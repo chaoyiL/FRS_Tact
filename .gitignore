@@ -1,0 +1,110 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Unit test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Environment variables / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Logs
+*.log
+logs/
+
+# ML / experiment artifacts
+checkpoints/
+eval_outputs/
+.cache/
+wandb/
+mlruns/
+runs/
+outputs/
+tensorboard/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# Hugging Face cache (local)
+.huggingface/
+
+# Data (large local datasets)
+data/
+datasets/
+*.parquet
+*.arrow
