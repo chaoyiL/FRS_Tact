@@ -208,6 +208,15 @@ wallx = [
 pi = ["lerobot[transformers-dep]", "lerobot[scipy-dep]"]
 molmoact2 = ["lerobot[transformers-dep]", "lerobot[peft-dep]", "lerobot[scipy-dep]"]
 smolvla = ["lerobot[transformers-dep]", "num2words>=0.5.14,<0.6.0"]
+smolvla-jax = [
+    "lerobot[smolvla]",
+    "jax>=0.6.2,<0.9.0",
+    "flax>=0.11.0,<0.13.0",
+    "optax>=0.2.5,<0.3.0",
+    "orbax-checkpoint>=0.11.18,<0.12.0",
+    "ml-dtypes>=0.5.1,<0.6.0",
+]
+smolvla-jax-test = ["lerobot[smolvla-jax]", "pytest>=8.0.0,<10.0.0"]
 # Dataset inspection + SmolVLA inference workflow
 infer = ["lerobot[dataset]", "lerobot[smolvla]"]
 # Probability-flow likelihood evaluation and modality contribution plots
