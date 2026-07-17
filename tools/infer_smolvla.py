@@ -2,7 +2,7 @@
 """Run SmolVLA inference on a frame from a local LeRobot dataset.
 
 Usage:
-    uv sync --extra infer
+    uv sync
     uv run python tools/infer_smolvla.py \
         --dataset-path /path/to/dataset \
         --episode 0 \

@@ -104,7 +104,7 @@ tensorboard/
 .huggingface/
 
 # Data (large local datasets)
-data/
-datasets/
+/data/
+/datasets/
 *.parquet
 *.arrow

@@ -3,35 +3,35 @@ from __future__ import annotations
 # Imports below the path setup and optional plotting imports are intentional.
 # ruff: noqa: E402, PLC0415, SLF001
 import argparse
-from collections.abc import Sequence
 import csv
+import os
 import pathlib
 import sys
+from collections.abc import Sequence
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-POLICY_SRC = ROOT / "policy" / "src"
-if str(POLICY_SRC) not in sys.path:
-    sys.path.insert(0, str(POLICY_SRC))
+EVAL_DIR = pathlib.Path(__file__).resolve().parent
+if str(EVAL_DIR) not in sys.path:
+    sys.path.insert(0, str(EVAL_DIR))
 
 import jax
 import jax.numpy as jnp
-from loglike_evaluate import VelocityContext
-from loglike_evaluate import _eval_utils
-from loglike_evaluate import create_velocity_context
-from loglike_evaluate import predict_velocity_with_context
 import numpy as np
-from openpi.models import model as _model
-from openpi.training import config as _config
+from utils import (
+    EpisodeData,
+    EvalObservation,
+    SmolVLAEvalModel,
+    VelocityContext,
+    _stack_observations,
+    add_eval_data_arguments,
+    create_velocity_context,
+    load_episode,
+    load_model_from_args,
+    predict_velocity_with_context,
+)
 
-EpisodeData = _eval_utils.EpisodeData
-_copy_tree = _eval_utils._copy_tree
-_indices_for_episode = _eval_utils._indices_for_episode
-_normalize_observation_dict = _eval_utils._normalize_observation_dict
-_prompt_from_raw = _eval_utils._prompt_from_raw
-create_transformed_dataset = _eval_utils.create_transformed_dataset
-load_model = _eval_utils.load_model
-
+from lerobot.datasets import LeRobotDataset
 
 _REVERSE_SCAN_CACHE: dict[tuple[int, int, int], Any] = {}
 
@@ -72,8 +72,7 @@ def select_frames(
 
 
 def load_selected_episode(
-    train_config: _config.TrainConfig,
-    checkpoint_dir: pathlib.Path,
+    model: SmolVLAEvalModel,
     episode_index: int,
     *,
     frames: Sequence[int] | None,
@@ -83,53 +82,38 @@ def load_selected_episode(
 ) -> EpisodeData:
     """Create the data pipeline once and materialize only the selected frames."""
 
-    _, raw_dataset, transformed_dataset = create_transformed_dataset(train_config, checkpoint_dir)
-    episode_indices = _indices_for_episode(raw_dataset, episode_index)
+    dataset = LeRobotDataset(
+        model.dataset_repo_id,
+        root=model.dataset_root,
+        revision=model.dataset_revision,
+        episodes=[episode_index],
+    )
+    frame_count = len(dataset)
     if max_frames is not None:
         if max_frames <= 0:
             raise ValueError(f"--max-frames must be positive, got {max_frames}.")
-        episode_indices = episode_indices[:max_frames]
+        frame_count = min(frame_count, max_frames)
 
     selected_frames = select_frames(
-        len(episode_indices),
+        frame_count,
         frames=frames,
         num_frames=num_frames,
         seed=seed,
     )
-    selected_indices = tuple(episode_indices[frame] for frame in selected_frames)
-
-    raw_samples: list[dict[str, Any]] = []
-    observations: list[_model.Observation] = []
-    actions: list[np.ndarray] = []
-    prompts: list[str | None] = []
-    for dataset_index in selected_indices:
-        raw = raw_dataset[dataset_index]
-        transformed = _normalize_observation_dict(_copy_tree(transformed_dataset[dataset_index]))
-        raw_samples.append(raw)
-        observations.append(_model.Observation.from_dict(transformed))
-        actions.append(np.asarray(transformed["actions"], dtype=np.float32))
-        prompts.append(_prompt_from_raw(raw))
-
-    return EpisodeData(
-        indices=selected_indices,
-        frames=selected_frames,
-        raw_samples=tuple(raw_samples),
-        observations=tuple(observations),
-        actions=tuple(actions),
-        prompts=tuple(prompts),
+    return load_episode(
+        model,
+        episode_index,
+        frame_indices=selected_frames,
     )
 
 
-def stack_observations(observations: Sequence[_model.Observation]) -> _model.Observation:
+def stack_observations(observations: Sequence[EvalObservation]) -> EvalObservation:
     if not observations:
         raise ValueError("Cannot stack an empty observation sequence.")
-    return jax.tree.map(
-        lambda *xs: None if xs[0] is None else jnp.stack([jnp.asarray(x) for x in xs], axis=0),
-        *observations,
-    )
+    return _stack_observations(*observations)
 
 
-def _get_reverse_scan(model: _model.BaseModel, *, batch_size: int, num_steps: int):
+def _get_reverse_scan(model: SmolVLAEvalModel, *, batch_size: int, num_steps: int):
     cache_key = (id(model), batch_size, num_steps)
     if cache_key in _REVERSE_SCAN_CACHE:
         return _REVERSE_SCAN_CACHE[cache_key]
@@ -153,8 +137,8 @@ def _get_reverse_scan(model: _model.BaseModel, *, batch_size: int, num_steps: in
 
 
 def reverse_integrate_actions(
-    model: _model.BaseModel,
-    observations: Sequence[_model.Observation],
+    model: SmolVLAEvalModel,
+    observations: Sequence[EvalObservation],
     actions: np.ndarray,
     *,
     num_steps: int,
@@ -196,7 +180,9 @@ def paired_tsne(
     try:
         from sklearn.manifold import TSNE
     except ImportError as exc:
-        raise ImportError("scikit-learn is required for t-SNE. Install the project's dev dependencies.") from exc
+        raise ImportError(
+            "scikit-learn is required for t-SNE. Install the project's dev dependencies."
+        ) from exc
 
     if action_truth.shape != x_base.shape:
         raise ValueError(f"Action/base shapes must match, got {action_truth.shape} and {x_base.shape}.")
@@ -251,6 +237,8 @@ def save_outputs(
     standardize: bool,
     annotate: bool,
 ) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     try:
         import matplotlib as mpl
 
@@ -375,12 +363,17 @@ def save_outputs(
     return npz_path, csv_path, plot_path
 
 
-def _extract_raw_actions(raw_samples: Sequence[dict[str, Any]], expected_shape: tuple[int, ...]) -> np.ndarray | None:
+def _extract_raw_actions(
+    raw_samples: Sequence[dict[str, Any]],
+    expected_shape: tuple[int, ...],
+    *,
+    action_key: str,
+) -> np.ndarray | None:
     raw_actions = []
     for sample in raw_samples:
-        if "actions" not in sample:
+        if action_key not in sample:
             return None
-        action = np.asarray(sample["actions"], dtype=np.float32)
+        action = np.asarray(sample[action_key], dtype=np.float32)
         if action.shape != expected_shape:
             return None
         raw_actions.append(action)
@@ -394,9 +387,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "and jointly visualize both sets with paired t-SNE points."
         )
     )
-    parser.add_argument("--config-name", default="pi05_bi")
-    parser.add_argument("--checkpoint-dir", default="/home/rvsa/codehub/ManiSkill-vitac/checkpoints/50000")
-    parser.add_argument("--episode-index", type=int, default=20)
+    add_eval_data_arguments(parser)
+    parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument(
         "--frames",
         nargs="+",
@@ -411,7 +403,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Optionally restrict selection to the first N episode frames.",
     )
     parser.add_argument("--num-steps", "-k", type=int, default=120, help="Euler steps from t=0 to t=1.")
-    parser.add_argument("--batch-size", type=int, default=4, help="Frames per reverse-integration model batch.")
+    parser.add_argument(
+        "--batch-size", type=int, default=4, help="Frames per reverse-integration model batch."
+    )
     parser.add_argument(
         "--perplexity",
         type=float,
@@ -423,7 +417,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="Standardize every flattened action coordinate jointly before t-SNE.",
     )
-    parser.add_argument("--annotate", action="store_true", help="Label both endpoints with episode frame indices.")
+    parser.add_argument(
+        "--annotate", action="store_true", help="Label both endpoints with episode frame indices."
+    )
     parser.add_argument(
         "--output-dir",
         type=pathlib.Path,
@@ -431,10 +427,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    train_config = _config.get_config(args.config_name)
+    model = load_model_from_args(args)
     episode = load_selected_episode(
-        train_config,
-        args.checkpoint_dir,
+        model,
         args.episode_index,
         frames=args.frames,
         num_frames=args.num_frames,
@@ -449,7 +444,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     print(f"action_shape={action_truth.shape}")
     print(f"num_steps={args.num_steps}")
 
-    model = load_model(train_config, args.checkpoint_dir)
     x_base = reverse_integrate_actions(
         model,
         episode.observations,
@@ -466,7 +460,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         seed=tsne_seed,
         standardize=args.standardize,
     )
-    raw_action_truth = _extract_raw_actions(episode.raw_samples, action_truth.shape[1:])
+    raw_action_truth = _extract_raw_actions(
+        episode.raw_samples,
+        action_truth.shape[1:],
+        action_key=model.action_key,
+    )
     npz_path, csv_path, plot_path = save_outputs(
         output_dir=args.output_dir,
         episode_index=args.episode_index,

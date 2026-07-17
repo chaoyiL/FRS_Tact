@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# The eval directory is inserted below so this script also works when invoked by path.
+# ruff: noqa: E402
 import argparse
 import csv
 import os
@@ -8,17 +10,14 @@ import re
 import sys
 from collections.abc import Sequence
 
+import jax
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 EVAL_SCRIPTS = pathlib.Path(__file__).resolve().parent
-POLICY_SRC = ROOT / "policy" / "src"
-for path in (EVAL_SCRIPTS, POLICY_SRC):
+for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
-
-from openpi.models import tokenizer as _tokenizer
-from openpi.training import config as _config
 
 from loglike_evaluate import (
     DEFAULT_HUTCHINSON_SAMPLES,
@@ -27,10 +26,9 @@ from loglike_evaluate import (
     ODE_SOLVERS,
     compute_episode_modality_contributions,
     load_episode,
-    load_model,
     save_contribution_curve,
 )
-
+from utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
 
 MODALITIES = ("vision", "tactile", "state", "language_prompt")
 CSV_PATTERN = re.compile(r"(?P<modality>.+)_contribution_episode_(?P<episode>.+)\.csv$")
@@ -64,7 +62,9 @@ def _infer_modality(csv_path: pathlib.Path) -> str:
     return match.group("modality")
 
 
-def _auto_csv_paths(input_dir: pathlib.Path, episode_index: str, modalities: Sequence[str]) -> list[pathlib.Path]:
+def _auto_csv_paths(
+    input_dir: pathlib.Path, episode_index: str, modalities: Sequence[str]
+) -> list[pathlib.Path]:
     paths = []
     missing = []
     for modality in modalities:
@@ -101,8 +101,7 @@ def _default_output_path(
 
 def evaluate_modalities(
     *,
-    config_name: str,
-    checkpoint_dir: str | pathlib.Path,
+    model: SmolVLAEvalModel,
     episode_index: int | str,
     frame: int,
     max_frames: int,
@@ -124,47 +123,35 @@ def evaluate_modalities(
     if sample_interval is not None and sample_interval <= 0:
         raise ValueError(f"--sample-interval must be positive, got {sample_interval}.")
 
-    train_config = _config.get_config(config_name)
     if sample_interval is None:
         episode = load_episode(
-            train_config,
-            checkpoint_dir,
+            model,
             episode_index,
             max_frames=max_frames,
             frame_indices=(frame,),
         )
     else:
         episode = load_episode(
-            train_config,
-            checkpoint_dir,
+            model,
             episode_index,
             start_frame=frame,
             sample_interval=sample_interval,
             max_frames=max_frames,
         )
-
-    model = load_model(train_config, checkpoint_dir)
-    state_in_prompt = bool(getattr(train_config.model, "discrete_state_input", False))
-
-    print(f"loaded episode={episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}")
+    print(
+        f"loaded episode={episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}"
+    )
     print(f"prompt={episode.prompts[0]!r}")
-    print("ablation_method=attention_mask")
-    print(f"state_in_prompt={state_in_prompt}")
+    print("ablation_method=input_mask_or_zero")
     print("divergence_method=hutchinson_rademacher_jvp")
     print(f"hutchinson_samples={hutchinson_samples}")
     print(f"hutchinson_seed={hutchinson_seed}")
     print(f"eval_batch_size={eval_batch_size}")
     print(f"ode_solver={ode_solver}")
-    print("model_dtype=bfloat16")
+    print(f"model_dtype={jax.tree.leaves(model.params)[0].dtype}")
 
     csv_paths: list[pathlib.Path] = []
     for modality in modalities:
-        prompt_tokenizer = (
-            _tokenizer.PaligemmaTokenizer(train_config.model.max_token_len)
-            if modality in ("state", "language_prompt") and state_in_prompt
-            else None
-        )
-
         print(f"ablated_modality={modality}")
         rows = compute_episode_modality_contributions(
             model,
@@ -175,8 +162,8 @@ def evaluate_modalities(
             episode.prompts,
             modality=modality,
             num_steps=num_steps,
-            prompt_tokenizer=prompt_tokenizer,
-            state_in_prompt=state_in_prompt,
+            prompt_tokenizer=None,
+            state_in_prompt=False,
             hutchinson_samples=hutchinson_samples,
             hutchinson_seed=hutchinson_seed,
             ode_solver=ode_solver,
@@ -239,9 +226,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         type=pathlib.Path,
         help="Existing CSV files to plot. If omitted, --modalities are evaluated first.",
     )
-    parser.add_argument("--config-name", default="pi05_bi")
-    parser.add_argument("--checkpoint-dir", default="/home/rvsa/codehub/ManiSkill-vitac/checkpoints/smash-byw-4500")
-    parser.add_argument("--episode-index", default=20)
+    add_eval_data_arguments(parser, required=False)
+    parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=1000)
     parser.add_argument(
@@ -310,10 +296,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.plot_only:
             csv_paths = _auto_csv_paths(args.input_dir, str(args.episode_index), args.modalities)
         else:
+            if args.checkpoint_dir is None or args.dataset_repo_id is None:
+                parser.error("--checkpoint-dir and --dataset-repo-id are required for evaluation.")
             sample_interval = None if args.single_frame else args.sample_interval
+            model = load_model_from_args(args)
             csv_paths = evaluate_modalities(
-                config_name=args.config_name,
-                checkpoint_dir=args.checkpoint_dir,
+                model=model,
                 episode_index=args.episode_index,
                 frame=args.frame,
                 max_frames=args.max_frames,

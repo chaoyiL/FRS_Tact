@@ -5,17 +5,17 @@
 ## 安装
 
 ```bash
-uv sync --extra smolvla-jax
+uv sync
 ```
 
-运行测试或 PyTorch/JAX 数值对比时安装测试依赖：
+默认依赖已包含 SmolVLA 的 PyTorch / JAX 栈，以及复用本机 CUDA 12 的
+`jax[cuda12-local]` 插件（不额外安装 CUDA 运行库）。
+
+运行测试：
 
 ```bash
-uv sync --extra smolvla-jax-test
 .venv/bin/pytest -q tests/jax
 ```
-
-默认 JAX wheel 可在 CPU 上运行。CUDA/TPU 环境应按目标平台安装对应的 `jax`/`jaxlib` wheel，业务代码不需要变化。
 
 ## 1. 转换 checkpoint
 
@@ -46,18 +46,15 @@ uv sync --extra smolvla-jax-test
 
 ## 2. 推理
 
-输入 NPZ 至少包含：
-
-- `observation.state`：`[state_dim]` 或 `[B, state_dim]`；
-- checkpoint `input_features` 中至少一个相机键；图像可为 HWC/CHW、单张或 batch、uint8 或 float。
-
-缺失相机会按 checkpoint 的 `empty_cameras` 设置补空图。图像 resize/pad、tokenizer、字段重命名、state 归一化、action 反归一化和 Aloha 适配均由 JAX 预处理路径完成。
+命令行推理直接读取 LeRobotDataset 的 episode/frame。task 默认取自 dataset，也可以用 `--task` 覆盖。缺失相机会按 checkpoint 的 `empty_cameras` 设置补空图；图像 resize/pad、tokenizer、字段重命名、state 归一化、action 反归一化和 Aloha 适配均由 JAX 预处理路径完成。
 
 ```bash
 .venv/bin/python tools/infer_smolvla_jax.py \
   --checkpoint checkpoints/black-smash-smolvla-40k-jax \
-  --observation observation.npz \
-  --task "smash the black object" \
+  --dataset-repo-id chaoyi/black_smash_02 \
+  --dataset-root ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
+  --episode 0 \
+  --frame 0 \
   --output actions.npy
 ```
 
@@ -76,38 +73,29 @@ policy.reset()
 
 RTC checkpoint 可通过 `previous_chunk`、`inference_delay` 和 `execution_horizon` 传参；命令行对应 `--previous-chunk`、`--inference-delay` 和 `--execution-horizon`。
 
-## 3. 准备训练数据
+## 3. LeRobotDataset 数据流
 
-当前仓库是 LeRobot 的 inference-only 子集，不包含上游 `lerobot.datasets`。训练入口因此使用一个明确、可审计的 NPZ 桥接格式。
+JAX trainer 直接构造 `LeRobotDataset` 和 PyTorch `DataLoader`。worker 负责 Parquet、图像和视频读取，主进程负责 tokenize、resize、使用 dataset metadata 中的 mean/std 归一化并转换为 JAX array。
 
-原始 NPZ 需要：
+未来 action chunk 由 dataset FPS 和 checkpoint `chunk_size` 自动生成。episode 尾部由 LeRobotDataset 重复边界 action，并产生 `action_is_pad`，loss 会忽略这些 padding。当前标准的 `action` 和部分旧数据集使用的 `actions` 都会自动识别，也可以用 `--action-key` 显式指定。
 
-- `task`：`[N]` 字符串数组；
-- `observation.state`：`[N, state_dim]`；
-- checkpoint 使用的相机键：`[N, H, W, C]` 或 `[N, C, H, W]`；
-- `actions`：`[N, chunk_size, action_dim]`；
-- 可选 `action_is_pad`：`[N, chunk_size]` bool。
-
-```bash
-.venv/bin/python tools/prepare_smolvla_jax_npz.py \
-  --checkpoint checkpoints/black-smash-smolvla-40k-jax \
-  --input raw_train.npz \
-  --output prepared_train.npz
-```
-
-输出已经完成图像预处理、tokenize、state/action 归一化，可直接随机 batch。大型数据集应按 shard 生成多个 NPZ；若接回完整版 LeRobot 数据集，可让 dataloader 直接产生同样六个必需字段：`images`、`image_masks`、`language_tokens`、`language_masks`、`state`、`actions`。
+字段重命名默认读取 checkpoint 的 preprocessor，例如把 dataset 的 `camera0/camera1` 映射为模型的 `camera1/camera2`。需要覆盖时使用 `--rename-map`。
 
 ## 4. 训练和断点续训
 
 ```bash
 .venv/bin/python tools/train_smolvla_jax.py \
   --checkpoint checkpoints/black-smash-smolvla-40k-jax \
-  --dataset prepared_train.npz \
+  --dataset-repo-id chaoyi/black_smash_02 \
+  --dataset-root ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
   --output outputs/smolvla-jax \
   --steps 30000 \
   --batch-size 8 \
+  --num-workers 4 \
   --save-freq 1000
 ```
+
+不传 `--dataset-root` 时会按 repo id 从 Hugging Face Hub 获取数据。可用 `--episodes 0 1 2` 限定训练 episode，或用 `--dataset-revision` 固定数据版本。
 
 训练实现包括与原配置一致的：
 
@@ -122,7 +110,8 @@ RTC checkpoint 可通过 `previous_chunk`、`inference_delay` 和 `execution_hor
 ```bash
 .venv/bin/python tools/train_smolvla_jax.py \
   --checkpoint checkpoints/black-smash-smolvla-40k-jax \
-  --dataset prepared_train.npz \
+  --dataset-repo-id chaoyi/black_smash_02 \
+  --dataset-root ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
   --output outputs/smolvla-jax-resumed \
   --resume outputs/smolvla-jax/checkpoint-00001000 \
   --steps 30000 \
@@ -131,7 +120,41 @@ RTC checkpoint 可通过 `previous_chunk`、`inference_delay` 和 `execution_hor
 
 多张可见设备上增加 `--data-parallel`。模型和 optimizer state 会复制到设备，batch 的第 0 维沿 `data` mesh 分片；batch size 应能被设备数整除。
 
-## 5. 数值对比
+## 5. Eval 链路
+
+likelihood / 绘图 / t-SNE 依赖已包含在默认 `uv sync` 中。所有 eval 脚本直接读取 JAX
+checkpoint 和 `LeRobotDataset`，不再依赖 OpenPI/Pi0 的 config、transform 或
+`policy/src`。例如单帧模态 action-error：
+
+```bash
+.venv/bin/python eval_scripts-jax/action_error_evaluate.py \
+  --checkpoint-dir checkpoints/black-smash-smolvla-40k-jax \
+  --dataset-repo-id chaoyi/black_smash_02 \
+  --dataset-root ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
+  --episode-index 0 --frame 0 --remove-modality state
+```
+
+概率流 likelihood 使用 Hutchinson-JVP 估计 divergence：
+
+```bash
+.venv/bin/python eval_scripts-jax/loglike_evaluate.py \
+  --checkpoint-dir checkpoints/black-smash-smolvla-40k-jax \
+  --dataset-repo-id chaoyi/black_smash_02 \
+  --dataset-root ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
+  --episode-index 0 --frame 0 --num-steps 120 --remove-modality vision
+```
+
+`plot_loglike_modalities.py` 可批量运行多个模态并合图，`action_reverse_tsne.py` 可将真实 action 正向积分到 base noise 后做配对 t-SNE。`eval_scripts-jax/test/k_trace_sweep.py` 和 `eps_trace_sweep.py` 分别用于积分步数与 trace 精度 sweep。
+
+数据集结构检查脚本已放在 `tools/` 下：
+
+```bash
+.venv/bin/python tools/inspect_dataset.py \
+  --dataset-path ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
+  --repo-id chaoyi/black_smash_02 --print-text
+```
+
+## 6. 数值对比
 
 ```bash
 .venv/bin/python tools/compare_smolvla_backends.py \

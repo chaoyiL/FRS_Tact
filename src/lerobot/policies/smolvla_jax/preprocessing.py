@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-from safetensors.flax import load_file as load_safetensors_file
+from safetensors.flax import load_file as load_safetensors_file, save_file as save_safetensors_file
 from transformers import AutoTokenizer
 
 from .configuration import JaxSmolVLAConfig
@@ -109,6 +109,7 @@ class JaxSmolVLAPreprocessor:
         config: JaxSmolVLAConfig | None = None,
         *,
         rename_map: Mapping[str, str] | None = None,
+        stats: Mapping[str, Mapping[str, Any]] | None = None,
         local_files_only: bool = True,
     ):
         self.checkpoint = Path(checkpoint).expanduser()
@@ -125,8 +126,16 @@ class JaxSmolVLAPreprocessor:
         self.max_length = int(tokenizer_config.get("max_length", self.config.tokenizer_max_length))
         self.padding = tokenizer_config.get("padding", self.config.pad_language_to)
         self.padding_side = tokenizer_config.get("padding_side", "right")
-        self.stats = self._load_stats("policy_preprocessor_step_5_normalizer_processor.safetensors")
-        self.post_stats = self._load_stats("policy_postprocessor_step_0_unnormalizer_processor.safetensors")
+        self.stats = (
+            self._flatten_stats(stats)
+            if stats is not None
+            else self._load_stats("policy_preprocessor_step_5_normalizer_processor.safetensors")
+        )
+        self.post_stats = (
+            dict(self.stats)
+            if stats is not None
+            else self._load_stats("policy_postprocessor_step_0_unnormalizer_processor.safetensors")
+        )
 
     def _load_json(self, filename: str, default: Any) -> Any:
         path = self.checkpoint / filename
@@ -145,6 +154,26 @@ class JaxSmolVLAPreprocessor:
     def _load_stats(self, filename: str) -> dict[str, Array]:
         path = self.checkpoint / filename
         return dict(load_safetensors_file(path)) if path.is_file() else {}
+
+    def _flatten_stats(self, stats: Mapping[str, Mapping[str, Any]]) -> dict[str, Array]:
+        flattened = {}
+        for feature, feature_stats in stats.items():
+            feature = self.rename_map.get(feature, feature)
+            for name, value in feature_stats.items():
+                flattened[f"{feature}.{name}"] = jnp.asarray(value)
+        return flattened
+
+    def save_normalization_assets(self, destination: str | Path) -> None:
+        destination = Path(destination)
+        destination.mkdir(parents=True, exist_ok=True)
+        save_safetensors_file(
+            dict(self.stats),
+            destination / "policy_preprocessor_step_5_normalizer_processor.safetensors",
+        )
+        save_safetensors_file(
+            dict(self.post_stats),
+            destination / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+        )
 
     def _stat(self, key: str, name: str, length: int, *, postprocess: bool = False) -> Array | None:
         values = self.post_stats if postprocess and self.post_stats else self.stats
@@ -179,11 +208,11 @@ class JaxSmolVLAPreprocessor:
             actions = aloha_encode_actions_inverse(actions)
         return actions
 
-    def tokenize(self, task: str) -> tuple[Array, Array]:
-        if not task.endswith("\n"):
-            task = f"{task}\n"
+    def tokenize(self, task: str | Sequence[str]) -> tuple[Array, Array]:
+        tasks = [task] if isinstance(task, str) else list(task)
+        tasks = [value if value.endswith("\n") else f"{value}\n" for value in tasks]
         tokenized = self.tokenizer(
-            [task],
+            tasks,
             max_length=self.max_length,
             truncation=True,
             padding=self.padding,
@@ -194,7 +223,11 @@ class JaxSmolVLAPreprocessor:
             tokenized["attention_mask"], dtype=jnp.bool_
         )
 
-    def prepare(self, observation: Mapping[str, Any], task: str) -> dict[str, Array]:
+    def prepare(
+        self,
+        observation: Mapping[str, Any],
+        task: str | Sequence[str],
+    ) -> dict[str, Array]:
         renamed = {self.rename_map.get(key, key): value for key, value in observation.items()}
         if "observation.state" not in renamed:
             raise KeyError("observation.state is required")
@@ -225,9 +258,11 @@ class JaxSmolVLAPreprocessor:
             images.append(-jnp.ones_like(images[-1]))
             masks.append(jnp.zeros_like(masks[-1]))
         tokens, language_masks = self.tokenize(task)
-        if tokens.shape[0] != state.shape[0]:
+        if tokens.shape[0] == 1 and state.shape[0] != 1:
             tokens = jnp.broadcast_to(tokens, (state.shape[0], tokens.shape[1]))
             language_masks = jnp.broadcast_to(language_masks, tokens.shape)
+        elif tokens.shape[0] != state.shape[0]:
+            raise ValueError(f"received {tokens.shape[0]} tasks for an observation batch of {state.shape[0]}")
         return {
             "images": jnp.stack(images, axis=1),
             "image_masks": jnp.stack(masks, axis=1),

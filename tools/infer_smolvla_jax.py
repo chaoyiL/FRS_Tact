@@ -1,9 +1,5 @@
 #!/usr/bin/env python
-"""Run the JAX SmolVLA policy on an observation stored in an NPZ file.
-
-The NPZ must contain ``observation.state`` and the camera keys expected by the
-checkpoint. Images may be HWC uint8 or CHW float arrays.
-"""
+"""Run JAX SmolVLA on one frame from a LeRobotDataset."""
 
 from __future__ import annotations
 
@@ -15,7 +11,9 @@ from pathlib import Path
 import jax
 import numpy as np
 
+from lerobot.datasets import LeRobotDataset
 from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
+from lerobot.policies.smolvla_jax.data import lerobot_sample_to_observation
 
 
 def parse_args() -> argparse.Namespace:
@@ -23,8 +21,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", required=True, help="Local checkpoint or Hugging Face repo id")
     parser.add_argument("--revision")
     parser.add_argument("--allow-download", action="store_true")
-    parser.add_argument("--observation", required=True, type=Path, help="Input .npz observation")
-    parser.add_argument("--task", required=True)
+    parser.add_argument("--dataset-repo-id", required=True)
+    parser.add_argument("--dataset-root", type=Path)
+    parser.add_argument("--dataset-revision")
+    parser.add_argument("--episode", required=True, type=int)
+    parser.add_argument("--frame", required=True, type=int, help="Frame within the selected episode")
+    parser.add_argument("--video-backend")
+    parser.add_argument("--task", help="Override the task stored in the dataset")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--noise", type=Path, help="Optional .npy noise with shape [B,50,32]")
     parser.add_argument("--rename-map", help="JSON object overriding the checkpoint rename map")
@@ -41,8 +44,20 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rename_map = json.loads(args.rename_map) if args.rename_map else None
-    with np.load(args.observation, allow_pickle=False) as archive:
-        observation = {key: archive[key] for key in archive.files}
+    dataset = LeRobotDataset(
+        repo_id=args.dataset_repo_id,
+        root=args.dataset_root,
+        revision=args.dataset_revision,
+        episodes=[args.episode],
+        video_backend=args.video_backend,
+    )
+    if args.frame < 0 or args.frame >= len(dataset):
+        raise IndexError(
+            f"frame {args.frame} is outside episode {args.episode}, which has {len(dataset)} frames"
+        )
+    sample = dataset[args.frame]
+    observation = lerobot_sample_to_observation(sample)
+    task = args.task if args.task is not None else str(sample["task"])
     noise = np.load(args.noise) if args.noise else None
     previous_chunk = np.load(args.previous_chunk) if args.previous_chunk else None
     policy = JaxSmolVLAPolicy.from_pretrained(
@@ -54,7 +69,7 @@ def main() -> None:
     start = time.perf_counter()
     actions = policy.predict_action_chunk(
         observation,
-        args.task,
+        task,
         seed=args.seed,
         noise=noise,
         jit=not args.no_jit,
@@ -68,6 +83,8 @@ def main() -> None:
     elapsed = time.perf_counter() - start
     actions_numpy = np.asarray(actions)
     print(f"platform     : {jax.default_backend()}")
+    print(f"dataset      : {args.dataset_repo_id} episode={args.episode} frame={args.frame}")
+    print(f"task         : {task!r}")
     print(f"action shape : {actions_numpy.shape}")
     print(f"elapsed      : {elapsed:.3f}s")
     print(f"first action : {actions_numpy[0, 0]}")

@@ -2,10 +2,10 @@
 """Inspect a local LeRobot dataset and save inference-relevant schema info as JSON.
 
 Usage:
-    uv sync --extra infer
-    uv run python inspect_dataset.py --dataset-path /path/to/dataset
-    uv run python inspect_dataset.py --dataset-path /path/to/dataset -o report.json
-    uv run python inspect_dataset.py --dataset-path /path/to/dataset --model lerobot/smolvla_base --print-text
+    uv sync
+    uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset
+    uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset -o report.json
+    uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset --model lerobot/smolvla_base --print-text
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import torch
 
 from lerobot.configs import FeatureType
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE, OBS_STR
+from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
 from lerobot.utils.feature_utils import dataset_to_policy_features
 
 
@@ -131,7 +131,7 @@ def _feature_groups(features: dict[str, dict]) -> dict[str, list[str]]:
             groups["images"].append(key)
         elif key == OBS_STATE:
             groups["state"].append(key)
-        elif key == ACTION:
+        elif key in (ACTION, "actions"):
             groups["action"].append(key)
         else:
             groups["other"].append(key)
@@ -209,38 +209,51 @@ def _build_infer_snippet(raw_obs: dict[str, Any], task: str | None) -> str:
     lines.extend(
         [
             "",
-            "observation = prepare_observation_for_inference(",
-            "    obs,",
-            "    policy.config.device,",
-            f"    task={task!r},",
-            "    robot_type=meta.info.robot_type,",
-            ")",
+            "# With a loaded JaxSmolVLAPreprocessor:",
+            f"prepared = preprocessor.prepare(obs, {task!r})",
         ]
     )
     return "\n".join(lines)
 
 
 def _compare_with_model(model_id: str, policy_features: dict[str, Any]) -> dict[str, Any]:
-    from lerobot.policies.smolvla import SmolVLAPolicy
+    model_path = Path(model_id).expanduser()
+    if model_path.is_dir():
+        config_path = model_path / "config.json"
+    elif model_path.is_file():
+        config_path = model_path
+    else:
+        from huggingface_hub import hf_hub_download
 
-    policy = SmolVLAPolicy.from_pretrained(model_id)
+        config_path = Path(hf_hub_download(model_id, "config.json"))
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    input_features = config.get("input_features", {})
     expected = {
-        key: {"type": feat.type.name, "shape": list(feat.shape)}
-        for key, feat in policy.config.input_features.items()
+        key: {"type": feat["type"], "shape": list(feat["shape"])} for key, feat in input_features.items()
     }
     provided = {
         key: {"type": feat.type.name, "shape": list(feat.shape)}
         for key, feat in policy_features.items()
         if feat.type in (FeatureType.VISUAL, FeatureType.STATE, FeatureType.ACTION)
     }
-    expected_visual = {k for k, v in policy.config.input_features.items() if v.type == FeatureType.VISUAL}
+    expected_visual = {key for key, feature in input_features.items() if feature.get("type") == "VISUAL"}
     provided_visual = {k for k, v in policy_features.items() if v.type == FeatureType.VISUAL}
-    rename_suggestions = {}
-    if expected_visual and provided_visual and expected_visual != provided_visual:
-        exp = sorted(expected_visual)
-        got = sorted(provided_visual)
-        for src, dst in zip(got, exp, strict=False):
-            rename_suggestions[src] = dst
+    rename_suggestions: dict[str, str] = {}
+    preprocessor_path = config_path.parent / "policy_preprocessor.json"
+    if preprocessor_path.is_file():
+        preprocessor = json.loads(preprocessor_path.read_text(encoding="utf-8"))
+        for step in preprocessor.get("steps", []):
+            if step.get("registry_name") == "rename_observations_processor":
+                rename_suggestions.update(step.get("config", {}).get("rename_map", {}))
+    elif expected_visual and provided_visual and expected_visual != provided_visual:
+        expected_cameras = sorted(
+            key for key in expected_visual if "empty" not in key and "tactile" not in key
+        )
+        provided_cameras = sorted(key for key in provided_visual if "tactile" not in key)
+        rename_suggestions.update(zip(provided_cameras, expected_cameras, strict=False))
+    dataset_action_key = next((key for key in (ACTION, "actions") if key in policy_features), None)
+    output_features = config.get("output_features", {})
+    model_action = output_features.get(ACTION) or output_features.get("actions")
     return {
         "model": model_id,
         "expected_input_features": expected,
@@ -248,8 +261,8 @@ def _compare_with_model(model_id: str, policy_features: dict[str, Any]) -> dict[
         "missing_from_dataset": sorted(set(expected) - set(provided)),
         "extra_in_dataset": sorted(set(provided) - set(expected)),
         "suggested_rename_map": rename_suggestions,
-        "action_dim_model": policy.config.action_feature.shape[0] if policy.config.action_feature else None,
-        "action_dim_dataset": policy_features[ACTION].shape[0] if ACTION in policy_features else None,
+        "action_dim_model": model_action["shape"][0] if model_action else None,
+        "action_dim_dataset": policy_features[dataset_action_key].shape[0] if dataset_action_key else None,
     }
 
 
@@ -281,8 +294,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "feature_groups": groups,
         "features": features,
         "policy_features": {
-            key: {"type": feat.type.name, "shape": list(feat.shape)}
-            for key, feat in policy_features.items()
+            key: {"type": feat.type.name, "shape": list(feat.shape)} for key, feat in policy_features.items()
         },
         "tasks": meta.tasks.reset_index().to_dict(orient="records"),
         "stats_summary": _stats_summary(meta.stats),

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+# The parent eval directory is inserted below for direct pytest collection.
+# ruff: noqa: E402
 import os
 import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "eval_scripts"
-POLICY_SRC = ROOT / "policy" / "src"
-for path in (EVAL_SCRIPTS, POLICY_SRC):
+EVAL_SCRIPTS = ROOT / "eval_scripts-jax"
+for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
@@ -15,18 +16,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-
-from loglike_evaluate import ODE_SOLVER_EULER
-from loglike_evaluate import ODE_SOLVER_FIREFLOW
-from loglike_evaluate import _add_batch_dim
-from loglike_evaluate import _run_euler_likelihood_scan
-from loglike_evaluate import _run_fireflow_likelihood_scan
-from loglike_evaluate import create_velocity_context
-from loglike_evaluate import integrate_to_base_log_likelihood
-from loglike_evaluate import load_episode
-from loglike_evaluate import load_model
-from loglike_evaluate import predict_velocity_with_context
-from openpi.training import config as _config
+from loglike_evaluate import (
+    ODE_SOLVER_EULER,
+    ODE_SOLVER_FIREFLOW,
+    _add_batch_dim,
+    _run_euler_likelihood_scan,
+    _run_fireflow_likelihood_scan,
+    create_velocity_context,
+    integrate_to_base_log_likelihood,
+    load_episode,
+    predict_velocity_with_context,
+)
+from utils import load_model
 
 
 def _expand_time(t: jax.Array, x_ndim: int) -> jax.Array:
@@ -102,7 +103,9 @@ def test_solver_nfe_counts(num_steps: int) -> None:
     assert int(fireflow_nfe) == num_steps + 1
 
 
-def _denoise_with_solver(model, observation, x_base: jax.Array, *, num_steps: int, ode_solver: str) -> jax.Array:
+def _denoise_with_solver(
+    model, observation, x_base: jax.Array, *, num_steps: int, ode_solver: str
+) -> jax.Array:
     x = jnp.asarray(x_base, dtype=jnp.float32)
     context = create_velocity_context(model, _add_batch_dim(observation))
     t = jnp.ones((x.shape[0],), dtype=jnp.float32)
@@ -146,25 +149,27 @@ def _denoise_with_solver(model, observation, x_base: jax.Array, *, num_steps: in
     return x_recon
 
 
-@pytest.mark.manual
 def test_fireflow_reconstruction_sanity_with_model() -> None:
     if os.environ.get("FIREFLOW_RECONSTRUCTION_TEST") != "1":
         pytest.skip("Set FIREFLOW_RECONSTRUCTION_TEST=1 to run checkpoint-backed reconstruction sanity.")
 
-    config_name = os.environ.get("FIREFLOW_CONFIG_NAME", "pi05_bi_vitac")
-    checkpoint_dir = os.environ.get("FIREFLOW_CHECKPOINT_DIR", str(ROOT / "checkpoints" / "11999"))
-    episode_index = os.environ.get("FIREFLOW_EPISODE_INDEX", "10")
+    checkpoint_dir = os.environ["FIREFLOW_CHECKPOINT_DIR"]
+    dataset_repo_id = os.environ["FIREFLOW_DATASET_REPO_ID"]
+    dataset_root = os.environ.get("FIREFLOW_DATASET_ROOT")
+    episode_index = os.environ.get("FIREFLOW_EPISODE_INDEX", "0")
     frame = int(os.environ.get("FIREFLOW_FRAME", "0"))
     num_steps = int(os.environ.get("FIREFLOW_NUM_STEPS", "20"))
 
-    train_config = _config.get_config(config_name)
-    episode = load_episode(
-        train_config,
+    model = load_model(
         checkpoint_dir,
+        dataset_repo_id=dataset_repo_id,
+        dataset_root=dataset_root,
+    )
+    episode = load_episode(
+        model,
         episode_index,
         frame_indices=(frame,),
     )
-    model = load_model(train_config, checkpoint_dir)
     observation = episode.observations[0]
     x_data = jnp.asarray(episode.actions[0], dtype=jnp.float32)
 

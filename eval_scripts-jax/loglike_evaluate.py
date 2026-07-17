@@ -1,49 +1,44 @@
 from __future__ import annotations
 
+# The eval directory is inserted below so these scripts also work when invoked by path.
+# ruff: noqa: E402
 import argparse
 import csv
 import dataclasses
-import importlib.util
+import os
 import pathlib
 import sys
-from collections.abc import Callable
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-POLICY_SRC = ROOT / "policy" / "src"
-if str(POLICY_SRC) not in sys.path:
-    sys.path.insert(0, str(POLICY_SRC))
+EVAL_DIR = pathlib.Path(__file__).resolve().parent
+if str(EVAL_DIR) not in sys.path:
+    sys.path.insert(0, str(EVAL_DIR))
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-from openpi.models import model as _model
-from openpi.models.pi0 import make_attn_mask
-from openpi.models import tokenizer as _tokenizer
-from openpi.training import config as _config
+from utils import (  # noqa: E402
+    EvalObservation,
+    SmolVLAEvalModel,
+    VelocityContext,
+    _add_batch_dim,
+    _scalar,
+    _stack_observations,
+    ablate_modality_observation,
+    add_eval_data_arguments,
+    create_velocity_context,
+    load_episode,
+    load_model_from_args,
+    predict_velocity_with_context,
+)
 
 DEFAULT_HUTCHINSON_SAMPLES = 1
 DEFAULT_HUTCHINSON_SEED = 0
 ODE_SOLVER_EULER = "euler"
 ODE_SOLVER_FIREFLOW = "fireflow"
 ODE_SOLVERS = (ODE_SOLVER_EULER, ODE_SOLVER_FIREFLOW)
-
-_EVAL_UTILS_PATH = pathlib.Path(__file__).resolve().parent / "utils.py"
-_EVAL_UTILS_SPEC = importlib.util.spec_from_file_location("eval_scripts_utils", _EVAL_UTILS_PATH)
-if _EVAL_UTILS_SPEC is None or _EVAL_UTILS_SPEC.loader is None:
-    raise ImportError(f"Could not load eval script utilities from {_EVAL_UTILS_PATH}")
-_eval_utils = importlib.util.module_from_spec(_EVAL_UTILS_SPEC)
-sys.modules[_EVAL_UTILS_SPEC.name] = _eval_utils
-_EVAL_UTILS_SPEC.loader.exec_module(_eval_utils)
-
-EpisodeData = _eval_utils.EpisodeData
-_scalar = _eval_utils._scalar
-_add_batch_dim = _eval_utils._add_batch_dim
-ablate_modality_observation = _eval_utils.ablate_modality_observation
-load_episode = _eval_utils.load_episode
-load_model = _eval_utils.load_model
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,27 +49,6 @@ class LikelihoodIntegrationResult:
     r_tot: jax.Array
     log_p_base: jax.Array
     log_likelihood: jax.Array
-
-
-@dataclasses.dataclass(frozen=True)
-class VelocityContext:
-    """Cached observation-dependent state for repeated velocity calls."""
-
-    observation: _model.Observation
-    prefix_tokens: jax.Array
-    prefix_mask: jax.Array
-    kv_cache: Any
-
-    def tree_flatten(self):
-        return ((self.observation, self.prefix_tokens, self.prefix_mask, self.kv_cache), None)
-
-    @classmethod
-    def tree_unflatten(cls, aux_data, children):
-        del aux_data
-        return cls(*children)
-
-
-jax.tree_util.register_pytree_node_class(VelocityContext)
 
 
 VelocityFn = Callable[[jax.Array, jax.Array], jax.Array]
@@ -167,7 +141,7 @@ def _run_fireflow_likelihood_scan(
 
 
 def _get_likelihood_scan(
-    model: _model.BaseModel,
+    model: SmolVLAEvalModel,
     *,
     batch_size: int,
     num_steps: int,
@@ -233,53 +207,8 @@ def _get_likelihood_scan(
     return run_scan
 
 
-def create_velocity_context(model: _model.BaseModel, observation: _model.Observation) -> VelocityContext:
-    """Precompute observation prefix and KV cache for repeated suffix velocity calls."""
-
-    image_keys = model.image_keys if model.image_keys is not None else list(observation.images.keys())
-    observation = _model.preprocess_observation(None, observation, train=False, image_keys=image_keys)
-    prefix_tokens, prefix_mask, prefix_ar_mask = model.embed_prefix(observation)
-    prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-    positions = jnp.cumsum(prefix_mask, axis=1) - 1
-    _, kv_cache = model.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-    return VelocityContext(
-        observation=observation,
-        prefix_tokens=prefix_tokens,
-        prefix_mask=prefix_mask,
-        kv_cache=kv_cache,
-    )
-
-
-def predict_velocity_with_context(
-    model: _model.BaseModel,
-    context: VelocityContext,
-    x: jax.Array,
-    t: jax.Array,
-) -> jax.Array:
-    """Compute v(x,t,o) using cached prefix/KV state."""
-
-    batch_size = context.observation.state.shape[0]
-    suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = model.embed_suffix(context.observation, x, t)
-    suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-    prefix_attn_mask = jnp.broadcast_to(
-        context.prefix_mask[:, None, :],
-        (batch_size, suffix_tokens.shape[1], context.prefix_tokens.shape[1]),
-    )
-    full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-    positions = jnp.sum(context.prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-    (prefix_out, suffix_out), _ = model.PaliGemma.llm(
-        [None, suffix_tokens],
-        mask=full_attn_mask,
-        positions=positions,
-        kv_cache=context.kv_cache,
-        adarms_cond=[None, adarms_cond],
-    )
-    del prefix_out
-    return model.action_out_proj(suffix_out[:, -model.action_horizon :])
-
-
 def velocity_and_hutchinson_trace(
-    model: _model.BaseModel,
+    model: SmolVLAEvalModel,
     context: VelocityContext,
     x: jax.Array,
     t: jax.Array,
@@ -323,13 +252,6 @@ def standard_normal_log_prob(x: jax.Array) -> jax.Array:
     return -0.5 * (jnp.sum(jnp.square(x), axis=event_dims) + event_size * jnp.log(2.0 * jnp.pi))
 
 
-def _stack_observations(*observations: _model.Observation) -> _model.Observation:
-    return jax.tree.map(
-        lambda *xs: None if xs[0] is None else jnp.concatenate([jnp.asarray(x)[None, ...] for x in xs], axis=0),
-        *observations,
-    )
-
-
 def _select_batch_result(result: LikelihoodIntegrationResult, index: int) -> LikelihoodIntegrationResult:
     return LikelihoodIntegrationResult(
         x_base=result.x_base[index : index + 1],
@@ -347,7 +269,7 @@ def clear_likelihood_scan_cache() -> None:
 
 
 def integrate_batched_to_base_log_likelihood_with_context(
-    model: _model.BaseModel,
+    model: SmolVLAEvalModel,
     context: VelocityContext,
     reference_actions: jax.Array,
     *,
@@ -391,8 +313,8 @@ def integrate_batched_to_base_log_likelihood_with_context(
 
 
 def integrate_batched_to_base_log_likelihood(
-    model: _model.BaseModel,
-    observation: _model.Observation,
+    model: SmolVLAEvalModel,
+    observation: EvalObservation,
     reference_actions: jax.Array,
     *,
     num_steps: int,
@@ -400,16 +322,7 @@ def integrate_batched_to_base_log_likelihood(
     hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
     ode_solver: str = ODE_SOLVER_EULER,
 ) -> LikelihoodIntegrationResult:
-    """Integrate batched pi0 code-time from actions at t=0 to base noise at t=1.
-
-    In policy/src/openpi/models/pi0.py:
-      x_t = t * noise + (1 - t) * actions
-      v_t learns dx_t/dt = noise - actions
-
-    Therefore actions live at t=0 and the standard Gaussian base lives at t=1.
-    ``sample_actions`` denoises from t=1 to t=0 with negative dt, so this likelihood
-    path uses positive dt to map data actions back to the Gaussian base.
-    """
+    """Integrate SmolVLA actions at t=0 to standard-Gaussian noise at t=1."""
 
     if num_steps <= 0:
         raise ValueError(f"num_steps must be positive, got {num_steps}")
@@ -434,8 +347,8 @@ def integrate_batched_to_base_log_likelihood(
 
 
 def integrate_to_base_log_likelihood(
-    model: _model.BaseModel,
-    observation: _model.Observation,
+    model: SmolVLAEvalModel,
+    observation: EvalObservation,
     reference_actions: jax.Array,
     *,
     num_steps: int,
@@ -455,7 +368,7 @@ def integrate_to_base_log_likelihood(
 
 
 def integrate_to_base_log_likelihood_with_context(
-    model: _model.BaseModel,
+    model: SmolVLAEvalModel,
     context: VelocityContext,
     reference_actions: jax.Array,
     *,
@@ -476,8 +389,8 @@ def integrate_to_base_log_likelihood_with_context(
 
 
 def compute_modality_contribution(
-    model: _model.BaseModel,
-    observation: _model.Observation,
+    model: SmolVLAEvalModel,
+    observation: EvalObservation,
     reference_actions: jax.Array,
     *,
     modality: str,
@@ -486,7 +399,7 @@ def compute_modality_contribution(
     hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
     ode_solver: str = ODE_SOLVER_EULER,
     prompt: str | None = None,
-    prompt_tokenizer: _tokenizer.PaligemmaTokenizer | None = None,
+    prompt_tokenizer: Any | None = None,
     state_in_prompt: bool = False,
 ) -> tuple[LikelihoodIntegrationResult, LikelihoodIntegrationResult, jax.Array]:
     ablated_observation = ablate_modality_observation(
@@ -520,10 +433,10 @@ def compute_modality_contribution(
 
 
 def compute_episode_modality_contributions(
-    model: _model.BaseModel,
+    model: SmolVLAEvalModel,
     frames: Sequence[int],
     dataset_indices: Sequence[int],
-    observations: Sequence[_model.Observation],
+    observations: Sequence[EvalObservation],
     reference_actions: Sequence[jax.Array],
     prompts: Sequence[str | None],
     *,
@@ -532,7 +445,7 @@ def compute_episode_modality_contributions(
     hutchinson_samples: int = DEFAULT_HUTCHINSON_SAMPLES,
     hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
     ode_solver: str = ODE_SOLVER_EULER,
-    prompt_tokenizer: _tokenizer.PaligemmaTokenizer | None = None,
+    prompt_tokenizer: Any | None = None,
     state_in_prompt: bool = False,
     eval_batch_size: int = 4,
 ) -> list[dict[str, float | int]]:
@@ -552,7 +465,9 @@ def compute_episode_modality_contributions(
 
         batched_observations = []
         batched_actions = []
-        for observation, actions, prompt in zip(chunk_observations, chunk_actions, chunk_prompts, strict=True):
+        for observation, actions, prompt in zip(
+            chunk_observations, chunk_actions, chunk_prompts, strict=True
+        ):
             ablated_observation = ablate_modality_observation(
                 observation,
                 modality=modality,
@@ -589,9 +504,12 @@ def compute_episode_modality_contributions(
                 "delta_logp": _scalar(
                     batched_result.log_p_base[original_index] - batched_result.log_p_base[ablated_index]
                 ),
-                "delta_r_tot": _scalar(batched_result.r_tot[original_index] - batched_result.r_tot[ablated_index]),
+                "delta_r_tot": _scalar(
+                    batched_result.r_tot[original_index] - batched_result.r_tot[ablated_index]
+                ),
                 "contribution": _scalar(
-                    batched_result.log_likelihood[original_index] - batched_result.log_likelihood[ablated_index]
+                    batched_result.log_likelihood[original_index]
+                    - batched_result.log_likelihood[ablated_index]
                 ),
             }
             rows.append(row)
@@ -613,6 +531,8 @@ def save_contribution_curve(
     modality: str,
     episode_index: str,
 ) -> tuple[pathlib.Path, pathlib.Path | None]:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     output_dir.mkdir(parents=True, exist_ok=True)
     csv_path = output_dir / f"{modality}_contribution_episode_{episode_index}.csv"
     with csv_path.open("w", newline="") as f:
@@ -662,13 +582,12 @@ def save_contribution_curve(
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Estimate modality contribution by attention-mask ablation.")
-    parser.add_argument("--config-name", default="pi05_bi_vitac")
-    parser.add_argument("--checkpoint-dir", default="/home/rvsa/codehub/ManiSkill-vitac/checkpoints/11999")
-    parser.add_argument("--episode-index", default=10)
+    parser = argparse.ArgumentParser(description="Estimate SmolVLA JAX modality contribution by ablation.")
+    add_eval_data_arguments(parser)
+    parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=1000)
-    parser.add_argument("--sample-interval", type=int, default=3)
+    parser.add_argument("--sample-interval", type=int)
     parser.add_argument("--num-steps", "-k", type=int, default=120)
     parser.add_argument(
         "--ode-solver",
@@ -694,7 +613,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=DEFAULT_HUTCHINSON_SEED,
         help="Random seed for Hutchinson probes.",
     )
-    parser.add_argument("--remove-modality", choices=("vision", "tactile", "state", "language_prompt"), default="vision")
+    parser.add_argument(
+        "--remove-modality", choices=("vision", "tactile", "state", "language_prompt"), default="vision"
+    )
     parser.add_argument("--output-dir", type=pathlib.Path, default=pathlib.Path("eval_outputs/loglike"))
     args = parser.parse_args(argv)
 
@@ -703,43 +624,35 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.eval_batch_size <= 0:
         raise ValueError(f"--eval-batch-size must be positive, got {args.eval_batch_size}.")
 
-    train_config = _config.get_config(args.config_name)
+    model = load_model_from_args(args)
     if args.sample_interval is None:
         episode = load_episode(
-            train_config,
-            args.checkpoint_dir,
+            model,
             args.episode_index,
             max_frames=args.max_frames,
             frame_indices=(args.frame,),
         )
     else:
         episode = load_episode(
-            train_config,
-            args.checkpoint_dir,
+            model,
             args.episode_index,
             start_frame=args.frame,
             sample_interval=args.sample_interval,
             max_frames=args.max_frames,
         )
-    model = load_model(train_config, args.checkpoint_dir)
-    state_in_prompt = bool(getattr(train_config.model, "discrete_state_input", False))
-    prompt_tokenizer = (
-        _tokenizer.PaligemmaTokenizer(train_config.model.max_token_len)
-        if args.remove_modality in ("state", "language_prompt") and state_in_prompt
-        else None
-    )
 
-    print(f"loaded episode={args.episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}")
+    print(
+        f"loaded episode={args.episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}"
+    )
     print(f"prompt={episode.prompts[0]!r}")
     print(f"ablated_modality={args.remove_modality}")
-    print("ablation_method=attention_mask")
-    print(f"state_in_prompt={state_in_prompt}")
+    print("ablation_method=input_mask_or_zero")
     print("divergence_method=hutchinson_rademacher_jvp")
     print(f"hutchinson_samples={args.hutchinson_samples}")
     print(f"hutchinson_seed={args.hutchinson_seed}")
     print(f"eval_batch_size={args.eval_batch_size}")
     print(f"ode_solver={args.ode_solver}")
-    print("model_dtype=bfloat16")
+    print(f"model_dtype={jax.tree.leaves(model.params)[0].dtype}")
 
     rows = compute_episode_modality_contributions(
         model,
@@ -750,24 +663,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         episode.prompts,
         modality=args.remove_modality,
         num_steps=args.num_steps,
-        prompt_tokenizer=prompt_tokenizer,
-        state_in_prompt=state_in_prompt,
+        prompt_tokenizer=None,
+        state_in_prompt=False,
         hutchinson_samples=args.hutchinson_samples,
         hutchinson_seed=args.hutchinson_seed,
         ode_solver=args.ode_solver,
         eval_batch_size=args.eval_batch_size,
     )
 
-    if args.sample_interval is not None:
-        csv_path, plot_path = save_contribution_curve(
-            rows,
-            output_dir=args.output_dir,
-            modality=args.remove_modality,
-            episode_index=str(args.episode_index),
-        )
-        print(f"curve_csv={csv_path}")
-        if plot_path is not None:
-            print(f"curve_plot={plot_path}")
+    csv_path, plot_path = save_contribution_curve(
+        rows,
+        output_dir=args.output_dir,
+        modality=args.remove_modality,
+        episode_index=str(args.episode_index),
+    )
+    print(f"curve_csv={csv_path}")
+    if plot_path is not None:
+        print(f"curve_plot={plot_path}")
 
 
 if __name__ == "__main__":

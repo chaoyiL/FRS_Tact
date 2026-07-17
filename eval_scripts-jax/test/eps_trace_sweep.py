@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# The parent eval directory is inserted below for direct script execution.
+# ruff: noqa: E402
 import argparse
 import csv
 import pathlib
@@ -7,29 +9,24 @@ import sys
 from collections.abc import Sequence
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "eval_scripts"
-POLICY_SRC = ROOT / "policy" / "src"
-for path in (POLICY_SRC, EVAL_SCRIPTS):
+EVAL_SCRIPTS = ROOT / "eval_scripts-jax"
+for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
 from loglike_evaluate import (
     LikelihoodIntegrationResult,
     _add_batch_dim,
     _scalar,
     create_velocity_context,
     load_episode,
-    load_model,
     predict_velocity_with_context,
     standard_normal_log_prob,
-    velocity_and_fd_coordinate_trace,
 )
-from openpi.shared import nnx_utils
-from openpi.training import config as _config
+from utils import add_eval_data_arguments, load_model_from_args
 
 
 def _parse_eps_values(values: Sequence[str]) -> tuple[float, ...]:
@@ -69,7 +66,9 @@ def exact_jacobian_trace_from_velocity(velocity_fn, x: jax.Array) -> jax.Array:
     return trace
 
 
-def velocity_and_autodiff_divergence(model, context, x: jax.Array, t: jax.Array) -> tuple[jax.Array, jax.Array]:
+def velocity_and_autodiff_divergence(
+    model, context, x: jax.Array, t: jax.Array
+) -> tuple[jax.Array, jax.Array]:
     x = jnp.asarray(x, dtype=jnp.float32)
 
     def velocity_fn(x_arg: jax.Array) -> jax.Array:
@@ -80,8 +79,42 @@ def velocity_and_autodiff_divergence(model, context, x: jax.Array, t: jax.Array)
     return velocity, divergence
 
 
+def velocity_and_fd_coordinate_trace(
+    model,
+    context,
+    x: jax.Array,
+    t: jax.Array,
+    fd_eps: float,
+) -> tuple[jax.Array, jax.Array]:
+    """Central finite-difference estimate of the coordinate Jacobian trace."""
+
+    x = jnp.asarray(x, dtype=jnp.float32)
+    flat_x = x.reshape((x.shape[0], -1))
+    event_size = flat_x.shape[1]
+
+    def velocity(flat: jax.Array) -> jax.Array:
+        shaped = flat.reshape(x.shape)
+        return predict_velocity_with_context(model, context, shaped, t).reshape(flat_x.shape)
+
+    center_velocity = velocity(flat_x).reshape(x.shape)
+
+    def scan_body(trace: jax.Array, index: jax.Array):
+        direction = jax.nn.one_hot(index, event_size, dtype=jnp.float32)[None, :]
+        plus = velocity(flat_x + fd_eps * direction)
+        minus = velocity(flat_x - fd_eps * direction)
+        derivative = (plus[:, index] - minus[:, index]) / (2.0 * fd_eps)
+        return trace + derivative, None
+
+    trace, _ = jax.lax.scan(
+        scan_body,
+        jnp.zeros((x.shape[0],), dtype=jnp.float32),
+        jnp.arange(event_size, dtype=jnp.int32),
+    )
+    return center_velocity, trace
+
+
 def integrate_to_base_log_likelihood_autodiff(
-    loglike_fn,
+    model,
     observation,
     reference_actions,
     *,
@@ -93,9 +126,27 @@ def integrate_to_base_log_likelihood_autodiff(
     x = jnp.asarray(reference_actions, dtype=jnp.float32)
     if x.ndim == 2:
         x = x[None, ...]
-    observation = _add_batch_dim(observation)
-    step_indices = jnp.arange(num_steps, dtype=jnp.float32)
-    x_base, r_tot, log_p_base, log_likelihood = loglike_fn(observation, x, step_indices)
+    context = create_velocity_context(model, _add_batch_dim(observation))
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
+
+    def scan_body(carry, _):
+        x_t, r_tot, t = carry
+        velocity, divergence = velocity_and_autodiff_divergence(model, context, x_t, t)
+        return (x_t + velocity * dt, r_tot + divergence * dt, t + dt), None
+
+    batch_size = x.shape[0]
+    initial = (
+        x,
+        jnp.zeros((batch_size,), dtype=jnp.float32),
+        jnp.zeros((batch_size,), dtype=jnp.float32),
+    )
+    (x_base, r_tot, _), _ = jax.lax.scan(
+        scan_body,
+        initial,
+        jnp.arange(num_steps, dtype=jnp.int32),
+    )
+    log_p_base = standard_normal_log_prob(x_base)
+    log_likelihood = log_p_base + r_tot
     return LikelihoodIntegrationResult(
         x_base=x_base,
         r_tot=r_tot,
@@ -173,7 +224,9 @@ def run_pointwise_sweep(
         fd_velocity, fd_divergence = velocity_and_fd_coordinate_trace(model, context, x, t, fd_eps)
         fd_divergence_scalar = _scalar(fd_divergence)
         abs_error = abs(fd_divergence_scalar - exact_divergence_scalar)
-        relative_error = abs_error / abs(exact_divergence_scalar) if exact_divergence_scalar != 0 else float("nan")
+        relative_error = (
+            abs_error / abs(exact_divergence_scalar) if exact_divergence_scalar != 0 else float("nan")
+        )
         max_velocity_delta = _scalar(jnp.max(jnp.abs(fd_velocity - exact_velocity)))
         row = {
             "fd_eps": fd_eps,
@@ -203,7 +256,6 @@ def run_integration_sweep(
     model,
     observation,
     reference_actions,
-    loglike_fn,
     eps_values: Sequence[float],
     num_steps: int,
     episode_index,
@@ -211,7 +263,7 @@ def run_integration_sweep(
     dataset_index: int,
 ) -> tuple[list[dict[str, float]], dict[str, float]]:
     ad_result = integrate_to_base_log_likelihood_autodiff(
-        loglike_fn,
+        model,
         observation,
         reference_actions,
         num_steps=num_steps,
@@ -229,8 +281,7 @@ def run_integration_sweep(
     print(f"autodiff_r_tot={ad_r_tot:.9f}")
     print(f"autodiff_log_p_base={ad_log_p_base:.9f}")
     print(
-        "fd_eps,fd_log_likelihood,fd_r_tot,log_likelihood_abs_error,"
-        "r_tot_abs_error,log_likelihood_rel_error"
+        "fd_eps,fd_log_likelihood,fd_r_tot,log_likelihood_abs_error,r_tot_abs_error,log_likelihood_rel_error"
     )
 
     rows: list[dict[str, float]] = []
@@ -283,13 +334,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             "closest to the autodiff result."
         )
     )
-    parser.add_argument("--config-name", default="pi05_bi_vitac")
-    parser.add_argument("--checkpoint-dir", default="/home/rvsa/codehub/ManiSkill-vitac/checkpoints/11999")
-    parser.add_argument("--episode-index", default=10)
+    add_eval_data_arguments(parser)
+    parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=2000)
-    parser.add_argument("--num-steps", "-k", type=int, default=10, help="Euler steps for likelihood integration.")
-    parser.add_argument("--time", type=float, default=0.0, help="Flow time at which to compare pointwise divergence.")
+    parser.add_argument(
+        "--num-steps", "-k", type=int, default=10, help="Euler steps for likelihood integration."
+    )
+    parser.add_argument(
+        "--time", type=float, default=0.0, help="Flow time at which to compare pointwise divergence."
+    )
     parser.add_argument(
         "--eps-values",
         nargs="+",
@@ -305,19 +359,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     eps_values = _parse_eps_values(args.eps_values)
-    train_config = _config.get_config(args.config_name)
+    model = load_model_from_args(args)
     episode = load_episode(
-        train_config,
-        args.checkpoint_dir,
+        model,
         args.episode_index,
         max_frames=args.max_frames,
         frame_indices=(args.frame,),
     )
-    model = load_model(train_config, args.checkpoint_dir)
-    if not hasattr(model, "integrate_to_base_log_likelihood"):
-        raise TypeError("Expected a Pi0/Pi05 model with integrate_to_base_log_likelihood.")
-    loglike_fn = nnx_utils.module_jit(model.integrate_to_base_log_likelihood, static_argnums=(4,))
-
     observation = episode.observations[0]
     reference_actions = episode.actions[0]
     x = jnp.asarray(reference_actions, dtype=jnp.float32)[None, ...]
@@ -339,7 +387,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         model=model,
         observation=observation,
         reference_actions=reference_actions,
-        loglike_fn=loglike_fn,
         eps_values=eps_values,
         num_steps=args.num_steps,
         episode_index=args.episode_index,

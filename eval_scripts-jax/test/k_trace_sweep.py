@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+# The parent eval directory is inserted below for direct script execution.
+# ruff: noqa: E402
 import argparse
 import gc
 import os
@@ -12,16 +14,14 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
 os.environ.setdefault("XLA_PYTHON_CLIENT_ALLOCATOR", "platform")
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "eval_scripts"
-POLICY_SRC = ROOT / "policy" / "src"
-for path in (POLICY_SRC, EVAL_SCRIPTS):
+EVAL_SCRIPTS = ROOT / "eval_scripts-jax"
+for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
 from loglike_evaluate import (
     DEFAULT_HUTCHINSON_SAMPLES,
     DEFAULT_HUTCHINSON_SEED,
-    ODE_SOLVER_EULER,
     ODE_SOLVER_FIREFLOW,
     ODE_SOLVERS,
     _add_batch_dim,
@@ -30,9 +30,8 @@ from loglike_evaluate import (
     create_velocity_context,
     integrate_to_base_log_likelihood_with_context,
     load_episode,
-    load_model,
 )
-from openpi.training import config as _config
+from utils import add_eval_data_arguments, load_model_from_args
 
 
 def _parse_k_values(values: Sequence[str]) -> tuple[int, ...]:
@@ -90,6 +89,8 @@ def save_log_likelihood_plot(
     frame: int,
     ode_solver: str,
 ) -> pathlib.Path:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
     try:
         import matplotlib
 
@@ -120,9 +121,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description="Sweep integration step count k and plot log-likelihood convergence."
     )
-    parser.add_argument("--config-name", default="pi05_bi")
-    parser.add_argument("--checkpoint-dir", default="/home/rvsa/codehub/ManiSkill-vitac/checkpoints/smash_b_1300")
-    parser.add_argument("--episode-index", default=10)
+    add_eval_data_arguments(parser)
+    parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0, help="Episode-relative frame to evaluate.")
     parser.add_argument("--max-frames", type=int, default=2000)
     parser.add_argument(
@@ -166,16 +166,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise ValueError(f"--hutchinson-samples must be positive, got {args.hutchinson_samples}.")
 
     k_values = _parse_k_values(args.k_values)
-    train_config = _config.get_config(args.config_name)
+    model = load_model_from_args(args)
     episode = load_episode(
-        train_config,
-        args.checkpoint_dir,
+        model,
         args.episode_index,
         max_frames=args.max_frames,
         frame_indices=(args.frame,),
     )
-    model = load_model(train_config, args.checkpoint_dir)
-
     print(f"episode={args.episode_index} frame={args.frame} dataset_index={episode.indices[0]}")
     print(f"ode_solver={args.ode_solver}")
     print(f"hutchinson_samples={args.hutchinson_samples}")
