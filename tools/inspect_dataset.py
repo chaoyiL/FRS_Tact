@@ -5,7 +5,7 @@ Usage:
     uv sync
     uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset
     uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset -o report.json
-    uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset --model lerobot/smolvla_base --print-text
+    uv run python tools/inspect_dataset.py --dataset-path /path/to/dataset --model /path/to/checkpoint --print-text
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ def _chw_to_hwc_uint8(image: np.ndarray | torch.Tensor) -> np.ndarray:
 
 
 def frame_to_raw_observation(sample: dict[str, Any], features: dict[str, dict]) -> dict[str, Any]:
-    """Convert a dataset frame into the raw dict expected by infer_smolvla helpers."""
+    """Convert a dataset frame into the raw dict expected by JAX SmolVLA preprocessing."""
     observation: dict[str, Any] = {}
     for key, feat in features.items():
         if key not in sample:
@@ -378,7 +378,7 @@ def print_text_report(report: dict[str, Any]) -> None:
         for key, summary in report["sample_summary"].items():
             print(f"  - {key}: {summary}")
 
-        print("\n[Raw observation for infer_smolvla]")
+        print("\n[Raw observation for infer_smolvla_jax]")
         for key, summary in report["raw_observation_for_inference"].items():
             print(f"  - {key}: {summary}")
         if "task" in report["sample_summary"]:

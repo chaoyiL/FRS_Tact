@@ -12,17 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .factory import get_policy_class, make_policy_config, make_pre_post_processors
-from .pretrained import PreTrainedPolicy
-from .smolvla.configuration_smolvla import SmolVLAConfig
-from .utils import make_robot_action, prepare_observation_for_inference
+from .smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig, JaxSmolVLAPolicy
 
 __all__ = [
-    "PreTrainedPolicy",
-    "SmolVLAConfig",
-    "get_policy_class",
-    "make_policy_config",
-    "make_pre_post_processors",
-    "make_robot_action",
-    "prepare_observation_for_inference",
+    "JaxSmolVLA",
+    "JaxSmolVLAConfig",
+    "JaxSmolVLAPolicy",
 ]

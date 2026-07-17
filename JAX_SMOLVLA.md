@@ -8,8 +8,9 @@
 uv sync
 ```
 
-默认依赖已包含 SmolVLA 的 PyTorch / JAX 栈，以及复用本机 CUDA 12 的
-`jax[cuda12-local]` 插件（不额外安装 CUDA 运行库）。
+默认依赖已包含 SmolVLA 的 JAX 栈，以及复用本机 CUDA 12 的
+`jax[cuda12-local]` 插件（不额外安装 CUDA 运行库）。`torch` 仅作为
+LeRobot 数据集与 DataLoader 后端保留，模型推理/训练走 JAX。
 
 运行测试：
 
@@ -75,7 +76,7 @@ RTC checkpoint 可通过 `previous_chunk`、`inference_delay` 和 `execution_hor
 
 ## 3. LeRobotDataset 数据流
 
-JAX trainer 直接构造 `LeRobotDataset` 和 PyTorch `DataLoader`。worker 负责 Parquet、图像和视频读取，主进程负责 tokenize、resize、使用 dataset metadata 中的 mean/std 归一化并转换为 JAX array。
+JAX trainer 直接构造 `LeRobotDataset` 和 torch `DataLoader`。worker 负责 Parquet、图像和视频读取，主进程负责 tokenize、resize、使用 dataset metadata 中的 mean/std 归一化并转换为 JAX array。
 
 未来 action chunk 由 dataset FPS 和 checkpoint `chunk_size` 自动生成。episode 尾部由 LeRobotDataset 重复边界 action，并产生 `action_is_pad`，loss 会忽略这些 padding。当前标准的 `action` 和部分旧数据集使用的 `actions` 都会自动识别，也可以用 `--action-key` 显式指定。
 
@@ -153,27 +154,6 @@ checkpoint 和 `LeRobotDataset`，不再依赖 OpenPI/Pi0 的 config、transform
   --dataset-path ~/.cache/huggingface/lerobot/chaoyi/black_smash_02 \
   --repo-id chaoyi/black_smash_02 --print-text
 ```
-
-## 6. 数值对比
-
-```bash
-.venv/bin/python tools/compare_smolvla_backends.py \
-  --checkpoint checkpoints/black-smash-smolvla-40k \
-  --stage all \
-  --num-steps 10
-```
-
-`--float32` 用于验证模型语义，BF16 用于观察真实后端舍入差异。当前真实 450,046,176 参数 checkpoint 的本机 CPU 结果：
-
-| 路径 | 模式 | PyTorch/JAX 结果 |
-| --- | --- | --- |
-| 16 层 joint transformer | FP32 | prefix max abs `1.06e-4`，suffix max abs `1.34e-5`，cosine `1.0` |
-| vision tower | FP32 | max abs `6.58e-5`，cosine `0.99999988` |
-| 单次完整 denoise velocity | FP32 | max abs `6.56e-6`，cosine `1.0000001` |
-| 单次完整 denoise velocity | BF16 | cosine `0.999986` |
-| 10-step action sample | BF16 | mean abs `0.00280`，cosine `0.9999588` |
-
-不同 accelerator 的 BF16 舍入可能产生略有差异；FP32 对比用于定位语义错误，端到端 BF16 cosine 用于验证部署一致性。
 
 ## 代码入口
 

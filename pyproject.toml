@@ -26,7 +26,7 @@ discord = "https://discord.gg/s3KuuzsPFb"
 [project]
 name = "lerobot"
 version = "0.6.1"
-description = "SmolVLA-focused LeRobot subset with PyTorch and JAX training/inference"
+description = "SmolVLA-focused LeRobot subset with JAX training/inference"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
 authors = [
@@ -57,7 +57,7 @@ classifiers = [
 keywords = ["lerobot", "huggingface", "robotics",  "machine learning", "artificial intelligence"]
 
 dependencies = [
-    # Core ML
+    # Core ML (torch is retained only as the LeRobot dataset / DataLoader backend)
     "torch>=2.7,<2.12.0",
     "torchvision>=0.22.0,<0.27.0",
     "numpy>=2.0.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
@@ -96,11 +96,10 @@ dependencies = [
     "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
     "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
 
-    # SmolVLA PyTorch (former extras: smolvla / transformers-dep)
+    # SmolVLA tokenizer (used by JAX preprocessing)
     "transformers>=5.4.0,<5.6.0",
-    "num2words>=0.5.14,<0.6.0",
 
-    # SmolVLA JAX + local CUDA 12 (former: smolvla-jax / smolvla-jax-cuda12-local)
+    # SmolVLA JAX + local CUDA 12
     "jax[cuda12-local]>=0.6.2,<0.9.0",
     "flax>=0.11.0,<0.13.0",
     "optax>=0.2.5,<0.3.0",
@@ -169,9 +168,6 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403", "E402"]
-# E402: conditional-import guards (TYPE_CHECKING / is_package_available) must precede the imports they protect
-"src/lerobot/scripts/convert_dataset_v21_to_v30.py" = ["E402"]
-"src/lerobot/policies/wall_x/**" = ["N801", "N812", "SIM102", "SIM108", "SIM210", "SIM211", "B006", "B007", "SIM118"] # Supprese these as they are coming from original Qwen2_5_vl code TODO(pepijn): refactor original
 
 [tool.ruff.lint.isort]
 combine-as-imports = true

@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .policies import PreTrainedConfig
 from .types import (
     FeatureType,
     NormalizationMode,
@@ -43,7 +42,6 @@ __all__ = [
     "NormalizationMode",
     "PipelineFeatureType",
     "PolicyFeature",
-    "PreTrainedConfig",
     "RTCAttentionSchedule",
     "VALID_VIDEO_CODECS",
     "VIDEO_ENCODER_INFO_KEYS",
