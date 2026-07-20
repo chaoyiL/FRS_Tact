@@ -43,15 +43,15 @@ def evaluate_split(
     maes: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
 
-    for indices, x_base_np, gt_action_np, tactile_tokens in conditioner.batches(
+    for indices, x_base_np, _predicted_np, gt_action_np, tactile_seq in conditioner.batches(
         split, batch_size=batch_size, shuffle=False, seed=0
     ):
         x_base = jnp.asarray(x_base_np)
         target = jnp.asarray(gt_action_np)
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
-        flow_loss = flow_matching_loss_per_sample(model, x_base, target, t, tactile_tokens)
+        flow_loss = flow_matching_loss_per_sample(model, x_base, target, t, tactile_seq)
         prediction = decode_actions(
-            model, x_base, tactile_tokens, num_steps=num_steps, solver=solver
+            model, x_base, tactile_seq, num_steps=num_steps, solver=solver
         )
         difference = prediction - target
         mse = jnp.mean(jnp.square(difference), axis=(1, 2))

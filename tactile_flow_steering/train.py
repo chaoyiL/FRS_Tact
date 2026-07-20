@@ -11,8 +11,11 @@ import numpy as np
 from flax import nnx
 
 from tactile_flow_steering.utils.checkpoint import save_checkpoint
+from tactile_flow_steering.utils.data import LossMode
 from tactile_flow_steering.utils.data import TactileConditionedBatches
+from tactile_flow_steering.utils.data import resolve_tactile_window
 from tactile_flow_steering.utils.metrics import evaluate_split
+from tactile_flow_steering.utils.model import DEFAULT_GRU_HIDDEN_DIM
 from tactile_flow_steering.utils.model import DecoderConfig
 from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
 from tactile_flow_steering.utils.model import make_optimizer
@@ -29,6 +32,12 @@ def train_decoder(
     output_dir: pathlib.Path,
     dataset_repo_id: str | None,
     dataset_root: pathlib.Path | None,
+    tactile_window_divisor: int,
+    history_stride: int,
+    loss_mode: LossMode,
+    gate_tau: float,
+    gate_temperature: float,
+    gate_lambda: float,
     model_dim: int,
     depth: int,
     num_heads: int,
@@ -52,18 +61,34 @@ def train_decoder(
         raise ValueError("warmup_epochs must be non-negative.")
     if not 0.0 <= min_learning_rate_ratio <= 1.0:
         raise ValueError("min_learning_rate_ratio must be in [0, 1].")
+    if loss_mode not in ("gt", "gated"):
+        raise ValueError(f"loss_mode must be 'gt' or 'gated', got {loss_mode!r}.")
+    if gate_temperature <= 0:
+        raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
+    if gate_lambda < 0:
+        raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
 
     pairs = CachedPairs(cache_dir)
+    action_horizon = int(pairs.manifest["action_horizon"])
+    tactile_window = resolve_tactile_window(
+        action_horizon=action_horizon,
+        window_divisor=tactile_window_divisor,
+    )
     conditioner = TactileConditionedBatches(
         pairs,
         tactile_encoder_dir=tactile_encoder_dir,
+        tactile_window=tactile_window,
         dataset_repo_id=dataset_repo_id,
         dataset_root=dataset_root,
+        history_stride=history_stride,
+        build_episode_baselines=(loss_mode == "gated"),
     )
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
-        action_horizon=int(pairs.manifest["action_horizon"]),
-        tactile_token_dim=conditioner.tactile_token_dim,
+        action_horizon=action_horizon,
+        tactile_window=tactile_window,
+        gru_hidden_dim=DEFAULT_GRU_HIDDEN_DIM,
+        resnet_embedding_dim=conditioner.resnet_embedding_dim,
         model_dim=model_dim,
         depth=depth,
         num_heads=num_heads,
@@ -96,7 +121,19 @@ def train_decoder(
         )
     else:
         print(f"learning_rate peak={peak_learning_rate:g}")
-    print(f"tactile_token_dim={conditioner.tactile_token_dim} (frozen encoder)")
+    print(
+        f"tactile_window={tactile_window} "
+        f"(action_horizon={action_horizon} / divisor={tactile_window_divisor}) "
+        f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
+        f"(frozen ResNet + trainable shared GRU)"
+    )
+    if loss_mode == "gt":
+        print("loss_mode=gt (target=gt_action)")
+    else:
+        print(
+            f"loss_mode=gated L=w*L*+lambda*(1-w)*L_stop "
+            f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g}"
+        )
     if cosine_decay:
         print(
             f"lr_schedule=warmup({warmup_steps} steps)+cosine "
@@ -120,17 +157,31 @@ def train_decoder(
         for epoch in range(1, epochs + 1):
             losses: list[float] = []
             weights: list[int] = []
-            for batch_number, (_, x_base_np, gt_action_np, tactile_tokens) in enumerate(
+            for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
                 conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
             ):
                 step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
+                if loss_mode == "gated":
+                    current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+                    gate_w = conditioner.gate_weights_for_cache_indices(
+                        indices,
+                        current_tokens,
+                        tau=gate_tau,
+                        temperature=gate_temperature,
+                    )
+                else:
+                    gate_w = np.ones((len(indices),), dtype=np.float32)
                 loss = train_step(
                     model,
                     optimizer,
                     jnp.asarray(x_base_np),
                     jnp.asarray(gt_action_np),
-                    tactile_tokens,
+                    jnp.asarray(predicted_np),
+                    tactile_seq,
+                    jnp.asarray(gate_w),
                     step_key,
+                    loss_mode=loss_mode,
+                    gate_lambda=gate_lambda,
                 )
                 losses.append(float(jax.device_get(loss)))
                 weights.append(len(x_base_np))
@@ -155,7 +206,14 @@ def train_decoder(
                 "cache_records_sha256": pairs.manifest["records_sha256"],
                 "cache_configuration": pairs.manifest["configuration"],
                 "tactile_encoder_dir": str(tactile_encoder_dir.resolve()),
-                "tactile_token_dim": conditioner.tactile_token_dim,
+                "tactile_window_divisor": tactile_window_divisor,
+                "tactile_window": tactile_window,
+                "gru_hidden_dim": DEFAULT_GRU_HIDDEN_DIM,
+                "history_stride": history_stride,
+                "loss_mode": loss_mode,
+                "gate_tau": gate_tau,
+                "gate_temperature": gate_temperature,
+                "gate_lambda": gate_lambda,
             }
             writer.writerow({"epoch": epoch, **metrics})
             history_file.flush()
@@ -190,7 +248,10 @@ def train_decoder(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Train a tactile cross-attn conditioned flow decoder (target = GT action)."
+        description=(
+            "Train tactile GRU + cross-attn flow decoder "
+            "(frozen ResNet features; loss-mode gt or gated hybrid)."
+        )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--tactile-encoder-dir", type=pathlib.Path, required=True)
@@ -206,6 +267,42 @@ def build_parser() -> argparse.ArgumentParser:
         type=pathlib.Path,
         default=None,
         help="Optional local dataset root hint (currently unused by image loader; reserved).",
+    )
+    parser.add_argument(
+        "--tactile-window-divisor",
+        type=int,
+        default=1,
+        help="tactile_window = action_horizon // divisor (must divide evenly). Default 1.",
+    )
+    parser.add_argument(
+        "--history-stride",
+        type=int,
+        default=1,
+        help="Frame stride when looking back for the tactile window (default 1 = contiguous).",
+    )
+    parser.add_argument(
+        "--loss-mode",
+        choices=("gt", "gated"),
+        default="gt",
+        help="gt: FM vs GT only. gated: L=w*L*+lambda*(1-w)*L_stop.",
+    )
+    parser.add_argument(
+        "--gate-tau",
+        type=float,
+        default=0.5,
+        help="Soft-gate midpoint tau for w=sigmoid((s-tau)/T). Default 0.5.",
+    )
+    parser.add_argument(
+        "--gate-temperature",
+        type=float,
+        default=0.1,
+        help="Soft-gate temperature T. Default 0.1.",
+    )
+    parser.add_argument(
+        "--gate-lambda",
+        type=float,
+        default=1.0,
+        help="Weight on (1-w)*L_stop in gated mode. Default 1.0.",
     )
 
     parser.add_argument("--model-dim", type=int, default=256)
@@ -237,6 +334,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_dir=args.output_dir,
         dataset_repo_id=args.dataset_repo_id,
         dataset_root=args.dataset_root,
+        tactile_window_divisor=args.tactile_window_divisor,
+        history_stride=args.history_stride,
+        loss_mode=args.loss_mode,
+        gate_tau=args.gate_tau,
+        gate_temperature=args.gate_temperature,
+        gate_lambda=args.gate_lambda,
         model_dim=args.model_dim,
         depth=args.depth,
         num_heads=args.num_heads,

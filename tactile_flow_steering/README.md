@@ -1,14 +1,14 @@
 # Tactile Flow Steering
 
-触觉条件流匹配解码器：消费根目录 `prepare.py` 生成的 action cache，训练/评估时在线加载触觉图，经冻结 `tactile_encoder` 编码为 2 个条件 token，用 **cross-attention** 注入，流匹配目标为数据集 **GT 动作**。
+触觉条件流匹配解码器：消费根目录 `prepare.py` 生成的 action cache；训练/评估时在线加载时间窗内的触觉图，经**冻结 ResNet** 编码后，由**可训练共享 GRU**（四路触觉各自过同一 GRU）得到 4 个 hidden token，经 **cross-attention** 注入。
 
 ## 数据流
 
 1. 根目录 `prepare.py` → `x_base.npy` / `predicted_actions.npy` / `gt_actions.npy`
-2. `train`：cache + 在线触觉 encode → `v(x_t, t, tactile_tokens) → gt_action`
-3. `evaluate`：`decode(x_base, tactile_tokens)` vs **gt_action** MSE
+2. `train`：cache + 时间窗触觉 → frozen ResNet `[B,T,4,D]` → shared GRU → `[B,4,H]` → CrossAttn FM
+3. `evaluate`：同样窗口 → `decode(x_base, tactile_seq)` vs **gt_action** MSE
 
-不写单独的 tactile prepare，也不微调 tactile encoder。
+不写单独的 tactile prepare；不微调 ResNet；端到端训练 **GRU + 去噪网络**。
 
 ## 环境
 
@@ -33,12 +33,33 @@ uv run python prepare.py \
 uv run python -m tactile_flow_steering.train \
   --cache-dir tactile_flow_steering/outputs/cache \
   --tactile-encoder-dir path/to/tactile_encoder/checkpoint \
-  --output-dir tactile_flow_steering/outputs/run_01
+  --output-dir tactile_flow_steering/outputs/run_01 \
+  --tactile-window-divisor 1 \
+  --loss-mode gt
 ```
 
-数据集 repo 默认取 cache manifest 的 `configuration.dataset_repo_id`，可用 `--dataset-repo-id` 覆盖。
+- `--tactile-window-divisor`：`tactile_window = action_horizon // divisor`（须整除；默认 1）
+- GRU hidden 维固定为 **256**（不可配置）
+- `--loss-mode`：
+  - `gt`（默认）：仅 `L*`，target = GT
+  - `gated`：`L = w L* + λ (1-w) L_stop`
+    - `L*`：target = GT；`L_stop`：target = VLA `predicted_actions`
+    - `s = mean_i(1 - cos(v_i[t], v_i[ep0]))`（当前帧 vs episode 首帧 ResNet token）
+    - `w = sigmoid((s - τ) / T)`
+    - CLI：`--gate-tau`（默认 0.5）、`--gate-temperature`（默认 0.1）、`--gate-lambda`（默认 1.0）
 
-每 step：左右腕各 encode 一次 → `tactile_tokens [B, 2, D]`（`stop_gradient`）→ FM loss（target=`gt_action`）。
+门控示例：
+
+```bash
+uv run python -m tactile_flow_steering.train \
+  --cache-dir tactile_flow_steering/outputs/cache \
+  --tactile-encoder-dir path/to/tactile_encoder/checkpoint \
+  --output-dir tactile_flow_steering/outputs/run_gated \
+  --loss-mode gated \
+  --gate-tau 0.5 \
+  --gate-temperature 0.1 \
+  --gate-lambda 1.0
+```
 
 ## 3. 评估
 
@@ -51,7 +72,7 @@ uv run python -m tactile_flow_steering.evaluate \
   --save-predictions
 ```
 
-输出 `metrics.json` / `per_sample.csv`（相对 GT 的 MSE/RMSE/MAE + t=0.5 flow loss）。
+评估始终相对 **GT**。窗口参数默认从 checkpoint metadata 读取。
 
 ## 测试
 

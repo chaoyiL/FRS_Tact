@@ -9,6 +9,7 @@ import numpy as np
 
 from tactile_flow_steering.utils.checkpoint import load_checkpoint
 from tactile_flow_steering.utils.data import TactileConditionedBatches
+from tactile_flow_steering.utils.data import resolve_tactile_window
 from tactile_flow_steering.utils.metrics import evaluate_split
 from tactile_flow_steering.utils.model import FlowSolver
 from tactile_flow_steering.utils.visualize import write_evaluation_plots
@@ -24,6 +25,8 @@ def evaluate_decoder(
     output_dir: pathlib.Path,
     dataset_repo_id: str | None,
     dataset_root: pathlib.Path | None,
+    tactile_window_divisor: int | None,
+    history_stride: int | None,
     batch_size: int,
     num_steps: int,
     solver: FlowSolver,
@@ -42,16 +45,34 @@ def evaluate_decoder(
     if actual_shape != expected_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_shape} != {expected_shape}.")
 
+    extra = checkpoint_metadata.get("extra_metadata") or {}
+    if tactile_window_divisor is None:
+        tactile_window_divisor = int(extra.get("tactile_window_divisor", 1))
+    if history_stride is None:
+        history_stride = int(extra.get("history_stride", 1))
+    action_horizon = int(pairs.manifest["action_horizon"])
+    tactile_window = resolve_tactile_window(
+        action_horizon=action_horizon,
+        window_divisor=tactile_window_divisor,
+    )
+    if tactile_window != model.config.tactile_window:
+        raise ValueError(
+            f"Resolved tactile_window={tactile_window} does not match "
+            f"checkpoint tactile_window={model.config.tactile_window}."
+        )
+
     conditioner = TactileConditionedBatches(
         pairs,
         tactile_encoder_dir=tactile_encoder_dir,
+        tactile_window=tactile_window,
         dataset_repo_id=dataset_repo_id,
         dataset_root=dataset_root,
+        history_stride=history_stride,
     )
-    if conditioner.tactile_token_dim != model.config.tactile_token_dim:
+    if conditioner.resnet_embedding_dim != model.config.resnet_embedding_dim:
         raise ValueError(
-            f"Encoder tactile_token_dim={conditioner.tactile_token_dim} does not match "
-            f"checkpoint tactile_token_dim={model.config.tactile_token_dim}."
+            f"Encoder resnet_embedding_dim={conditioner.resnet_embedding_dim} does not match "
+            f"checkpoint resnet_embedding_dim={model.config.resnet_embedding_dim}."
         )
 
     result = evaluate_split(
@@ -70,6 +91,8 @@ def evaluate_decoder(
         "sample_count": len(result.cache_indices),
         "decoder_steps": num_steps,
         "decoder_solver": solver,
+        "tactile_window": tactile_window,
+        "tactile_window_divisor": tactile_window_divisor,
         "flow_loss": result.flow_loss,
         "mse": result.mse,
         "rmse": result.rmse,
@@ -137,7 +160,7 @@ def evaluate_decoder(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate tactile-conditioned flow decoder against GT actions."
+        description="Evaluate tactile GRU-conditioned flow decoder against GT actions."
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--tactile-encoder-dir", type=pathlib.Path, required=True)
@@ -145,6 +168,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     parser.add_argument("--dataset-repo-id", type=str, default=None)
     parser.add_argument("--dataset-root", type=pathlib.Path, default=None)
+    parser.add_argument(
+        "--tactile-window-divisor",
+        type=int,
+        default=None,
+        help="Override window divisor (default: value stored in checkpoint metadata).",
+    )
+    parser.add_argument(
+        "--history-stride",
+        type=int,
+        default=None,
+        help="Override history stride (default: value stored in checkpoint metadata).",
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-steps", type=int, default=5)
     parser.add_argument(
@@ -169,6 +204,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         output_dir=args.output_dir,
         dataset_repo_id=args.dataset_repo_id,
         dataset_root=args.dataset_root,
+        tactile_window_divisor=args.tactile_window_divisor,
+        history_stride=args.history_stride,
         batch_size=args.batch_size,
         num_steps=args.num_steps,
         solver=args.solver,

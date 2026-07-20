@@ -156,10 +156,9 @@ def _decode_with_tactile(
 ) -> tuple[np.ndarray, np.ndarray]:
     x_base = jnp.asarray(pairs.arrays["x_base"][cache_indices])
     target = np.asarray(pairs.arrays["gt_action"][cache_indices], dtype=np.float32)
-    dataset_indices = [int(pairs.arrays["dataset_index"][index]) for index in cache_indices]
-    tactile_tokens = conditioner.encode_indices(dataset_indices)
+    tactile_seq = conditioner.encode_cache_indices(cache_indices)
     decoded = np.asarray(
-        decode_actions(model, x_base, tactile_tokens, num_steps=num_steps, solver=solver),
+        decode_actions(model, x_base, tactile_seq, num_steps=num_steps, solver=solver),
         dtype=np.float32,
     )
     return target, decoded
