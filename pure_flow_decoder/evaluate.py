@@ -7,12 +7,12 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from flow_decoder.utils.cache import CachedPairs
-from flow_decoder.utils.cache import atomic_write_json
-from flow_decoder.utils.checkpoint import load_checkpoint
-from flow_decoder.utils.metrics import evaluate_split
-from flow_decoder.utils.model import FlowSolver
-from flow_decoder.utils.visualize import write_evaluation_plots
+from pure_flow_decoder.utils.cache import CachedPairs
+from pure_flow_decoder.utils.cache import atomic_write_json
+from pure_flow_decoder.utils.checkpoint import load_checkpoint
+from pure_flow_decoder.utils.metrics import evaluate_split
+from pure_flow_decoder.utils.model import FlowSolver
+from pure_flow_decoder.utils.visualize import write_evaluation_plots
 
 
 def evaluate_decoder(

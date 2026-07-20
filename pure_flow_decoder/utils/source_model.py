@@ -8,13 +8,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from pure_flow_decoder.utils.integration import euler_integrate_velocity
+from pure_flow_decoder.utils.integration import fireflow_integrate_velocity
+from lerobot.policies.smolvla_jax.modeling import PrefixContext
 from modalities_eval_scripts.utils import EvalObservation
 from modalities_eval_scripts.utils import SmolVLAEvalModel
 from modalities_eval_scripts.utils import VelocityContext
 from modalities_eval_scripts.utils import _stack_observations
-from lerobot.policies.smolvla_jax.modeling import PrefixContext
-from utils.integration import euler_integrate_velocity
-from utils.integration import fireflow_integrate_velocity
 
 
 def stack_observations(observations: Sequence[EvalObservation]) -> EvalObservation:

@@ -10,7 +10,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from flow_decoder.utils.integration import fireflow_integrate_velocity
+from pure_flow_decoder.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]

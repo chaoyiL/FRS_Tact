@@ -4,7 +4,7 @@ import argparse
 import pathlib
 from collections.abc import Sequence
 
-from flow_decoder.utils.cache import finalize_partial_cache
+from pure_flow_decoder.utils.cache import finalize_partial_cache
 
 
 def build_parser() -> argparse.ArgumentParser:

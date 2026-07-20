@@ -10,15 +10,15 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from utils.cache import CachedPairs
-from utils.checkpoint import save_checkpoint
-from utils.metrics import evaluate_split
-from utils.model import DecoderConfig
-from utils.model import SelfAttentionFlowDecoder
-from utils.model import make_optimizer
-from utils.model import resolve_peak_learning_rate
-from utils.model import train_step
-from utils.visualize import plot_training_history
+from pure_flow_decoder.utils.cache import CachedPairs
+from pure_flow_decoder.utils.checkpoint import save_checkpoint
+from pure_flow_decoder.utils.metrics import evaluate_split
+from pure_flow_decoder.utils.model import DecoderConfig
+from pure_flow_decoder.utils.model import SelfAttentionFlowDecoder
+from pure_flow_decoder.utils.model import make_optimizer
+from pure_flow_decoder.utils.model import resolve_peak_learning_rate
+from pure_flow_decoder.utils.model import train_step
+from pure_flow_decoder.utils.visualize import plot_training_history
 
 
 def train_decoder(

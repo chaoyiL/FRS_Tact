@@ -9,15 +9,15 @@ import numpy as np
 from flax import nnx
 from flax import traverse_util
 
-from flow_decoder.utils.cache import atomic_write_json
-from flow_decoder.utils.model import DecoderConfig
-from flow_decoder.utils.model import SelfAttentionFlowDecoder
+from utils.cache import atomic_write_json
+from tactile_flow_steering.utils.model import DecoderConfig
+from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
 
 PARAMS_NAME = "params.npz"
 CHECKPOINT_NAME = "checkpoint.json"
 
 
-def _flat_parameter_state(model: SelfAttentionFlowDecoder):
+def _flat_parameter_state(model: TactileConditionedFlowDecoder):
     state = nnx.state(model, nnx.Param)
     return state, traverse_util.flatten_dict(state.to_pure_dict())
 
@@ -28,7 +28,7 @@ def _path_name(path: tuple[Any, ...]) -> str:
 
 def save_checkpoint(
     directory: pathlib.Path,
-    model: SelfAttentionFlowDecoder,
+    model: TactileConditionedFlowDecoder,
     *,
     epoch: int,
     metrics: dict[str, float],
@@ -53,13 +53,13 @@ def save_checkpoint(
     atomic_write_json(directory / CHECKPOINT_NAME, metadata)
 
 
-def load_checkpoint(directory: pathlib.Path) -> tuple[SelfAttentionFlowDecoder, dict[str, Any]]:
+def load_checkpoint(directory: pathlib.Path) -> tuple[TactileConditionedFlowDecoder, dict[str, Any]]:
     import json
 
     with (directory / CHECKPOINT_NAME).open(encoding="utf-8") as file:
         metadata = json.load(file)
     config = DecoderConfig(**metadata["decoder_config"])
-    model = SelfAttentionFlowDecoder(config, rngs=nnx.Rngs(0))
+    model = TactileConditionedFlowDecoder(config, rngs=nnx.Rngs(0))
     state, flat_template = _flat_parameter_state(model)
     ordered_paths = sorted(flat_template, key=_path_name)
     actual_names = [_path_name(path) for path in ordered_paths]

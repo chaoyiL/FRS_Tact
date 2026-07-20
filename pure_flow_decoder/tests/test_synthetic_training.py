@@ -6,11 +6,11 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from flow_decoder.utils.model import DecoderConfig
-from flow_decoder.utils.model import SelfAttentionFlowDecoder
-from flow_decoder.utils.model import flow_matching_loss_per_sample
-from flow_decoder.utils.model import make_optimizer
-from flow_decoder.utils.model import train_step
+from pure_flow_decoder.utils.model import DecoderConfig
+from pure_flow_decoder.utils.model import SelfAttentionFlowDecoder
+from pure_flow_decoder.utils.model import flow_matching_loss_per_sample
+from pure_flow_decoder.utils.model import make_optimizer
+from pure_flow_decoder.utils.model import train_step
 
 
 class SyntheticTrainingTest(unittest.TestCase):

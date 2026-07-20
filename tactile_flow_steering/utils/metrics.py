@@ -6,11 +6,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from utils.cache import CachedPairs
-from utils.model import FlowSolver
-from utils.model import SelfAttentionFlowDecoder
-from utils.model import decode_actions
-from utils.model import flow_matching_loss_per_sample
+from tactile_flow_steering.utils.data import TactileConditionedBatches
+from tactile_flow_steering.utils.model import FlowSolver
+from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
+from tactile_flow_steering.utils.model import decode_actions
+from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
 
 
 @dataclasses.dataclass(frozen=True)
@@ -28,8 +28,8 @@ class EvaluationResult:
 
 
 def evaluate_split(
-    model: SelfAttentionFlowDecoder,
-    pairs: CachedPairs,
+    model: TactileConditionedFlowDecoder,
+    conditioner: TactileConditionedBatches,
     *,
     split: str,
     batch_size: int,
@@ -43,14 +43,16 @@ def evaluate_split(
     maes: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
 
-    for indices, x_base_np, target_np, _ in pairs.batches(
+    for indices, x_base_np, gt_action_np, tactile_tokens in conditioner.batches(
         split, batch_size=batch_size, shuffle=False, seed=0
     ):
         x_base = jnp.asarray(x_base_np)
-        target = jnp.asarray(target_np)
+        target = jnp.asarray(gt_action_np)
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
-        flow_loss = flow_matching_loss_per_sample(model, x_base, target, t)
-        prediction = decode_actions(model, x_base, num_steps=num_steps, solver=solver)
+        flow_loss = flow_matching_loss_per_sample(model, x_base, target, t, tactile_tokens)
+        prediction = decode_actions(
+            model, x_base, tactile_tokens, num_steps=num_steps, solver=solver
+        )
         difference = prediction - target
         mse = jnp.mean(jnp.square(difference), axis=(1, 2))
         mae = jnp.mean(jnp.abs(difference), axis=(1, 2))

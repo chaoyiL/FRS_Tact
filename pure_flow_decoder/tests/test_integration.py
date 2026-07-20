@@ -4,8 +4,8 @@ import unittest
 
 import jax.numpy as jnp
 
-from flow_decoder.utils.integration import euler_integrate_velocity
-from flow_decoder.utils.integration import fireflow_integrate_velocity
+from pure_flow_decoder.utils.integration import euler_integrate_velocity
+from pure_flow_decoder.utils.integration import fireflow_integrate_velocity
 
 
 class EulerIntegrationTest(unittest.TestCase):

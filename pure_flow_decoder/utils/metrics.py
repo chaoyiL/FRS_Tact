@@ -6,11 +6,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from flow_decoder.utils.cache import CachedPairs
-from flow_decoder.utils.model import FlowSolver
-from flow_decoder.utils.model import SelfAttentionFlowDecoder
-from flow_decoder.utils.model import decode_actions
-from flow_decoder.utils.model import flow_matching_loss_per_sample
+from pure_flow_decoder.utils.cache import CachedPairs
+from pure_flow_decoder.utils.model import FlowSolver
+from pure_flow_decoder.utils.model import SelfAttentionFlowDecoder
+from pure_flow_decoder.utils.model import decode_actions
+from pure_flow_decoder.utils.model import flow_matching_loss_per_sample
 
 
 @dataclasses.dataclass(frozen=True)
@@ -43,7 +43,7 @@ def evaluate_split(
     maes: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
 
-    for indices, x_base_np, target_np in pairs.batches(
+    for indices, x_base_np, target_np, _ in pairs.batches(
         split, batch_size=batch_size, shuffle=False, seed=0
     ):
         x_base = jnp.asarray(x_base_np)

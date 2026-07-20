@@ -6,16 +6,16 @@ import tempfile
 
 import numpy as np
 
-from flow_decoder.utils.cache import CACHE_VERSION
-from flow_decoder.utils.cache import SampleRecord
-from flow_decoder.utils.cache import atomic_write_json
-from flow_decoder.utils.cache import create_cache_arrays
-from flow_decoder.utils.cache import finalize_partial_cache
-from flow_decoder.utils.cache import flush_arrays
-from flow_decoder.utils.cache import limit_records
-from flow_decoder.utils.cache import load_manifest
-from flow_decoder.utils.cache import open_cache_arrays
-from flow_decoder.utils.cache import split_episodes
+from pure_flow_decoder.utils.cache import CACHE_VERSION
+from pure_flow_decoder.utils.cache import SampleRecord
+from pure_flow_decoder.utils.cache import atomic_write_json
+from pure_flow_decoder.utils.cache import create_cache_arrays
+from pure_flow_decoder.utils.cache import finalize_partial_cache
+from pure_flow_decoder.utils.cache import flush_arrays
+from pure_flow_decoder.utils.cache import limit_records
+from pure_flow_decoder.utils.cache import load_manifest
+from pure_flow_decoder.utils.cache import open_cache_arrays
+from pure_flow_decoder.utils.cache import split_episodes
 
 
 class EpisodeSplitTest(unittest.TestCase):

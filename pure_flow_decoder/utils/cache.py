@@ -10,10 +10,11 @@ from typing import Any, Literal
 
 import numpy as np
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 MANIFEST_NAME = "manifest.json"
 X_BASE_NAME = "x_base.npy"
 TARGET_NAME = "predicted_actions.npy"
+GT_ACTION_NAME = "gt_actions.npy"
 DATASET_INDEX_NAME = "dataset_indices.npy"
 EPISODE_INDEX_NAME = "episode_indices.npy"
 SPLIT_NAME = "split.npy"
@@ -21,6 +22,7 @@ INVERSION_MSE_NAME = "inversion_mse.npy"
 ARRAY_FILENAMES = {
     "x_base": X_BASE_NAME,
     "target": TARGET_NAME,
+    "gt_action": GT_ACTION_NAME,
     "dataset_index": DATASET_INDEX_NAME,
     "episode_index": EPISODE_INDEX_NAME,
     "split": SPLIT_NAME,
@@ -116,6 +118,9 @@ def create_cache_arrays(
     arrays: dict[str, np.memmap] = {
         "x_base": np.lib.format.open_memmap(cache_dir / X_BASE_NAME, mode="w+", dtype=np.float32, shape=shape),
         "target": np.lib.format.open_memmap(cache_dir / TARGET_NAME, mode="w+", dtype=np.float32, shape=shape),
+        "gt_action": np.lib.format.open_memmap(
+            cache_dir / GT_ACTION_NAME, mode="w+", dtype=np.float32, shape=shape
+        ),
         "dataset_index": np.lib.format.open_memmap(
             cache_dir / DATASET_INDEX_NAME, mode="w+", dtype=np.int64, shape=(count,)
         ),
@@ -138,6 +143,7 @@ def open_cache_arrays(cache_dir: pathlib.Path, *, mode: str = "r") -> dict[str, 
     return {
         "x_base": np.load(cache_dir / X_BASE_NAME, mmap_mode=mode),
         "target": np.load(cache_dir / TARGET_NAME, mmap_mode=mode),
+        "gt_action": np.load(cache_dir / GT_ACTION_NAME, mmap_mode=mode),
         "dataset_index": np.load(cache_dir / DATASET_INDEX_NAME, mmap_mode=mode),
         "episode_index": np.load(cache_dir / EPISODE_INDEX_NAME, mmap_mode=mode),
         "split": np.load(cache_dir / SPLIT_NAME, mmap_mode=mode),
@@ -254,7 +260,7 @@ def load_manifest(cache_dir: pathlib.Path, *, require_complete: bool = True) -> 
     if require_complete and manifest.get("status") != "complete":
         raise ValueError(
             f"Cache is not complete ({manifest.get('completed_samples', 0)}/{manifest.get('sample_count')}). "
-            "Resume flow_decoder.prepare first."
+            "Resume prepare.py first."
         )
     return manifest
 
@@ -276,7 +282,7 @@ class CachedPairs:
         batch_size: int,
         shuffle: bool,
         seed: int,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}.")
         indices = self.indices(split)
@@ -288,4 +294,5 @@ class CachedPairs:
                 batch_indices,
                 np.asarray(self.arrays["x_base"][batch_indices], dtype=np.float32),
                 np.asarray(self.arrays["target"][batch_indices], dtype=np.float32),
+                np.asarray(self.arrays["gt_action"][batch_indices], dtype=np.float32),
             )

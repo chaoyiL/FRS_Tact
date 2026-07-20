@@ -10,11 +10,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from flow_decoder.utils.cache import CachedPairs
-from flow_decoder.utils.metrics import EvaluationResult
-from flow_decoder.utils.model import FlowSolver
-from flow_decoder.utils.model import SelfAttentionFlowDecoder
-from flow_decoder.utils.model import decode_actions
+from tactile_flow_steering.utils.data import TactileConditionedBatches
+from tactile_flow_steering.utils.metrics import EvaluationResult
+from tactile_flow_steering.utils.model import FlowSolver
+from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
+from tactile_flow_steering.utils.model import decode_actions
+from utils.cache import CachedPairs
 
 
 def _select_ranked_positions(values: np.ndarray, count: int) -> list[int]:
@@ -29,70 +30,13 @@ def _select_ranked_positions(values: np.ndarray, count: int) -> list[int]:
     return unique_positions[:count]
 
 
-def _select_trajectory_positions(sample_mse: np.ndarray, count: int) -> list[int]:
-    return _select_ranked_positions(sample_mse, count)
-
-
-def _episode_mean_mse(result: EvaluationResult, pairs: CachedPairs) -> tuple[np.ndarray, np.ndarray]:
-    episode_indices = pairs.arrays["episode_index"]
-    grouped: dict[int, list[float]] = defaultdict(list)
-    for cache_index, mse in zip(result.cache_indices, result.sample_mse):
-        grouped[int(episode_indices[cache_index])].append(float(mse))
-
-    episodes = np.asarray(sorted(grouped), dtype=np.int64)
-    means = np.asarray([float(np.mean(grouped[int(episode)])) for episode in episodes], dtype=np.float32)
-    return episodes, means
-
-
-def _select_episode_indices(episode_means: np.ndarray, count: int) -> list[int]:
-    return _select_ranked_positions(episode_means, count)
-
-
-def _validation_episode_cache_indices(pairs: CachedPairs, episode_index: int) -> np.ndarray:
-    val_indices = pairs.indices("val")
-    episode_indices = pairs.arrays["episode_index"]
-    dataset_indices = pairs.arrays["dataset_index"]
-    mask = episode_indices[val_indices] == episode_index
-    selected = val_indices[mask]
-    return selected[np.argsort(dataset_indices[selected])]
-
-
-def _decode_cache_indices(
-    model: SelfAttentionFlowDecoder,
-    pairs: CachedPairs,
-    cache_indices: np.ndarray,
-    *,
-    num_steps: int,
-    solver: FlowSolver = "euler",
-    batch_size: int = 256,
-) -> tuple[np.ndarray, np.ndarray]:
-    if len(cache_indices) == 0:
-        raise ValueError("cache_indices must not be empty.")
-
-    targets: list[np.ndarray] = []
-    decoded: list[np.ndarray] = []
-    for start in range(0, len(cache_indices), batch_size):
-        batch_indices = cache_indices[start : start + batch_size]
-        x_base = jnp.asarray(pairs.arrays["x_base"][batch_indices])
-        targets.append(np.asarray(pairs.arrays["target"][batch_indices], dtype=np.float32))
-        decoded.append(
-            np.asarray(decode_actions(model, x_base, num_steps=num_steps, solver=solver), dtype=np.float32)
-        )
-    return np.concatenate(targets, axis=0), np.concatenate(decoded, axis=0)
-
-
-def _concatenate_action_horizons(actions: np.ndarray) -> np.ndarray:
-    if actions.ndim != 3:
-        raise ValueError(f"Expected actions with shape [N, T, A], got {actions.shape}.")
-    return actions.reshape(-1, actions.shape[-1])
-
-
 def write_evaluation_plots(
     *,
     output_dir: pathlib.Path,
     result: EvaluationResult,
     pairs: CachedPairs,
-    model: SelfAttentionFlowDecoder,
+    model: TactileConditionedFlowDecoder,
+    conditioner: TactileConditionedBatches,
     num_steps: int,
     solver: FlowSolver,
     num_trajectory_samples: int,
@@ -100,26 +44,9 @@ def write_evaluation_plots(
 ) -> list[pathlib.Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[pathlib.Path] = []
-
-    written.append(
-        _plot_metric_histograms(
-            output_dir / "metrics_histogram.png",
-            result,
-        )
-    )
-    written.append(
-        _plot_metric_scatter(
-            output_dir / "metrics_scatter.png",
-            result,
-        )
-    )
-    written.append(
-        _plot_per_episode_mse(
-            output_dir / "per_episode_mse.png",
-            result,
-            pairs,
-        )
-    )
+    written.append(_plot_metric_histograms(output_dir / "metrics_histogram.png", result))
+    written.append(_plot_metric_scatter(output_dir / "metrics_scatter.png", result))
+    written.append(_plot_per_episode_mse(output_dir / "per_episode_mse.png", result, pairs))
     if num_trajectory_samples > 0:
         written.append(
             _plot_action_trajectories(
@@ -127,6 +54,7 @@ def write_evaluation_plots(
                 result=result,
                 pairs=pairs,
                 model=model,
+                conditioner=conditioner,
                 num_steps=num_steps,
                 solver=solver,
                 num_samples=num_trajectory_samples,
@@ -139,6 +67,7 @@ def write_evaluation_plots(
                 result=result,
                 pairs=pairs,
                 model=model,
+                conditioner=conditioner,
                 num_steps=num_steps,
                 solver=solver,
                 num_episodes=num_episode_strips,
@@ -162,7 +91,7 @@ def _plot_metric_histograms(path: pathlib.Path, result: EvaluationResult) -> pat
         axis.set_xlabel("per-sample value")
         axis.set_ylabel("count")
         axis.legend()
-    fig.suptitle("Validation metric distributions", fontsize=14)
+    fig.suptitle("Validation metric distributions (vs GT)", fontsize=14)
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
@@ -180,7 +109,7 @@ def _plot_metric_scatter(path: pathlib.Path, result: EvaluationResult) -> pathli
     )
     fig.colorbar(scatter, ax=axis, label="MAE")
     axis.set_xlabel("flow loss (t=0.5)")
-    axis.set_ylabel("reconstruction MSE")
+    axis.set_ylabel("reconstruction MSE vs GT")
     axis.set_title("Per-sample flow loss vs reconstruction error")
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -207,7 +136,7 @@ def _plot_per_episode_mse(
     else:
         axis.boxplot(data, tick_labels=labels)
     axis.set_xlabel("episode index")
-    axis.set_ylabel("reconstruction MSE")
+    axis.set_ylabel("reconstruction MSE vs GT")
     axis.set_title("Per-episode reconstruction error")
     if len(episodes) > 12:
         axis.tick_params(axis="x", rotation=45)
@@ -216,24 +145,45 @@ def _plot_per_episode_mse(
     return path
 
 
+def _decode_with_tactile(
+    model: TactileConditionedFlowDecoder,
+    pairs: CachedPairs,
+    conditioner: TactileConditionedBatches,
+    cache_indices: np.ndarray,
+    *,
+    num_steps: int,
+    solver: FlowSolver,
+) -> tuple[np.ndarray, np.ndarray]:
+    x_base = jnp.asarray(pairs.arrays["x_base"][cache_indices])
+    target = np.asarray(pairs.arrays["gt_action"][cache_indices], dtype=np.float32)
+    dataset_indices = [int(pairs.arrays["dataset_index"][index]) for index in cache_indices]
+    tactile_tokens = conditioner.encode_indices(dataset_indices)
+    decoded = np.asarray(
+        decode_actions(model, x_base, tactile_tokens, num_steps=num_steps, solver=solver),
+        dtype=np.float32,
+    )
+    return target, decoded
+
+
 def _plot_action_trajectories(
     *,
     path: pathlib.Path,
     result: EvaluationResult,
     pairs: CachedPairs,
-    model: SelfAttentionFlowDecoder,
+    model: TactileConditionedFlowDecoder,
+    conditioner: TactileConditionedBatches,
     num_steps: int,
     solver: FlowSolver,
     num_samples: int,
 ) -> pathlib.Path:
-    positions = _select_trajectory_positions(result.sample_mse, num_samples)
+    positions = _select_ranked_positions(result.sample_mse, num_samples)
     if not positions:
         return path
 
     cache_indices = result.cache_indices[positions]
-    x_base = jnp.asarray(pairs.arrays["x_base"][cache_indices])
-    target = np.asarray(pairs.arrays["target"][cache_indices], dtype=np.float32)
-    decoded = np.asarray(decode_actions(model, x_base, num_steps=num_steps, solver=solver), dtype=np.float32)
+    target, decoded = _decode_with_tactile(
+        model, pairs, conditioner, cache_indices, num_steps=num_steps, solver=solver
+    )
     action_horizon = target.shape[1]
     action_dim = target.shape[2]
     dims_to_plot = min(3, action_dim)
@@ -253,13 +203,7 @@ def _plot_action_trajectories(
         axis = axes[row, 0]
         cache_index = int(result.cache_indices[position])
         for dim in range(dims_to_plot):
-            axis.plot(
-                timesteps,
-                target[row, :, dim],
-                linestyle="-",
-                linewidth=1.8,
-                label=f"target dim {dim}",
-            )
+            axis.plot(timesteps, target[row, :, dim], linestyle="-", linewidth=1.8, label=f"gt dim {dim}")
             axis.plot(
                 timesteps,
                 decoded[row, :, dim],
@@ -276,7 +220,7 @@ def _plot_action_trajectories(
         axis.legend(loc="upper right", fontsize=8, ncol=2)
 
     fig.suptitle(
-        f"Decoded vs target actions (best / median / worst samples, first {dims_to_plot} dims)",
+        f"Decoded vs GT actions (best / median / worst samples, first {dims_to_plot} dims)",
         fontsize=13,
     )
     fig.savefig(path, dpi=150)
@@ -287,102 +231,74 @@ def _plot_action_trajectories(
 _DIM_COLORS = ("#4C72B0", "#55A868", "#C44E52")
 
 
+def _validation_episode_cache_indices(pairs: CachedPairs, episode_index: int) -> np.ndarray:
+    val_indices = pairs.indices("val")
+    episode_indices = pairs.arrays["episode_index"]
+    dataset_indices = pairs.arrays["dataset_index"]
+    mask = episode_indices[val_indices] == episode_index
+    selected = val_indices[mask]
+    return selected[np.argsort(dataset_indices[selected])]
+
+
 def _plot_episode_action_strips(
     *,
     path: pathlib.Path,
     result: EvaluationResult,
     pairs: CachedPairs,
-    model: SelfAttentionFlowDecoder,
+    model: TactileConditionedFlowDecoder,
+    conditioner: TactileConditionedBatches,
     num_steps: int,
     solver: FlowSolver,
     num_episodes: int,
 ) -> pathlib.Path:
-    episodes, episode_means = _episode_mean_mse(result, pairs)
-    selected_positions = _select_episode_indices(episode_means, num_episodes)
-    if not selected_positions:
+    episode_indices = pairs.arrays["episode_index"]
+    grouped: dict[int, list[float]] = defaultdict(list)
+    for cache_index, mse in zip(result.cache_indices, result.sample_mse):
+        grouped[int(episode_indices[cache_index])].append(float(mse))
+    if not grouped:
         return path
 
+    episodes = np.asarray(sorted(grouped), dtype=np.int64)
+    means = np.asarray([float(np.mean(grouped[int(episode)])) for episode in episodes], dtype=np.float32)
+    selected_positions = _select_ranked_positions(means, num_episodes)
+    if not selected_positions:
+        return path
     selected_episodes = [int(episodes[position]) for position in selected_positions]
-    action_horizon = int(pairs.manifest["action_horizon"])
-    action_dim = int(pairs.manifest["action_dim"])
-    dims_to_plot = min(3, action_dim)
 
-    episode_series: list[tuple[int, float, np.ndarray, np.ndarray, int]] = []
-    max_timesteps = 0
-    for position, episode_index in zip(selected_positions, selected_episodes):
-        cache_indices = _validation_episode_cache_indices(pairs, episode_index)
-        target, decoded = _decode_cache_indices(
-            model,
-            pairs,
-            cache_indices,
-            num_steps=num_steps,
-            solver=solver,
-        )
-        target_series = _concatenate_action_horizons(target)
-        decoded_series = _concatenate_action_horizons(decoded)
-        episode_series.append(
-            (
-                episode_index,
-                float(episode_means[position]),
-                target_series,
-                decoded_series,
-                len(cache_indices),
-            )
-        )
-        max_timesteps = max(max_timesteps, len(target_series))
-
-    fig_height = max(2.8, 2.4 * len(episode_series))
-    fig_width = min(48.0, max(18.0, max_timesteps / 220.0))
     fig, axes = plt.subplots(
-        len(episode_series),
+        len(selected_episodes),
         1,
-        figsize=(fig_width, fig_height),
+        figsize=(12, 3.0 * len(selected_episodes)),
         constrained_layout=True,
         squeeze=False,
     )
-
-    for row, (episode_index, mean_mse, target_series, decoded_series, sample_count) in enumerate(
-        episode_series
-    ):
+    for row, episode_index in enumerate(selected_episodes):
         axis = axes[row, 0]
-        timesteps = np.arange(len(target_series))
+        cache_indices = _validation_episode_cache_indices(pairs, episode_index)
+        target, decoded = _decode_with_tactile(
+            model, pairs, conditioner, cache_indices, num_steps=num_steps, solver=solver
+        )
+        concatenated_gt = target.reshape(-1, target.shape[-1])
+        concatenated_decoded = decoded.reshape(-1, decoded.shape[-1])
+        dims_to_plot = min(3, concatenated_gt.shape[-1])
+        timesteps = np.arange(concatenated_gt.shape[0])
         for dim in range(dims_to_plot):
-            color = _DIM_COLORS[dim]
+            color = _DIM_COLORS[dim % len(_DIM_COLORS)]
+            axis.plot(timesteps, concatenated_gt[:, dim], color=color, linewidth=1.6, label=f"gt dim {dim}")
             axis.plot(
                 timesteps,
-                target_series[:, dim],
-                linestyle="-",
-                linewidth=1.2,
+                concatenated_decoded[:, dim],
                 color=color,
-                label=f"target dim {dim}",
-            )
-            axis.plot(
-                timesteps,
-                decoded_series[:, dim],
+                linewidth=1.6,
                 linestyle="--",
-                linewidth=1.2,
-                color=color,
                 label=f"decoded dim {dim}",
             )
-
-        for sample_start in range(action_horizon, len(target_series), action_horizon):
-            axis.axvline(sample_start, color="#BBBBBB", linewidth=0.6, alpha=0.8)
-
-        axis.set_xlim(0, max(len(target_series) - 1, 1))
+        axis.set_xlabel("concatenated action steps")
         axis.set_ylabel("normalized action")
-        axis.set_title(
-            f"episode={episode_index} samples={sample_count} "
-            f"mean_mse={mean_mse:.4f} timesteps={len(target_series)}"
-        )
-        if row == len(episode_series) - 1:
-            axis.set_xlabel("concatenated action horizon steps")
-        if row == 0:
-            axis.legend(loc="upper right", fontsize=8, ncol=3)
+        axis.set_title(f"episode={episode_index} mean_mse={means[selected_positions[row]]:.4f}")
+        axis.legend(loc="upper right", fontsize=8, ncol=3)
 
-    fig.suptitle(
-        f"Episode action strips (best / median / worst episodes, first {dims_to_plot} dims)",
-        fontsize=13,
-    )
+    fig.suptitle("Episode action strips vs GT (best / median / worst)", fontsize=13)
     fig.savefig(path, dpi=150)
     plt.close(fig)
     return path
@@ -393,7 +309,6 @@ def plot_training_history(
     *,
     output_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
-    """Plot train/val flow loss and val MSE from a training history CSV."""
     import csv
 
     if not history_path.exists():
@@ -422,7 +337,7 @@ def plot_training_history(
     axis.plot(epochs, val_mse, label="val_mse", linewidth=2.0, color="#C44E52")
     axis.set_xlabel("epoch")
     axis.set_ylabel("loss / MSE")
-    axis.set_title("Training curves")
+    axis.set_title("Training curves (target = GT action)")
     axis.grid(True, alpha=0.3)
     axis.legend()
     fig.savefig(destination, dpi=150)

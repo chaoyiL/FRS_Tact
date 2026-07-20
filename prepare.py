@@ -19,11 +19,11 @@ if str(ROOT) not in sys.path:
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.smolvla_jax.data import action_delta_timestamps
 
-from eval_scripts.utils import EvalObservation
-from eval_scripts.utils import SmolVLAEvalModel
-from eval_scripts.utils import add_eval_data_arguments
-from eval_scripts.utils import load_model
-from eval_scripts.utils import parse_rename_map
+from modalities_eval_scripts.utils import EvalObservation
+from modalities_eval_scripts.utils import SmolVLAEvalModel
+from modalities_eval_scripts.utils import add_eval_data_arguments
+from modalities_eval_scripts.utils import load_model
+from modalities_eval_scripts.utils import parse_rename_map
 from utils.cache import CACHE_VERSION
 from utils.cache import MANIFEST_NAME
 from utils.cache import SampleRecord
@@ -183,19 +183,26 @@ def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -
     )
 
 
-def _load_observation(model: SmolVLAEvalModel, dataset: LeRobotDataset, dataset_index: int):
+def _load_observation_and_gt(
+    model: SmolVLAEvalModel, dataset: LeRobotDataset, dataset_index: int
+) -> tuple[EvalObservation, jax.Array]:
     sample = dataset[dataset_index]
-    observation, _, _ = model.prepare_sample(sample)
-    return observation
+    observation, gt_actions, _ = model.prepare_sample(sample)
+    return observation, jnp.asarray(gt_actions, dtype=jnp.float32)
 
 
 def _load_observation_batch(
     model: SmolVLAEvalModel,
     dataset: LeRobotDataset,
     batch_records: Sequence[SampleRecord],
-) -> EvalObservation:
-    observations = [_load_observation(model, dataset, record.dataset_index) for record in batch_records]
-    return stack_observations(observations)
+) -> tuple[EvalObservation, jax.Array]:
+    observations: list[EvalObservation] = []
+    gt_actions: list[jax.Array] = []
+    for record in batch_records:
+        observation, actions = _load_observation_and_gt(model, dataset, record.dataset_index)
+        observations.append(observation)
+        gt_actions.append(actions)
+    return stack_observations(observations), jnp.stack(gt_actions, axis=0)
 
 
 def _pad_observation_batch(observation: EvalObservation, target_batch: int) -> EvalObservation:
@@ -221,6 +228,16 @@ def _pad_observation_batch(observation: EvalObservation, target_batch: int) -> E
         state=pad_array(observation.state),
         image_keys=observation.image_keys,
     )
+
+
+def _pad_action_batch(actions: jax.Array, target_batch: int) -> jax.Array:
+    current = int(actions.shape[0])
+    if current == target_batch:
+        return actions
+    if current > target_batch:
+        raise ValueError(f"Cannot pad action batch of {current} down to {target_batch}.")
+    pad = target_batch - current
+    return jnp.pad(actions, ((0, pad), (0, 0), (0, 0)))
 
 
 def prepare_cache(
@@ -357,13 +374,16 @@ def prepare_cache(
         stop = pending["stop"]
         valid = pending["valid"]
         predicted_actions, x_base = jax.device_get(pending["predicted"]), jax.device_get(pending["x_base"])
+        gt_actions = pending["gt_action"]
         noise = pending["noise"]
         predicted_actions = np.asarray(predicted_actions[:valid], dtype=np.float32)
         x_base = np.asarray(x_base[:valid], dtype=np.float32)
+        gt_actions = np.asarray(gt_actions[:valid], dtype=np.float32)
         noise = np.asarray(jax.device_get(noise[:valid]), dtype=np.float32)
 
         arrays["target"][start:stop] = predicted_actions
         arrays["x_base"][start:stop] = x_base
+        arrays["gt_action"][start:stop] = gt_actions
         arrays["inversion_mse"][start:stop] = inversion_mse(x_base, noise)
         manifest["completed_samples"] = stop
         batches_since_flush += 1
@@ -386,9 +406,10 @@ def prepare_cache(
         stop = min(start + batch_size, len(records))
         batch_records = records[start:stop]
         valid = len(batch_records)
-        observation_batch = _load_observation_batch(model, dataset, batch_records)
+        observation_batch, gt_action_batch = _load_observation_batch(model, dataset, batch_records)
         if valid < batch_size:
             observation_batch = _pad_observation_batch(observation_batch, batch_size)
+            gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
             pad_indices = [batch_records[-1].dataset_index] * (batch_size - valid)
         else:
             pad_indices = []
@@ -411,6 +432,7 @@ def prepare_cache(
             "valid": valid,
             "predicted": predicted_actions,
             "x_base": x_base,
+            "gt_action": gt_action_batch,
             "noise": noise,
         }
         if batch_number == 0:
@@ -429,7 +451,10 @@ def prepare_cache(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Precompute SmolVLA predicted-action / reverse-integrated x_base pairs."
+        description=(
+            "Precompute SmolVLA predicted actions, reverse-integrated x_base, "
+            "and dataset ground-truth actions."
+        ),
     )
     add_eval_data_arguments(parser, required=True)
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
