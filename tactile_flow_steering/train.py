@@ -54,6 +54,11 @@ def train_decoder(
     validation_steps: int,
     seed: int,
     write_plots: bool,
+    num_workers: int,
+    prefetch_batches: int,
+    load_threads: int,
+    pipeline_prefetch: int,
+    image_cache_size: int,
 ) -> None:
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
@@ -82,6 +87,11 @@ def train_decoder(
         dataset_root=dataset_root,
         history_stride=history_stride,
         build_episode_baselines=(loss_mode == "gated"),
+        num_workers=num_workers,
+        prefetch_batches=prefetch_batches,
+        load_threads=load_threads,
+        pipeline_prefetch=pipeline_prefetch,
+        image_cache_size=image_cache_size,
     )
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
@@ -127,6 +137,11 @@ def train_decoder(
         f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
         f"(frozen ResNet + trainable shared GRU)"
     )
+    print(
+        f"dataloader=num_workers={num_workers} prefetch_batches={prefetch_batches} "
+        f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
+        f"image_cache_size={image_cache_size}"
+    )
     if loss_mode == "gt":
         print("loss_mode=gt (target=gt_action)")
     else:
@@ -147,103 +162,106 @@ def train_decoder(
     best_mse = float("inf")
     base_key = jax.random.key(seed)
 
-    with history_path.open("w", newline="", encoding="utf-8") as history_file:
-        writer = csv.DictWriter(
-            history_file,
-            fieldnames=["epoch", "train_flow_loss", "val_flow_loss", "val_mse", "val_rmse", "val_mae"],
-        )
-        writer.writeheader()
+    try:
+        with history_path.open("w", newline="", encoding="utf-8") as history_file:
+            writer = csv.DictWriter(
+                history_file,
+                fieldnames=["epoch", "train_flow_loss", "val_flow_loss", "val_mse", "val_rmse", "val_mae"],
+            )
+            writer.writeheader()
 
-        for epoch in range(1, epochs + 1):
-            losses: list[float] = []
-            weights: list[int] = []
-            for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
-                conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
-            ):
-                step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
-                if loss_mode == "gated":
-                    current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
-                    gate_w = conditioner.gate_weights_for_cache_indices(
-                        indices,
-                        current_tokens,
-                        tau=gate_tau,
-                        temperature=gate_temperature,
+            for epoch in range(1, epochs + 1):
+                losses: list[float] = []
+                weights: list[int] = []
+                for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
+                    conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
+                ):
+                    step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
+                    if loss_mode == "gated":
+                        current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+                        gate_w = conditioner.gate_weights_for_cache_indices(
+                            indices,
+                            current_tokens,
+                            tau=gate_tau,
+                            temperature=gate_temperature,
+                        )
+                    else:
+                        gate_w = np.ones((len(indices),), dtype=np.float32)
+                    loss = train_step(
+                        model,
+                        optimizer,
+                        jnp.asarray(x_base_np),
+                        jnp.asarray(gt_action_np),
+                        jnp.asarray(predicted_np),
+                        tactile_seq,
+                        jnp.asarray(gate_w),
+                        step_key,
+                        loss_mode=loss_mode,
+                        gate_lambda=gate_lambda,
                     )
-                else:
-                    gate_w = np.ones((len(indices),), dtype=np.float32)
-                loss = train_step(
-                    model,
-                    optimizer,
-                    jnp.asarray(x_base_np),
-                    jnp.asarray(gt_action_np),
-                    jnp.asarray(predicted_np),
-                    tactile_seq,
-                    jnp.asarray(gate_w),
-                    step_key,
-                    loss_mode=loss_mode,
-                    gate_lambda=gate_lambda,
-                )
-                losses.append(float(jax.device_get(loss)))
-                weights.append(len(x_base_np))
+                    losses.append(float(jax.device_get(loss)))
+                    weights.append(len(x_base_np))
 
-            train_loss = float(np.average(losses, weights=weights))
-            validation = evaluate_split(
-                model,
-                conditioner,
-                split="val",
-                batch_size=batch_size,
-                num_steps=validation_steps,
-                keep_predictions=False,
-            )
-            metrics = {
-                "train_flow_loss": train_loss,
-                "val_flow_loss": validation.flow_loss,
-                "val_mse": validation.mse,
-                "val_rmse": validation.rmse,
-                "val_mae": validation.mae,
-            }
-            checkpoint_extra = {
-                "cache_records_sha256": pairs.manifest["records_sha256"],
-                "cache_configuration": pairs.manifest["configuration"],
-                "tactile_encoder_dir": str(tactile_encoder_dir.resolve()),
-                "tactile_window_divisor": tactile_window_divisor,
-                "tactile_window": tactile_window,
-                "gru_hidden_dim": DEFAULT_GRU_HIDDEN_DIM,
-                "history_stride": history_stride,
-                "loss_mode": loss_mode,
-                "gate_tau": gate_tau,
-                "gate_temperature": gate_temperature,
-                "gate_lambda": gate_lambda,
-            }
-            writer.writerow({"epoch": epoch, **metrics})
-            history_file.flush()
-            save_checkpoint(
-                output_dir / "last",
-                model,
-                epoch=epoch,
-                metrics=metrics,
-                extra_metadata=checkpoint_extra,
-            )
-            if validation.mse < best_mse:
-                best_mse = validation.mse
+                train_loss = float(np.average(losses, weights=weights))
+                validation = evaluate_split(
+                    model,
+                    conditioner,
+                    split="val",
+                    batch_size=batch_size,
+                    num_steps=validation_steps,
+                    keep_predictions=False,
+                )
+                metrics = {
+                    "train_flow_loss": train_loss,
+                    "val_flow_loss": validation.flow_loss,
+                    "val_mse": validation.mse,
+                    "val_rmse": validation.rmse,
+                    "val_mae": validation.mae,
+                }
+                checkpoint_extra = {
+                    "cache_records_sha256": pairs.manifest["records_sha256"],
+                    "cache_configuration": pairs.manifest["configuration"],
+                    "tactile_encoder_dir": str(tactile_encoder_dir.resolve()),
+                    "tactile_window_divisor": tactile_window_divisor,
+                    "tactile_window": tactile_window,
+                    "gru_hidden_dim": DEFAULT_GRU_HIDDEN_DIM,
+                    "history_stride": history_stride,
+                    "loss_mode": loss_mode,
+                    "gate_tau": gate_tau,
+                    "gate_temperature": gate_temperature,
+                    "gate_lambda": gate_lambda,
+                }
+                writer.writerow({"epoch": epoch, **metrics})
+                history_file.flush()
                 save_checkpoint(
-                    output_dir / "best",
+                    output_dir / "last",
                     model,
                     epoch=epoch,
                     metrics=metrics,
                     extra_metadata=checkpoint_extra,
                 )
-            print(
-                f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
-                f"val_flow_loss={validation.flow_loss:.8f} val_mse={validation.mse:.8f} "
-                f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}"
-            )
+                if validation.mse < best_mse:
+                    best_mse = validation.mse
+                    save_checkpoint(
+                        output_dir / "best",
+                        model,
+                        epoch=epoch,
+                        metrics=metrics,
+                        extra_metadata=checkpoint_extra,
+                    )
+                print(
+                    f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
+                    f"val_flow_loss={validation.flow_loss:.8f} val_mse={validation.mse:.8f} "
+                    f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}"
+                )
 
-    print(f"best_val_mse={best_mse:.8f}")
-    print(f"checkpoints={output_dir}")
-    if write_plots:
-        plot_path = plot_training_history(history_path, output_path=output_dir / "training_curves.png")
-        print(f"plot={plot_path}")
+        print(f"best_val_mse={best_mse:.8f}")
+        print(f"checkpoints={output_dir}")
+        if write_plots:
+            plot_path = plot_training_history(history_path, output_path=output_dir / "training_curves.png")
+            print(f"plot={plot_path}")
+    finally:
+        conditioner.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -323,6 +341,36 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--validation-steps", type=int, default=10)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-plots", action="store_true")
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=4,
+        help="Spawn process workers for video decode (0/1 = in-process threads only).",
+    )
+    parser.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=4,
+        help="In-flight mp decode batches queued ahead of the trainer.",
+    )
+    parser.add_argument(
+        "--load-threads",
+        type=int,
+        default=8,
+        help="Per-process threads for unique-frame video decode within a batch.",
+    )
+    parser.add_argument(
+        "--pipeline-prefetch",
+        type=int,
+        default=2,
+        help="Decoded image batches buffered while parent runs ResNet/train step.",
+    )
+    parser.add_argument(
+        "--image-cache-size",
+        type=int,
+        default=4096,
+        help="Total LRU decoded-frame budget (split across mp workers).",
+    )
     return parser
 
 
@@ -356,6 +404,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         validation_steps=args.validation_steps,
         seed=args.seed,
         write_plots=not args.no_plots,
+        num_workers=args.num_workers,
+        prefetch_batches=args.prefetch_batches,
+        load_threads=args.load_threads,
+        pipeline_prefetch=args.pipeline_prefetch,
+        image_cache_size=args.image_cache_size,
     )
 
 

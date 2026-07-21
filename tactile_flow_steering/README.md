@@ -35,10 +35,16 @@ uv run python -m tactile_flow_steering.train \
   --tactile-encoder-dir path/to/tactile_encoder/checkpoint \
   --output-dir tactile_flow_steering/outputs/run_01 \
   --tactile-window-divisor 1 \
-  --loss-mode gt
+  --loss-mode gt \
+  --num-workers 4 \
+  --prefetch-batches 4 \
+  --load-threads 8
 ```
 
 - `--tactile-window-divisor`：`tactile_window = action_horizon // divisor`（须整除；默认 1）
+- `--num-workers`：视频解码 spawn 进程数（`0/1` 仅用进程内线程；默认 4）
+- `--load-threads`：每个进程内对 batch 去重帧的并行解码线程数（默认 8）
+- `--prefetch-batches` / `--pipeline-prefetch`：解码与 ResNet/train 流水线缓冲
 - GRU hidden 维固定为 **256**（不可配置）
 - `--loss-mode`：
   - `gt`（默认）：仅 `L*`，target = GT

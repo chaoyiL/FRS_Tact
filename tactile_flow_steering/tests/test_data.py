@@ -12,6 +12,7 @@ from tactile_flow_steering.utils.data import NUM_TACTILE_STREAMS
 from tactile_flow_steering.utils.data import TACTILE_KEYS
 from tactile_flow_steering.utils.data import TactileConditionedBatches
 from tactile_flow_steering.utils.data import gate_weights_from_change
+from tactile_flow_steering.utils.data import load_tactile_windows
 from tactile_flow_steering.utils.data import resolve_dataset_repo_id
 from tactile_flow_steering.utils.data import resolve_tactile_window
 from tactile_flow_steering.utils.data import resnet_embedding_dim_from_encoder
@@ -97,6 +98,32 @@ class DataHelpersTest(unittest.TestCase):
         change = tactile_change_from_tokens(tokens, tokens)
         self.assertTrue(np.allclose(change, 0.0, atol=1e-6))
 
+    def test_load_tactile_windows_dedupes_frames(self):
+        fake_dataset = mock.Mock()
+        fake_dataset.indices_for_episode.return_value = tuple(range(0, 20))
+        calls: list[int] = []
+
+        def get_images(index, keys, *, as_float=True):
+            calls.append(int(index))
+            dtype = np.float32 if as_float else np.uint8
+            fill = (index % 5) * (1.0 if as_float else 10)
+            return {key: np.full((4, 4, 3), fill, dtype=dtype) for key in keys}
+
+        fake_dataset.get_images.side_effect = get_images
+        # Overlapping windows on contiguous frames should share decoded indices.
+        images = load_tactile_windows(
+            fake_dataset,
+            [(12, 0), (13, 0)],
+            tactile_window=3,
+            history_stride=1,
+            tactile_keys=TACTILE_KEYS,
+            load_threads=1,
+            as_float=False,
+        )
+        self.assertEqual(images.shape, (2, 3, 4, 4, 4, 3))
+        self.assertEqual(images.dtype, np.uint8)
+        self.assertEqual(sorted(calls), [10, 11, 12, 13])
+
     def test_encode_cache_indices_shape_and_stop_gradient(self):
         fake_dataset = mock.Mock()
         fake_dataset.indices_for_episode.return_value = tuple(range(0, 20))
@@ -120,6 +147,10 @@ class DataHelpersTest(unittest.TestCase):
         conditioner.image_size = 8
         conditioner.dataset = fake_dataset
         conditioner.tactile_keys = TACTILE_KEYS
+        conditioner.load_threads = 1
+        conditioner.pipeline_prefetch = 1
+        conditioner.num_workers = 0
+        conditioner._mp_loader = None
         conditioner.episode_baselines = {
             0: np.ones((4, 4), dtype=np.float32),
         }
