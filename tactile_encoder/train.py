@@ -709,38 +709,41 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--loader",
         choices=("thread", "mp"),
-        default="mp",
-        help="Batch decode backend: spawn process workers (mp) or threads (thread).",
+        default="thread",
+        help="Batch decode backend: threads (default) or spawn process workers (mp).",
     )
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=8,
-        help="Process workers (loader=mp) or thread workers (loader=thread). Ignored when preloaded.",
+        default=16,
+        help="Thread workers (loader=thread) or process workers (loader=mp). Ignored when preloaded.",
     )
     parser.add_argument(
         "--pair-threads",
         type=int,
         default=8,
-        help="Threads per mp worker for parallel load_pair within a batch.",
+        help="Threads per mp worker for parallel load_pair within a batch (mp mode only).",
     )
     parser.add_argument(
         "--pipeline-prefetch",
         type=int,
-        default=4,
-        help="Main-process batches to decode/unpickle ahead while GPU trains.",
+        default=6,
+        help="Main-process batches to buffer ahead while GPU trains.",
     )
     parser.add_argument(
         "--prefetch-batches",
         type=int,
-        default=12,
-        help="How many batches mp workers decode ahead of the GPU train step.",
+        default=6,
+        help="How many batches to decode ahead of the train step (thread pool depth or mp queue).",
     )
     parser.add_argument(
         "--image-cache-size",
         type=int,
-        default=65536,
-        help="Total LRU budget of decoded frames across workers (split per worker).",
+        default=32768,
+        help=(
+            "LRU decoded-frame budget. In thread mode this is the single-process cache; "
+            "in mp mode it is split across workers."
+        ),
     )
     parser.add_argument(
         "--preload-images",
