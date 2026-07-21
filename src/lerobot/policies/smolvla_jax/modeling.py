@@ -48,7 +48,18 @@ class JaxSmolVLA:
     def _linear(self, params: Params, prefix: str, x: Array, *, bias: bool = False) -> Array:
         weight = self._p(params, f"{prefix}.weight")
         bias_value = self._p(params, f"{prefix}.bias") if bias else None
-        return linear(x, weight, bias_value)
+        output = linear(x, weight, bias_value)
+        lora_a = params.get(f"{prefix}.lora_a")
+        lora_b = params.get(f"{prefix}.lora_b")
+        if lora_a is not None or lora_b is not None:
+            if lora_a is None or lora_b is None:
+                raise KeyError(f"Incomplete LoRA adapter for {prefix}")
+            scale = params.get(f"{prefix}.lora_scale")
+            if scale is None:
+                raise KeyError(f"Missing LoRA scale for {prefix}")
+            adapter = linear(linear(x, lora_a), lora_b) * scale
+            output = output + adapter.astype(output.dtype)
+        return output
 
     def _vision_layer(self, params: Params, hidden: Array, layer_index: int) -> Array:
         prefix = f"model.vlm_with_expert.vlm.model.vision_model.encoder.layers.{layer_index}"
@@ -255,7 +266,9 @@ class JaxSmolVLA:
         )
         q_weight = self._p(params, f"{prefix}.self_attn.q_proj.weight")
         hidden = hidden.astype(q_weight.dtype)
-        query = linear(hidden, q_weight).reshape(*hidden.shape[:2], -1, self.config.head_dim)
+        query = self._linear(params, f"{prefix}.self_attn.q_proj", hidden).reshape(
+            *hidden.shape[:2], -1, self.config.head_dim
+        )
         key = self._linear(params, f"{prefix}.self_attn.k_proj", hidden).reshape(
             *hidden.shape[:2], -1, self.config.head_dim
         )
@@ -270,7 +283,7 @@ class JaxSmolVLA:
         prefix = self._layer_prefix(expert, layer_index)
         output_weight = self._p(params, f"{prefix}.self_attn.o_proj.weight")
         attention = attention.astype(output_weight.dtype)
-        projected = linear(attention, output_weight)
+        projected = self._linear(params, f"{prefix}.self_attn.o_proj", attention)
         # The reference uses an in-place ``out_emb += hidden_states``.  PyTorch
         # therefore casts the residual to the projection dtype (BF16 here)
         # instead of promoting the projection to FP32.
@@ -382,7 +395,11 @@ class JaxSmolVLA:
             self.config.text_rms_norm_eps,
         )
         q_weight = self._p(params, f"{expert_prefix}.self_attn.q_proj.weight")
-        query = linear(expert_norm.astype(q_weight.dtype), q_weight).reshape(
+        query = self._linear(
+            params,
+            f"{expert_prefix}.self_attn.q_proj",
+            expert_norm.astype(q_weight.dtype),
+        ).reshape(
             *expert_hidden.shape[:2], -1, self.config.head_dim
         )
         flat_key = prefix_key.reshape(*prefix_key.shape[:2], -1)

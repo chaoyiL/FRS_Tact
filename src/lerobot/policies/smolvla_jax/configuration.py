@@ -39,6 +39,9 @@ class JaxSmolVLAConfig:
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
     train_state_proj: bool = True
+    module_modes: dict[str, str] | None = None
+    lora_rank: int = 8
+    lora_alpha: float = 16.0
     adapt_to_pi_aloha: bool = False
     optimizer_lr: float = 1e-4
     optimizer_beta1: float = 0.9
@@ -133,6 +136,9 @@ class JaxSmolVLAConfig:
             freeze_vision_encoder=bool(raw.get("freeze_vision_encoder", True)),
             train_expert_only=bool(raw.get("train_expert_only", True)),
             train_state_proj=bool(raw.get("train_state_proj", True)),
+            module_modes=raw.get("module_modes"),
+            lora_rank=int(raw.get("lora_rank", 8)),
+            lora_alpha=float(raw.get("lora_alpha", 16.0)),
             adapt_to_pi_aloha=bool(raw.get("adapt_to_pi_aloha", False)),
             optimizer_lr=float(raw.get("optimizer_lr", 1e-4)),
             optimizer_beta1=float(raw.get("optimizer_betas", [0.9, 0.95])[0]),

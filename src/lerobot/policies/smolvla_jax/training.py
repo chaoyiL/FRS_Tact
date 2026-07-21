@@ -11,8 +11,9 @@ import jax.numpy as jnp
 import optax
 from flax import struct
 
-from .checkpoint import load_params, save_portable_params
+from .checkpoint import load_params, save_portable_params, write_effective_config
 from .configuration import JaxSmolVLAConfig
+from .lora import initialize_lora_params, is_trainable_parameter
 from .modeling import JaxSmolVLA
 from .sharding import create_data_parallel_mesh, replicate_tree, shard_batch
 
@@ -26,37 +27,6 @@ class TrainState:
     params: Params
     opt_state: optax.OptState
     rng: Array
-
-
-def is_trainable_parameter(name: str, config: JaxSmolVLAConfig) -> bool:
-    if ".lm_expert." in name:
-        return ".lm_head." not in name
-    if name.startswith("model.state_proj."):
-        return config.train_state_proj
-    if name.startswith(
-        (
-            "model.action_in_proj.",
-            "model.action_out_proj.",
-            "model.action_time_mlp_in.",
-            "model.action_time_mlp_out.",
-        )
-    ):
-        return True
-    if config.train_expert_only:
-        return False
-    if config.freeze_vision_encoder and ".vision_model." in name:
-        return False
-    frozen_fragments = [
-        ".vlm.lm_head.",
-        ".text_model.norm.weight",
-        f".text_model.layers.{config.num_vlm_layers - 1}.",
-    ]
-    if (
-        config.num_vlm_layers != config.num_expert_layers
-        and config.num_vlm_layers % config.num_expert_layers == 0
-    ):
-        frozen_fragments.append(f".text_model.layers.{config.num_vlm_layers - 2}.")
-    return not any(fragment in name for fragment in frozen_fragments)
 
 
 def partition_params(params: Mapping[str, Array], config: JaxSmolVLAConfig) -> tuple[Params, Params]:
@@ -120,6 +90,7 @@ class JaxSmolVLATrainer:
     ):
         self.model = model
         self.config = model.config
+        params = initialize_lora_params(params, self.config, seed=seed)
         trainable, self.frozen_params = partition_params(params, self.config)
         self.optimizer, self.learning_rate = create_optimizer(self.config, total_steps)
         self.state = TrainState(
@@ -184,6 +155,7 @@ class JaxSmolVLATrainer:
             source_dir=source_dir,
             overwrite=True,
         )
+        write_effective_config(destination, self.config)
         training_state = {
             "step": self.state.step,
             "opt_state": self.state.opt_state,
@@ -197,7 +169,7 @@ class JaxSmolVLATrainer:
 
     def restore(self, checkpoint: str | Path) -> None:
         checkpoint = Path(checkpoint)
-        params = load_params(checkpoint)
+        params = initialize_lora_params(load_params(checkpoint), self.config)
         trainable, frozen = partition_params(params, self.config)
         target = {
             "step": self.state.step,

@@ -148,6 +148,47 @@ def save_portable_params(
     return destination
 
 
+def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) -> Path:
+    """Persist training-time overrides in the checkpoint's compatible config.json."""
+
+    destination = Path(destination).expanduser().resolve()
+    config_path = destination / "config.json"
+    raw: dict[str, Any] = {}
+    if config_path.is_file():
+        with config_path.open() as file:
+            raw = json.load(file)
+
+    raw.update(
+        {
+            "chunk_size": config.chunk_size,
+            "n_action_steps": config.n_action_steps,
+            "max_state_dim": config.max_state_dim,
+            "max_action_dim": config.max_action_dim,
+            "empty_cameras": config.empty_cameras,
+            "module_modes": config.module_modes,
+            "lora_rank": config.lora_rank,
+            "lora_alpha": config.lora_alpha,
+            "optimizer_lr": config.optimizer_lr,
+            "optimizer_eps": config.optimizer_eps,
+            "optimizer_weight_decay": config.optimizer_weight_decay,
+            "optimizer_grad_clip_norm": config.optimizer_grad_clip_norm,
+            "scheduler_warmup_steps": config.scheduler_warmup_steps,
+            "scheduler_decay_steps": config.scheduler_decay_steps,
+            "scheduler_decay_lr": config.scheduler_decay_lr,
+        }
+    )
+    input_features = raw.setdefault("input_features", {})
+    input_features.setdefault("observation.state", {"type": "STATE"})["shape"] = [config.state_dim]
+    output_features = raw.setdefault("output_features", {})
+    output_features.setdefault("action", {"type": "ACTION"})["shape"] = [config.action_dim]
+
+    destination.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w") as file:
+        json.dump(raw, file, indent=4)
+        file.write("\n")
+    return config_path
+
+
 def restore_orbax_params(path: str | Path) -> dict[str, Array]:
     path = Path(path).expanduser().resolve()
     params_dir = path if path.name == "params" else path / "params"

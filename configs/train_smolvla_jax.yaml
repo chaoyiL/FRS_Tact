@@ -48,6 +48,18 @@ wandb:
 # ---- 覆盖 checkpoint 的模型配置（对应原 config.json）----
 # 数据集 actions / observation.state 是 20 维；base 权重默认是 6 维。
 model:
+  # 每个模块必须选择一种模式：frozen | full | lora
+  # lora 只作用于该模块的 Linear；Conv / Embedding / Norm 保持冻结。
+  module_modes:
+    vision: lora
+    connector: full
+    vlm_text: lora
+    expert: full
+    action: full
+    state_proj: full
+  lora_rank: 8
+  lora_alpha: 16.0
+
   action_dim: 20
   state_dim: 20
   max_action_dim: 32

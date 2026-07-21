@@ -16,6 +16,7 @@ import yaml
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
 from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader
+from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
@@ -185,6 +186,13 @@ def main() -> None:
         load_params(checkpoint),
         seed=int(cfg.get("seed", 0)),
         total_steps=int(require(cfg, "steps")),
+    )
+    trainable_count = sum(int(value.size) for value in trainer.state.params.values())
+    frozen_count = sum(int(value.size) for value in trainer.frozen_params.values())
+    print(f"module_modes={resolve_module_modes(config)}")
+    print(
+        f"parameters: trainable={trainable_count:,} frozen={frozen_count:,} "
+        f"trainable_ratio={trainable_count / max(trainable_count + frozen_count, 1):.4%}"
     )
     resume = cfg.get("resume")
     if resume:
