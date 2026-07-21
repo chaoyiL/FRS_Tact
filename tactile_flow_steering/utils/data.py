@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pathlib
 from collections.abc import Iterator, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from typing import Literal
 
 import jax
@@ -18,19 +17,16 @@ from tactile_encoder.utils.model import encode_resnet18
 from tactile_encoder.utils.model import tactile_clip_config_from_dict
 from tactile_encoder.utils.prefetch import prefetch_iterator
 from tactile_flow_steering.utils.mp_batches import MpTactileWindowLoader
+from tactile_flow_steering.utils.window_io import NUM_TACTILE_STREAMS
+from tactile_flow_steering.utils.window_io import TACTILE_KEYS
+from tactile_flow_steering.utils.window_io import load_tactile_windows
+from tactile_flow_steering.utils.window_io import _frame_streams_from_images
+from tactile_flow_steering.utils.window_io import window_frame_indices
 from utils.cache import CachedPairs
 
 Array = jax.Array
 SplitName = Literal["train", "val"]
 LossMode = Literal["gt", "gated"]
-
-TACTILE_KEYS = (
-    "tactile_left_0",
-    "tactile_right_0",
-    "tactile_left_1",
-    "tactile_right_1",
-)
-NUM_TACTILE_STREAMS = len(TACTILE_KEYS)
 
 
 def resolve_tactile_window(*, action_horizon: int, window_divisor: int) -> int:
@@ -91,106 +87,6 @@ def resolve_dataset_root(
     return pathlib.Path(root) if root else None
 
 
-def window_frame_indices(
-    dataset,
-    *,
-    dataset_index: int,
-    episode_index: int,
-    window: int,
-    history_stride: int = 1,
-) -> tuple[int, ...]:
-    """Oldest→newest frame indices of length ``window``, clamped to episode start."""
-
-    if window <= 0:
-        raise ValueError(f"window must be positive, got {window}.")
-    if history_stride <= 0:
-        raise ValueError(f"history_stride must be positive, got {history_stride}.")
-    episode_frames = dataset.indices_for_episode(int(episode_index))
-    if not episode_frames:
-        raise ValueError(f"Episode {episode_index} has no frames.")
-    episode_start = int(episode_frames[0])
-    current = int(dataset_index)
-    if window == 1:
-        return (current,)
-    past = tuple(
-        max(episode_start, current - step * history_stride)
-        for step in range(window - 1, 0, -1)
-    )
-    return past + (current,)
-
-
-def _frame_streams_from_images(
-    images: dict[str, np.ndarray],
-    tactile_keys: Sequence[str],
-) -> np.ndarray:
-    return np.stack([np.asarray(images[key]) for key in tactile_keys], axis=0)
-
-
-def load_tactile_windows(
-    dataset,
-    samples: Sequence[tuple[int, int]],
-    *,
-    tactile_window: int,
-    history_stride: int,
-    tactile_keys: Sequence[str] = TACTILE_KEYS,
-    load_threads: int = 8,
-    as_float: bool = False,
-) -> np.ndarray:
-    """Decode tactile windows for ``(dataset_index, episode_index)`` samples.
-
-    Deduplicates frame indices within the batch and loads unique frames in a
-    thread pool (video decode releases the GIL). Returns
-    ``[B, T, 4, H, W, C]`` as float32 ``[0, 1]`` or uint8.
-    """
-
-    if len(samples) == 0:
-        raise ValueError("samples must be non-empty.")
-    if load_threads <= 0:
-        raise ValueError(f"load_threads must be positive, got {load_threads}.")
-
-    window_indices: list[tuple[int, ...]] = []
-    unique_frames: list[int] = []
-    seen: set[int] = set()
-    for dataset_index, episode_index in samples:
-        frames = window_frame_indices(
-            dataset,
-            dataset_index=int(dataset_index),
-            episode_index=int(episode_index),
-            window=tactile_window,
-            history_stride=history_stride,
-        )
-        window_indices.append(frames)
-        for frame_index in frames:
-            if frame_index not in seen:
-                seen.add(frame_index)
-                unique_frames.append(int(frame_index))
-
-    def _load_one(frame_index: int) -> tuple[int, np.ndarray]:
-        images = dataset.get_images(int(frame_index), tactile_keys, as_float=as_float)
-        stacked = _frame_streams_from_images(images, tactile_keys)
-        if as_float:
-            stacked = stacked.astype(np.float32, copy=False)
-        else:
-            stacked = np.asarray(stacked, dtype=np.uint8)
-        return int(frame_index), stacked
-
-    decoded: dict[int, np.ndarray] = {}
-    if load_threads == 1 or len(unique_frames) <= 1:
-        for frame_index in unique_frames:
-            key, value = _load_one(frame_index)
-            decoded[key] = value
-    else:
-        workers = min(load_threads, len(unique_frames))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for frame_index, stacked in pool.map(_load_one, unique_frames, chunksize=4):
-                decoded[frame_index] = stacked
-
-    windows = []
-    for frames in window_indices:
-        windows.append(np.stack([decoded[frame_index] for frame_index in frames], axis=0))
-    return np.stack(windows, axis=0)
-
-
 def _l2_normalize(vectors: np.ndarray, *, eps: float = 1e-8) -> np.ndarray:
     norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
     return vectors / np.maximum(norms, eps)
@@ -245,14 +141,14 @@ class TactileConditionedBatches:
         tactile_window: int,
         dataset_repo_id: str | None = None,
         dataset_root: pathlib.Path | None = None,
-        image_cache_size: int = 4096,
+        image_cache_size: int = 8192,
         history_stride: int = 1,
-        encode_batch_size: int = 64,
+        encode_batch_size: int = 256,
         build_episode_baselines: bool = False,
-        num_workers: int = 4,
-        prefetch_batches: int = 4,
-        load_threads: int = 8,
-        pipeline_prefetch: int = 2,
+        num_workers: int = 8,
+        prefetch_batches: int = 8,
+        load_threads: int = 16,
+        pipeline_prefetch: int = 4,
     ):
         if tactile_window <= 0:
             raise ValueError(f"tactile_window must be positive, got {tactile_window}.")
@@ -295,6 +191,10 @@ class TactileConditionedBatches:
         self.tactile_keys = TACTILE_KEYS
         self.episode_baselines: dict[int, np.ndarray] = {}
         self._mp_loader: MpTactileWindowLoader | None = None
+        # Build gated baselines before spawning workers so parent JAX/CUDA inits cleanly
+        # and workers never need to touch ResNet.
+        if build_episode_baselines:
+            self.build_episode_baseline_embeddings()
         if self.num_workers > 1:
             self._mp_loader = MpTactileWindowLoader(
                 repo_id=self.repo_id,
@@ -307,8 +207,6 @@ class TactileConditionedBatches:
                 load_threads=self.load_threads,
             )
             self._mp_loader.start()
-        if build_episode_baselines:
-            self.build_episode_baseline_embeddings()
 
     def close(self) -> None:
         if self._mp_loader is not None:
@@ -357,14 +255,61 @@ class TactileConditionedBatches:
         """Precompute episode-first-frame ResNet tokens for all cache episodes."""
 
         episode_indices = np.unique(np.asarray(self.pairs.arrays["episode_index"], dtype=np.int64))
-        baselines: dict[int, np.ndarray] = {}
-        for episode_index in episode_indices.tolist():
-            episode_frames = self.dataset.indices_for_episode(int(episode_index))
+        episode_list = [int(ep) for ep in episode_indices.tolist()]
+        print(
+            f"building episode baselines for {len(episode_list)} episodes "
+            f"(load_threads={self.load_threads}, encode_batch={self.encode_batch_size})...",
+            flush=True,
+        )
+
+        # Collect first-frame indices, then decode unique frames in parallel.
+        first_frames: list[int] = []
+        for episode_index in episode_list:
+            episode_frames = self.dataset.indices_for_episode(episode_index)
             if not episode_frames:
                 raise ValueError(f"Episode {episode_index} has no frames.")
-            baselines[int(episode_index)] = self._encode_frame_streams(int(episode_frames[0]))
+            first_frames.append(int(episode_frames[0]))
+
+        unique_frames = list(dict.fromkeys(first_frames))
+
+        def _load_one(frame_index: int) -> tuple[int, np.ndarray]:
+            images = self.dataset.get_images(int(frame_index), self.tactile_keys, as_float=True)
+            stacked = _frame_streams_from_images(images, self.tactile_keys).astype(np.float32)
+            return int(frame_index), stacked
+
+        decoded: dict[int, np.ndarray] = {}
+        if self.load_threads == 1 or len(unique_frames) <= 1:
+            for frame_index in unique_frames:
+                key, value = _load_one(frame_index)
+                decoded[key] = value
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            workers = min(self.load_threads, len(unique_frames))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for frame_index, stacked in pool.map(_load_one, unique_frames, chunksize=4):
+                    decoded[frame_index] = stacked
+        print(f"decoded {len(decoded)} unique first frames; encoding ResNet...", flush=True)
+
+        stacked_images = np.stack([decoded[frame] for frame in first_frames], axis=0)  # [E,4,H,W,C]
+        flat = stacked_images.reshape((-1,) + stacked_images.shape[2:])
+        encoded_parts: list[np.ndarray] = []
+        total = flat.shape[0]
+        for start in range(0, total, self.encode_batch_size):
+            chunk = self._encode_images_frozen(flat[start : start + self.encode_batch_size])
+            encoded_parts.append(np.asarray(chunk, dtype=np.float32))
+            done = min(start + self.encode_batch_size, total)
+            if start == 0 or done == total or done % max(self.encode_batch_size * 4, 1) == 0:
+                print(f"  ResNet baseline encode {done}/{total}", flush=True)
+        encoded = np.concatenate(encoded_parts, axis=0).reshape(
+            len(episode_list), NUM_TACTILE_STREAMS, self.resnet_embedding_dim
+        )
+        baselines = {
+            episode_index: encoded[i]
+            for i, episode_index in enumerate(episode_list)
+        }
         self.episode_baselines = baselines
-        print(f"episode_baselines={len(baselines)} (first-frame ResNet tokens)")
+        print(f"episode_baselines={len(baselines)} (first-frame ResNet tokens)", flush=True)
         return baselines
 
     def gate_weights_for_cache_indices(

@@ -31,7 +31,6 @@ from lerobot.utils.constants import DEFAULT_FEATURES, HF_LEROBOT_HOME, HF_LEROBO
 from lerobot.utils.feature_utils import _validate_feature_names
 from lerobot.utils.utils import flatten_dict
 
-from .compute_stats import aggregate_stats
 from .depth_utils import MM_PER_METRE
 from .feature_utils import create_empty_dataset_info
 from .io_utils import (
@@ -624,6 +623,8 @@ class LeRobotDatasetMetadata:
         self.info.splits = {"train": f"0:{self.info.total_episodes}"}
 
         write_info(self.info, self.root)
+
+        from .compute_stats import aggregate_stats
 
         self.stats = aggregate_stats([self.stats, episode_stats]) if self.stats is not None else episode_stats
         write_stats(self.stats, self.root)

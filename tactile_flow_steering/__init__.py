@@ -1,6 +1,5 @@
-"""Tactile cross-attention conditioned flow matching decoder."""
+"""Tactile cross-attention conditioned flow matching decoder.
 
-from tactile_flow_steering.utils.model import DecoderConfig
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-
-__all__ = ["DecoderConfig", "TactileConditionedFlowDecoder"]
+Import concrete symbols from submodules (e.g. ``tactile_flow_steering.utils.model``)
+so spawn data-loader workers can import ``window_io`` without pulling JAX/CUDA.
+"""

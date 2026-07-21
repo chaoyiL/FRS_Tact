@@ -36,15 +36,18 @@ uv run python -m tactile_flow_steering.train \
   --output-dir tactile_flow_steering/outputs/run_01 \
   --tactile-window-divisor 1 \
   --loss-mode gt \
-  --num-workers 4 \
-  --prefetch-batches 4 \
-  --load-threads 8
+  --num-workers 8 \
+  --prefetch-batches 8 \
+  --load-threads 16 \
+  --pipeline-prefetch 4 \
+  --encode-batch-size 256
 ```
 
 - `--tactile-window-divisor`：`tactile_window = action_horizon // divisor`（须整除；默认 1）
-- `--num-workers`：视频解码 spawn 进程数（`0/1` 仅用进程内线程；默认 4）
-- `--load-threads`：每个进程内对 batch 去重帧的并行解码线程数（默认 8）
+- `--num-workers`：视频/parquet 解码 spawn 进程数（`0/1` 仅用进程内线程；默认 8）
+- `--load-threads`：每个进程内对 batch 去重帧的并行解码线程数（默认 16）
 - `--prefetch-batches` / `--pipeline-prefetch`：解码与 ResNet/train 流水线缓冲
+- `--encode-batch-size`：父进程冻结 ResNet 微批次（默认 256）
 - GRU hidden 维固定为 **256**（不可配置）
 - `--loss-mode`：
   - `gt`（默认）：仅 `L*`，target = GT

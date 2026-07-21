@@ -25,11 +25,16 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
 
     os.environ["JAX_PLATFORMS"] = "cpu"
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["TACTILE_IO_LIGHT_IMPORT"] = "1"
+    import importlib
+    import sys
 
     try:
         from tactile_encoder.utils.image_dataset import create_image_dataset
-        from tactile_flow_steering.utils.data import TACTILE_KEYS
-        from tactile_flow_steering.utils.data import load_tactile_windows
+
+        window_io = importlib.import_module("tactile_flow_steering.utils.window_io")
+        TACTILE_KEYS = window_io.TACTILE_KEYS
+        load_tactile_windows = window_io.load_tactile_windows
 
         repo_id = init["repo_id"]
         image_size = int(init["image_size"])
@@ -37,11 +42,17 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
         tactile_window = int(init["tactile_window"])
         history_stride = int(init["history_stride"])
         load_threads = max(1, int(init.get("load_threads", 8)))
+        print(f"worker pid={os.getpid()} opening dataset {repo_id!r}...", flush=True)
         dataset = create_image_dataset(
             repo_id,
             image_size=image_size,
             cache_size=cache_size,
         ).dataset
+        if "jax" in sys.modules:
+            raise RuntimeError(
+                "light import path unexpectedly pulled jax into an mp worker"
+            )
+        print(f"worker pid={os.getpid()} ready (jax_imported=False)", flush=True)
     except Exception as exc:  # noqa: BLE001 — surface init failure to parent
         result_q.put(("__init__", None, f"worker init failed: {exc}\n{traceback.format_exc()}"))
         return
@@ -91,8 +102,9 @@ class MpTactileWindowLoader:
         self._num_workers = int(num_workers)
         self._prefetch = max(1, int(prefetch_batches))
         self._image_size = int(image_size)
-        per_worker = max(4096, int(image_cache_size) // max(1, self._num_workers))
-        self._worker_cache = min(per_worker, 16384)
+        # Split LRU budget across workers; keep a small floor so tiny configs still cache.
+        per_worker = max(256, int(image_cache_size) // max(1, self._num_workers))
+        self._worker_cache = min(per_worker, 8192)
         self._ctx = mp.get_context("spawn")
         self._task_q = self._ctx.Queue(maxsize=max(self._num_workers * 2, self._prefetch * 2))
         self._result_q = self._ctx.Queue(maxsize=max(self._num_workers * 2, self._prefetch * 2))

@@ -205,11 +205,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--num-trajectory-samples", type=int, default=6)
     parser.add_argument("--num-episode-strips", type=int, default=6)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--prefetch-batches", type=int, default=4)
-    parser.add_argument("--load-threads", type=int, default=8)
-    parser.add_argument("--pipeline-prefetch", type=int, default=2)
-    parser.add_argument("--image-cache-size", type=int, default=4096)
+    parser.add_argument("--num-workers", type=int, default=8)
+    parser.add_argument("--prefetch-batches", type=int, default=8)
+    parser.add_argument("--load-threads", type=int, default=16)
+    parser.add_argument("--pipeline-prefetch", type=int, default=4)
+    parser.add_argument("--image-cache-size", type=int, default=8192)
+    parser.add_argument("--encode-batch-size", type=int, default=256)
     return parser
 
 

@@ -12,12 +12,12 @@ from tactile_flow_steering.utils.data import NUM_TACTILE_STREAMS
 from tactile_flow_steering.utils.data import TACTILE_KEYS
 from tactile_flow_steering.utils.data import TactileConditionedBatches
 from tactile_flow_steering.utils.data import gate_weights_from_change
-from tactile_flow_steering.utils.data import load_tactile_windows
 from tactile_flow_steering.utils.data import resolve_dataset_repo_id
 from tactile_flow_steering.utils.data import resolve_tactile_window
 from tactile_flow_steering.utils.data import resnet_embedding_dim_from_encoder
 from tactile_flow_steering.utils.data import tactile_change_from_tokens
-from tactile_flow_steering.utils.data import window_frame_indices
+from tactile_flow_steering.utils.window_io import load_tactile_windows
+from tactile_flow_steering.utils.window_io import window_frame_indices
 
 
 class FakePairs:

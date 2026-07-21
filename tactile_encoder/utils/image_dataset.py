@@ -6,8 +6,12 @@ Loads only wrist RGB + tactile frames. Does not load state, actions, or prompts.
 from __future__ import annotations
 
 import dataclasses
+import importlib
+import sys
 import threading
+import types
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -39,6 +43,42 @@ CANONICAL_FROM_RAW: dict[str, str] = {
     "observation.images.tactile_right_1": "tactile_right_1",
 }
 RAW_FROM_CANONICAL: dict[str, str] = {canonical: raw for raw, canonical in CANONICAL_FROM_RAW.items()}
+
+
+def _import_lerobot_dataset_module() -> Any:
+    """Import ``LeRobotDataset`` module.
+
+    Mp data workers set ``TACTILE_IO_LIGHT_IMPORT=1`` so we skip
+    ``lerobot.datasets.__init__`` (compute_stats → transformers → jax). Parent
+    training keeps the normal import path.
+    """
+
+    import os
+
+    module_name = "lerobot.datasets.lerobot_dataset"
+    if module_name in sys.modules:
+        return sys.modules[module_name]
+
+    if os.environ.get("TACTILE_IO_LIGHT_IMPORT") != "1":
+        return importlib.import_module(module_name)
+
+    try:
+        import lerobot
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("lerobot is required for tactile CLIP image loading.") from exc
+
+    datasets_pkg = "lerobot.datasets"
+    datasets_path = Path(lerobot.__file__).resolve().parent / "datasets"
+    if datasets_pkg not in sys.modules:
+        pkg = types.ModuleType(datasets_pkg)
+        pkg.__path__ = [str(datasets_path)]
+        pkg.__file__ = str(datasets_path / "__init__.py")
+        pkg.__package__ = datasets_pkg
+        sys.modules[datasets_pkg] = pkg
+    elif not hasattr(sys.modules[datasets_pkg], "__path__"):
+        sys.modules[datasets_pkg].__path__ = [str(datasets_path)]
+
+    return importlib.import_module(module_name)
 
 
 def resize_with_pad(image: np.ndarray, height: int, width: int) -> np.ndarray:
@@ -251,7 +291,7 @@ class ImageOnlyLeRobotDataset:
         cache_size: int = DEFAULT_IMAGE_CACHE_SIZE,
     ):
         try:
-            import lerobot.datasets.lerobot_dataset as lerobot_dataset
+            lerobot_dataset = _import_lerobot_dataset_module()
         except ModuleNotFoundError as exc:
             raise RuntimeError("lerobot is required for tactile CLIP image loading.") from exc
 

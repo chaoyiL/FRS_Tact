@@ -29,7 +29,6 @@ from lerobot.utils.constants import HF_LEROBOT_HUB_CACHE
 
 from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
 from .dataset_reader import DatasetReader
-from .dataset_writer import DatasetWriter
 from .utils import (
     create_lerobot_dataset_card,
     get_safe_version,
@@ -41,6 +40,14 @@ from .video_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _dataset_writer_cls():
+    """Lazy import so read-only dataset open avoids compute_stats/transformers/jax."""
+
+    from .dataset_writer import DatasetWriter
+
+    return DatasetWriter
 
 
 class LeRobotDataset(torch.utils.data.Dataset):
@@ -284,7 +291,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     encoder_queue_maxsize,
                     encoder_threads,
                 )
-            self.writer = DatasetWriter(
+            self.writer = _dataset_writer_cls()(
                 meta=self.meta,
                 root=self.root,
                 rgb_encoder=rgb_encoder,
@@ -755,7 +762,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             streaming_enc = cls._build_streaming_encoder(
                 fps, rgb_encoder, depth_encoder, encoder_queue_maxsize, encoder_threads
             )
-        obj.writer = DatasetWriter(
+        obj.writer = _dataset_writer_cls()(
             meta=obj.meta,
             root=obj.root,
             rgb_encoder=rgb_encoder,
@@ -864,7 +871,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             streaming_enc = cls._build_streaming_encoder(
                 obj.meta.fps, rgb_encoder, depth_encoder, encoder_queue_maxsize, encoder_threads
             )
-        obj.writer = DatasetWriter(
+        obj.writer = _dataset_writer_cls()(
             meta=obj.meta,
             root=obj.root,
             rgb_encoder=rgb_encoder,

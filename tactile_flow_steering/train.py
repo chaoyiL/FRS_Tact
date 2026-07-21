@@ -1,28 +1,18 @@
+"""Train tactile-conditioned flow decoder.
+
+IMPORTANT: keep module-level imports free of JAX/Flax/data loaders. Mp spawn workers
+re-import this file as ``__main__`` under ``CUDA_VISIBLE_DEVICES=""``; eager ``import jax``
+there causes ``CUDA_ERROR_NO_DEVICE`` spam and fails the light-import guard.
+"""
+
 from __future__ import annotations
 
 import argparse
-import csv
 import pathlib
 from collections.abc import Sequence
+from typing import Literal
 
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax import nnx
-
-from tactile_flow_steering.utils.checkpoint import save_checkpoint
-from tactile_flow_steering.utils.data import LossMode
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.data import resolve_tactile_window
-from tactile_flow_steering.utils.metrics import evaluate_split
-from tactile_flow_steering.utils.model import DEFAULT_GRU_HIDDEN_DIM
-from tactile_flow_steering.utils.model import DecoderConfig
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import make_optimizer
-from tactile_flow_steering.utils.model import resolve_peak_learning_rate
-from tactile_flow_steering.utils.model import train_step
-from tactile_flow_steering.utils.visualize import plot_training_history
-from utils.cache import CachedPairs
+LossMode = Literal["gt", "gated"]
 
 
 def train_decoder(
@@ -52,6 +42,7 @@ def train_decoder(
     batch_size: int,
     epochs: int,
     validation_steps: int,
+    eval_every: int,
     seed: int,
     write_plots: bool,
     num_workers: int,
@@ -59,7 +50,28 @@ def train_decoder(
     load_threads: int,
     pipeline_prefetch: int,
     image_cache_size: int,
+    encode_batch_size: int,
 ) -> None:
+    import csv
+
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+    from flax import nnx
+
+    from tactile_flow_steering.utils.checkpoint import save_checkpoint
+    from tactile_flow_steering.utils.data import TactileConditionedBatches
+    from tactile_flow_steering.utils.data import resolve_tactile_window
+    from tactile_flow_steering.utils.metrics import evaluate_split
+    from tactile_flow_steering.utils.model import DEFAULT_GRU_HIDDEN_DIM
+    from tactile_flow_steering.utils.model import DecoderConfig
+    from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
+    from tactile_flow_steering.utils.model import make_optimizer
+    from tactile_flow_steering.utils.model import resolve_peak_learning_rate
+    from tactile_flow_steering.utils.model import train_step
+    from tactile_flow_steering.utils.visualize import plot_training_history
+    from utils.cache import CachedPairs
+
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
     if warmup_epochs < 0:
@@ -72,6 +84,16 @@ def train_decoder(
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
     if gate_lambda < 0:
         raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
+    if eval_every <= 0:
+        raise ValueError(f"eval_every must be positive, got {eval_every}.")
+
+    print(f"jax_devices={jax.devices()}", flush=True)
+    if not any(d.platform == "gpu" for d in jax.devices()):
+        print(
+            "WARNING: no JAX GPU device visible; ResNet encode + training will run on CPU "
+            "(very slow). Check nvidia-smi / CUDA_VISIBLE_DEVICES.",
+            flush=True,
+        )
 
     pairs = CachedPairs(cache_dir)
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -92,6 +114,7 @@ def train_decoder(
         load_threads=load_threads,
         pipeline_prefetch=pipeline_prefetch,
         image_cache_size=image_cache_size,
+        encode_batch_size=encode_batch_size,
     )
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
@@ -140,7 +163,8 @@ def train_decoder(
     print(
         f"dataloader=num_workers={num_workers} prefetch_batches={prefetch_batches} "
         f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
-        f"image_cache_size={image_cache_size}"
+        f"image_cache_size={image_cache_size} encode_batch_size={encode_batch_size} "
+        f"eval_every={eval_every}"
     )
     if loss_mode == "gt":
         print("loss_mode=gt (target=gt_action)")
@@ -201,23 +225,14 @@ def train_decoder(
                     )
                     losses.append(float(jax.device_get(loss)))
                     weights.append(len(x_base_np))
-
+                    if batch_number == 0 or (batch_number + 1) % 20 == 0:
+                        print(
+                            f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
+                            f"flow_loss={losses[-1]:.6f}",
+                            flush=True,
+                        )
                 train_loss = float(np.average(losses, weights=weights))
-                validation = evaluate_split(
-                    model,
-                    conditioner,
-                    split="val",
-                    batch_size=batch_size,
-                    num_steps=validation_steps,
-                    keep_predictions=False,
-                )
-                metrics = {
-                    "train_flow_loss": train_loss,
-                    "val_flow_loss": validation.flow_loss,
-                    "val_mse": validation.mse,
-                    "val_rmse": validation.rmse,
-                    "val_mae": validation.mae,
-                }
+                run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
                     "cache_configuration": pairs.manifest["configuration"],
@@ -230,30 +245,72 @@ def train_decoder(
                     "gate_tau": gate_tau,
                     "gate_temperature": gate_temperature,
                     "gate_lambda": gate_lambda,
+                    "eval_every": eval_every,
                 }
-                writer.writerow({"epoch": epoch, **metrics})
-                history_file.flush()
-                save_checkpoint(
-                    output_dir / "last",
-                    model,
-                    epoch=epoch,
-                    metrics=metrics,
-                    extra_metadata=checkpoint_extra,
-                )
-                if validation.mse < best_mse:
-                    best_mse = validation.mse
+                if run_eval:
+                    validation = evaluate_split(
+                        model,
+                        conditioner,
+                        split="val",
+                        batch_size=batch_size,
+                        num_steps=validation_steps,
+                        keep_predictions=False,
+                    )
+                    metrics = {
+                        "train_flow_loss": train_loss,
+                        "val_flow_loss": validation.flow_loss,
+                        "val_mse": validation.mse,
+                        "val_rmse": validation.rmse,
+                        "val_mae": validation.mae,
+                    }
+                    writer.writerow({"epoch": epoch, **metrics})
+                    history_file.flush()
                     save_checkpoint(
-                        output_dir / "best",
+                        output_dir / "last",
                         model,
                         epoch=epoch,
                         metrics=metrics,
                         extra_metadata=checkpoint_extra,
                     )
-                print(
-                    f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
-                    f"val_flow_loss={validation.flow_loss:.8f} val_mse={validation.mse:.8f} "
-                    f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}"
-                )
+                    if validation.mse < best_mse:
+                        best_mse = validation.mse
+                        save_checkpoint(
+                            output_dir / "best",
+                            model,
+                            epoch=epoch,
+                            metrics=metrics,
+                            extra_metadata=checkpoint_extra,
+                        )
+                    print(
+                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
+                        f"val_flow_loss={validation.flow_loss:.8f} val_mse={validation.mse:.8f} "
+                        f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}",
+                        flush=True,
+                    )
+                else:
+                    metrics = {"train_flow_loss": train_loss}
+                    writer.writerow(
+                        {
+                            "epoch": epoch,
+                            "train_flow_loss": train_loss,
+                            "val_flow_loss": "",
+                            "val_mse": "",
+                            "val_rmse": "",
+                            "val_mae": "",
+                        }
+                    )
+                    history_file.flush()
+                    save_checkpoint(
+                        output_dir / "last",
+                        model,
+                        epoch=epoch,
+                        metrics=metrics,
+                        extra_metadata=checkpoint_extra,
+                    )
+                    print(
+                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} (skip val)",
+                        flush=True,
+                    )
 
         print(f"best_val_mse={best_mse:.8f}")
         print(f"checkpoints={output_dir}")
@@ -339,37 +396,49 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--validation-steps", type=int, default=10)
+    parser.add_argument(
+        "--eval-every",
+        type=int,
+        default=5,
+        help="Run full validation every N epochs (also always on the final epoch). Default 5.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
         "--num-workers",
         type=int,
-        default=4,
-        help="Spawn process workers for video decode (0/1 = in-process threads only).",
+        default=8,
+        help="Spawn process workers for video/parquet decode (0/1 = in-process threads only).",
     )
     parser.add_argument(
         "--prefetch-batches",
         type=int,
-        default=4,
+        default=8,
         help="In-flight mp decode batches queued ahead of the trainer.",
     )
     parser.add_argument(
         "--load-threads",
         type=int,
-        default=8,
-        help="Per-process threads for unique-frame video decode within a batch.",
+        default=16,
+        help="Per-process threads for unique-frame decode within a batch.",
     )
     parser.add_argument(
         "--pipeline-prefetch",
         type=int,
-        default=2,
+        default=4,
         help="Decoded image batches buffered while parent runs ResNet/train step.",
     )
     parser.add_argument(
         "--image-cache-size",
         type=int,
-        default=4096,
+        default=8192,
         help="Total LRU decoded-frame budget (split across mp workers).",
+    )
+    parser.add_argument(
+        "--encode-batch-size",
+        type=int,
+        default=256,
+        help="Frozen ResNet microbatch size on the parent process/GPU.",
     )
     return parser
 
@@ -402,6 +471,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         batch_size=args.batch_size,
         epochs=args.epochs,
         validation_steps=args.validation_steps,
+        eval_every=args.eval_every,
         seed=args.seed,
         write_plots=not args.no_plots,
         num_workers=args.num_workers,
@@ -409,6 +479,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         load_threads=args.load_threads,
         pipeline_prefetch=args.pipeline_prefetch,
         image_cache_size=args.image_cache_size,
+        encode_batch_size=args.encode_batch_size,
     )
 
 
