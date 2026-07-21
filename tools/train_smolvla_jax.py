@@ -6,96 +6,274 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import fields, replace
 from pathlib import Path
+from typing import Any
 
 import jax
+import yaml
 
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.checkpoint import load_params
+from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
 from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
+
+DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True, type=Path)
-    parser.add_argument("--dataset-repo-id", required=True)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help=f"YAML config path (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument("--checkpoint", help="Override YAML: local path or Hugging Face repo id")
+    parser.add_argument("--revision")
+    parser.add_argument("--allow-download", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dataset-repo-id")
     parser.add_argument("--dataset-root", type=Path)
     parser.add_argument("--dataset-revision")
     parser.add_argument("--episodes", type=int, nargs="+")
-    parser.add_argument("--action-key", help="Defaults to auto-detecting action/actions")
-    parser.add_argument("--rename-map", help="JSON object overriding checkpoint observation renames")
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--action-key")
+    parser.add_argument("--rename-map", help="JSON object; overrides YAML rename_map")
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--prefetch-factor", type=int)
     parser.add_argument("--video-backend")
-    parser.add_argument("--allow-tokenizer-download", action="store_true")
-    parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--steps", type=int, default=1_000)
-    parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--log-freq", type=int, default=10)
-    parser.add_argument("--save-freq", type=int, default=1_000)
+    parser.add_argument("--allow-tokenizer-download", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--steps", type=int)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--log-freq", type=int)
+    parser.add_argument("--save-freq", type=int)
     parser.add_argument("--resume", type=Path)
-    parser.add_argument("--data-parallel", action="store_true")
+    parser.add_argument("--data-parallel", action=argparse.BooleanOptionalAction, default=None)
     return parser.parse_args()
+
+
+def load_yaml_config(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"config not found: {path}")
+    with path.open(encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"config root must be a mapping: {path}")
+    return data
+
+
+def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    merged = dict(cfg)
+    cli = {
+        "checkpoint": args.checkpoint,
+        "revision": args.revision,
+        "allow_download": args.allow_download,
+        "dataset_repo_id": args.dataset_repo_id,
+        "dataset_root": args.dataset_root,
+        "dataset_revision": args.dataset_revision,
+        "episodes": args.episodes,
+        "action_key": args.action_key,
+        "num_workers": args.num_workers,
+        "prefetch_factor": args.prefetch_factor,
+        "video_backend": args.video_backend,
+        "allow_tokenizer_download": args.allow_tokenizer_download,
+        "output": args.output,
+        "steps": args.steps,
+        "batch_size": args.batch_size,
+        "seed": args.seed,
+        "log_freq": args.log_freq,
+        "save_freq": args.save_freq,
+        "resume": args.resume,
+        "data_parallel": args.data_parallel,
+    }
+    for key, value in cli.items():
+        if value is not None:
+            merged[key] = value
+    if args.rename_map is not None:
+        rename_map = json.loads(args.rename_map)
+        if not isinstance(rename_map, dict):
+            raise ValueError("--rename-map must be a JSON object")
+        merged["rename_map"] = rename_map
+    return merged
+
+
+def require(cfg: dict[str, Any], key: str) -> Any:
+    if key not in cfg or cfg[key] in (None, ""):
+        raise ValueError(f"missing required config field: {key}")
+    return cfg[key]
+
+
+def apply_model_overrides(config: JaxSmolVLAConfig, overrides: dict[str, Any] | None) -> JaxSmolVLAConfig:
+    if not overrides:
+        return config
+    if not isinstance(overrides, dict):
+        raise ValueError("model overrides must be a mapping")
+    known = {field.name for field in fields(JaxSmolVLAConfig)}
+    unknown = sorted(set(overrides) - known)
+    if unknown:
+        raise ValueError(f"unknown model override fields: {unknown}")
+    cleaned: dict[str, Any] = {}
+    for key, value in overrides.items():
+        if key == "image_keys" and value is not None:
+            cleaned[key] = tuple(value)
+        else:
+            cleaned[key] = value
+    return replace(config, **cleaned)
+
+
+def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, model: JaxSmolVLAConfig):
+    wandb_cfg = cfg.get("wandb") or {}
+    if not bool(wandb_cfg.get("enabled", False)):
+        return None
+
+    import wandb
+
+    mode = str(wandb_cfg.get("mode", "online"))
+    run = wandb.init(
+        project=wandb_cfg.get("project", "smolvla-jax"),
+        entity=wandb_cfg.get("entity"),
+        name=wandb_cfg.get("name"),
+        group=wandb_cfg.get("group"),
+        tags=list(wandb_cfg.get("tags") or []),
+        notes=wandb_cfg.get("notes"),
+        dir=str(Path(require(cfg, "output"))),
+        mode=mode,
+        config={
+            "config_path": str(config_path.resolve()),
+            "checkpoint": str(checkpoint),
+            "dataset_repo_id": cfg.get("dataset_repo_id"),
+            "dataset_root": cfg.get("dataset_root"),
+            "action_key": cfg.get("action_key"),
+            "batch_size": cfg.get("batch_size"),
+            "steps": cfg.get("steps"),
+            "seed": cfg.get("seed"),
+            "data_parallel": cfg.get("data_parallel"),
+            "rename_map": cfg.get("rename_map"),
+            "model": model.to_dict(),
+            "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
+        },
+    )
+    print(f"wandb={run.url if run is not None else mode}")
+    return run
 
 
 def main() -> None:
     args = parse_args()
-    rename_map = json.loads(args.rename_map) if args.rename_map else None
-    if rename_map is not None and not isinstance(rename_map, dict):
-        raise ValueError("--rename-map must be a JSON object")
-    config = JaxSmolVLAConfig.from_pretrained(args.checkpoint)
+    cfg = merge_cli_overrides(load_yaml_config(args.config), args)
+
+    checkpoint = resolve_checkpoint(
+        require(cfg, "checkpoint"),
+        revision=cfg.get("revision"),
+        local_files_only=not bool(cfg.get("allow_download", False)),
+    )
+    print(f"config={args.config.resolve()}")
+    print(f"checkpoint={checkpoint}")
+
+    config = apply_model_overrides(
+        JaxSmolVLAConfig.from_pretrained(checkpoint),
+        cfg.get("model"),
+    )
+    print(
+        f"model overrides: action_dim={config.action_dim} state_dim={config.state_dim} "
+        f"image_keys={list(config.image_keys)}"
+    )
+
     model = JaxSmolVLA(config)
     trainer = JaxSmolVLATrainer(
         model,
-        load_params(args.checkpoint),
-        seed=args.seed,
-        total_steps=args.steps,
+        load_params(checkpoint),
+        seed=int(cfg.get("seed", 0)),
+        total_steps=int(require(cfg, "steps")),
     )
-    if args.resume:
-        trainer.restore(args.resume)
-    if args.data_parallel:
+    resume = cfg.get("resume")
+    if resume:
+        trainer.restore(Path(resume))
+    if bool(cfg.get("data_parallel", False)):
         trainer.enable_data_parallel()
+
+    rename_map = cfg.get("rename_map") or None
+    if rename_map is not None and not isinstance(rename_map, dict):
+        raise ValueError("rename_map must be a mapping")
+
+    allow_download = bool(cfg.get("allow_download", False))
+    allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     data = LeRobotJaxDataLoader(
-        args.checkpoint,
+        checkpoint,
         config,
-        repo_id=args.dataset_repo_id,
-        root=args.dataset_root,
-        revision=args.dataset_revision,
-        episodes=args.episodes,
-        action_key=args.action_key,
+        repo_id=require(cfg, "dataset_repo_id"),
+        root=Path(cfg["dataset_root"]) if cfg.get("dataset_root") else None,
+        revision=cfg.get("dataset_revision"),
+        episodes=cfg.get("episodes"),
+        action_key=cfg.get("action_key"),
         rename_map=rename_map,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        prefetch_factor=args.prefetch_factor,
-        video_backend=args.video_backend,
-        seed=args.seed,
-        local_files_only=not args.allow_tokenizer_download,
+        batch_size=int(cfg.get("batch_size", 8)),
+        num_workers=int(cfg.get("num_workers", 4)),
+        prefetch_factor=int(cfg.get("prefetch_factor", 2)),
+        video_backend=cfg.get("video_backend"),
+        seed=int(cfg.get("seed", 0)),
+        local_files_only=not (allow_tokenizer_download or allow_download),
     )
     batches = data.batches()
     print(
-        f"dataset={args.dataset_repo_id} frames={len(data.dataset)} "
+        f"dataset={cfg['dataset_repo_id']} frames={len(data.dataset)} "
         f"episodes={data.dataset.num_episodes} fps={data.dataset.fps} "
         f"action_key={data.action_key!r}"
     )
+
+    output = Path(require(cfg, "output"))
+    output.mkdir(parents=True, exist_ok=True)
+    steps = int(require(cfg, "steps"))
+    log_freq = int(cfg.get("log_freq", 10))
+    save_freq = int(cfg.get("save_freq", 1000))
+    wandb_cfg = cfg.get("wandb") or {}
+    wandb_run = init_wandb(cfg, config_path=args.config, checkpoint=checkpoint, model=config)
+    log_checkpoints = bool(wandb_cfg.get("log_checkpoints", False))
+
     start = time.perf_counter()
-    while int(trainer.state.step) < args.steps:
-        metrics = trainer.step(next(batches))
-        step = int(trainer.state.step)
-        if step == 1 or step % args.log_freq == 0:
-            metrics = jax.device_get(metrics)
-            elapsed = time.perf_counter() - start
-            print(
-                f"step={step} loss={float(metrics['loss']):.6f} "
-                f"grad_norm={float(metrics['grad_norm']):.4f} "
-                f"lr={float(metrics['learning_rate']):.3e} elapsed={elapsed:.1f}s"
-            )
-        if step % args.save_freq == 0 or step == args.steps:
-            path = args.output / f"checkpoint-{step:08d}"
-            trainer.save(path, source_dir=args.checkpoint)
-            data.preprocessor.save_normalization_assets(path)
-            print(f"saved checkpoint: {path}")
+    try:
+        while int(trainer.state.step) < steps:
+            metrics = trainer.step(next(batches))
+            step = int(trainer.state.step)
+            if step == 1 or step % log_freq == 0:
+                metrics = jax.device_get(metrics)
+                elapsed = time.perf_counter() - start
+                loss = float(metrics["loss"])
+                grad_norm = float(metrics["grad_norm"])
+                lr = float(metrics["learning_rate"])
+                print(
+                    f"step={step} loss={loss:.6f} "
+                    f"grad_norm={grad_norm:.4f} "
+                    f"lr={lr:.3e} elapsed={elapsed:.1f}s"
+                )
+                if wandb_run is not None:
+                    import wandb
+
+                    wandb.log(
+                        {
+                            "train/loss": loss,
+                            "train/grad_norm": grad_norm,
+                            "train/learning_rate": lr,
+                            "train/elapsed_s": elapsed,
+                        },
+                        step=step,
+                    )
+            if step % save_freq == 0 or step == steps:
+                path = output / f"checkpoint-{step:08d}"
+                trainer.save(path, source_dir=checkpoint)
+                data.preprocessor.save_normalization_assets(path)
+                print(f"saved checkpoint: {path}")
+                if wandb_run is not None:
+                    import wandb
+
+                    wandb.log({"train/checkpoint_step": step}, step=step)
+                    if log_checkpoints:
+                        wandb.save(str(path / "*"), base_path=str(output))
+    finally:
+        if wandb_run is not None:
+            import wandb
+
+            wandb.finish()
 
 
 if __name__ == "__main__":

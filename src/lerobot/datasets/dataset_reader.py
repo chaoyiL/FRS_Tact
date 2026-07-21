@@ -318,7 +318,14 @@ class DatasetReader:
         """
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
-        abs_idx = item["index"].item()
+        # Prefer episode-local reconstruction over the raw ``index`` column.
+        # Some converted v2.1→v3.0 datasets keep legacy absolute indices that no
+        # longer match ``dataset_from_index`` / ``dataset_to_index``. Using those
+        # values makes every delta timestamp look out-of-episode, so
+        # ``*_is_pad`` becomes all-True and training loss collapses to 0.
+        frame_idx = item["frame_index"].item()
+        ep = self._meta.episodes[ep_idx]
+        abs_idx = int(ep["dataset_from_index"]) + int(frame_idx)
 
         query_indices = None
         if self.delta_indices is not None:

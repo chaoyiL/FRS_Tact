@@ -64,24 +64,19 @@ dependencies = [
     "opencv-python-headless>=4.9.0,<4.14.0",
     "Pillow>=10.0.0,<13.0.0",
     "einops>=0.8.0,<0.9.0",
-
     # Config & Hub
     "draccus==0.10.0", # TODO: Relax version constraint
     "huggingface-hub>=0.34.0,<1.0.0",
     "requests>=2.32.0,<3.0.0",
-
     # Serialization & checkpointing
     "safetensors>=0.4.3,<1.0.0",
-
     # Lightweight utilities
     "packaging>=24.2,<26.0",
     "termcolor>=2.4.0,<4.0.0",
     "tqdm>=4.66.0,<5.0.0",
-
     # Build tools (required by opencv-python-headless on some platforms)
     "cmake>=3.29.0.1,<4.2.0",
     "setuptools>=71.0.0,<81.0.0",
-
     # Dataset (former extras: dataset / infer / av-dep)
     "datasets>=4.7.0,<5.0.0",
     "pandas>=2.0.0,<3.0.0",
@@ -95,22 +90,20 @@ dependencies = [
     "torchcodec>=0.3.0,<0.12.0; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')) or (sys_platform == 'darwin' and platform_machine == 'arm64')",
     "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
     "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
-
     # SmolVLA tokenizer + FlaxCLIPModel (tactile_encoder); Flax removed in transformers 5+
     "transformers>=4.57.0,<5.0.0",
-
     # SmolVLA JAX + local CUDA 12
     "jax[cuda12-local]>=0.6.2,<0.9.0",
     "flax>=0.11.0,<0.13.0",
     "optax>=0.2.5,<0.3.0",
     "orbax-checkpoint>=0.11.18,<0.12.0",
     "ml-dtypes>=0.5.1,<0.6.0",
-
     # Eval / tests (former: smolvla-likelihood-eval / smolvla-jax-test)
     "matplotlib>=3.10.3,<4.0.0",
     "contourpy>=1.3.0,<2.0.0",
     "scikit-learn>=1.6.0,<2.0.0",
     "pytest>=8.0.0,<10.0.0",
+    "wandb>=0.28.1",
 ]
 
 
