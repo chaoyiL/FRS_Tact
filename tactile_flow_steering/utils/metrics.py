@@ -25,6 +25,10 @@ class EvaluationResult:
     sample_rmse: np.ndarray
     sample_mae: np.ndarray
     predictions: np.ndarray | None
+    tactile_change: float | None = None
+    tactile_sim: float | None = None
+    gate_w: float | None = None
+    gate_active_frac: float | None = None
 
 
 def evaluate_split(
@@ -36,12 +40,23 @@ def evaluate_split(
     num_steps: int,
     keep_predictions: bool,
     solver: FlowSolver = "euler",
+    gate_tau: float | None = None,
+    gate_temperature: float | None = None,
 ) -> EvaluationResult:
+    from tactile_flow_steering.utils.data import gate_weights_from_change
+
     cache_indices: list[np.ndarray] = []
     flow_losses: list[np.ndarray] = []
     mses: list[np.ndarray] = []
     maes: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
+    tactile_changes: list[np.ndarray] = []
+    gate_weights: list[np.ndarray] = []
+    track_tactile = (
+        gate_tau is not None
+        and gate_temperature is not None
+        and bool(conditioner.episode_baselines)
+    )
 
     for indices, x_base_np, _predicted_np, gt_action_np, tactile_seq in conditioner.batches(
         split, batch_size=batch_size, shuffle=False, seed=0
@@ -63,6 +78,14 @@ def evaluate_split(
         maes.append(np.asarray(jax.device_get(mae)))
         if keep_predictions:
             predictions.append(np.asarray(jax.device_get(prediction), dtype=np.float32))
+        if track_tactile:
+            current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+            change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
+            gate_w = gate_weights_from_change(
+                change, tau=float(gate_tau), temperature=float(gate_temperature)
+            )
+            tactile_changes.append(change)
+            gate_weights.append(gate_w)
 
     if not cache_indices:
         raise ValueError(f"No samples found for split {split!r}.")
@@ -71,6 +94,18 @@ def evaluate_split(
     all_mse = np.concatenate(mses)
     all_mae = np.concatenate(maes)
     all_rmse = np.sqrt(all_mse)
+    if tactile_changes:
+        all_change = np.concatenate(tactile_changes)
+        all_gate = np.concatenate(gate_weights)
+        tactile_change = float(np.mean(all_change))
+        tactile_sim = float(np.mean(1.0 - all_change))
+        gate_w_mean = float(np.mean(all_gate))
+        gate_active_frac = float(np.mean(all_gate > 0.5))
+    else:
+        tactile_change = None
+        tactile_sim = None
+        gate_w_mean = None
+        gate_active_frac = None
     return EvaluationResult(
         flow_loss=float(np.mean(all_flow)),
         mse=float(np.mean(all_mse)),
@@ -82,4 +117,8 @@ def evaluate_split(
         sample_rmse=all_rmse,
         sample_mae=all_mae,
         predictions=np.concatenate(predictions) if keep_predictions else None,
+        tactile_change=tactile_change,
+        tactile_sim=tactile_sim,
+        gate_w=gate_w_mean,
+        gate_active_frac=gate_active_frac,
     )

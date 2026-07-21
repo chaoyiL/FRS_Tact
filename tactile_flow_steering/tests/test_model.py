@@ -137,6 +137,34 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["decoder_config"]["tactile_window"], 3)
             self.assertEqual(metadata["decoder_config"]["num_tactile_tokens"], 4)
 
+    def test_optimizer_state_round_trip(self):
+        from tactile_flow_steering.utils.checkpoint import load_optimizer_state
+        from tactile_flow_steering.utils.checkpoint import restore_optimizer_state
+        from tactile_flow_steering.utils.model import make_optimizer
+
+        model = self.make_model()
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0, total_steps=10)
+        optimizer.step[...] = jnp.asarray(4, dtype=jnp.uint32)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory)
+            save_checkpoint(
+                checkpoint_dir,
+                model,
+                epoch=2,
+                metrics={"train_flow_loss": 1.0},
+                optimizer=optimizer,
+            )
+            restored_model, metadata = load_checkpoint(checkpoint_dir)
+            self.assertTrue(metadata["has_opt_state"])
+            opt_state, step = load_optimizer_state(checkpoint_dir)
+            self.assertIsNotNone(opt_state)
+            self.assertEqual(step, 4)
+            restored_opt = make_optimizer(
+                restored_model, learning_rate=1e-3, weight_decay=0.0, total_steps=10
+            )
+            restore_optimizer_state(restored_opt, opt_state=opt_state, step=step)
+            self.assertEqual(int(restored_opt.step[...]), 4)
+
 
 if __name__ == "__main__":
     unittest.main()

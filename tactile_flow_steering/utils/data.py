@@ -312,15 +312,12 @@ class TactileConditionedBatches:
         print(f"episode_baselines={len(baselines)} (first-frame ResNet tokens)", flush=True)
         return baselines
 
-    def gate_weights_for_cache_indices(
+    def tactile_change_for_cache_indices(
         self,
         cache_indices: Sequence[int],
         current_tokens: np.ndarray | Array,
-        *,
-        tau: float,
-        temperature: float,
     ) -> np.ndarray:
-        """Compute ``w(s)`` using current-frame tokens vs episode baselines."""
+        """Per-sample ``s = mean_i(1 - cos)`` vs episode first-frame baselines."""
 
         if not self.episode_baselines:
             raise RuntimeError(
@@ -337,7 +334,19 @@ class TactileConditionedBatches:
                 raise KeyError(f"Missing episode baseline for episode_index={episode_index}.")
             baselines.append(self.episode_baselines[episode_index])
         baseline_batch = np.stack(baselines, axis=0)
-        change = tactile_change_from_tokens(current, baseline_batch)
+        return tactile_change_from_tokens(current, baseline_batch)
+
+    def gate_weights_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+        *,
+        tau: float,
+        temperature: float,
+    ) -> np.ndarray:
+        """Compute ``w(s)`` using current-frame tokens vs episode baselines."""
+
+        change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
         return gate_weights_from_change(change, tau=tau, temperature=temperature)
 
     def _samples_for_cache_indices(

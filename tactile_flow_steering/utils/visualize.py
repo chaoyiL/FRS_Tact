@@ -303,42 +303,6 @@ def _plot_episode_action_strips(
     return path
 
 
-def plot_training_history(
-    history_path: pathlib.Path,
-    *,
-    output_path: pathlib.Path | None = None,
-) -> pathlib.Path:
-    import csv
+# Re-export for train.py callers.
+from tactile_flow_steering.utils.history_plot import plot_training_history as plot_training_history
 
-    if not history_path.exists():
-        raise FileNotFoundError(f"Training history not found: {history_path}")
-
-    epochs: list[int] = []
-    train_flow_loss: list[float] = []
-    val_flow_loss: list[float] = []
-    val_mse: list[float] = []
-    with history_path.open(encoding="utf-8") as file:
-        for row in csv.DictReader(file):
-            epochs.append(int(row["epoch"]))
-            train_flow_loss.append(float(row["train_flow_loss"]))
-            val_flow_loss.append(float(row["val_flow_loss"]))
-            val_mse.append(float(row["val_mse"]))
-
-    if not epochs:
-        raise ValueError(f"No training history rows found in {history_path}.")
-
-    destination = output_path or history_path.with_name("training_curves.png")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, axis = plt.subplots(figsize=(10, 5), constrained_layout=True)
-    axis.plot(epochs, train_flow_loss, label="train_flow_loss", linewidth=2.0, color="#4C72B0")
-    axis.plot(epochs, val_flow_loss, label="val_flow_loss", linewidth=2.0, color="#55A868")
-    axis.plot(epochs, val_mse, label="val_mse", linewidth=2.0, color="#C44E52")
-    axis.set_xlabel("epoch")
-    axis.set_ylabel("loss / MSE")
-    axis.set_title("Training curves (target = GT action)")
-    axis.grid(True, alpha=0.3)
-    axis.legend()
-    fig.savefig(destination, dpi=150)
-    plt.close(fig)
-    return destination

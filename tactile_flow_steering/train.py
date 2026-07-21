@@ -15,6 +15,19 @@ from typing import Literal
 LossMode = Literal["gt", "gated"]
 
 
+def _resolve_resume_dir(
+    *,
+    output_dir: pathlib.Path,
+    resume: bool,
+    resume_from: pathlib.Path | None,
+) -> pathlib.Path | None:
+    if resume_from is not None:
+        return resume_from
+    if resume:
+        return output_dir / "last"
+    return None
+
+
 def train_decoder(
     *,
     cache_dir: pathlib.Path,
@@ -51,16 +64,24 @@ def train_decoder(
     pipeline_prefetch: int,
     image_cache_size: int,
     encode_batch_size: int,
+    resume: bool = False,
+    resume_from: pathlib.Path | None = None,
 ) -> None:
     import csv
+    import json
 
     import jax
     import jax.numpy as jnp
     import numpy as np
     from flax import nnx
 
+    from tactile_flow_steering.utils.checkpoint import CHECKPOINT_NAME
+    from tactile_flow_steering.utils.checkpoint import load_checkpoint
+    from tactile_flow_steering.utils.checkpoint import load_optimizer_state
+    from tactile_flow_steering.utils.checkpoint import restore_optimizer_state
     from tactile_flow_steering.utils.checkpoint import save_checkpoint
     from tactile_flow_steering.utils.data import TactileConditionedBatches
+    from tactile_flow_steering.utils.data import gate_weights_from_change
     from tactile_flow_steering.utils.data import resolve_tactile_window
     from tactile_flow_steering.utils.metrics import evaluate_split
     from tactile_flow_steering.utils.model import DEFAULT_GRU_HIDDEN_DIM
@@ -69,8 +90,34 @@ def train_decoder(
     from tactile_flow_steering.utils.model import make_optimizer
     from tactile_flow_steering.utils.model import resolve_peak_learning_rate
     from tactile_flow_steering.utils.model import train_step
-    from tactile_flow_steering.utils.visualize import plot_training_history
+    from tactile_flow_steering.utils.history_plot import plot_training_history
     from utils.cache import CachedPairs
+
+    history_fields = [
+        "epoch",
+        "train_flow_loss",
+        "val_flow_loss",
+        "val_mse",
+        "val_rmse",
+        "val_mae",
+        "train_tactile_sim",
+        "train_tactile_change",
+        "train_gate_w",
+        "train_gate_active_frac",
+        "val_tactile_sim",
+        "val_tactile_change",
+        "val_gate_w",
+        "val_gate_active_frac",
+    ]
+
+    def _blank_history_row(epoch: int, **filled: float | str) -> dict[str, float | int | str]:
+        row: dict[str, float | int | str] = {field: "" for field in history_fields}
+        row["epoch"] = epoch
+        row.update(filled)
+        return row
+
+    def _weighted_mean(values: list[float], counts: list[int]) -> float:
+        return float(np.average(np.asarray(values, dtype=np.float64), weights=counts))
 
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
@@ -86,6 +133,29 @@ def train_decoder(
         raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
+
+    resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
+    start_epoch = 1
+    resume_metadata: dict | None = None
+    resumed_opt_state = None
+    resumed_opt_step: int | None = None
+    if resume_dir is not None:
+        if not (resume_dir / CHECKPOINT_NAME).exists():
+            raise FileNotFoundError(f"Resume checkpoint not found: {resume_dir}")
+        model, resume_metadata = load_checkpoint(resume_dir)
+        resumed_opt_state, resumed_opt_step = load_optimizer_state(resume_dir)
+        start_epoch = int(resume_metadata["epoch"]) + 1
+        print(
+            f"resuming from {resume_dir} epoch={resume_metadata['epoch']} "
+            f"next_epoch={start_epoch} has_opt_state={resumed_opt_state is not None}",
+            flush=True,
+        )
+        if start_epoch > epochs:
+            print(
+                f"already finished: last epoch {resume_metadata['epoch']} >= --epochs {epochs}",
+                flush=True,
+            )
+            return
 
     print(f"jax_devices={jax.devices()}", flush=True)
     if not any(d.platform == "gpu" for d in jax.devices()):
@@ -127,14 +197,24 @@ def train_decoder(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
     )
-    model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
+    if resume_metadata is None:
+        model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
+    else:
+        ckpt_config = DecoderConfig(**resume_metadata["decoder_config"])
+        if dataclasses_asdict_mismatch := _config_diff(ckpt_config, decoder_config):
+            print(
+                "warning: CLI decoder config differs from resume checkpoint; "
+                f"keeping checkpoint weights. diffs={dataclasses_asdict_mismatch}",
+                flush=True,
+            )
+        # ``model`` already loaded above.
     train_samples = len(pairs.indices("train"))
     steps_per_epoch = max(1, (train_samples + batch_size - 1) // batch_size)
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch
     total_steps = epochs * steps_per_epoch
     peak_learning_rate = resolve_peak_learning_rate(
         learning_rate,
-        model_dim=model_dim,
+        model_dim=int(model.config.model_dim),
         lr_reference_dim=lr_reference_dim,
     )
     optimizer = make_optimizer(
@@ -147,9 +227,16 @@ def train_decoder(
         min_learning_rate_ratio=min_learning_rate_ratio,
         cosine_decay=cosine_decay,
     )
+    if resumed_opt_state is not None:
+        restore_optimizer_state(optimizer, opt_state=resumed_opt_state, step=resumed_opt_step)
+    elif resume_dir is not None:
+        print(
+            "warning: optimizer state missing in checkpoint; reinitialized Adam state.",
+            flush=True,
+        )
     if lr_reference_dim is not None:
         print(
-            f"learning_rate={learning_rate:g} scaled by sqrt({lr_reference_dim}/{model_dim}) "
+            f"learning_rate={learning_rate:g} scaled by sqrt({lr_reference_dim}/{model.config.model_dim}) "
             f"-> peak={peak_learning_rate:g}"
         )
     else:
@@ -164,7 +251,7 @@ def train_decoder(
         f"dataloader=num_workers={num_workers} prefetch_batches={prefetch_batches} "
         f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
         f"image_cache_size={image_cache_size} encode_batch_size={encode_batch_size} "
-        f"eval_every={eval_every}"
+        f"eval_every={eval_every} start_epoch={start_epoch} epochs={epochs}"
     )
     if loss_mode == "gt":
         print("loss_mode=gt (target=gt_action)")
@@ -184,33 +271,45 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     best_mse = float("inf")
+    best_path = output_dir / "best" / CHECKPOINT_NAME
+    if best_path.exists():
+        with best_path.open(encoding="utf-8") as file:
+            best_meta = json.load(file)
+        best_mse = float(best_meta.get("metrics", {}).get("val_mse", best_mse))
     base_key = jax.random.key(seed)
+    history_exists = history_path.exists() and history_path.stat().st_size > 0
+    history_mode = "a" if resume_dir is not None and history_exists else "w"
 
     try:
-        with history_path.open("w", newline="", encoding="utf-8") as history_file:
-            writer = csv.DictWriter(
-                history_file,
-                fieldnames=["epoch", "train_flow_loss", "val_flow_loss", "val_mse", "val_rmse", "val_mae"],
-            )
-            writer.writeheader()
+        with history_path.open(history_mode, newline="", encoding="utf-8") as history_file:
+            writer = csv.DictWriter(history_file, fieldnames=history_fields)
+            if history_mode == "w":
+                writer.writeheader()
 
-            for epoch in range(1, epochs + 1):
+            for epoch in range(start_epoch, epochs + 1):
                 losses: list[float] = []
                 weights: list[int] = []
+                tactile_sims: list[float] = []
+                tactile_changes: list[float] = []
+                gate_ws: list[float] = []
+                gate_actives: list[float] = []
                 for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
                     conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
                 ):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
+                    batch_n = len(x_base_np)
                     if loss_mode == "gated":
                         current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
-                        gate_w = conditioner.gate_weights_for_cache_indices(
-                            indices,
-                            current_tokens,
-                            tau=gate_tau,
-                            temperature=gate_temperature,
+                        change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
+                        gate_w = gate_weights_from_change(
+                            change, tau=gate_tau, temperature=gate_temperature
                         )
+                        tactile_sims.append(float(np.mean(1.0 - change)))
+                        tactile_changes.append(float(np.mean(change)))
+                        gate_ws.append(float(np.mean(gate_w)))
+                        gate_actives.append(float(np.mean(gate_w > 0.5)))
                     else:
-                        gate_w = np.ones((len(indices),), dtype=np.float32)
+                        gate_w = np.ones((batch_n,), dtype=np.float32)
                     loss = train_step(
                         model,
                         optimizer,
@@ -224,14 +323,28 @@ def train_decoder(
                         gate_lambda=gate_lambda,
                     )
                     losses.append(float(jax.device_get(loss)))
-                    weights.append(len(x_base_np))
+                    weights.append(batch_n)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
+                        extra = ""
+                        if loss_mode == "gated":
+                            extra = (
+                                f" tactile_sim={tactile_sims[-1]:.4f}"
+                                f" gate_w={gate_ws[-1]:.4f}"
+                            )
                         print(
                             f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
-                            f"flow_loss={losses[-1]:.6f}",
+                            f"flow_loss={losses[-1]:.6f}{extra}",
                             flush=True,
                         )
                 train_loss = float(np.average(losses, weights=weights))
+                train_tactile_metrics: dict[str, float] = {}
+                if loss_mode == "gated" and tactile_sims:
+                    train_tactile_metrics = {
+                        "train_tactile_sim": _weighted_mean(tactile_sims, weights),
+                        "train_tactile_change": _weighted_mean(tactile_changes, weights),
+                        "train_gate_w": _weighted_mean(gate_ws, weights),
+                        "train_gate_active_frac": _weighted_mean(gate_actives, weights),
+                    }
                 run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
@@ -255,15 +368,27 @@ def train_decoder(
                         batch_size=batch_size,
                         num_steps=validation_steps,
                         keep_predictions=False,
+                        gate_tau=gate_tau if loss_mode == "gated" else None,
+                        gate_temperature=gate_temperature if loss_mode == "gated" else None,
                     )
-                    metrics = {
+                    metrics: dict[str, float] = {
                         "train_flow_loss": train_loss,
                         "val_flow_loss": validation.flow_loss,
                         "val_mse": validation.mse,
                         "val_rmse": validation.rmse,
                         "val_mae": validation.mae,
+                        **train_tactile_metrics,
                     }
-                    writer.writerow({"epoch": epoch, **metrics})
+                    if validation.tactile_sim is not None:
+                        metrics.update(
+                            {
+                                "val_tactile_sim": validation.tactile_sim,
+                                "val_tactile_change": float(validation.tactile_change),
+                                "val_gate_w": float(validation.gate_w),
+                                "val_gate_active_frac": float(validation.gate_active_frac),
+                            }
+                        )
+                    writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     save_checkpoint(
                         output_dir / "last",
@@ -271,6 +396,7 @@ def train_decoder(
                         epoch=epoch,
                         metrics=metrics,
                         extra_metadata=checkpoint_extra,
+                        optimizer=optimizer,
                     )
                     if validation.mse < best_mse:
                         best_mse = validation.mse
@@ -280,25 +406,29 @@ def train_decoder(
                             epoch=epoch,
                             metrics=metrics,
                             extra_metadata=checkpoint_extra,
+                            optimizer=optimizer,
                         )
+                    tactile_msg = ""
+                    if train_tactile_metrics:
+                        tactile_msg = (
+                            f" train_tactile_sim={train_tactile_metrics['train_tactile_sim']:.4f}"
+                            f" train_gate_w={train_tactile_metrics['train_gate_w']:.4f}"
+                        )
+                        if validation.tactile_sim is not None:
+                            tactile_msg += (
+                                f" val_tactile_sim={validation.tactile_sim:.4f}"
+                                f" val_gate_w={validation.gate_w:.4f}"
+                            )
                     print(
                         f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
                         f"val_flow_loss={validation.flow_loss:.8f} val_mse={validation.mse:.8f} "
-                        f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}",
+                        f"val_rmse={validation.rmse:.8f} val_mae={validation.mae:.8f}"
+                        f"{tactile_msg}",
                         flush=True,
                     )
                 else:
-                    metrics = {"train_flow_loss": train_loss}
-                    writer.writerow(
-                        {
-                            "epoch": epoch,
-                            "train_flow_loss": train_loss,
-                            "val_flow_loss": "",
-                            "val_mse": "",
-                            "val_rmse": "",
-                            "val_mae": "",
-                        }
-                    )
+                    metrics = {"train_flow_loss": train_loss, **train_tactile_metrics}
+                    writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     save_checkpoint(
                         output_dir / "last",
@@ -306,9 +436,17 @@ def train_decoder(
                         epoch=epoch,
                         metrics=metrics,
                         extra_metadata=checkpoint_extra,
+                        optimizer=optimizer,
                     )
+                    tactile_msg = ""
+                    if train_tactile_metrics:
+                        tactile_msg = (
+                            f" train_tactile_sim={train_tactile_metrics['train_tactile_sim']:.4f}"
+                            f" train_gate_w={train_tactile_metrics['train_gate_w']:.4f}"
+                        )
                     print(
-                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} (skip val)",
+                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f}"
+                        f"{tactile_msg} (skip val)",
                         flush=True,
                     )
 
@@ -319,6 +457,19 @@ def train_decoder(
             print(f"plot={plot_path}")
     finally:
         conditioner.close()
+
+
+def _config_diff(left: object, right: object) -> dict[str, tuple[object, object]]:
+    import dataclasses
+
+    diffs: dict[str, tuple[object, object]] = {}
+    left_dict = dataclasses.asdict(left)  # type: ignore[arg-type]
+    right_dict = dataclasses.asdict(right)  # type: ignore[arg-type]
+    for key, left_value in left_dict.items():
+        right_value = right_dict.get(key)
+        if left_value != right_value:
+            diffs[key] = (left_value, right_value)
+    return diffs
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -405,6 +556,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from output-dir/last (params + optimizer state if present).",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=pathlib.Path,
+        help="Resume from an explicit checkpoint directory (overrides --resume).",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=8,
@@ -480,6 +641,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         pipeline_prefetch=args.pipeline_prefetch,
         image_cache_size=args.image_cache_size,
         encode_batch_size=args.encode_batch_size,
+        resume=args.resume,
+        resume_from=args.resume_from,
     )
 
 
