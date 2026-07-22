@@ -15,10 +15,9 @@ action_key: actions
 rename_map:
   observation.images.camera0: observation.images.camera1
   observation.images.camera1: observation.images.camera2
-  observation.images.tactile_left_0: observation.images.camera3
 
 # ---- 输出与训练超参 ----
-output: /workspace/smolvla_runs/tactile_test_03_3gpu
+output: /workspace/smolvla_runs/tactile_test_03_3gpu_2
 steps: 30000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4
@@ -66,7 +65,6 @@ model:
   image_keys:
     - observation.images.camera1
     - observation.images.camera2
-    - observation.images.camera3
   chunk_size: 50
   n_action_steps: 50
   # image_keys 里缺的相机，最多用几路空图（mask=0）补齐；训练/部署共用，写进 checkpoint
