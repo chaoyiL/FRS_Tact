@@ -35,8 +35,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--allow-download", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--dataset-repo-id")
     parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--dataset-revision")
-    parser.add_argument("--episodes", type=int, nargs="+")
     parser.add_argument("--action-key")
     parser.add_argument("--rename-map", help="JSON object; overrides YAML rename_map")
     parser.add_argument("--num-workers", type=int)
@@ -72,8 +70,6 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         "allow_download": args.allow_download,
         "dataset_repo_id": args.dataset_repo_id,
         "dataset_root": args.dataset_root,
-        "dataset_revision": args.dataset_revision,
-        "episodes": args.episodes,
         "action_key": args.action_key,
         "num_workers": args.num_workers,
         "prefetch_factor": args.prefetch_factor,
@@ -211,8 +207,6 @@ def main() -> None:
         config,
         repo_id=require(cfg, "dataset_repo_id"),
         root=Path(cfg["dataset_root"]) if cfg.get("dataset_root") else None,
-        revision=cfg.get("dataset_revision"),
-        episodes=cfg.get("episodes"),
         action_key=cfg.get("action_key"),
         rename_map=rename_map,
         batch_size=int(cfg.get("batch_size", 8)),
