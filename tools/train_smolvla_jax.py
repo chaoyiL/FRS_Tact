@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
 from dataclasses import fields, replace
 from pathlib import Path
@@ -15,7 +14,7 @@ import yaml
 
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
-from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader
+from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader, parse_dataset_sources
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 
@@ -33,10 +32,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", help="Override YAML: local path or Hugging Face repo id")
     parser.add_argument("--revision")
     parser.add_argument("--allow-download", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--dataset-repo-id")
-    parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--action-key")
-    parser.add_argument("--rename-map", help="JSON object; overrides YAML rename_map")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--prefetch-factor", type=int)
     parser.add_argument("--video-backend")
@@ -68,9 +63,6 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         "checkpoint": args.checkpoint,
         "revision": args.revision,
         "allow_download": args.allow_download,
-        "dataset_repo_id": args.dataset_repo_id,
-        "dataset_root": args.dataset_root,
-        "action_key": args.action_key,
         "num_workers": args.num_workers,
         "prefetch_factor": args.prefetch_factor,
         "video_backend": args.video_backend,
@@ -87,11 +79,6 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
     for key, value in cli.items():
         if value is not None:
             merged[key] = value
-    if args.rename_map is not None:
-        rename_map = json.loads(args.rename_map)
-        if not isinstance(rename_map, dict):
-            raise ValueError("--rename-map must be a JSON object")
-        merged["rename_map"] = rename_map
     return merged
 
 
@@ -139,14 +126,11 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
         config={
             "config_path": str(config_path.resolve()),
             "checkpoint": str(checkpoint),
-            "dataset_repo_id": cfg.get("dataset_repo_id"),
-            "dataset_root": cfg.get("dataset_root"),
-            "action_key": cfg.get("action_key"),
+            "datasets": cfg.get("datasets"),
             "batch_size": cfg.get("batch_size"),
             "steps": cfg.get("steps"),
             "seed": cfg.get("seed"),
             "data_parallel": cfg.get("data_parallel"),
-            "rename_map": cfg.get("rename_map"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
         },
@@ -196,19 +180,13 @@ def main() -> None:
     if bool(cfg.get("data_parallel", False)):
         trainer.enable_data_parallel()
 
-    rename_map = cfg.get("rename_map") or None
-    if rename_map is not None and not isinstance(rename_map, dict):
-        raise ValueError("rename_map must be a mapping")
-
     allow_download = bool(cfg.get("allow_download", False))
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
+    sources = parse_dataset_sources(cfg)
     data = LeRobotJaxDataLoader(
         checkpoint,
         config,
-        repo_id=require(cfg, "dataset_repo_id"),
-        root=Path(cfg["dataset_root"]) if cfg.get("dataset_root") else None,
-        action_key=cfg.get("action_key"),
-        rename_map=rename_map,
+        sources=sources,
         batch_size=int(cfg.get("batch_size", 8)),
         num_workers=int(cfg.get("num_workers", 4)),
         prefetch_factor=int(cfg.get("prefetch_factor", 2)),
@@ -217,11 +195,13 @@ def main() -> None:
         local_files_only=not (allow_tokenizer_download or allow_download),
     )
     batches = data.batches()
-    print(
-        f"dataset={cfg['dataset_repo_id']} frames={len(data.dataset)} "
-        f"episodes={data.dataset.num_episodes} fps={data.dataset.fps} "
-        f"action_key={data.action_key!r}"
-    )
+    for summary in data.dataset_summaries:
+        print(
+            f"dataset={summary['repo_id']} frames={summary['frames']} "
+            f"episodes={summary['episodes']} fps={summary['fps']} "
+            f"action_key={summary['action_key']!r} weight={summary['weight']}"
+        )
+    print(f"combined_frames={len(data.dataset)}")
 
     output = Path(require(cfg, "output"))
     output.mkdir(parents=True, exist_ok=True)

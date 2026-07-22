@@ -8,13 +8,21 @@ revision: null
 allow_download: true
 
 # ---- 数据集 ----
-dataset_repo_id: chaoyi/tactile_test_03
-# dataset_root: /workspace/lerobot_v30/chaoyi/tactile_test_03
-action_key: actions
-# 把数据集相机名映射成 checkpoint 期望的特征名；不需要可留空 {}
-rename_map:
-  observation.images.camera0: observation.images.camera1
-  observation.images.camera1: observation.images.camera2
+# 写一个或多个均可；每个条目可有独立 root / action_key / rename_map / weight
+datasets:
+  - repo_id: chaoyi/tactile_test_03
+    # root: /workspace/lerobot_v30/chaoyi/tactile_test_03
+    action_key: actions
+    weight: 1.0
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+  # - repo_id: chaoyi/another_dataset
+  #   action_key: actions
+  #   weight: 1.0
+  #   rename_map:
+  #     observation.images.cam_high: observation.images.camera1
+  #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
 output: /workspace/smolvla_runs/tactile_test_03_3gpu_2
