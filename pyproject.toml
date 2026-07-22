@@ -94,6 +94,8 @@ dependencies = [
     "transformers>=4.57.0,<5.0.0",
     # SmolVLA JAX + local CUDA 12
     "jax[cuda12-local]>=0.6.2,<0.9.0",
+    # Provides ptxas/nvlink for XLA GPU JIT (jax[cuda12-local] does not pull these)
+    "nvidia-cuda-nvcc-cu12>=12.8,<13; sys_platform == 'linux'",
     "flax>=0.11.0,<0.13.0",
     "optax>=0.2.5,<0.3.0",
     "orbax-checkpoint>=0.11.18,<0.12.0",

@@ -5,7 +5,7 @@
 
 # ---- 模型 ----
 # 本地 checkpoint 目录，或 Hugging Face model id
-checkpoint: /home/typhon/models/black-smash-smolvla-40k
+checkpoint: /home/typhon/FRS_Tact/checkpoints/tactile_test_03_3gpu
 revision: null
 # true 时允许下载缺失的 Hub 资源（tokenizer / checkpoint）
 allow_download: false
@@ -14,7 +14,11 @@ jit: true
 # 可选：覆盖 Euler denoising steps；null 表示用 checkpoint 里的 num_steps
 num_steps: null
 # 机器人观测 key -> checkpoint 期望的特征名；不需要可留空 {}
-rename_map: {}
+rename_map: {
+  observation.images.camera0: observation.images.camera1,
+  observation.images.camera1: observation.images.camera2,
+  observation.images.tactile_left_0: observation.images.camera3
+}
 # 示例（与 train_smolvla_jax.yaml 对齐时）:
 # rename_map:
 #   observation.images.camera0: observation.images.camera1
