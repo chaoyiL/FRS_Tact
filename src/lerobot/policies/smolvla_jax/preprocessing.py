@@ -174,6 +174,83 @@ class JaxSmolVLAPreprocessor:
             dict(self.post_stats),
             destination / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
         )
+        self._write_processor_configs(destination)
+
+    def _write_processor_configs(self, destination: Path) -> None:
+        """Keep processor JSON metadata aligned with the effective model config."""
+
+        preprocessor_path = destination / "policy_preprocessor.json"
+        postprocessor_path = destination / "policy_postprocessor.json"
+        preprocessor = self._load_json_from(preprocessor_path, default=self._load_json("policy_preprocessor.json", default={}))
+        postprocessor = self._load_json_from(
+            postprocessor_path, default=self._load_json("policy_postprocessor.json", default={})
+        )
+
+        self._set_step_config(
+            preprocessor,
+            "rename_observations_processor",
+            {"rename_map": dict(self.rename_map)},
+        )
+        self._set_step_config(
+            preprocessor,
+            "tokenizer_processor",
+            {
+                "max_length": self.config.tokenizer_max_length,
+                "padding": self.config.pad_language_to,
+                "tokenizer_name": self.config.tokenizer_name,
+            },
+        )
+        normalizer_features = {
+            "observation.state": {"type": "STATE", "shape": [self.config.state_dim]},
+            "action": {"type": "ACTION", "shape": [self.config.action_dim]},
+        }
+        for key in self.config.image_keys:
+            normalizer_features[key] = {
+                "type": "VISUAL",
+                "shape": [3, self.config.resize_height, self.config.resize_width],
+            }
+        self._set_step_config(
+            preprocessor,
+            "normalizer_processor",
+            {
+                "features": normalizer_features,
+                "norm_map": {"VISUAL": "IDENTITY", "STATE": "MEAN_STD", "ACTION": "MEAN_STD"},
+            },
+        )
+        self._set_step_config(
+            postprocessor,
+            "unnormalizer_processor",
+            {
+                "features": {"action": {"type": "ACTION", "shape": [self.config.action_dim]}},
+                "norm_map": {"VISUAL": "IDENTITY", "STATE": "MEAN_STD", "ACTION": "MEAN_STD"},
+            },
+        )
+
+        with preprocessor_path.open("w") as file:
+            json.dump(preprocessor, file, indent=2)
+            file.write("\n")
+        with postprocessor_path.open("w") as file:
+            json.dump(postprocessor, file, indent=2)
+            file.write("\n")
+
+    @staticmethod
+    def _load_json_from(path: Path, *, default: Any) -> Any:
+        if not path.is_file():
+            return default
+        with path.open() as file:
+            return json.load(file)
+
+    @staticmethod
+    def _set_step_config(processor: dict[str, Any], registry_name: str, updates: Mapping[str, Any]) -> None:
+        steps = processor.setdefault("steps", [])
+        for step in steps:
+            if step.get("registry_name") != registry_name:
+                continue
+            config = dict(step.get("config") or {})
+            config.update(dict(updates))
+            step["config"] = config
+            return
+        steps.append({"registry_name": registry_name, "config": dict(updates)})
 
     def _stat(self, key: str, name: str, length: int, *, postprocess: bool = False) -> Array | None:
         values = self.post_stats if postprocess and self.post_stats else self.stats

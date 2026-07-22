@@ -148,6 +148,51 @@ def save_portable_params(
     return destination
 
 
+def _sync_visual_input_features(
+    input_features: dict[str, Any],
+    *,
+    image_keys: tuple[str, ...],
+    resize_height: int,
+    resize_width: int,
+) -> None:
+    """Make VISUAL entries match the image keys used at train/eval time."""
+
+    existing_visual = {
+        key: dict(feature)
+        for key, feature in input_features.items()
+        if isinstance(feature, Mapping) and feature.get("type") == "VISUAL"
+    }
+    for key in list(input_features):
+        feature = input_features.get(key)
+        if isinstance(feature, Mapping) and feature.get("type") == "VISUAL" and key not in image_keys:
+            del input_features[key]
+
+    default_shape = [3, int(resize_height), int(resize_width)]
+    template = next(iter(existing_visual.values()), {"type": "VISUAL", "shape": default_shape})
+    for key in image_keys:
+        feature = dict(existing_visual.get(key, template))
+        feature["type"] = "VISUAL"
+        feature.setdefault("shape", default_shape)
+        input_features[key] = feature
+
+
+def _legacy_flags_from_module_modes(module_modes: Mapping[str, Any] | None) -> dict[str, bool] | None:
+    """Derive the older boolean training switches from module_modes when present."""
+
+    if module_modes is None:
+        return None
+    vision = str(module_modes.get("vision", "frozen")).lower()
+    connector = str(module_modes.get("connector", "frozen")).lower()
+    vlm_text = str(module_modes.get("vlm_text", "frozen")).lower()
+    state_proj = str(module_modes.get("state_proj", "full")).lower()
+    train_expert_only = connector == "frozen" and vlm_text == "frozen" and vision == "frozen"
+    return {
+        "freeze_vision_encoder": vision == "frozen",
+        "train_expert_only": train_expert_only,
+        "train_state_proj": state_proj != "frozen",
+    }
+
+
 def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) -> Path:
     """Persist training-time overrides in the checkpoint's compatible config.json."""
 
@@ -165,22 +210,45 @@ def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) ->
             "max_state_dim": config.max_state_dim,
             "max_action_dim": config.max_action_dim,
             "empty_cameras": config.empty_cameras,
+            "resize_imgs_with_padding": [config.resize_width, config.resize_height],
+            "tokenizer_max_length": config.tokenizer_max_length,
+            "pad_language_to": config.pad_language_to,
+            "vlm_model_name": config.tokenizer_name,
+            "num_steps": config.num_steps,
+            "add_image_special_tokens": config.add_image_special_tokens,
             "module_modes": config.module_modes,
             "lora_rank": config.lora_rank,
             "lora_alpha": config.lora_alpha,
             "optimizer_lr": config.optimizer_lr,
+            "optimizer_betas": [config.optimizer_beta1, config.optimizer_beta2],
             "optimizer_eps": config.optimizer_eps,
             "optimizer_weight_decay": config.optimizer_weight_decay,
             "optimizer_grad_clip_norm": config.optimizer_grad_clip_norm,
             "scheduler_warmup_steps": config.scheduler_warmup_steps,
             "scheduler_decay_steps": config.scheduler_decay_steps,
             "scheduler_decay_lr": config.scheduler_decay_lr,
+            "freeze_vision_encoder": config.freeze_vision_encoder,
+            "train_expert_only": config.train_expert_only,
+            "train_state_proj": config.train_state_proj,
         }
     )
+    legacy = _legacy_flags_from_module_modes(config.module_modes)
+    if legacy is not None:
+        # Prefer module_modes as source of truth when both are present.
+        raw.update(legacy)
+
     input_features = raw.setdefault("input_features", {})
     input_features.setdefault("observation.state", {"type": "STATE"})["shape"] = [config.state_dim]
+    input_features["observation.state"]["type"] = "STATE"
+    _sync_visual_input_features(
+        input_features,
+        image_keys=tuple(config.image_keys),
+        resize_height=config.resize_height,
+        resize_width=config.resize_width,
+    )
     output_features = raw.setdefault("output_features", {})
     output_features.setdefault("action", {"type": "ACTION"})["shape"] = [config.action_dim]
+    output_features["action"]["type"] = "ACTION"
 
     destination.mkdir(parents=True, exist_ok=True)
     with config_path.open("w") as file:
