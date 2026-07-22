@@ -1,0 +1,71 @@
+# SmolVLA JAX 远程部署配置。改这里即可切换 checkpoint / 机器人地址 / 任务指令。
+# 运行:
+#   uv run python -m deploy_smolvla.remote_client --config configs/deploy_smolvla_jax.yaml
+#   ./deploy_smolvla/run_client.sh configs/deploy_smolvla_jax.yaml
+
+# ---- 模型 ----
+# 本地 checkpoint 目录，或 Hugging Face model id
+checkpoint: /home/typhon/models/black-smash-smolvla-40k
+revision: null
+# true 时允许下载缺失的 Hub 资源（tokenizer / checkpoint）
+allow_download: false
+seed: 0
+jit: true
+# 可选：覆盖 Euler denoising steps；null 表示用 checkpoint 里的 num_steps
+num_steps: null
+# 机器人观测 key -> checkpoint 期望的特征名；不需要可留空 {}
+rename_map: {}
+# 示例（与 train_smolvla_jax.yaml 对齐时）:
+# rename_map:
+#   observation.images.camera0: observation.images.camera1
+#   observation.images.camera1: observation.images.camera2
+#   observation.images.tactile_left_0: observation.images.camera3
+
+# ---- 机器人连接 ----
+connection:
+  # 局域网: "192.168.1.10" / "ws://192.168.1.10:26421"
+  # 隧道: "https://example.ngrok-free.dev"
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  action_ack_timeout_s: 30.0
+  # 默认 token；若设置了 token_env 对应的环境变量，则以环境变量为准
+  token: 123
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+# ---- 观测 / 任务（下发给 robot server）----
+observation:
+  data_type: vision
+  language_prompt: Pour the black powder into the mortar and grind.
+  # 当前 JAX 部署要求双臂 + 带 state 观测
+  single_arm_mode: false
+  no_state_obs_mode: false
+
+# ---- 控制 ----
+control:
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  # 必须与 checkpoint.chunk_size 一致
+  action_horizon: 50
+  steps_per_inference: 5
+  # 仅当 checkpoint 开启 RTC 时使用；不设则默认用 steps_per_inference
+  inference_delay: null
+  execution_horizon: null
+
+# ---- 运行时 ----
+runtime:
+  # false：warmup 后需按 Enter 再给机器人发 start（真机更安全）
+  auto_start: false
+  warmup_runs: 2
+  status_interval_s: 2.0
+  # 0 表示一直跑到 Ctrl+C；正数适合协议冒烟测试
+  max_iterations: 0
+
+# ---- 观测落盘（异步，不阻塞推理）----
+logging:
+  save_observations: false
+  output_dir: outputs/vb3_remote_observations
+  save_every: 1
+  queue_size: 32

@@ -104,6 +104,9 @@ dependencies = [
     "scikit-learn>=1.6.0,<2.0.0",
     "pytest>=8.0.0,<10.0.0",
     "wandb>=0.28.1",
+    # Remote robot bridge client (deploy/)
+    "websockets>=13.0,<16.0",
+    "msgpack>=1.0.0,<2.0.0",
 ]
 
 
@@ -124,7 +127,8 @@ torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["lerobot*", "deploy*"]
 
 [tool.ruff]
 target-version = "py312"
