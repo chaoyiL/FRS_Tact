@@ -10,7 +10,7 @@ allow_download: true
 # ---- 数据集 ----
 # 写一个或多个均可；每个条目可有独立 root / action_key / rename_map / weight
 datasets:
-  - repo_id: chaoyi/tactile_test_03
+  - repo_id: chaoyi/tactile_test_05
     # root: /workspace/lerobot_v30/chaoyi/tactile_test_03
     action_key: actions
     weight: 1.0
@@ -25,14 +25,14 @@ datasets:
   #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
-output: /workspace/smolvla_runs/tactile_test_03_3gpu_2
-steps: 30000
+output: /root/smolvla_runs/tactile_test_03_3gpu
+steps: 60000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4
 prefetch_factor: 2
 video_backend: null
 log_freq: 10
-save_freq: 1000
+save_freq: 5000
 seed: 42
 resume: null
 data_parallel: true
@@ -77,6 +77,19 @@ model:
   n_action_steps: 50
   # image_keys 里缺的相机，最多用几路空图（mask=0）补齐；训练/部署共用，写进 checkpoint
   empty_cameras: 0
+
+  # ---- VLM / Expert 架构维度（覆盖 checkpoint；改这里即可）----
+  # 层数可小于预训练（只用前 N 层）；expert 层数须能整除 num_vlm_layers
+  num_vlm_layers: 8
+  num_expert_layers: -1          # 设为 -1 则与 num_vlm_layers 一致
+  self_attn_every_n_layers: 2
+  attention_mode: cross_attn     # cross_attn | self_attn
+  # expert 隐层宽 = text_hidden_size * expert_width_multiplier（改宽度会与预训练 expert 权重 shape 不匹配）
+  expert_width_multiplier: 0.75
+  # text_hidden_size: 960         # 一般保持与预训练 VLM 一致，勿随意改
+  # text_intermediate_size: 2560
+  # expert_hidden_size / expert_intermediate_size 默认由上面两项自动推导；如需可显式覆盖
+
   optimizer_lr: 0.0001
   optimizer_grad_clip_norm: 10.0
   scheduler_warmup_steps: 1000

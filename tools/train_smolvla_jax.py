@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import time
-from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -89,21 +88,7 @@ def require(cfg: dict[str, Any], key: str) -> Any:
 
 
 def apply_model_overrides(config: JaxSmolVLAConfig, overrides: dict[str, Any] | None) -> JaxSmolVLAConfig:
-    if not overrides:
-        return config
-    if not isinstance(overrides, dict):
-        raise ValueError("model overrides must be a mapping")
-    known = {field.name for field in fields(JaxSmolVLAConfig)}
-    unknown = sorted(set(overrides) - known)
-    if unknown:
-        raise ValueError(f"unknown model override fields: {unknown}")
-    cleaned: dict[str, Any] = {}
-    for key, value in overrides.items():
-        if key == "image_keys" and value is not None:
-            cleaned[key] = tuple(value)
-        else:
-            cleaned[key] = value
-    return replace(config, **cleaned)
+    return config.with_overrides(overrides)
 
 
 def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, model: JaxSmolVLAConfig):
@@ -157,7 +142,10 @@ def main() -> None:
     )
     print(
         f"model overrides: action_dim={config.action_dim} state_dim={config.state_dim} "
-        f"image_keys={list(config.image_keys)}"
+        f"image_keys={list(config.image_keys)} "
+        f"num_vlm_layers={config.num_vlm_layers} num_expert_layers={config.num_expert_layers} "
+        f"expert_width_multiplier={config.expert_width_multiplier} "
+        f"text_hidden_size={config.text_hidden_size} expert_hidden_size={config.expert_hidden_size}"
     )
 
     model = JaxSmolVLA(config)

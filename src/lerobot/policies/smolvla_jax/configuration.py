@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
 from .rtc import JaxRTCConfig
+
+
+def compute_expert_sizes(text_hidden_size: int, expert_width_multiplier: float) -> tuple[int, int]:
+    """Match PyTorch SmolVLA get_intermediate_size() for the action expert."""
+
+    expert_hidden_size = int(text_hidden_size * expert_width_multiplier)
+    intermediate = int(4 * int(2 * expert_hidden_size / 3))
+    expert_intermediate_size = 256 * ((intermediate + 255) // 256)
+    return expert_hidden_size, expert_intermediate_size
 
 
 @dataclass(frozen=True)
@@ -93,11 +102,9 @@ class JaxSmolVLAConfig:
         requested_expert_layers = int(raw.get("num_expert_layers", -1))
         num_expert_layers = requested_expert_layers if requested_expert_layers > 0 else num_vlm_layers
         expert_width_multiplier = float(raw.get("expert_width_multiplier", 0.75))
-        expert_hidden_size = int(cls.text_hidden_size * expert_width_multiplier)
-
-        # Matches get_intermediate_size() in the PyTorch implementation.
-        intermediate = int(4 * int(2 * expert_hidden_size / 3))
-        expert_intermediate_size = 256 * ((intermediate + 255) // 256)
+        expert_hidden_size, expert_intermediate_size = compute_expert_sizes(
+            cls.text_hidden_size, expert_width_multiplier
+        )
         rtc_raw = raw.get("rtc_config")
         rtc_config = None
         if rtc_raw is not None:
@@ -156,3 +163,45 @@ class JaxSmolVLAConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def with_overrides(self, overrides: dict[str, Any] | None) -> JaxSmolVLAConfig:
+        """Apply YAML/CLI model overrides and refresh derived expert sizes."""
+
+        if not overrides:
+            return self
+        if not isinstance(overrides, dict):
+            raise ValueError("model overrides must be a mapping")
+        known = {field.name for field in fields(JaxSmolVLAConfig)}
+        unknown = sorted(set(overrides) - known)
+        if unknown:
+            raise ValueError(f"unknown model override fields: {unknown}")
+
+        cleaned: dict[str, Any] = {}
+        for key, value in overrides.items():
+            if key == "image_keys" and value is not None:
+                cleaned[key] = tuple(value)
+            else:
+                cleaned[key] = value
+
+        updated = replace(self, **cleaned)
+
+        num_vlm_layers = int(updated.num_vlm_layers)
+        num_expert_layers = int(updated.num_expert_layers)
+        if num_expert_layers <= 0:
+            num_expert_layers = num_vlm_layers
+
+        derived: dict[str, Any] = {
+            "num_vlm_layers": num_vlm_layers,
+            "num_expert_layers": num_expert_layers,
+        }
+        # Recompute expert sizes from width knobs unless the user pinned both.
+        if {"expert_hidden_size", "expert_intermediate_size"} - set(cleaned):
+            expert_hidden_size, expert_intermediate_size = compute_expert_sizes(
+                int(updated.text_hidden_size), float(updated.expert_width_multiplier)
+            )
+            if "expert_hidden_size" not in cleaned:
+                derived["expert_hidden_size"] = expert_hidden_size
+            if "expert_intermediate_size" not in cleaned:
+                derived["expert_intermediate_size"] = expert_intermediate_size
+
+        return replace(updated, **derived)
