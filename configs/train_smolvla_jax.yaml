@@ -6,6 +6,8 @@
 checkpoint: lerobot/smolvla_base
 revision: null
 allow_download: true
+# num_vlm_layers 超过 checkpoint 自带层数时，从这里按需下载并补齐缺失 VLM 层；HF cache 已有则直接复用
+full_vlm_checkpoint: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 
 # ---- 数据集 ----
 # 写一个或多个均可；每个条目可有独立 root / action_key / rename_map / weight
@@ -79,9 +81,10 @@ model:
   empty_cameras: 0
 
   # ---- VLM / Expert 架构维度（覆盖 checkpoint；改这里即可）----
-  # 层数可小于预训练（只用前 N 层）；expert 层数须能整除 num_vlm_layers
+  # 1~16 直接使用 SmolVLA 权重；17~32 自动从 full_vlm_checkpoint 补齐缺失层
   num_vlm_layers: 8
-  num_expert_layers: -1          # 设为 -1 则与 num_vlm_layers 一致
+  # -1 为自动：在 checkpoint 可用范围内选择能整除 VLM 层数的最大 expert 层数（32层时为16）
+  num_expert_layers: -1
   self_attn_every_n_layers: 2
   attention_mode: cross_attn     # cross_attn | self_attn
   # expert 隐层宽 = text_hidden_size * expert_width_multiplier（改宽度会与预训练 expert 权重 shape 不匹配）

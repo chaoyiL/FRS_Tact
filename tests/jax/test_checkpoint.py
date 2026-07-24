@@ -10,12 +10,63 @@ import pytest
 pytest.importorskip("jax")
 
 from lerobot.policies.smolvla_jax.checkpoint import (  # noqa: E402
+    count_expert_layers,
+    count_vlm_layers,
+    extend_vlm_layers,
     load_safetensors_params,
     parameter_summary,
     save_portable_params,
     write_effective_config,
 )
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig  # noqa: E402
+
+
+def test_extend_vlm_layers_from_full_checkpoint(tmp_path: Path) -> None:
+    from safetensors.flax import save_file as save_safetensors_file
+
+    target_prefix = "model.vlm_with_expert.vlm.model.text_model.layers"
+    expert_prefix = "model.vlm_with_expert.lm_expert.layers"
+    params = {
+        f"{target_prefix}.{layer}.input_layernorm.weight": np.full(2, layer, dtype=np.float16)
+        for layer in range(2)
+    }
+    params.update(
+        {
+            f"{expert_prefix}.{layer}.input_layernorm.weight": np.full(2, layer, dtype=np.float16)
+            for layer in range(2)
+        }
+    )
+    source = tmp_path / "full-vlm"
+    source.mkdir()
+    save_safetensors_file(
+        {
+            f"model.text_model.layers.{layer}.input_layernorm.weight": np.full(
+                2, layer, dtype=np.float32
+            )
+            for layer in range(4)
+        },
+        source / "model.safetensors",
+    )
+
+    assert count_vlm_layers(params) == 2
+    assert count_expert_layers(params) == 2
+    extended = extend_vlm_layers(params, 4, source=source)
+    assert count_vlm_layers(extended) == 4
+    assert extended[f"{target_prefix}.3.input_layernorm.weight"].dtype == np.float16
+    np.testing.assert_array_equal(
+        extended[f"{target_prefix}.3.input_layernorm.weight"],
+        np.full(2, 3, dtype=np.float16),
+    )
+
+
+def test_vlm_override_auto_expert_layers() -> None:
+    config = JaxSmolVLAConfig(num_vlm_layers=16, num_expert_layers=16)
+    assert config.with_overrides({"num_vlm_layers": 8, "num_expert_layers": -1}).num_expert_layers == 8
+    full = config.with_overrides({"num_vlm_layers": 32, "num_expert_layers": -1})
+    assert full.num_expert_layers == 16
+    assert config.with_overrides({"num_vlm_layers": 24, "num_expert_layers": -1}).num_expert_layers == 12
+    with pytest.raises(ValueError, match="must divide"):
+        config.with_overrides({"num_vlm_layers": 24, "num_expert_layers": 16})
 
 
 def test_portable_round_trip_and_manifest(tmp_path: Path) -> None:

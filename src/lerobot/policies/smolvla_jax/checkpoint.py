@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ import jax
 import numpy as np
 import orbax.checkpoint as ocp
 from huggingface_hub import snapshot_download
+from safetensors import safe_open
 from safetensors.flax import load_file as load_safetensors_file, save_file as save_safetensors_file
 
 from .configuration import JaxSmolVLAConfig
@@ -25,6 +27,10 @@ ASSET_FILENAMES = (
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
     "train_config.json",
 )
+
+_VLM_LAYER_PREFIX = "model.vlm_with_expert.vlm.model.text_model.layers."
+_EXPERT_LAYER_PREFIX = "model.vlm_with_expert.lm_expert.layers."
+_SOURCE_VLM_LAYER_PREFIX = "model.text_model.layers."
 
 
 def resolve_checkpoint(
@@ -53,6 +59,99 @@ def load_safetensors_params(path: str | Path) -> dict[str, Array]:
     if not model_file.is_file():
         raise FileNotFoundError(f"SmolVLA model file not found: {model_file}")
     return dict(load_safetensors_file(model_file))
+
+
+def _layer_indices(names: Iterable[str], prefix: str) -> set[int]:
+    pattern = re.compile(rf"^{re.escape(prefix)}(\d+)\.")
+    return {
+        int(match.group(1))
+        for name in names
+        if (match := pattern.match(name)) is not None
+    }
+
+
+def count_vlm_layers(params: Mapping[str, Array]) -> int:
+    """Count contiguous VLM text layers available in a SmolVLA checkpoint."""
+
+    indices = _layer_indices(params, _VLM_LAYER_PREFIX)
+    count = 0
+    while count in indices:
+        count += 1
+    return count
+
+
+def count_expert_layers(params: Mapping[str, Array]) -> int:
+    """Count contiguous action-expert layers available in a SmolVLA checkpoint."""
+
+    indices = _layer_indices(params, _EXPERT_LAYER_PREFIX)
+    count = 0
+    while count in indices:
+        count += 1
+    return count
+
+
+def extend_vlm_layers(
+    params: Mapping[str, Array],
+    requested_layers: int,
+    *,
+    source: str | Path,
+    local_files_only: bool = False,
+) -> dict[str, Array]:
+    """Fill missing VLM text layers from a full SmolVLM checkpoint.
+
+    SmolVLA base stores only the first 16 text layers even though its
+    SmolVLM2-500M source contains 32. The source file is opened lazily so only
+    the requested missing layers are materialized. Imported tensors are cast
+    to the dtype used by the matching layer-0 SmolVLA tensor.
+    """
+
+    requested_layers = int(requested_layers)
+    if requested_layers <= 0:
+        raise ValueError(f"num_vlm_layers must be positive, got {requested_layers}")
+
+    available_layers = count_vlm_layers(params)
+    if requested_layers <= available_layers:
+        return dict(params)
+
+    source_path = resolve_checkpoint(source, local_files_only=local_files_only)
+    source_file = source_path / "model.safetensors" if source_path.is_dir() else source_path
+    if not source_file.is_file():
+        raise FileNotFoundError(f"full VLM model file not found: {source_file}")
+
+    output = dict(params)
+    with safe_open(source_file, framework="flax") as tensors:
+        source_keys = tuple(tensors.keys())
+        source_indices = _layer_indices(source_keys, _SOURCE_VLM_LAYER_PREFIX)
+        source_layer_count = 0
+        while source_layer_count in source_indices:
+            source_layer_count += 1
+        if requested_layers > source_layer_count:
+            raise ValueError(
+                f"requested {requested_layers} VLM layers, but {source} only has "
+                f"{source_layer_count}"
+            )
+
+        for layer_index in range(available_layers, requested_layers):
+            source_prefix = f"{_SOURCE_VLM_LAYER_PREFIX}{layer_index}."
+            layer_keys = [name for name in source_keys if name.startswith(source_prefix)]
+            if not layer_keys:
+                raise KeyError(f"missing VLM source parameters for layer {layer_index}: {source}")
+            for source_name in layer_keys:
+                target_name = f"model.vlm_with_expert.vlm.{source_name}"
+                reference_name = target_name.replace(
+                    f"{_VLM_LAYER_PREFIX}{layer_index}.",
+                    f"{_VLM_LAYER_PREFIX}0.",
+                    1,
+                )
+                value = tensors.get_tensor(source_name)
+                reference = output.get(reference_name)
+                if reference is not None:
+                    value = value.astype(reference.dtype)
+                output[target_name] = value
+
+    if count_vlm_layers(output) < requested_layers:
+        raise RuntimeError(f"failed to extend VLM parameters to {requested_layers} layers")
+    return output
 
 
 def parameter_summary(params: Mapping[str, Array]) -> dict[str, Any]:

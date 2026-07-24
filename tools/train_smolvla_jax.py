@@ -12,7 +12,13 @@ import jax
 import yaml
 
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
+from lerobot.policies.smolvla_jax.checkpoint import (
+    count_expert_layers,
+    count_vlm_layers,
+    extend_vlm_layers,
+    load_params,
+    resolve_checkpoint,
+)
 from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader, parse_dataset_sources
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
@@ -148,10 +154,34 @@ def main() -> None:
         f"text_hidden_size={config.text_hidden_size} expert_hidden_size={config.expert_hidden_size}"
     )
 
+    allow_download = bool(cfg.get("allow_download", False))
+    params = load_params(checkpoint)
+    checkpoint_vlm_layers = count_vlm_layers(params)
+    checkpoint_expert_layers = count_expert_layers(params)
+    if config.num_expert_layers > checkpoint_expert_layers:
+        raise ValueError(
+            f"requested {config.num_expert_layers} expert layers, but checkpoint only has "
+            f"{checkpoint_expert_layers}; use num_expert_layers: -1 (auto) or "
+            f"num_expert_layers: {checkpoint_expert_layers}"
+        )
+    if config.num_vlm_layers > checkpoint_vlm_layers:
+        full_vlm_checkpoint = cfg.get("full_vlm_checkpoint") or config.tokenizer_name
+        print(
+            f"extending VLM: checkpoint_layers={checkpoint_vlm_layers} "
+            f"requested_layers={config.num_vlm_layers} source={full_vlm_checkpoint}"
+        )
+        params = extend_vlm_layers(
+            params,
+            config.num_vlm_layers,
+            source=full_vlm_checkpoint,
+            local_files_only=not allow_download,
+        )
+        print(f"extended VLM parameters to {count_vlm_layers(params)} layers")
+
     model = JaxSmolVLA(config)
     trainer = JaxSmolVLATrainer(
         model,
-        load_params(checkpoint),
+        params,
         seed=int(cfg.get("seed", 0)),
         total_steps=int(require(cfg, "steps")),
     )
@@ -168,7 +198,6 @@ def main() -> None:
     if bool(cfg.get("data_parallel", False)):
         trainer.enable_data_parallel()
 
-    allow_download = bool(cfg.get("allow_download", False))
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     sources = parse_dataset_sources(cfg)
     data = LeRobotJaxDataLoader(

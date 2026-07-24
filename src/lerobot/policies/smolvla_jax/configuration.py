@@ -188,7 +188,24 @@ class JaxSmolVLAConfig:
         num_vlm_layers = int(updated.num_vlm_layers)
         num_expert_layers = int(updated.num_expert_layers)
         if num_expert_layers <= 0:
-            num_expert_layers = num_vlm_layers
+            # Use as many source expert layers as possible while preserving the
+            # transformer's requirement that expert depth divides VLM depth.
+            max_expert_layers = min(num_vlm_layers, int(self.num_expert_layers))
+            num_expert_layers = next(
+                candidate
+                for candidate in range(max_expert_layers, 0, -1)
+                if num_vlm_layers % candidate == 0
+            )
+        if num_vlm_layers <= 0 or num_expert_layers <= 0:
+            raise ValueError(
+                f"VLM/expert layer counts must be positive, got "
+                f"{num_vlm_layers}/{num_expert_layers}"
+            )
+        if num_vlm_layers % num_expert_layers:
+            raise ValueError(
+                f"num_expert_layers ({num_expert_layers}) must divide "
+                f"num_vlm_layers ({num_vlm_layers})"
+            )
 
         derived: dict[str, Any] = {
             "num_vlm_layers": num_vlm_layers,
