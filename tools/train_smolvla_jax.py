@@ -4,9 +4,7 @@
 from __future__ import annotations
 
 import argparse
-import json
 import time
-from dataclasses import fields, replace
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +12,14 @@ import jax
 import yaml
 
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
-from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader
+from lerobot.policies.smolvla_jax.checkpoint import (
+    count_expert_layers,
+    count_vlm_layers,
+    extend_vlm_layers,
+    load_params,
+    resolve_checkpoint,
+)
+from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader, parse_dataset_sources
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 
@@ -33,12 +37,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", help="Override YAML: local path or Hugging Face repo id")
     parser.add_argument("--revision")
     parser.add_argument("--allow-download", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--dataset-repo-id")
-    parser.add_argument("--dataset-root", type=Path)
-    parser.add_argument("--dataset-revision")
-    parser.add_argument("--episodes", type=int, nargs="+")
-    parser.add_argument("--action-key")
-    parser.add_argument("--rename-map", help="JSON object; overrides YAML rename_map")
     parser.add_argument("--num-workers", type=int)
     parser.add_argument("--prefetch-factor", type=int)
     parser.add_argument("--video-backend")
@@ -70,11 +68,6 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         "checkpoint": args.checkpoint,
         "revision": args.revision,
         "allow_download": args.allow_download,
-        "dataset_repo_id": args.dataset_repo_id,
-        "dataset_root": args.dataset_root,
-        "dataset_revision": args.dataset_revision,
-        "episodes": args.episodes,
-        "action_key": args.action_key,
         "num_workers": args.num_workers,
         "prefetch_factor": args.prefetch_factor,
         "video_backend": args.video_backend,
@@ -91,11 +84,6 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
     for key, value in cli.items():
         if value is not None:
             merged[key] = value
-    if args.rename_map is not None:
-        rename_map = json.loads(args.rename_map)
-        if not isinstance(rename_map, dict):
-            raise ValueError("--rename-map must be a JSON object")
-        merged["rename_map"] = rename_map
     return merged
 
 
@@ -106,21 +94,7 @@ def require(cfg: dict[str, Any], key: str) -> Any:
 
 
 def apply_model_overrides(config: JaxSmolVLAConfig, overrides: dict[str, Any] | None) -> JaxSmolVLAConfig:
-    if not overrides:
-        return config
-    if not isinstance(overrides, dict):
-        raise ValueError("model overrides must be a mapping")
-    known = {field.name for field in fields(JaxSmolVLAConfig)}
-    unknown = sorted(set(overrides) - known)
-    if unknown:
-        raise ValueError(f"unknown model override fields: {unknown}")
-    cleaned: dict[str, Any] = {}
-    for key, value in overrides.items():
-        if key == "image_keys" and value is not None:
-            cleaned[key] = tuple(value)
-        else:
-            cleaned[key] = value
-    return replace(config, **cleaned)
+    return config.with_overrides(overrides)
 
 
 def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, model: JaxSmolVLAConfig):
@@ -143,14 +117,11 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
         config={
             "config_path": str(config_path.resolve()),
             "checkpoint": str(checkpoint),
-            "dataset_repo_id": cfg.get("dataset_repo_id"),
-            "dataset_root": cfg.get("dataset_root"),
-            "action_key": cfg.get("action_key"),
+            "datasets": cfg.get("datasets"),
             "batch_size": cfg.get("batch_size"),
             "steps": cfg.get("steps"),
             "seed": cfg.get("seed"),
             "data_parallel": cfg.get("data_parallel"),
-            "rename_map": cfg.get("rename_map"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
         },
@@ -177,13 +148,40 @@ def main() -> None:
     )
     print(
         f"model overrides: action_dim={config.action_dim} state_dim={config.state_dim} "
-        f"image_keys={list(config.image_keys)}"
+        f"image_keys={list(config.image_keys)} "
+        f"num_vlm_layers={config.num_vlm_layers} num_expert_layers={config.num_expert_layers} "
+        f"expert_width_multiplier={config.expert_width_multiplier} "
+        f"text_hidden_size={config.text_hidden_size} expert_hidden_size={config.expert_hidden_size}"
     )
+
+    allow_download = bool(cfg.get("allow_download", False))
+    params = load_params(checkpoint)
+    checkpoint_vlm_layers = count_vlm_layers(params)
+    checkpoint_expert_layers = count_expert_layers(params)
+    if config.num_expert_layers > checkpoint_expert_layers:
+        raise ValueError(
+            f"requested {config.num_expert_layers} expert layers, but checkpoint only has "
+            f"{checkpoint_expert_layers}; use num_expert_layers: -1 (auto) or "
+            f"num_expert_layers: {checkpoint_expert_layers}"
+        )
+    if config.num_vlm_layers > checkpoint_vlm_layers:
+        full_vlm_checkpoint = cfg.get("full_vlm_checkpoint") or config.tokenizer_name
+        print(
+            f"extending VLM: checkpoint_layers={checkpoint_vlm_layers} "
+            f"requested_layers={config.num_vlm_layers} source={full_vlm_checkpoint}"
+        )
+        params = extend_vlm_layers(
+            params,
+            config.num_vlm_layers,
+            source=full_vlm_checkpoint,
+            local_files_only=not allow_download,
+        )
+        print(f"extended VLM parameters to {count_vlm_layers(params)} layers")
 
     model = JaxSmolVLA(config)
     trainer = JaxSmolVLATrainer(
         model,
-        load_params(checkpoint),
+        params,
         seed=int(cfg.get("seed", 0)),
         total_steps=int(require(cfg, "steps")),
     )
@@ -200,21 +198,12 @@ def main() -> None:
     if bool(cfg.get("data_parallel", False)):
         trainer.enable_data_parallel()
 
-    rename_map = cfg.get("rename_map") or None
-    if rename_map is not None and not isinstance(rename_map, dict):
-        raise ValueError("rename_map must be a mapping")
-
-    allow_download = bool(cfg.get("allow_download", False))
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
+    sources = parse_dataset_sources(cfg)
     data = LeRobotJaxDataLoader(
         checkpoint,
         config,
-        repo_id=require(cfg, "dataset_repo_id"),
-        root=Path(cfg["dataset_root"]) if cfg.get("dataset_root") else None,
-        revision=cfg.get("dataset_revision"),
-        episodes=cfg.get("episodes"),
-        action_key=cfg.get("action_key"),
-        rename_map=rename_map,
+        sources=sources,
         batch_size=int(cfg.get("batch_size", 8)),
         num_workers=int(cfg.get("num_workers", 4)),
         prefetch_factor=int(cfg.get("prefetch_factor", 2)),
@@ -223,11 +212,13 @@ def main() -> None:
         local_files_only=not (allow_tokenizer_download or allow_download),
     )
     batches = data.batches()
-    print(
-        f"dataset={cfg['dataset_repo_id']} frames={len(data.dataset)} "
-        f"episodes={data.dataset.num_episodes} fps={data.dataset.fps} "
-        f"action_key={data.action_key!r}"
-    )
+    for summary in data.dataset_summaries:
+        print(
+            f"dataset={summary['repo_id']} frames={summary['frames']} "
+            f"episodes={summary['episodes']} fps={summary['fps']} "
+            f"action_key={summary['action_key']!r} weight={summary['weight']}"
+        )
+    print(f"combined_frames={len(data.dataset)}")
 
     output = Path(require(cfg, "output"))
     output.mkdir(parents=True, exist_ok=True)

@@ -97,19 +97,22 @@ class JaxSmolVLA:
         prefix = "model.vlm_with_expert.vlm.model.vision_model"
         patch_weight = self._p(params, f"{prefix}.embeddings.patch_embedding.weight")
         patch_bias = self._p(params, f"{prefix}.embeddings.patch_embedding.bias")
-        image = image.astype(patch_weight.dtype)
+        # Keep conv operands in one dtype. Trainable full-finetune can promote
+        # checkpoint bf16 weights to float32 while images stay float32, or vice
+        # versa; mixing them crashes lax.conv_general_dilated.
+        compute_dtype = jnp.result_type(image.dtype, patch_weight.dtype, jnp.float32)
         patches = jax.lax.conv_general_dilated(
-            image,
-            patch_weight,
+            image.astype(compute_dtype),
+            patch_weight.astype(compute_dtype),
             window_strides=(self.config.vision_patch_size, self.config.vision_patch_size),
             padding="VALID",
             dimension_numbers=("NCHW", "OIHW", "NCHW"),
             preferred_element_type=jnp.float32,
         ).astype(patch_weight.dtype)
-        patches = patches + patch_bias[None, :, None, None]
+        patches = patches + patch_bias.astype(patches.dtype)[None, :, None, None]
         hidden = jnp.transpose(patches, (0, 2, 3, 1)).reshape(image.shape[0], -1, patches.shape[1])
         positions = self._p(params, f"{prefix}.embeddings.position_embedding.weight")
-        hidden = hidden + positions[: hidden.shape[1]][None, :, :]
+        hidden = hidden + positions[: hidden.shape[1]][None, :, :].astype(hidden.dtype)
 
         for layer_index in range(self.config.vision_num_layers):
             hidden = self._vision_layer(params, hidden, layer_index)

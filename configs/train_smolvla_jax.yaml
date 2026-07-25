@@ -6,28 +6,35 @@
 checkpoint: lerobot/smolvla_base
 revision: null
 allow_download: true
+# num_vlm_layers 超过 checkpoint 自带层数时，从这里按需下载并补齐缺失 VLM 层；HF cache 已有则直接复用
+full_vlm_checkpoint: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 
 # ---- 数据集 ----
-dataset_repo_id: chaoyi/tactile_test_03
-# dataset_root: /workspace/lerobot_v30/chaoyi/tactile_test_03
-dataset_revision: null
-episodes: null
-action_key: actions
-# 把数据集相机名映射成 checkpoint 期望的特征名；不需要可留空 {}
-rename_map:
-  observation.images.camera0: observation.images.camera1
-  observation.images.camera1: observation.images.camera2
-  # observation.images.tactile_left_0: observation.images.camera3
+# 写一个或多个均可；每个条目可有独立 root / action_key / rename_map / weight
+datasets:
+  - repo_id: chaoyi/tactile_test_05
+    # root: /workspace/lerobot_v30/chaoyi/tactile_test_03
+    action_key: actions
+    weight: 1.0
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+  # - repo_id: chaoyi/another_dataset
+  #   action_key: actions
+  #   weight: 1.0
+  #   rename_map:
+  #     observation.images.cam_high: observation.images.camera1
+  #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
-output: /home/typhon/FRS_Tact/checkpoints/tactile_test_03_3gpu-checkpoint-00030000
-steps: 30000
+output: /root/smolvla_runs/tactile_test_03_3gpu
+steps: 60000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4
 prefetch_factor: 2
 video_backend: null
 log_freq: 10
-save_freq: 1000
+save_freq: 5000
 seed: 42
 resume: null
 data_parallel: true
@@ -68,10 +75,24 @@ model:
   image_keys:
     - observation.images.camera1
     - observation.images.camera2
-    - observation.images.camera3
   chunk_size: 50
   n_action_steps: 50
+  # image_keys 里缺的相机，最多用几路空图（mask=0）补齐；训练/部署共用，写进 checkpoint
   empty_cameras: 0
+
+  # ---- VLM / Expert 架构维度（覆盖 checkpoint；改这里即可）----
+  # 1~16 直接使用 SmolVLA 权重；17~32 自动从 full_vlm_checkpoint 补齐缺失层
+  num_vlm_layers: 8
+  # -1 为自动：在 checkpoint 可用范围内选择能整除 VLM 层数的最大 expert 层数（32层时为16）
+  num_expert_layers: -1
+  self_attn_every_n_layers: 2
+  attention_mode: cross_attn     # cross_attn | self_attn
+  # expert 隐层宽 = text_hidden_size * expert_width_multiplier（改宽度会与预训练 expert 权重 shape 不匹配）
+  expert_width_multiplier: 0.75
+  # text_hidden_size: 960         # 一般保持与预训练 VLM 一致，勿随意改
+  # text_intermediate_size: 2560
+  # expert_hidden_size / expert_intermediate_size 默认由上面两项自动推导；如需可显式覆盖
+
   optimizer_lr: 0.0001
   optimizer_grad_clip_norm: 10.0
   scheduler_warmup_steps: 1000

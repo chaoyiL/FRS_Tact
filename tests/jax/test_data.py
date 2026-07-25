@@ -13,7 +13,10 @@ from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.data import (
     action_delta_timestamps,
     canonicalize_dataset_stats,
+    ensure_stats_counts,
+    parse_dataset_sources,
     prepare_lerobot_batch,
+    rename_dataset_stats,
     resolve_action_key,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
@@ -78,6 +81,9 @@ def test_prepare_lerobot_batch_converts_torch_and_padding() -> None:
 
 def test_training_stats_are_saved_for_future_inference(tmp_path: Path) -> None:
     processor = object.__new__(JaxSmolVLAPreprocessor)
+    processor.checkpoint = tmp_path / "source"
+    processor.config = JaxSmolVLAConfig()
+    processor.rename_map = {}
     processor.stats = {
         "observation.state.mean": jnp.asarray([1.0, 2.0]),
         "action.std": jnp.asarray([3.0, 4.0]),
@@ -89,3 +95,52 @@ def test_training_stats_are_saved_for_future_inference(tmp_path: Path) -> None:
     post = load_safetensors_file(tmp_path / "policy_postprocessor_step_0_unnormalizer_processor.safetensors")
     np.testing.assert_array_equal(pre["observation.state.mean"], [1.0, 2.0])
     np.testing.assert_array_equal(post["action.std"], [3.0, 4.0])
+
+
+def test_parse_dataset_sources() -> None:
+    sources = parse_dataset_sources(
+        {
+            "datasets": [
+                {
+                    "repo_id": "org/a",
+                    "action_key": "actions",
+                    "weight": 2.0,
+                    "rename_map": {"observation.images.cam0": "observation.images.camera1"},
+                },
+                {
+                    "repo_id": "org/b",
+                    "action_key": "action",
+                    "rename_map": {"observation.images.x": "observation.images.camera1"},
+                },
+            ],
+        }
+    )
+    assert len(sources) == 2
+    assert sources[0].repo_id == "org/a"
+    assert sources[0].weight == 2.0
+    assert sources[0].rename_map == {"observation.images.cam0": "observation.images.camera1"}
+    assert sources[1].action_key == "action"
+    with pytest.raises(ValueError):
+        parse_dataset_sources({})
+    with pytest.raises(ValueError):
+        parse_dataset_sources({"datasets": []})
+
+
+def test_rename_and_count_stats_for_aggregation() -> None:
+    stats = canonicalize_dataset_stats(
+        {
+            "observation.state": {"mean": [0.0], "std": [1.0]},
+            "actions": {"mean": [2.0], "std": [3.0]},
+            "observation.images.cam0": {"mean": [0.5], "std": [0.1]},
+        },
+        "actions",
+    )
+    renamed = rename_dataset_stats(
+        stats,
+        {"observation.images.cam0": "observation.images.camera1"},
+    )
+    assert "action" in renamed
+    assert "observation.images.camera1" in renamed
+    assert "observation.images.cam0" not in renamed
+    counted = ensure_stats_counts(renamed, frame_count=10)
+    np.testing.assert_array_equal(counted["action"]["count"], [10])
