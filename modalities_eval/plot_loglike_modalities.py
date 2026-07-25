@@ -22,7 +22,7 @@ for path in (EVAL_SCRIPTS,):
 from loglike_evaluate import (
     DEFAULT_HUTCHINSON_SAMPLES,
     DEFAULT_HUTCHINSON_SEED,
-    ODE_SOLVER_EULER,
+    ODE_SOLVER_FIREFLOW,
     ODE_SOLVERS,
     compute_episode_modality_contributions,
     load_episode,
@@ -31,6 +31,10 @@ from loglike_evaluate import (
 from utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
 
 MODALITIES = ("vision", "tactile", "state", "language_prompt")
+DEFAULT_CHECKPOINT_DIR = pathlib.Path("/home/typhon/models/tactile_test_05_1.5w")
+DEFAULT_DATASET_REPO_ID = "chaoyi/tactile_test_03"
+DEFAULT_MODALITIES = ("vision", "state", "language_prompt")
+DEFAULT_OUTPUT_DIR = pathlib.Path("eval_outputs/loglike")
 CSV_PATTERN = re.compile(r"(?P<modality>.+)_contribution_episode_(?P<episode>.+)\.csv$")
 
 
@@ -60,26 +64,6 @@ def _infer_modality(csv_path: pathlib.Path) -> str:
     if match is None:
         return csv_path.stem
     return match.group("modality")
-
-
-def _auto_csv_paths(
-    input_dir: pathlib.Path, episode_index: str, modalities: Sequence[str]
-) -> list[pathlib.Path]:
-    paths = []
-    missing = []
-    for modality in modalities:
-        path = input_dir / f"{modality}_contribution_episode_{episode_index}.csv"
-        if path.exists():
-            paths.append(path)
-        else:
-            missing.append(path.name)
-
-    if not paths:
-        raise FileNotFoundError(
-            f"No modality CSV files found in {input_dir} for episode {episode_index}. "
-            f"Looked for: {', '.join(missing)}"
-        )
-    return paths
 
 
 def _default_output_path(
@@ -216,17 +200,15 @@ def plot_modalities(
     return output_path
 
 
-def main(argv: Sequence[str] | None = None) -> None:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run log-likelihood modality ablations and plot modality contribution curves."
     )
-    parser.add_argument(
-        "csv_paths",
-        nargs="*",
-        type=pathlib.Path,
-        help="Existing CSV files to plot. If omitted, --modalities are evaluated first.",
-    )
     add_eval_data_arguments(parser, required=False)
+    parser.set_defaults(
+        checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
+        dataset_repo_id=DEFAULT_DATASET_REPO_ID,
+    )
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=1000)
@@ -241,11 +223,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         action="store_true",
         help="Evaluate only --frame instead of sampling an episode curve.",
     )
-    parser.add_argument("--num-steps", "-k", type=int, default=120)
+    parser.add_argument("--num-steps", "-k", type=int, default=50)
     parser.add_argument(
         "--ode-solver",
         choices=ODE_SOLVERS,
-        default=ODE_SOLVER_EULER,
+        default=ODE_SOLVER_FIREFLOW,
         help="ODE solver for data-to-base likelihood integration.",
     )
     parser.add_argument(
@@ -269,57 +251,45 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument(
         "--modalities",
         nargs="+",
-        default=None,
+        default=list(DEFAULT_MODALITIES),
         choices=MODALITIES,
-        help="Modalities to ablate and plot together. Required when CSV paths are omitted.",
+        help="Modalities to ablate and plot together.",
     )
-    parser.add_argument("--input-dir", type=pathlib.Path, default=pathlib.Path("eval_outputs/loglike"))
-    parser.add_argument("--output-dir", type=pathlib.Path, default=None)
-    parser.add_argument(
-        "--plot-only",
-        action="store_true",
-        help="Skip evaluation and plot CSVs from positional paths or --input-dir.",
-    )
+    parser.add_argument("--output-dir", type=pathlib.Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
         "--y-field",
         default="contribution",
         help="CSV column to plot. Defaults to the modality contribution.",
     )
     parser.add_argument("--output-path", type=pathlib.Path)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    parser = _build_parser()
     args = parser.parse_args(argv)
 
-    csv_paths = list(args.csv_paths)
-    if not csv_paths:
-        if args.modalities is None:
-            parser.error("--modalities is required when CSV paths are omitted.")
-        output_dir = args.output_dir or args.input_dir
-        if args.plot_only:
-            csv_paths = _auto_csv_paths(args.input_dir, str(args.episode_index), args.modalities)
-        else:
-            if args.checkpoint_dir is None or args.dataset_repo_id is None:
-                parser.error("--checkpoint-dir and --dataset-repo-id are required for evaluation.")
-            sample_interval = None if args.single_frame else args.sample_interval
-            model = load_model_from_args(args)
-            csv_paths = evaluate_modalities(
-                model=model,
-                episode_index=args.episode_index,
-                frame=args.frame,
-                max_frames=args.max_frames,
-                sample_interval=sample_interval,
-                num_steps=args.num_steps,
-                ode_solver=args.ode_solver,
-                eval_batch_size=args.eval_batch_size,
-                hutchinson_samples=args.hutchinson_samples,
-                hutchinson_seed=args.hutchinson_seed,
-                modalities=args.modalities,
-                output_dir=output_dir,
-            )
+    sample_interval = None if args.single_frame else args.sample_interval
+    model = load_model_from_args(args)
+    csv_paths = evaluate_modalities(
+        model=model,
+        episode_index=args.episode_index,
+        frame=args.frame,
+        max_frames=args.max_frames,
+        sample_interval=sample_interval,
+        num_steps=args.num_steps,
+        ode_solver=args.ode_solver,
+        eval_batch_size=args.eval_batch_size,
+        hutchinson_samples=args.hutchinson_samples,
+        hutchinson_seed=args.hutchinson_seed,
+        modalities=args.modalities,
+        output_dir=args.output_dir,
+    )
 
     output_path = args.output_path
     if output_path is None:
-        output_dir = args.output_dir or args.input_dir
         output_path = _default_output_path(
-            output_dir=output_dir,
+            output_dir=args.output_dir,
             y_field=args.y_field,
             episode_index=args.episode_index,
             csv_paths=csv_paths,

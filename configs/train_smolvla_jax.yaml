@@ -17,10 +17,10 @@ action_key: actions
 rename_map:
   observation.images.camera0: observation.images.camera1
   observation.images.camera1: observation.images.camera2
-  observation.images.tactile_left_0: observation.images.camera3
+  # observation.images.tactile_left_0: observation.images.camera3
 
 # ---- 输出与训练超参 ----
-output: /workspace/smolvla_runs/tactile_test_03_3gpu
+output: /home/typhon/FRS_Tact/checkpoints/tactile_test_03_3gpu-checkpoint-00030000
 steps: 30000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4

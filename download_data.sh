@@ -7,8 +7,8 @@ HF_NAMESPACE="KaiyueChen"
 # LeRobot 本地缓存 / v3.0 转换路径用的命名空间（原从 openpi config.py 的 DATASET_REPO_NAMESPACE 读取）
 # LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
 LEROBOT_NAMESPACE="chaoyi"
-# HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${HOME}/.cache/huggingface/dataset}" # for server
-HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-/workspace}" # for runpods
+HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${HOME}/.cache/huggingface/dataset}" # for server
+# HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-/workspace}" # for runpods
 if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
     HF_DATASET_CACHE_DIR="$1"
 fi
