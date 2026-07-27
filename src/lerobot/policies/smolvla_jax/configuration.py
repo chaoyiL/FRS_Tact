@@ -17,6 +17,29 @@ def compute_expert_sizes(text_hidden_size: int, expert_width_multiplier: float) 
     return expert_hidden_size, expert_intermediate_size
 
 
+def _coerce_override_value(value: Any, annotation: Any) -> Any:
+    """Coerce YAML/CLI override values to the dataclass field type."""
+
+    if value is None:
+        return None
+    if annotation is float or annotation == "float":
+        return float(value)
+    if annotation is int or annotation == "int":
+        return int(value)
+    if annotation is bool or annotation == "bool":
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+            if lowered in {"0", "false", "no", "off"}:
+                return False
+            raise ValueError(f"cannot coerce {value!r} to bool")
+        return bool(value)
+    if annotation is str or annotation == "str":
+        return str(value)
+    return value
+
+
 @dataclass(frozen=True)
 class JaxSmolVLAConfig:
     """Static model settings required by the JAX implementation."""
@@ -171,8 +194,8 @@ class JaxSmolVLAConfig:
             return self
         if not isinstance(overrides, dict):
             raise ValueError("model overrides must be a mapping")
-        known = {field.name for field in fields(JaxSmolVLAConfig)}
-        unknown = sorted(set(overrides) - known)
+        field_types = {field.name: field.type for field in fields(JaxSmolVLAConfig)}
+        unknown = sorted(set(overrides) - set(field_types))
         if unknown:
             raise ValueError(f"unknown model override fields: {unknown}")
 
@@ -181,7 +204,10 @@ class JaxSmolVLAConfig:
             if key == "image_keys" and value is not None:
                 cleaned[key] = tuple(value)
             else:
-                cleaned[key] = value
+                # PyYAML 1.2 treats bare scientific notation like ``1e-4`` as a
+                # string; coerce to the dataclass field type so AdamW etc. get
+                # real floats instead of ``"1e-4" * array``.
+                cleaned[key] = _coerce_override_value(value, field_types[key])
 
         updated = replace(self, **cleaned)
 

@@ -69,6 +69,24 @@ def test_vlm_override_auto_expert_layers() -> None:
         config.with_overrides({"num_vlm_layers": 24, "num_expert_layers": 16})
 
 
+def test_with_overrides_coerces_yaml_scientific_notation_strings() -> None:
+    """PyYAML may parse bare ``1e-4`` as a string; overrides must still become floats."""
+
+    config = JaxSmolVLAConfig().with_overrides(
+        {
+            "optimizer_lr": "5e-5",
+            "optimizer_weight_decay": "1e-4",
+            "lora_rank": "8",
+        }
+    )
+    assert config.optimizer_lr == pytest.approx(5e-5)
+    assert config.optimizer_weight_decay == pytest.approx(1e-4)
+    assert isinstance(config.optimizer_lr, float)
+    assert isinstance(config.optimizer_weight_decay, float)
+    assert config.lora_rank == 8
+    assert isinstance(config.lora_rank, int)
+
+
 def test_portable_round_trip_and_manifest(tmp_path: Path) -> None:
     params = {
         "float.weight": np.arange(12, dtype=np.float32).reshape(3, 4),

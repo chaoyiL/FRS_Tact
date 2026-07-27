@@ -103,8 +103,8 @@ model:
   # text_intermediate_size: 2560
   # expert_hidden_size / expert_intermediate_size 默认由上面两项自动推导；如需可显式覆盖
 
-  optimizer_lr: 5e-5
-  optimizer_weight_decay: 1e-4   # AdamW weight decay；可加大抗过拟合（如 1e-4 ~ 1e-2）
+  optimizer_lr: 5.0e-5
+  optimizer_weight_decay: 1.0e-4   # AdamW weight decay；可加大抗过拟合（如 1e-4 ~ 1e-2）
   optimizer_grad_clip_norm: 10.0
   scheduler_warmup_steps: 1000
   scheduler_decay_steps: 30000
