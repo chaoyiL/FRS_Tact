@@ -19,7 +19,11 @@ from lerobot.policies.smolvla_jax.checkpoint import (
     load_params,
     resolve_checkpoint,
 )
-from lerobot.policies.smolvla_jax.data import LeRobotJaxDataLoader, parse_dataset_sources
+from lerobot.policies.smolvla_jax.data import (
+    LeRobotJaxDataLoader,
+    parse_dataset_sources,
+    split_sources_train_val,
+)
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 
@@ -47,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int)
     parser.add_argument("--log-freq", type=int)
     parser.add_argument("--save-freq", type=int)
+    parser.add_argument("--eval-freq", type=int)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--data-parallel", action=argparse.BooleanOptionalAction, default=None)
     return parser.parse_args()
@@ -78,6 +83,7 @@ def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[s
         "seed": args.seed,
         "log_freq": args.log_freq,
         "save_freq": args.save_freq,
+        "eval_freq": args.eval_freq,
         "resume": args.resume,
         "data_parallel": args.data_parallel,
     }
@@ -122,12 +128,49 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
             "steps": cfg.get("steps"),
             "seed": cfg.get("seed"),
             "data_parallel": cfg.get("data_parallel"),
+            "validation": cfg.get("validation"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
         },
     )
     print(f"wandb={run.url if run is not None else mode}")
     return run
+
+
+def run_validation(
+    trainer: JaxSmolVLATrainer,
+    val_data: LeRobotJaxDataLoader,
+    *,
+    step: int,
+    eval_count: int,
+    seed: int,
+    val_cfg: dict[str, Any],
+    wandb_run,
+) -> int:
+    max_batches = val_cfg.get("max_batches")
+    rollout = bool(val_cfg.get("rollout", True))
+    rollout_steps = val_cfg.get("rollout_steps")
+    metrics = trainer.evaluate(
+        val_data.batches(),
+        seed=seed + step,
+        max_batches=None if max_batches in (None, 0) else int(max_batches),
+        rollout=rollout,
+        rollout_steps=None if rollout_steps in (None, 0) else int(rollout_steps),
+    )
+    eval_count += 1
+    print(
+        f"val step={step} loss={metrics['loss']:.6f} "
+        f"action_mse={metrics['action_mse']:.6f} "
+        f"eval_count={eval_count}"
+    )
+    if wandb_run is not None:
+        import wandb
+
+        payload = {"val/loss": float(metrics["loss"])}
+        if rollout:
+            payload["val/action_mse"] = float(metrics["action_mse"])
+        wandb.log(payload, step=step)
+    return eval_count
 
 
 def main() -> None:
@@ -200,34 +243,80 @@ def main() -> None:
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     sources = parse_dataset_sources(cfg)
+    val_cfg = dict(cfg.get("validation") or {})
+    val_enabled = bool(val_cfg.get("enabled", True))
+    val_fraction = float(val_cfg.get("fraction", 0.1))
+    train_sources = sources
+    val_sources = []
+    if val_enabled:
+        train_sources, val_sources = split_sources_train_val(
+            sources,
+            val_fraction=val_fraction,
+            seed=int(cfg.get("seed", 0)),
+        )
+        if not val_sources:
+            print("warning: validation enabled but no held-out episodes; disabling val")
+            val_enabled = False
+            train_sources = sources
+
+    common_loader_kwargs = {
+        "batch_size": int(cfg.get("batch_size", 8)),
+        "num_workers": int(cfg.get("num_workers", 4)),
+        "prefetch_factor": int(cfg.get("prefetch_factor", 2)),
+        "video_backend": cfg.get("video_backend"),
+        "seed": int(cfg.get("seed", 0)),
+        "local_files_only": not (allow_tokenizer_download or allow_download),
+    }
     data = LeRobotJaxDataLoader(
         checkpoint,
         config,
-        sources=sources,
-        batch_size=int(cfg.get("batch_size", 8)),
-        num_workers=int(cfg.get("num_workers", 4)),
-        prefetch_factor=int(cfg.get("prefetch_factor", 2)),
-        video_backend=cfg.get("video_backend"),
-        seed=int(cfg.get("seed", 0)),
-        local_files_only=not (allow_tokenizer_download or allow_download),
+        sources=train_sources,
+        **common_loader_kwargs,
     )
     batches = data.batches()
     for summary in data.dataset_summaries:
         print(
-            f"dataset={summary['repo_id']} frames={summary['frames']} "
+            f"train_dataset={summary['repo_id']} frames={summary['frames']} "
             f"episodes={summary['episodes']} fps={summary['fps']} "
             f"action_key={summary['action_key']!r} weight={summary['weight']}"
         )
-    print(f"combined_frames={len(data.dataset)}")
+    print(f"train_frames={len(data.dataset)}")
+
+    val_data = None
+    if val_enabled:
+        val_data = LeRobotJaxDataLoader(
+            checkpoint,
+            config,
+            sources=val_sources,
+            preprocessor=data.preprocessor,
+            shuffle=False,
+            infinite=False,
+            drop_last=True,
+            **common_loader_kwargs,
+        )
+        for summary in val_data.dataset_summaries:
+            print(
+                f"val_dataset={summary['repo_id']} frames={summary['frames']} "
+                f"episodes={summary['episodes']} fps={summary['fps']} "
+                f"action_key={summary['action_key']!r} weight={summary['weight']}"
+            )
+        print(
+            f"val_frames={len(val_data.dataset)} fraction={val_fraction:g} "
+            f"rollout={bool(val_cfg.get('rollout', True))}"
+        )
 
     output = Path(require(cfg, "output"))
     output.mkdir(parents=True, exist_ok=True)
     steps = int(require(cfg, "steps"))
     log_freq = int(cfg.get("log_freq", 10))
     save_freq = int(cfg.get("save_freq", 1000))
+    eval_freq = int(cfg.get("eval_freq", val_cfg.get("eval_freq", save_freq)))
+    if eval_freq <= 0:
+        raise ValueError(f"eval_freq must be positive, got {eval_freq}")
     wandb_cfg = cfg.get("wandb") or {}
     wandb_run = init_wandb(cfg, config_path=args.config, checkpoint=checkpoint, model=config)
     log_checkpoints = bool(wandb_cfg.get("log_checkpoints", False))
+    eval_count = 0
 
     start = time.perf_counter()
     try:
@@ -257,6 +346,16 @@ def main() -> None:
                         },
                         step=step,
                     )
+            if val_data is not None and (step % eval_freq == 0 or step == steps):
+                eval_count = run_validation(
+                    trainer,
+                    val_data,
+                    step=step,
+                    eval_count=eval_count,
+                    seed=int(cfg.get("seed", 0)),
+                    val_cfg=val_cfg,
+                    wandb_run=wandb_run,
+                )
             if step % save_freq == 0 or step == steps:
                 path = output / f"checkpoint-{step:08d}"
                 trainer.save(path, source_dir=checkpoint)

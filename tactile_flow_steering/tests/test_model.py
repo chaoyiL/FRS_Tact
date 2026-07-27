@@ -14,10 +14,14 @@ from tactile_flow_steering.utils.model import DecoderConfig
 from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
 from tactile_flow_steering.utils.model import decode_actions
 from tactile_flow_steering.utils.model import decode_euler
+from tactile_flow_steering.utils.metrics import gate_stratified_decode_metrics
+from tactile_flow_steering.utils.model import decode_mse_per_sample
 from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
 from tactile_flow_steering.utils.model import gated_flow_matching_loss_per_sample
+from tactile_flow_steering.utils.model import gt_supervised_loss_per_sample
 from tactile_flow_steering.utils.model import make_optimizer
 from tactile_flow_steering.utils.model import train_step
+import numpy as np
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
@@ -71,8 +75,69 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             jax.random.key(2),
             loss_mode="gt",
             gate_lambda=1.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
         )
         self.assertTrue(bool(jnp.isfinite(step_loss)))
+        pred_step_loss = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            gate,
+            jax.random.key(3),
+            loss_mode="predicted",
+            gate_lambda=1.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
+        )
+        self.assertTrue(bool(jnp.isfinite(pred_step_loss)))
+
+    def test_gate_stratified_decode_metrics(self):
+        out = gate_stratified_decode_metrics(
+            np.asarray([1.0, 2.0, 3.0, 4.0]),
+            np.asarray([0.1, 0.2, 0.3, 0.4]),
+            np.asarray([0.9, 0.8, 0.1, 0.2]),
+        )
+        self.assertEqual(out["n_high_w"], 2)
+        self.assertEqual(out["n_low_w"], 2)
+        self.assertAlmostEqual(float(out["mse_gt_high_w"]), 1.5)
+        self.assertAlmostEqual(float(out["mse_gt_low_w"]), 3.5)
+        self.assertAlmostEqual(float(out["mse_pred_high_w"]), 0.15)
+        self.assertAlmostEqual(float(out["mse_pred_low_w"]), 0.35)
+
+    def test_gt_supervised_adds_aux_decode_mse(self):
+        model = self.make_model()
+        x_base = jax.random.normal(jax.random.key(20), (3, 6, 3))
+        gt = x_base + 1.0
+        tactile = self._tactile_seq(jax.random.key(21), 3)
+        t = jnp.full((3,), 0.5, dtype=jnp.float32)
+        flow = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
+        decode_mse = decode_mse_per_sample(
+            model, x_base, gt, tactile, num_steps=4, solver="euler"
+        )
+        combined = gt_supervised_loss_per_sample(
+            model,
+            x_base,
+            gt,
+            t,
+            tactile,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
+        )
+        flow_only = gt_supervised_loss_per_sample(
+            model,
+            x_base,
+            gt,
+            t,
+            tactile,
+            aux_decode_weight=0.0,
+            aux_decode_steps=4,
+        )
+        self.assertTrue(bool(jnp.allclose(flow_only, flow, atol=1e-5)))
+        self.assertTrue(bool(jnp.allclose(combined, flow + decode_mse, atol=1e-5)))
 
     def test_gated_loss_respects_weights(self):
         model = self.make_model()
@@ -83,13 +148,39 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         t = jnp.full((3,), 0.5, dtype=jnp.float32)
         ones = jnp.ones((3,), dtype=jnp.float32)
         zeros = jnp.zeros((3,), dtype=jnp.float32)
-        loss_star = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
+        loss_star = gt_supervised_loss_per_sample(
+            model,
+            x_base,
+            gt,
+            t,
+            tactile,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
+        )
         loss_stop = flow_matching_loss_per_sample(model, x_base, predicted, t, tactile)
         gated_w1 = gated_flow_matching_loss_per_sample(
-            model, x_base, gt, predicted, t, tactile, ones, gate_lambda=1.0
+            model,
+            x_base,
+            gt,
+            predicted,
+            t,
+            tactile,
+            ones,
+            gate_lambda=1.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
         )
         gated_w0 = gated_flow_matching_loss_per_sample(
-            model, x_base, gt, predicted, t, tactile, zeros, gate_lambda=1.0
+            model,
+            x_base,
+            gt,
+            predicted,
+            t,
+            tactile,
+            zeros,
+            gate_lambda=1.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
         )
         self.assertTrue(bool(jnp.allclose(gated_w1, loss_star, atol=1e-5)))
         self.assertTrue(bool(jnp.allclose(gated_w0, loss_stop, atol=1e-5)))
@@ -102,6 +193,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             tactile,
             jnp.full((3,), 0.5, dtype=jnp.float32),
             gate_lambda=2.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=4,
         )
         expected = 0.5 * loss_star + 2.0 * 0.5 * loss_stop
         self.assertTrue(bool(jnp.allclose(gated_half, expected, atol=1e-5)))

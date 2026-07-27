@@ -19,14 +19,20 @@ HISTORY_FIELDS = (
     "val_mse",
     "val_rmse",
     "val_mae",
-    "train_tactile_sim",
-    "train_tactile_change",
-    "train_gate_w",
-    "train_gate_active_frac",
-    "val_tactile_sim",
-    "val_tactile_change",
-    "val_gate_w",
-    "val_gate_active_frac",
+    "val_flow_loss_gt",
+    "val_mse_gt",
+    "val_rmse_gt",
+    "val_mae_gt",
+    "val_flow_loss_pred",
+    "val_mse_pred",
+    "val_rmse_pred",
+    "val_mae_pred",
+    "val_mse_gt_high_w",
+    "val_mse_gt_low_w",
+    "val_mse_pred_high_w",
+    "val_mse_pred_low_w",
+    "val_n_high_w",
+    "val_n_low_w",
 )
 
 
@@ -86,34 +92,37 @@ def plot_training_history(
     *,
     output_path: pathlib.Path | None = None,
 ) -> pathlib.Path:
-    """Plot flow loss, val decode error, and tactile similarity / gate curves."""
+    """Plot flow loss, gate-stratified val MSE, and high/low-w sample counts."""
 
     rows = _read_history_rows(history_path)
     train_epochs, train_flow_loss = _finite_series(rows, "train_flow_loss")
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
-    val_mse_epochs, val_mse = _finite_series(rows, "val_mse")
-    _, val_rmse = _finite_series(rows, "val_rmse")
-    _, val_mae = _finite_series(rows, "val_mae")
-    sim_epochs, train_tactile_sim = _finite_series(rows, "train_tactile_sim")
-    _, train_tactile_change = _finite_series(rows, "train_tactile_change")
-    _, train_gate_w = _finite_series(rows, "train_gate_w")
-    _, train_gate_active = _finite_series(rows, "train_gate_active_frac")
-    val_sim_epochs, val_tactile_sim = _finite_series(rows, "val_tactile_sim")
-    _, val_gate_w = _finite_series(rows, "val_gate_w")
-    has_val = bool(val_loss_epochs or val_mse_epochs)
-    has_tactile = bool(sim_epochs or val_sim_epochs)
+    high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
+    low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
+    high_pred_epochs, mse_pred_high = _finite_series(rows, "val_mse_pred_high_w")
+    low_pred_epochs, mse_pred_low = _finite_series(rows, "val_mse_pred_low_w")
+    # Fallback for older histories without stratified columns.
+    mse_gt_epochs, val_mse_gt = _finite_series(rows, "val_mse_gt")
+    mse_pred_epochs, val_mse_pred = _finite_series(rows, "val_mse_pred")
+    n_high_epochs, n_high_w = _finite_series(rows, "val_n_high_w")
+    n_low_epochs, n_low_w = _finite_series(rows, "val_n_low_w")
+
+    has_stratified = bool(high_gt_epochs or low_gt_epochs or high_pred_epochs or low_pred_epochs)
+    has_overall_mse = bool(mse_gt_epochs or mse_pred_epochs)
+    has_val_mse = has_stratified or has_overall_mse
+    has_counts = bool(n_high_epochs or n_low_epochs)
 
     destination = output_path or history_path.with_name("training_curves.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    n_rows = 1 + int(has_val) + int(has_tactile)
+    n_rows = 1 + int(has_val_mse) + int(has_counts)
     fig, axes = plt.subplots(
         n_rows,
         1,
-        figsize=(10, 4 + 3 * n_rows),
-        constrained_layout=True,
+        figsize=(10, 4.2 + 3.1 * n_rows),
         sharex=True,
     )
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.90, bottom=0.08, hspace=0.32)
     if n_rows == 1:
         axes = [axes]
 
@@ -136,106 +145,116 @@ def plot_training_history(
             markersize=5,
         )
     axes[row].set_ylabel("flow loss")
-    axes[row].set_title("Flow matching loss")
+    axes[row].set_title("Flow matching loss", pad=8)
     axes[row].grid(True, alpha=0.3)
-    axes[row].legend(loc="upper right")
+    axes[row].legend(loc="upper right", fontsize=9, framealpha=0.92)
     row += 1
 
-    if has_val:
-        if val_mse_epochs:
-            axes[row].plot(
-                val_mse_epochs,
-                val_mse,
-                label="val_mse",
-                linewidth=2.0,
-                color="#C44E52",
-                marker="o",
-                markersize=5,
-            )
-            axes[row].plot(
-                val_mse_epochs,
-                val_rmse,
-                label="val_rmse",
-                linewidth=2.0,
-                color="#8172B2",
-                marker="s",
-                markersize=5,
-            )
-            axes[row].plot(
-                val_mse_epochs,
-                val_mae,
-                label="val_mae",
-                linewidth=2.0,
-                color="#DD8452",
-                marker="^",
-                markersize=5,
-            )
-            axes[row].legend(loc="upper right")
-        axes[row].set_ylabel("action error")
-        axes[row].set_title("Validation decode error vs GT")
+    if has_val_mse:
+        if has_stratified:
+            if high_gt_epochs:
+                axes[row].plot(
+                    high_gt_epochs,
+                    mse_gt_high,
+                    label="val_mse_gt (w>0.5)",
+                    linewidth=2.0,
+                    color="#C44E52",
+                    marker="o",
+                    markersize=5,
+                )
+            if low_gt_epochs:
+                axes[row].plot(
+                    low_gt_epochs,
+                    mse_gt_low,
+                    label="val_mse_gt (w≤0.5)",
+                    linewidth=2.0,
+                    color="#DD8452",
+                    marker="^",
+                    markersize=5,
+                )
+            if high_pred_epochs:
+                axes[row].plot(
+                    high_pred_epochs,
+                    mse_pred_high,
+                    label="val_mse_pred (w>0.5)",
+                    linewidth=2.0,
+                    color="#4C72B0",
+                    marker="s",
+                    markersize=5,
+                )
+            if low_pred_epochs:
+                axes[row].plot(
+                    low_pred_epochs,
+                    mse_pred_low,
+                    label="val_mse_pred (w≤0.5)",
+                    linewidth=2.0,
+                    color="#64B5CD",
+                    marker="D",
+                    markersize=5,
+                )
+            axes[row].set_title("Validation decode MSE by gate weight", pad=8)
+        else:
+            if mse_gt_epochs:
+                axes[row].plot(
+                    mse_gt_epochs,
+                    val_mse_gt,
+                    label="val_mse_gt",
+                    linewidth=2.0,
+                    color="#C44E52",
+                    marker="o",
+                    markersize=5,
+                )
+            if mse_pred_epochs:
+                axes[row].plot(
+                    mse_pred_epochs,
+                    val_mse_pred,
+                    label="val_mse_pred",
+                    linewidth=2.0,
+                    color="#4C72B0",
+                    marker="s",
+                    markersize=5,
+                )
+            axes[row].set_title("Validation decode MSE (gt vs predicted)", pad=8)
+        axes[row].set_ylabel("action MSE")
         axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
         row += 1
 
-    if has_tactile:
-        ax = axes[row]
-        if sim_epochs:
-            ax.plot(
-                sim_epochs,
-                train_tactile_sim,
-                label="train_tactile_sim (mean cos)",
-                linewidth=2.0,
-                color="#4C72B0",
-            )
-            ax.plot(
-                sim_epochs,
-                train_tactile_change,
-                label="train_tactile_change s=1-cos",
-                linewidth=2.0,
-                color="#C44E52",
-            )
-            ax.plot(
-                sim_epochs,
-                train_gate_w,
-                label="train_gate_w",
+    if has_counts:
+        if n_high_epochs:
+            axes[row].plot(
+                n_high_epochs,
+                n_high_w,
+                label="val count (w>0.5)",
                 linewidth=2.0,
                 color="#55A868",
-            )
-            ax.plot(
-                sim_epochs,
-                train_gate_active,
-                label="train_gate_active_frac (w>0.5)",
-                linewidth=1.8,
-                color="#8172B2",
-                linestyle="--",
-            )
-        if val_sim_epochs:
-            ax.plot(
-                val_sim_epochs,
-                val_tactile_sim,
-                label="val_tactile_sim",
-                linewidth=2.0,
-                color="#64B5CD",
                 marker="o",
                 markersize=5,
             )
-            ax.plot(
-                val_sim_epochs,
-                val_gate_w,
-                label="val_gate_w",
+        if n_low_epochs:
+            axes[row].plot(
+                n_low_epochs,
+                n_low_w,
+                label="val count (w≤0.5)",
                 linewidth=2.0,
-                color="#DD8452",
+                color="#8172B2",
                 marker="s",
                 markersize=5,
             )
-        ax.set_ylabel("sim / change / gate")
-        ax.set_title("Tactile similarity vs episode baseline (gated)")
-        ax.set_ylim(-0.05, 1.05)
-        ax.grid(True, alpha=0.3)
-        ax.legend(loc="best", fontsize=8)
+        axes[row].set_ylabel("# val samples")
+        axes[row].set_title("Validation sample counts by gate weight", pad=8)
+        axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
         row += 1
 
     axes[-1].set_xlabel("epoch")
-    fig.suptitle(f"Training history: {history_path.parent.name}/{history_path.name}", fontsize=12)
-    fig.savefig(destination, dpi=150)
+    fig.suptitle(
+        f"Training history: {history_path.parent.name}/{history_path.name}",
+        fontsize=12,
+        y=0.97,
+    )
+    temporary = destination.with_name(destination.name + ".tmp.png")
+    fig.savefig(temporary, dpi=150)
     plt.close(fig)
+    temporary.replace(destination)
     return destination

@@ -11,6 +11,7 @@ from safetensors.flax import load_file as load_safetensors_file
 
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.data import (
+    DatasetSource,
     action_delta_timestamps,
     canonicalize_dataset_stats,
     ensure_stats_counts,
@@ -18,6 +19,7 @@ from lerobot.policies.smolvla_jax.data import (
     prepare_lerobot_batch,
     rename_dataset_stats,
     resolve_action_key,
+    split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
 
@@ -124,6 +126,31 @@ def test_parse_dataset_sources() -> None:
         parse_dataset_sources({})
     with pytest.raises(ValueError):
         parse_dataset_sources({"datasets": []})
+
+
+def test_split_sources_train_val_uses_explicit_episodes(monkeypatch) -> None:
+    class FakeMeta:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.total_episodes = 100
+
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
+        FakeMeta,
+    )
+    sources = [
+        DatasetSource(
+            repo_id="org/a",
+            episodes=list(range(10)),
+            action_key="actions",
+            weight=1.0,
+        )
+    ]
+    train, val = split_sources_train_val(sources, val_fraction=0.2, seed=0)
+    assert len(train) == 1 and len(val) == 1
+    assert set(train[0].episodes).isdisjoint(val[0].episodes)
+    assert len(train[0].episodes) + len(val[0].episodes) == 10
+    assert len(val[0].episodes) == 2
 
 
 def test_rename_and_count_stats_for_aggregation() -> None:

@@ -10,6 +10,7 @@ import numpy as np
 from tactile_flow_steering.utils.checkpoint import load_checkpoint
 from tactile_flow_steering.utils.data import TactileConditionedBatches
 from tactile_flow_steering.utils.data import resolve_tactile_window
+from tactile_flow_steering.utils.metrics import EvalTarget
 from tactile_flow_steering.utils.metrics import evaluate_split
 from tactile_flow_steering.utils.model import FlowSolver
 from tactile_flow_steering.utils.visualize import write_evaluation_plots
@@ -30,6 +31,7 @@ def evaluate_decoder(
     batch_size: int,
     num_steps: int,
     solver: FlowSolver,
+    target: EvalTarget | None,
     save_predictions: bool,
     write_plots: bool,
     num_trajectory_samples: int,
@@ -55,6 +57,9 @@ def evaluate_decoder(
         tactile_window_divisor = int(extra.get("tactile_window_divisor", 1))
     if history_stride is None:
         history_stride = int(extra.get("history_stride", 1))
+    if target is None:
+        loss_mode = str(extra.get("loss_mode", "gt"))
+        target = "predicted" if loss_mode == "predicted" else "gt"
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -94,6 +99,7 @@ def evaluate_decoder(
             num_steps=num_steps,
             solver=solver,
             keep_predictions=save_predictions,
+            target=target,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, float | int | str] = {
@@ -104,11 +110,19 @@ def evaluate_decoder(
             "decoder_solver": solver,
             "tactile_window": tactile_window,
             "tactile_window_divisor": tactile_window_divisor,
+            "target": result.target,
             "flow_loss": result.flow_loss,
             "mse": result.mse,
             "rmse": result.rmse,
             "mae": result.mae,
-            "target": "gt_action",
+            "flow_loss_gt": result.flow_loss_gt,
+            "mse_gt": result.mse_gt,
+            "rmse_gt": result.rmse_gt,
+            "mae_gt": result.mae_gt,
+            "flow_loss_pred": result.flow_loss_pred,
+            "mse_pred": result.mse_pred,
+            "rmse_pred": result.rmse_pred,
+            "mae_pred": result.mae_pred,
         }
         atomic_write_json(output_dir / "metrics.json", metrics)
 
@@ -124,6 +138,10 @@ def evaluate_decoder(
                     "mse",
                     "rmse",
                     "mae",
+                    "mse_gt",
+                    "mae_gt",
+                    "mse_pred",
+                    "mae_pred",
                 ],
             )
             writer.writeheader()
@@ -137,6 +155,10 @@ def evaluate_decoder(
                         "mse": float(result.sample_mse[position]),
                         "rmse": float(result.sample_rmse[position]),
                         "mae": float(result.sample_mae[position]),
+                        "mse_gt": float(result.sample_mse_gt[position]),
+                        "mae_gt": float(result.sample_mae_gt[position]),
+                        "mse_pred": float(result.sample_mse_pred[position]),
+                        "mae_pred": float(result.sample_mae_pred[position]),
                     }
                 )
         if result.predictions is not None:
@@ -162,8 +184,9 @@ def evaluate_decoder(
                 print(f"plot={plot_path}")
 
         print(
-            f"validation_samples={len(result.cache_indices)} solver={solver} flow_loss={result.flow_loss:.8f} "
-            f"mse={result.mse:.8f} rmse={result.rmse:.8f} mae={result.mae:.8f}"
+            f"validation_samples={len(result.cache_indices)} solver={solver} "
+            f"target={result.target} flow_loss={result.flow_loss:.8f} "
+            f"mse={result.mse:.8f} mse_gt={result.mse_gt:.8f} mse_pred={result.mse_pred:.8f}"
         )
         print(f"evaluation={output_dir}")
         return metrics
@@ -173,7 +196,10 @@ def evaluate_decoder(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Evaluate tactile GRU-conditioned flow decoder against GT actions."
+        description=(
+            "Evaluate tactile GRU-conditioned flow decoder. "
+            "Primary metrics follow --target; mse_gt and mse_pred are always reported."
+        )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--tactile-encoder-dir", type=pathlib.Path, required=True)
@@ -195,6 +221,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-steps", type=int, default=5)
+    parser.add_argument(
+        "--target",
+        choices=("gt", "predicted"),
+        default=None,
+        help=(
+            "Primary eval target for flow_loss/mse. "
+            "Default: predicted if checkpoint loss_mode=predicted, else gt. "
+            "mse_gt and mse_pred are always written."
+        ),
+    )
     parser.add_argument(
         "--solver",
         "--decoder-solver",
@@ -228,6 +264,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         batch_size=args.batch_size,
         num_steps=args.num_steps,
         solver=args.solver,
+        target=args.target,
         save_predictions=args.save_predictions,
         write_plots=not args.no_plots,
         num_trajectory_samples=args.num_trajectory_samples,

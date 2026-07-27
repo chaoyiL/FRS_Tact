@@ -230,6 +230,50 @@ def flow_matching_loss_per_sample(
     return jnp.mean(jnp.square(predicted_velocity - target_velocity), axis=(1, 2))
 
 
+def decode_mse_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    target: Array,
+    tactile_seq: Array,
+    *,
+    num_steps: int,
+    solver: FlowSolver = "euler",
+) -> Array:
+    """Per-sample MSE between integrated decode(x_base) and ``target``."""
+
+    decoded = decode_actions(
+        model, x_base, tactile_seq, num_steps=num_steps, solver=solver
+    )
+    return jnp.mean(jnp.square(decoded - target), axis=(1, 2))
+
+
+def gt_supervised_loss_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    gt_action: Array,
+    t: Array,
+    tactile_seq: Array,
+    *,
+    aux_decode_weight: float,
+    aux_decode_steps: int,
+    aux_decode_solver: FlowSolver = "euler",
+) -> Array:
+    """Per-sample ``FM(gt) + λ_aux MSE(decode, gt)``."""
+
+    flow = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq)
+    if aux_decode_weight == 0.0:
+        return flow
+    decode_mse = decode_mse_per_sample(
+        model,
+        x_base,
+        gt_action,
+        tactile_seq,
+        num_steps=aux_decode_steps,
+        solver=aux_decode_solver,
+    )
+    return flow + float(aux_decode_weight) * decode_mse
+
+
 def gated_flow_matching_loss_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -240,16 +284,41 @@ def gated_flow_matching_loss_per_sample(
     gate_weights: Array,
     *,
     gate_lambda: float,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
 ) -> Array:
-    """Per-sample ``w L* + λ (1-w) L_stop`` with shared noise time ``t``."""
+    """Per-sample ``w L* + λ (1-w) L_stop`` with shared noise time ``t``.
 
-    loss_star = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq)
+    ``L*`` is the GT-supervised loss (FM + aux decode MSE). ``L_stop`` remains
+    FM toward predicted actions only (no decode aux).
+    """
+
+    loss_star = gt_supervised_loss_per_sample(
+        model,
+        x_base,
+        gt_action,
+        t,
+        tactile_seq,
+        aux_decode_weight=aux_decode_weight,
+        aux_decode_steps=aux_decode_steps,
+        aux_decode_solver=aux_decode_solver,
+    )
     loss_stop = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq)
     weights = jax.lax.stop_gradient(gate_weights)
     return weights * loss_star + float(gate_lambda) * (1.0 - weights) * loss_stop
 
 
-@partial(nnx.jit, static_argnames=("loss_mode", "gate_lambda"))
+@partial(
+    nnx.jit,
+    static_argnames=(
+        "loss_mode",
+        "gate_lambda",
+        "aux_decode_weight",
+        "aux_decode_steps",
+        "aux_decode_solver",
+    ),
+)
 def train_step(
     model: TactileConditionedFlowDecoder,
     optimizer: nnx.Optimizer,
@@ -262,13 +331,31 @@ def train_step(
     *,
     loss_mode: str = "gt",
     gate_lambda: float = 1.0,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
 ) -> Array:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
     def loss_fn(candidate: TactileConditionedFlowDecoder) -> Array:
         if loss_mode == "gt":
             return jnp.mean(
-                flow_matching_loss_per_sample(candidate, x_base, gt_action, t, tactile_seq)
+                gt_supervised_loss_per_sample(
+                    candidate,
+                    x_base,
+                    gt_action,
+                    t,
+                    tactile_seq,
+                    aux_decode_weight=aux_decode_weight,
+                    aux_decode_steps=aux_decode_steps,
+                    aux_decode_solver=aux_decode_solver,
+                )
+            )
+        if loss_mode == "predicted":
+            return jnp.mean(
+                flow_matching_loss_per_sample(
+                    candidate, x_base, predicted_action, t, tactile_seq
+                )
             )
         if loss_mode == "gated":
             return jnp.mean(
@@ -281,9 +368,12 @@ def train_step(
                     tactile_seq,
                     gate_weights,
                     gate_lambda=gate_lambda,
+                    aux_decode_weight=aux_decode_weight,
+                    aux_decode_steps=aux_decode_steps,
+                    aux_decode_solver=aux_decode_solver,
                 )
             )
-        raise ValueError(f"loss_mode must be 'gt' or 'gated', got {loss_mode!r}.")
+        raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
 
     loss, gradients = nnx.value_and_grad(loss_fn)(model)
     optimizer.update(model, gradients)

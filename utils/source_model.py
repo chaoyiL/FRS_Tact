@@ -8,10 +8,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from modalities_eval_scripts.utils import EvalObservation
-from modalities_eval_scripts.utils import SmolVLAEvalModel
-from modalities_eval_scripts.utils import VelocityContext
-from modalities_eval_scripts.utils import _stack_observations
+from modalities_eval.utils import EvalObservation
+from modalities_eval.utils import SmolVLAEvalModel
+from modalities_eval.utils import VelocityContext
+from modalities_eval.utils import _stack_observations
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
 from utils.integration import euler_integrate_velocity
 from utils.integration import fireflow_integrate_velocity

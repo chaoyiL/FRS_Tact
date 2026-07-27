@@ -1,11 +1,11 @@
 """Compatibility re-exports for SmolVLA evaluation helpers.
 
-Prefer importing from ``modalities_eval_scripts.utils`` directly.
+Prefer importing from ``modalities_eval.utils`` directly.
 """
 
 from __future__ import annotations
 
-from modalities_eval_scripts.utils import (  # noqa: F401
+from modalities_eval.utils import (  # noqa: F401
     EpisodeData,
     EvalObservation,
     SmolVLAEvalModel,

@@ -35,10 +35,20 @@ prefetch_factor: 2
 video_backend: null
 log_freq: 10
 save_freq: 5000
+eval_freq: 1000       # 每隔多少 step 跑一次验证（也在最后一步跑）
 seed: 42
 resume: null
 data_parallel: true
 allow_tokenizer_download: true
+
+# ---- Flow-matching 验证集 ----
+# 按 episode 划分；验证时计算 FM loss，并可选做 action-chunk rollout（sample_actions）后与 GT 比 MSE。
+validation:
+  enabled: true
+  fraction: 0.1          # 每个数据集抽出的 episode 比例
+  rollout: true          # true: 额外做 FM 积分采样（rollout）
+  rollout_steps: null    # null = 用 model.num_steps；可改成更小以加速验证
+  max_batches: null      # null = 跑完整验证集；可设正整数做快速抽检
 
 # ---- Weights & Biases ----
 wandb:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +143,105 @@ class JaxSmolVLATrainer:
             batch = shard_batch(batch, self.mesh)
         self.state, metrics = self._compiled_step(self.state, self.frozen_params, batch)
         return metrics
+
+    def _eval_batch(
+        self,
+        params: Params,
+        batch: Mapping[str, Array],
+        rng: Array,
+        *,
+        rollout: bool,
+        rollout_steps: int,
+    ) -> dict[str, Array]:
+        loss_rng, sample_rng = jax.random.split(rng)
+        loss = self.model.loss(params, batch, loss_rng)
+        metrics: dict[str, Array] = {
+            "loss": loss,
+            "n_samples": jnp.asarray(batch["actions"].shape[0], dtype=jnp.float32),
+        }
+        if not rollout:
+            metrics["action_mse"] = jnp.asarray(0.0, dtype=jnp.float32)
+            return metrics
+
+        predicted = self.model.sample_actions(
+            params,
+            batch["images"],
+            batch["image_masks"],
+            batch["language_tokens"],
+            batch["language_masks"],
+            batch["state"],
+            sample_rng,
+            num_steps=rollout_steps,
+        )
+        target = batch["actions"][..., : self.config.action_dim]
+        errors = jnp.square(predicted - target)
+        action_is_pad = batch.get("action_is_pad")
+        if action_is_pad is not None:
+            valid = (~action_is_pad).astype(errors.dtype)[..., None]
+            errors = errors * valid
+            denominator = jnp.maximum(jnp.sum(valid) * errors.shape[-1], 1.0)
+            action_mse = jnp.sum(errors) / denominator
+        else:
+            action_mse = jnp.mean(errors)
+        metrics["action_mse"] = action_mse
+        return metrics
+
+    def evaluate(
+        self,
+        batches: Iterable[Mapping[str, Any]],
+        *,
+        seed: int = 0,
+        max_batches: int | None = None,
+        rollout: bool = True,
+        rollout_steps: int | None = None,
+    ) -> dict[str, float]:
+        """Run FM validation (and optional action-chunk rollouts) over finite batches."""
+
+        steps = self.config.num_steps if rollout_steps is None else int(rollout_steps)
+        if steps <= 0:
+            raise ValueError(f"rollout_steps must be positive, got {steps}")
+
+        def eval_fn(params: Params, batch: Mapping[str, Array], rng: Array) -> dict[str, Array]:
+            return self._eval_batch(
+                params,
+                batch,
+                rng,
+                rollout=bool(rollout),
+                rollout_steps=steps,
+            )
+
+        compiled = jax.jit(eval_fn)
+
+        total_loss = 0.0
+        total_mse = 0.0
+        total_weight = 0.0
+        n_batches = 0
+        rng = jax.random.key(seed)
+        params = self.full_params
+
+        for batch in batches:
+            if max_batches is not None and n_batches >= max_batches:
+                break
+            batch = jax.tree.map(jnp.asarray, batch)
+            if self.mesh is not None:
+                batch = shard_batch(batch, self.mesh)
+            rng, batch_rng = jax.random.split(rng)
+            metrics = jax.device_get(compiled(params, batch, batch_rng))
+            weight = float(metrics["n_samples"])
+            total_loss += float(metrics["loss"]) * weight
+            total_mse += float(metrics["action_mse"]) * weight
+            total_weight += weight
+            n_batches += 1
+
+        if n_batches == 0 or total_weight <= 0:
+            raise ValueError("validation produced no batches")
+
+        return {
+            "loss": total_loss / total_weight,
+            "action_mse": total_mse / total_weight if rollout else float("nan"),
+            "n_samples": total_weight,
+            "n_batches": float(n_batches),
+        }
 
     @property
     def full_params(self) -> Params:

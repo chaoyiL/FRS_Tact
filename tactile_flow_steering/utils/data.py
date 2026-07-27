@@ -26,7 +26,7 @@ from utils.cache import CachedPairs
 
 Array = jax.Array
 SplitName = Literal["train", "val"]
-LossMode = Literal["gt", "gated"]
+LossMode = Literal["gt", "predicted", "gated"]
 
 
 def resolve_tactile_window(*, action_horizon: int, window_divisor: int) -> int:

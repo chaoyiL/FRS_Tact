@@ -19,11 +19,11 @@ if str(ROOT) not in sys.path:
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.smolvla_jax.data import action_delta_timestamps
 
-from modalities_eval_scripts.utils import EvalObservation
-from modalities_eval_scripts.utils import SmolVLAEvalModel
-from modalities_eval_scripts.utils import add_eval_data_arguments
-from modalities_eval_scripts.utils import load_model
-from modalities_eval_scripts.utils import parse_rename_map
+from modalities_eval.utils import EvalObservation
+from modalities_eval.utils import SmolVLAEvalModel
+from modalities_eval.utils import add_eval_data_arguments
+from modalities_eval.utils import load_model
+from modalities_eval.utils import parse_rename_map
 from utils.cache import CACHE_VERSION
 from utils.cache import MANIFEST_NAME
 from utils.cache import SampleRecord
@@ -35,6 +35,7 @@ from utils.cache import load_manifest
 from utils.cache import open_cache_arrays
 from utils.cache import records_digest
 from utils.cache import split_episodes
+from utils.cache import trim_episode_tail
 from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
@@ -77,6 +78,8 @@ def build_records(
     frame_stride: int,
     max_episodes: int | None,
     max_samples: int | None,
+    action_horizon: int,
+    drop_tail_action_chunks: int = 1,
 ) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
     if frame_stride <= 0:
         raise ValueError(f"frame_stride must be positive, got {frame_stride}.")
@@ -94,11 +97,27 @@ def build_records(
     records: list[SampleRecord] = []
     for episode_index in episodes:
         split = "val" if episode_index in val_set else "train"
-        dataset_indices = _indices_for_episode(metadata, episode_index)[::frame_stride]
+        trimmed = trim_episode_tail(
+            _indices_for_episode(metadata, episode_index),
+            drop_tail_action_chunks=drop_tail_action_chunks,
+            action_horizon=action_horizon,
+        )
+        dataset_indices = trimmed[::frame_stride]
         records.extend(SampleRecord(int(index), episode_index, split) for index in dataset_indices)
     records = limit_records(records, max_samples=max_samples, seed=split_seed)
     if not records:
-        raise ValueError("Dataset selection produced no samples.")
+        raise ValueError(
+            "Dataset selection produced no samples. "
+            "Try lowering --drop-tail-action-chunks or using longer episodes."
+        )
+    present = {record.episode_index for record in records}
+    train_episodes = tuple(episode for episode in train_episodes if episode in present)
+    val_episodes = tuple(episode for episode in val_episodes if episode in present)
+    if not train_episodes or not val_episodes:
+        raise ValueError(
+            "After dropping episode tails, train or val split is empty. "
+            "Try lowering --drop-tail-action-chunks."
+        )
     return records, train_episodes, val_episodes
 
 
@@ -119,6 +138,7 @@ def _configuration(
     frame_stride: int,
     max_episodes: int | None,
     max_samples: int | None,
+    drop_tail_action_chunks: int,
 ) -> dict[str, Any]:
     return {
         "checkpoint_dir": str(checkpoint_dir.resolve()),
@@ -137,6 +157,7 @@ def _configuration(
         "frame_stride": frame_stride,
         "max_episodes": max_episodes,
         "max_samples": max_samples,
+        "drop_tail_action_chunks": drop_tail_action_chunks,
     }
 
 
@@ -260,6 +281,7 @@ def prepare_cache(
     frame_stride: int,
     max_episodes: int | None,
     max_samples: int | None,
+    drop_tail_action_chunks: int = 1,
     flush_every: int = 8,
 ) -> dict[str, Any]:
     if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
@@ -268,6 +290,8 @@ def prepare_cache(
         raise ValueError(f"reverse_solver must be 'euler' or 'fireflow', got {reverse_solver!r}.")
     if flush_every <= 0:
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
+    if drop_tail_action_chunks < 0:
+        raise ValueError(f"drop_tail_action_chunks must be >= 0, got {drop_tail_action_chunks}.")
 
     model = load_model(
         checkpoint_dir,
@@ -283,6 +307,7 @@ def prepare_cache(
         root=model.dataset_root,
         revision=model.dataset_revision,
     )
+    action_horizon = int(model.action_horizon)
     records, train_episodes, val_episodes = build_records(
         metadata,
         val_fraction=val_fraction,
@@ -290,6 +315,8 @@ def prepare_cache(
         frame_stride=frame_stride,
         max_episodes=max_episodes,
         max_samples=max_samples,
+        action_horizon=action_horizon,
+        drop_tail_action_chunks=drop_tail_action_chunks,
     )
     configuration = _configuration(
         checkpoint_dir=checkpoint_dir,
@@ -307,11 +334,17 @@ def prepare_cache(
         frame_stride=frame_stride,
         max_episodes=max_episodes,
         max_samples=max_samples,
+        drop_tail_action_chunks=drop_tail_action_chunks,
     )
     digest = records_digest(records)
     manifest_path = cache_dir / MANIFEST_NAME
-    action_horizon = model.action_horizon
     action_dim = model.action_dim
+    drop_frames = int(drop_tail_action_chunks) * action_horizon
+    if drop_frames > 0:
+        print(
+            f"dropping last {drop_tail_action_chunks} action chunk(s) "
+            f"({drop_frames} frames) from each episode before sampling"
+        )
 
     if manifest_path.exists():
         manifest = load_manifest(cache_dir, require_complete=False)
@@ -477,6 +510,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--val-fraction", type=float, default=0.2)
     parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument(
+        "--drop-tail-action-chunks",
+        type=int,
+        default=1,
+        help=(
+            "Drop the last K * action_horizon frames from each episode before "
+            "frame-stride sampling (default: 1). Set 0 to keep episode tails."
+        ),
+    )
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--max-samples", type=int)
     return parser
@@ -503,6 +545,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         frame_stride=args.frame_stride,
         max_episodes=args.max_episodes,
         max_samples=args.max_samples,
+        drop_tail_action_chunks=args.drop_tail_action_chunks,
         flush_every=args.flush_every,
     )
 

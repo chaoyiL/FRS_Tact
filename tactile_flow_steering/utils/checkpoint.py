@@ -69,12 +69,22 @@ def _optimizer_step_value(optimizer: nnx.Optimizer) -> int:
     return int(np.asarray(jax.device_get(optimizer.step[...])))
 
 
+def _serialize_metric_value(value: Any) -> float | str | int | bool:
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, (str,)):
+        return value
+    if isinstance(value, (int, np.integer)) and not isinstance(value, (bool, np.bool_)):
+        return int(value)
+    return float(value)
+
+
 def save_checkpoint(
     directory: pathlib.Path,
     model: TactileConditionedFlowDecoder,
     *,
     epoch: int,
-    metrics: dict[str, float],
+    metrics: dict[str, Any],
     extra_metadata: dict[str, Any] | None = None,
     optimizer: nnx.Optimizer | None = None,
 ) -> None:
@@ -86,7 +96,7 @@ def save_checkpoint(
     metadata: dict[str, Any] = {
         "version": 2,
         "epoch": int(epoch),
-        "metrics": {key: float(value) for key, value in metrics.items()},
+        "metrics": {key: _serialize_metric_value(value) for key, value in metrics.items()},
         "decoder_config": dataclasses.asdict(model.config),
         "parameter_paths": [_path_name(path) for path, _ in ordered],
         "has_opt_state": optimizer is not None,

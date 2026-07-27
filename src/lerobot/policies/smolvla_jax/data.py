@@ -209,8 +209,70 @@ def parse_dataset_sources(cfg: Mapping[str, Any]) -> list[DatasetSource]:
     return sources
 
 
+def split_sources_train_val(
+    sources: Sequence[DatasetSource],
+    *,
+    val_fraction: float,
+    seed: int,
+) -> tuple[list[DatasetSource], list[DatasetSource]]:
+    """Hold out a fraction of episodes per dataset for FM validation."""
+
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}")
+
+    train_sources: list[DatasetSource] = []
+    val_sources: list[DatasetSource] = []
+    rng = np.random.default_rng(seed)
+
+    for source in sources:
+        metadata = LeRobotDatasetMetadata(
+            repo_id=source.repo_id,
+            root=source.root,
+            revision=source.revision,
+        )
+        if source.episodes is not None:
+            episode_ids = np.asarray(list(source.episodes), dtype=np.int64)
+        else:
+            episode_ids = np.arange(metadata.total_episodes, dtype=np.int64)
+        if episode_ids.size == 0:
+            raise ValueError(f"dataset {source.repo_id!r} has no episodes to split")
+        if episode_ids.size == 1:
+            train_sources.append(source)
+            continue
+
+        shuffled = episode_ids.copy()
+        rng.shuffle(shuffled)
+        n_val = max(1, int(round(float(val_fraction) * shuffled.size)))
+        n_val = min(n_val, shuffled.size - 1)
+        val_ids = sorted(int(x) for x in shuffled[:n_val])
+        train_ids = sorted(int(x) for x in shuffled[n_val:])
+        train_sources.append(
+            DatasetSource(
+                repo_id=source.repo_id,
+                root=source.root,
+                revision=source.revision,
+                episodes=train_ids,
+                action_key=source.action_key,
+                rename_map=source.rename_map,
+                weight=source.weight,
+            )
+        )
+        val_sources.append(
+            DatasetSource(
+                repo_id=source.repo_id,
+                root=source.root,
+                revision=source.revision,
+                episodes=val_ids,
+                action_key=source.action_key,
+                rename_map=source.rename_map,
+                weight=source.weight,
+            )
+        )
+    return train_sources, val_sources
+
+
 class LeRobotJaxDataLoader:
-    """Infinite JAX batch stream backed by one or more LeRobot datasets."""
+    """JAX batch stream backed by one or more LeRobot datasets."""
 
     def __init__(
         self,
@@ -224,6 +286,10 @@ class LeRobotJaxDataLoader:
         video_backend: str | None = None,
         seed: int = 0,
         local_files_only: bool = True,
+        shuffle: bool = True,
+        infinite: bool = True,
+        drop_last: bool | None = None,
+        preprocessor: JaxSmolVLAPreprocessor | None = None,
     ):
         if batch_size <= 0:
             raise ValueError(f"batch size must be positive, got {batch_size}")
@@ -235,6 +301,8 @@ class LeRobotJaxDataLoader:
         self.sources = list(sources)
         self.config = config
         self.action_key = CANONICAL_ACTION_KEY
+        self.infinite = bool(infinite)
+        self.shuffle = bool(shuffle)
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -302,29 +370,42 @@ class LeRobotJaxDataLoader:
             self.dataset = mapped_datasets[0]
         else:
             self.dataset = ConcatDataset(mapped_datasets)
-        if len(self.dataset) < batch_size:
+        effective_batch_size = min(batch_size, len(self.dataset))
+        if effective_batch_size <= 0:
+            raise ValueError("dataset is empty")
+        if drop_last is None:
+            drop_last = bool(infinite)
+        if drop_last and len(self.dataset) < effective_batch_size:
             raise ValueError(
                 f"combined datasets contain {len(self.dataset)} frames, "
-                f"smaller than batch size {batch_size}"
+                f"smaller than batch size {effective_batch_size}"
+            )
+        self.batch_size = int(effective_batch_size)
+
+        if preprocessor is not None:
+            self.preprocessor = preprocessor
+        else:
+            merged_stats = aggregate_stats(stats_list) if len(stats_list) > 1 else stats_list[0]
+            # Sample keys are already remapped; keep preprocessor rename_map empty.
+            self.preprocessor = JaxSmolVLAPreprocessor(
+                checkpoint,
+                config,
+                rename_map={},
+                stats=merged_stats,
+                local_files_only=local_files_only,
             )
 
-        merged_stats = aggregate_stats(stats_list) if len(stats_list) > 1 else stats_list[0]
-        # Sample keys are already remapped; keep preprocessor rename_map empty.
-        self.preprocessor = JaxSmolVLAPreprocessor(
-            checkpoint,
-            config,
-            rename_map={},
-            stats=merged_stats,
-            local_files_only=local_files_only,
-        )
-
         generator = torch.Generator().manual_seed(seed)
-        use_weighted = len(self.sources) > 1 and any(source.weight != 1.0 for source in self.sources)
+        use_weighted = (
+            self.shuffle
+            and len(self.sources) > 1
+            and any(source.weight != 1.0 for source in self.sources)
+        )
         loader_kwargs: dict[str, Any] = {
-            "batch_size": batch_size,
-            "drop_last": True,
+            "batch_size": self.batch_size,
+            "drop_last": bool(drop_last),
             "num_workers": num_workers,
-            "persistent_workers": num_workers > 0,
+            "persistent_workers": num_workers > 0 and self.infinite,
             "collate_fn": _collate_lerobot_samples,
         }
         if use_weighted:
@@ -336,7 +417,7 @@ class LeRobotJaxDataLoader:
             )
             loader_kwargs["sampler"] = sampler
         else:
-            loader_kwargs["shuffle"] = True
+            loader_kwargs["shuffle"] = self.shuffle
             loader_kwargs["generator"] = generator
         if num_workers > 0:
             loader_kwargs["prefetch_factor"] = prefetch_factor
@@ -389,3 +470,5 @@ class LeRobotJaxDataLoader:
                     self.config,
                     self.action_key,
                 )
+            if not self.infinite:
+                break

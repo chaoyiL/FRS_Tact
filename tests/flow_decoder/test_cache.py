@@ -10,12 +10,16 @@ from utils.cache import CACHE_VERSION
 from utils.cache import SampleRecord
 from utils.cache import atomic_write_json
 from utils.cache import create_cache_arrays
+from utils.cache import filter_cache_by_mse
 from utils.cache import finalize_partial_cache
 from utils.cache import flush_arrays
 from utils.cache import limit_records
 from utils.cache import load_manifest
 from utils.cache import open_cache_arrays
+from utils.cache import sample_pred_gt_mse
 from utils.cache import split_episodes
+from utils.cache import trim_episode_tail
+from utils.cache import write_cache_subset
 
 
 class EpisodeSplitTest(unittest.TestCase):
@@ -97,6 +101,73 @@ class EpisodeSplitTest(unittest.TestCase):
             self.assertEqual(manifest["train_sample_count"] + manifest["val_sample_count"], 3)
             self.assertEqual(set(manifest["train_episodes"]) & set(manifest["val_episodes"]), set())
             self.assertAlmostEqual(manifest["mean_source_inversion_mse"], 2.0)
+
+    def test_trim_episode_tail_drops_k_action_horizons(self):
+        indices = list(range(120))
+        self.assertEqual(trim_episode_tail(indices, drop_tail_action_chunks=0, action_horizon=50), tuple(range(120)))
+        self.assertEqual(trim_episode_tail(indices, drop_tail_action_chunks=1, action_horizon=50), tuple(range(70)))
+        self.assertEqual(trim_episode_tail(indices, drop_tail_action_chunks=2, action_horizon=50), tuple(range(20)))
+        self.assertEqual(trim_episode_tail(indices, drop_tail_action_chunks=3, action_horizon=50), ())
+
+    def test_filter_cache_by_mse_keeps_low_error_rows(self):
+        records = [
+            SampleRecord(10, 0, "train"),
+            SampleRecord(20, 0, "train"),
+            SampleRecord(30, 1, "val"),
+            SampleRecord(40, 1, "val"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            source = root / "source"
+            output = root / "filtered"
+            arrays = create_cache_arrays(source, records, action_horizon=2, action_dim=2)
+            # MSE rows: 0, 0.25, 4.0, 0.0  (threshold 1.0 keeps 0,1,3)
+            arrays["target"][:] = np.asarray(
+                [
+                    [[0.0, 0.0], [0.0, 0.0]],
+                    [[0.5, 0.5], [0.5, 0.5]],
+                    [[2.0, 2.0], [2.0, 2.0]],
+                    [[0.0, 0.0], [0.0, 0.0]],
+                ],
+                dtype=np.float32,
+            )
+            arrays["gt_action"][:] = 0.0
+            arrays["x_base"][:] = 1.0
+            arrays["inversion_mse"][:] = np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+            flush_arrays(arrays)
+            atomic_write_json(
+                source / "manifest.json",
+                {
+                    "version": CACHE_VERSION,
+                    "status": "complete",
+                    "completed_samples": 4,
+                    "sample_count": 4,
+                    "train_sample_count": 2,
+                    "val_sample_count": 2,
+                    "train_episodes": [0],
+                    "val_episodes": [1],
+                    "action_horizon": 2,
+                    "action_dim": 2,
+                    "configuration": {},
+                    "records_sha256": "unused",
+                    "mean_source_inversion_mse": 0.25,
+                },
+            )
+
+            mse = sample_pred_gt_mse(np.asarray(arrays["target"]), np.asarray(arrays["gt_action"]))
+            self.assertTrue(np.allclose(mse, [0.0, 0.25, 4.0, 0.0]))
+
+            manifest = filter_cache_by_mse(source, output, max_mse=1.0)
+            kept = open_cache_arrays(output)
+            self.assertEqual(manifest["sample_count"], 3)
+            self.assertEqual(manifest["filter"]["dropped_sample_count"], 1)
+            self.assertEqual(list(kept["dataset_index"]), [10, 20, 40])
+            self.assertTrue(np.allclose(kept["inversion_mse"], [0.1, 0.2, 0.4]))
+            self.assertEqual(manifest["train_sample_count"], 2)
+            self.assertEqual(manifest["val_sample_count"], 1)
+
+            with self.assertRaises(FileExistsError):
+                write_cache_subset(source, output, [0, 1, 3])
 
 
 if __name__ == "__main__":

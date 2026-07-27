@@ -55,6 +55,26 @@ def records_digest(records: Sequence[SampleRecord]) -> str:
     return digest.hexdigest()
 
 
+def trim_episode_tail(
+    dataset_indices: Sequence[int],
+    *,
+    drop_tail_action_chunks: int,
+    action_horizon: int,
+) -> tuple[int, ...]:
+    """Drop the last ``drop_tail_action_chunks * action_horizon`` frames from an episode."""
+    if drop_tail_action_chunks < 0:
+        raise ValueError(f"drop_tail_action_chunks must be >= 0, got {drop_tail_action_chunks}.")
+    if action_horizon <= 0:
+        raise ValueError(f"action_horizon must be positive, got {action_horizon}.")
+    indices = tuple(int(index) for index in dataset_indices)
+    drop_frames = int(drop_tail_action_chunks) * int(action_horizon)
+    if drop_frames <= 0:
+        return indices
+    if len(indices) <= drop_frames:
+        return ()
+    return indices[:-drop_frames]
+
+
 def split_episodes(
     episode_indices: Sequence[int], *, val_fraction: float = 0.2, seed: int = 0
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -262,6 +282,145 @@ def load_manifest(cache_dir: pathlib.Path, *, require_complete: bool = True) -> 
             f"Cache is not complete ({manifest.get('completed_samples', 0)}/{manifest.get('sample_count')}). "
             "Resume prepare.py first."
         )
+    return manifest
+
+
+def sample_pred_gt_mse(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:
+    """Per-sample MSE between predicted and GT action chunks. Shape [N]."""
+    if pred.shape != gt.shape:
+        raise ValueError(f"pred/gt shape mismatch: {pred.shape} vs {gt.shape}")
+    if pred.ndim != 3:
+        raise ValueError(f"Expected actions [N, H, A], got {pred.shape}")
+    diff = pred.astype(np.float64) - gt.astype(np.float64)
+    return np.mean(np.square(diff), axis=(1, 2)).astype(np.float64)
+
+
+def filter_cache_by_mse(
+    cache_dir: str | pathlib.Path,
+    output_dir: str | pathlib.Path,
+    *,
+    max_mse: float = 1.0,
+) -> dict[str, Any]:
+    """Write a new cache keeping only samples with MSE(pred, gt) <= max_mse."""
+    if max_mse < 0:
+        raise ValueError(f"max_mse must be >= 0, got {max_mse}.")
+
+    pairs = CachedPairs(cache_dir)
+    pred = np.asarray(pairs.arrays["target"], dtype=np.float32)
+    gt = np.asarray(pairs.arrays["gt_action"], dtype=np.float32)
+    mse = sample_pred_gt_mse(pred, gt)
+    keep = np.flatnonzero(mse <= float(max_mse)).astype(np.int64)
+    dropped = int(mse.shape[0] - keep.shape[0])
+
+    if keep.size == 0:
+        raise ValueError(
+            f"No samples remain after filtering with max_mse={max_mse}. "
+            f"Source MSE: min={float(mse.min()):.6f} median={float(np.median(mse)):.6f} "
+            f"max={float(mse.max()):.6f}."
+        )
+
+    kept_mse = mse[keep]
+    return write_cache_subset(
+        cache_dir,
+        output_dir,
+        keep,
+        extra_manifest={
+            "filter": {
+                "type": "pred_gt_mse",
+                "max_mse": float(max_mse),
+                "source_sample_count": int(mse.shape[0]),
+                "kept_sample_count": int(keep.shape[0]),
+                "dropped_sample_count": dropped,
+                "kept_mse_mean": float(kept_mse.mean()),
+                "kept_mse_median": float(np.median(kept_mse)),
+                "kept_mse_max": float(kept_mse.max()),
+                "source_mse_mean": float(mse.mean()),
+                "source_mse_median": float(np.median(mse)),
+                "source_mse_max": float(mse.max()),
+            }
+        },
+    )
+
+
+def write_cache_subset(
+    source_dir: str | pathlib.Path,
+    output_dir: str | pathlib.Path,
+    keep_indices: Sequence[int] | np.ndarray,
+    *,
+    extra_manifest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Copy selected rows from a complete cache into a new complete cache directory."""
+    source_dir = pathlib.Path(source_dir)
+    output_dir = pathlib.Path(output_dir)
+    keep = np.asarray(keep_indices, dtype=np.int64)
+    if keep.ndim != 1:
+        raise ValueError(f"keep_indices must be 1-D, got shape {keep.shape}.")
+    if keep.size == 0:
+        raise ValueError("keep_indices is empty; refusing to write an empty cache.")
+    if np.any(keep[1:] < keep[:-1]):
+        keep = np.sort(keep)
+
+    source_manifest = load_manifest(source_dir, require_complete=True)
+    source = open_cache_arrays(source_dir)
+    sample_count = int(source_manifest["sample_count"])
+    if int(keep.min()) < 0 or int(keep.max()) >= sample_count:
+        raise ValueError(
+            f"keep_indices out of range for cache with {sample_count} samples "
+            f"(min={int(keep.min())}, max={int(keep.max())})."
+        )
+
+    records = [
+        SampleRecord(
+            int(source["dataset_index"][index]),
+            int(source["episode_index"][index]),
+            "val" if int(source["split"][index]) == 1 else "train",
+        )
+        for index in keep.tolist()
+    ]
+    if not any(record.split == "train" for record in records):
+        raise ValueError("Filtered cache would have no training samples.")
+    if not any(record.split == "val" for record in records):
+        raise ValueError("Filtered cache would have no validation samples.")
+
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise FileExistsError(
+            f"Output cache directory is not empty: {output_dir}. "
+            "Choose a new directory to avoid mixing caches."
+        )
+
+    action_horizon = int(source_manifest["action_horizon"])
+    action_dim = int(source_manifest["action_dim"])
+    arrays = create_cache_arrays(
+        output_dir,
+        records,
+        action_horizon=action_horizon,
+        action_dim=action_dim,
+    )
+    for key in ("x_base", "target", "gt_action", "inversion_mse"):
+        arrays[key][:] = np.asarray(source[key][keep], dtype=arrays[key].dtype)
+    flush_arrays(arrays)
+
+    train_episodes = sorted({record.episode_index for record in records if record.split == "train"})
+    val_episodes = sorted({record.episode_index for record in records if record.split == "val"})
+    manifest = {
+        "version": CACHE_VERSION,
+        "status": "complete",
+        "completed_samples": len(records),
+        "sample_count": len(records),
+        "train_sample_count": sum(record.split == "train" for record in records),
+        "val_sample_count": sum(record.split == "val" for record in records),
+        "train_episodes": train_episodes,
+        "val_episodes": val_episodes,
+        "action_horizon": action_horizon,
+        "action_dim": action_dim,
+        "configuration": dict(source_manifest.get("configuration", {})),
+        "records_sha256": records_digest(records),
+        "mean_source_inversion_mse": float(np.mean(np.asarray(arrays["inversion_mse"]))),
+        "source_cache_dir": str(source_dir.resolve()),
+    }
+    if extra_manifest:
+        manifest.update(extra_manifest)
+    atomic_write_json(output_dir / MANIFEST_NAME, manifest)
     return manifest
 
 
