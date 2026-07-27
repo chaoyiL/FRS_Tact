@@ -142,11 +142,29 @@ class DatasetReader:
         self._build_index_mapping()
 
     def _build_index_mapping(self) -> None:
-        """Build absolute-to-relative index mapping from loaded hf_dataset."""
+        """Build absolute-to-relative index mapping from loaded hf_dataset.
+
+        Keys must match the absolute indices used by :meth:`get_item` /
+        :meth:`_get_query_indices` (``dataset_from_index + frame_index``).
+        Do not key by the raw ``index`` column: filtered/converted datasets may
+        keep legacy values that no longer match episode metadata ranges, which
+        then raises ``KeyError`` when delta queries look up reconstructed abs
+        indices.
+        """
         self._absolute_to_relative_idx = None
         if self.episodes is not None and self.hf_dataset is not None:
-            indices = self.hf_dataset.data.column("index").to_numpy()
-            self._absolute_to_relative_idx = dict(zip(indices.tolist(), range(len(indices)), strict=True))
+            frame_indices = self.hf_dataset.data.column("frame_index").to_numpy()
+            episode_indices = self.hf_dataset.data.column("episode_index").to_numpy()
+            # Cache episode starts once; episodes metadata may be an HF Dataset.
+            ep_starts = {
+                int(ep_idx): int(self._meta.episodes[int(ep_idx)]["dataset_from_index"])
+                for ep_idx in set(int(x) for x in episode_indices.tolist())
+            }
+            abs_indices = [
+                ep_starts[int(ep_idx)] + int(frame_idx)
+                for ep_idx, frame_idx in zip(episode_indices.tolist(), frame_indices.tolist(), strict=True)
+            ]
+            self._absolute_to_relative_idx = dict(zip(abs_indices, range(len(abs_indices)), strict=True))
 
     @property
     def num_frames(self) -> int:

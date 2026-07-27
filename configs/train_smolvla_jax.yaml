@@ -27,7 +27,7 @@ datasets:
   #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
-output: /root/smolvla_runs/tactile_test_03_3gpu
+output: /workspace/tactile_01
 steps: 60000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4
