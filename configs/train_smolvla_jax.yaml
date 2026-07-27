@@ -92,7 +92,7 @@ model:
 
   # ---- VLM / Expert 架构维度（覆盖 checkpoint；改这里即可）----
   # 1~16 直接使用 SmolVLA 权重；17~32 自动从 full_vlm_checkpoint 补齐缺失层
-  num_vlm_layers: 8
+  num_vlm_layers: 16
   # -1 为自动：在 checkpoint 可用范围内选择能整除 VLM 层数的最大 expert 层数（32层时为16）
   num_expert_layers: -1
   self_attn_every_n_layers: 2
