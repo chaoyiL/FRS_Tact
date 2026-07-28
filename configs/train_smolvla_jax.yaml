@@ -27,7 +27,7 @@ datasets:
   #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
-output: /workspace/tactile_01
+output: /workspace/tactile_02
 steps: 60000
 batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 4
@@ -35,11 +35,50 @@ prefetch_factor: 2
 video_backend: null
 log_freq: 10
 save_freq: 5000
-eval_freq: 1000       # 每隔多少 step 跑一次验证（也在最后一步跑）
+eval_freq: 500       # 每隔多少 step 跑一次验证（也在最后一步跑）
 seed: 42
 resume: null
 data_parallel: true
 allow_tokenizer_download: true
+
+# ---- 图像增强（仅训练集；验证集始终关闭）----
+# enable: false 可关闭。省略 tfs 则用下方默认 brightness/contrast/saturation/hue/sharpness/affine。
+image_transforms:
+  enable: true
+  max_num_transforms: 3   # 每帧最多随机抽几种增强
+  random_order: false
+  # tfs:
+  #   brightness:
+  #     weight: 1.0
+  #     type: ColorJitter
+  #     kwargs:
+  #       brightness: [0.8, 1.2]
+  #   contrast:
+  #     weight: 1.0
+  #     type: ColorJitter
+  #     kwargs:
+  #       contrast: [0.8, 1.2]
+  #   saturation:
+  #     weight: 1.0
+  #     type: ColorJitter
+  #     kwargs:
+  #       saturation: [0.5, 1.5]
+  #   hue:
+  #     weight: 1.0
+  #     type: ColorJitter
+  #     kwargs:
+  #       hue: [-0.05, 0.05]
+  #   sharpness:
+  #     weight: 1.0
+  #     type: SharpnessJitter
+  #     kwargs:
+  #       sharpness: [0.5, 1.5]
+  #   affine:
+  #     weight: 1.0
+  #     type: RandomAffine
+  #     kwargs:
+  #       degrees: [-5.0, 5.0]
+  #       translate: [0.05, 0.05]
 
 # ---- Flow-matching 验证集 ----
 # 按 episode 划分；验证时计算 FM loss，并可选做 action-chunk rollout（sample_actions）后与 GT 比 MSE。
@@ -48,7 +87,7 @@ validation:
   fraction: 0.1          # 每个数据集抽出的 episode 比例
   rollout: true          # true: 额外做 FM 积分采样（rollout）
   rollout_steps: null    # null = 用 model.num_steps；可改成更小以加速验证
-  max_batches: null      # null = 跑完整验证集；可设正整数做快速抽检
+  max_batches: 150      # null = 跑完整验证集；可设正整数做快速抽检
 
 # ---- Weights & Biases ----
 wandb:
@@ -68,9 +107,9 @@ model:
   # 每个模块必须选择一种模式：frozen | full | lora
   # lora 只作用于该模块的 Linear；Conv / Embedding / Norm 保持冻结。
   module_modes:
-    vision: lora
+    vision: frozen
     connector: full
-    vlm_text: lora
+    vlm_text: frozen
     expert: full
     action: full
     state_proj: full

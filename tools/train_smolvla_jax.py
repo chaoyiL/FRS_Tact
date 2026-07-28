@@ -19,6 +19,7 @@ from lerobot.policies.smolvla_jax.checkpoint import (
     load_params,
     resolve_checkpoint,
 )
+from lerobot.datasets.transforms import build_image_transforms
 from lerobot.policies.smolvla_jax.data import (
     LeRobotJaxDataLoader,
     parse_dataset_sources,
@@ -129,6 +130,7 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
             "seed": cfg.get("seed"),
             "data_parallel": cfg.get("data_parallel"),
             "validation": cfg.get("validation"),
+            "image_transforms": cfg.get("image_transforms"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
         },
@@ -267,10 +269,21 @@ def main() -> None:
         "seed": int(cfg.get("seed", 0)),
         "local_files_only": not (allow_tokenizer_download or allow_download),
     }
+    train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
+    print(
+        "image_transforms="
+        + (
+            f"enabled max_num_transforms={train_image_transforms._cfg.max_num_transforms} "
+            f"tfs={list(train_image_transforms.transforms)}"
+            if train_image_transforms is not None
+            else "disabled"
+        )
+    )
     data = LeRobotJaxDataLoader(
         checkpoint,
         config,
         sources=train_sources,
+        image_transforms=train_image_transforms,
         **common_loader_kwargs,
     )
     batches = data.batches()
@@ -284,6 +297,7 @@ def main() -> None:
 
     val_data = None
     if val_enabled:
+        # Validation must stay unaugmented for stable metrics.
         val_data = LeRobotJaxDataLoader(
             checkpoint,
             config,
@@ -292,6 +306,7 @@ def main() -> None:
             shuffle=False,
             infinite=False,
             drop_last=True,
+            image_transforms=None,
             **common_loader_kwargs,
         )
         for summary in val_data.dataset_summaries:

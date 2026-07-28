@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -290,6 +290,7 @@ class LeRobotJaxDataLoader:
         infinite: bool = True,
         drop_last: bool | None = None,
         preprocessor: JaxSmolVLAPreprocessor | None = None,
+        image_transforms: Callable | None = None,
     ):
         if batch_size <= 0:
             raise ValueError(f"batch size must be positive, got {batch_size}")
@@ -303,6 +304,7 @@ class LeRobotJaxDataLoader:
         self.action_key = CANONICAL_ACTION_KEY
         self.infinite = bool(infinite)
         self.shuffle = bool(shuffle)
+        self.image_transforms = image_transforms
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -327,6 +329,7 @@ class LeRobotJaxDataLoader:
                 revision=metadata.revision,
                 episodes=list(source.episodes) if source.episodes is not None else None,
                 delta_timestamps=delta_timestamps,
+                image_transforms=image_transforms,
                 video_backend=video_backend,
                 download_videos=True,
             )
