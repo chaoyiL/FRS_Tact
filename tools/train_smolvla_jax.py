@@ -305,7 +305,8 @@ def main() -> None:
         print(
             f"train_dataset={summary['repo_id']} frames={summary['frames']} "
             f"episodes={summary['episodes']} fps={summary['fps']} "
-            f"action_key={summary['action_key']!r} weight={summary['weight']}"
+            f"action_key={summary['action_key']!r} weight={summary['weight']} "
+            f"visual_keys={summary.get('visual_keys')}"
         )
     print(f"train_frames={len(data.dataset)}")
 

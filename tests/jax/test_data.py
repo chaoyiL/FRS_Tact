@@ -19,6 +19,7 @@ from lerobot.policies.smolvla_jax.data import (
     prepare_lerobot_batch,
     rename_dataset_stats,
     resolve_action_key,
+    resolve_source_visual_keys,
     split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
@@ -171,3 +172,19 @@ def test_rename_and_count_stats_for_aggregation() -> None:
     assert "observation.images.cam0" not in renamed
     counted = ensure_stats_counts(renamed, frame_count=10)
     np.testing.assert_array_equal(counted["action"]["count"], [10])
+
+
+def test_resolve_source_visual_keys_with_rename_map() -> None:
+    keys = resolve_source_visual_keys(
+        ["observation.images.camera1", "observation.images.camera2"],
+        {
+            "observation.images.camera0": "observation.images.camera1",
+            "observation.images.camera1": "observation.images.camera2",
+        },
+        [
+            "observation.images.camera0",
+            "observation.images.camera1",
+            "observation.images.tactile_left_0",
+        ],
+    )
+    assert keys == ["observation.images.camera0", "observation.images.camera1"]
