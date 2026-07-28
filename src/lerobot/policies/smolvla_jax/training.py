@@ -8,6 +8,7 @@ from typing import Any
 import flax.serialization
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import struct
 
@@ -15,6 +16,7 @@ from .checkpoint import load_params, save_portable_params, write_effective_confi
 from .configuration import JaxSmolVLAConfig
 from .lora import initialize_lora_params, is_trainable_parameter
 from .modeling import JaxSmolVLA
+from .modality_dropout import ModalityDropoutConfig, apply_modality_dropout
 from .sharding import create_data_parallel_mesh, replicate_tree, shard_batch
 
 Array = jax.Array
@@ -87,9 +89,15 @@ class JaxSmolVLATrainer:
         *,
         seed: int = 0,
         total_steps: int | None = None,
+        modality_dropout: ModalityDropoutConfig | Mapping[str, Any] | None = None,
     ):
         self.model = model
         self.config = model.config
+        if isinstance(modality_dropout, ModalityDropoutConfig):
+            self.modality_dropout = modality_dropout
+        else:
+            self.modality_dropout = ModalityDropoutConfig.from_dict(modality_dropout)
+        self._modality_dropout_rng = np.random.default_rng(seed + 17)
         params = initialize_lora_params(params, self.config, seed=seed)
         trainable, self.frozen_params = partition_params(params, self.config)
         self.optimizer, self.learning_rate = create_optimizer(self.config, total_steps)
@@ -139,9 +147,30 @@ class JaxSmolVLATrainer:
 
     def step(self, batch: Mapping[str, Any]) -> dict[str, Array]:
         batch = jax.tree.map(jnp.asarray, batch)
+        step = int(np.asarray(jax.device_get(self.state.step)))
+        batch, drop_info = apply_modality_dropout(
+            batch,
+            step=step,
+            rng=self._modality_dropout_rng,
+            config=self.modality_dropout,
+        )
         if self.mesh is not None:
             batch = shard_batch(batch, self.mesh)
         self.state, metrics = self._compiled_step(self.state, self.frozen_params, batch)
+        metrics = dict(metrics)
+        metrics["modality_dropout_applied"] = jnp.asarray(
+            1.0 if drop_info["applied"] else 0.0, dtype=jnp.float32
+        )
+        # Encode dropped modality for logging: -1=none, -2=language, -3=state, >=0=camera index.
+        if not drop_info["applied"]:
+            dropped_code = -1
+        elif drop_info["modality"] == "language":
+            dropped_code = -2
+        elif drop_info["modality"] == "state":
+            dropped_code = -3
+        else:
+            dropped_code = int(drop_info["camera_index"])
+        metrics["modality_dropout_code"] = jnp.asarray(dropped_code, dtype=jnp.int32)
         return metrics
 
     def _eval_batch(

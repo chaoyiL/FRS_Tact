@@ -29,9 +29,9 @@ datasets:
 # ---- 输出与训练超参 ----
 output: /workspace/tactile_02
 steps: 60000
-batch_size: 6          # 全局 batch，多卡时必须能被 GPU 数整除
-num_workers: 4
-prefetch_factor: 2
+batch_size: 192          # 全局 batch，多卡时必须能被 GPU 数整除
+num_workers: 16
+prefetch_factor: 4
 video_backend: null
 log_freq: 10
 save_freq: 5000
@@ -45,7 +45,7 @@ allow_tokenizer_download: true
 # enable: false 可关闭。省略 tfs 则用下方默认 brightness/contrast/saturation/hue/sharpness/affine。
 image_transforms:
   enable: true
-  max_num_transforms: 3   # 每帧最多随机抽几种增强
+  max_num_transforms: 5   # 每帧最多随机抽几种增强
   random_order: false
   # tfs:
   #   brightness:
@@ -80,6 +80,17 @@ image_transforms:
   #       degrees: [-5.0, 5.0]
   #       translate: [0.05, 0.05]
 
+# ---- Modality dropout（仅训练；验证/推理不启用）----
+# 每 every_n_steps 步，以 prob 概率随机 drop 掉一种模态（通过 attn/pad mask）。
+# 可选模态：每个相机、language；drop_state 默认关（state 对动作很关键）。
+modality_dropout:
+  enable: true
+  every_n_steps: 10
+  prob: 1.0
+  drop_language: true
+  drop_state: true
+  # camera_indices: [0, 1]   # null/省略 = 所有相机；可指定只 drop 部分相机
+
 # ---- Flow-matching 验证集 ----
 # 按 episode 划分；验证时计算 FM loss，并可选做 action-chunk rollout（sample_actions）后与 GT 比 MSE。
 validation:
@@ -87,7 +98,7 @@ validation:
   fraction: 0.1          # 每个数据集抽出的 episode 比例
   rollout: true          # true: 额外做 FM 积分采样（rollout）
   rollout_steps: null    # null = 用 model.num_steps；可改成更小以加速验证
-  max_batches: 150      # null = 跑完整验证集；可设正整数做快速抽检
+  max_batches: 5      # null = 跑完整验证集；可设正整数做快速抽检
 
 # ---- Weights & Biases ----
 wandb:
@@ -146,4 +157,4 @@ model:
   optimizer_weight_decay: 1.0e-4   # AdamW weight decay；可加大抗过拟合（如 1e-4 ~ 1e-2）
   optimizer_grad_clip_norm: 10.0
   scheduler_warmup_steps: 1000
-  scheduler_decay_steps: 30000
+  scheduler_decay_steps: 60000

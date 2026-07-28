@@ -131,6 +131,7 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
             "data_parallel": cfg.get("data_parallel"),
             "validation": cfg.get("validation"),
             "image_transforms": cfg.get("image_transforms"),
+            "modality_dropout": cfg.get("modality_dropout"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
         },
@@ -224,11 +225,24 @@ def main() -> None:
         print(f"extended VLM parameters to {count_vlm_layers(params)} layers")
 
     model = JaxSmolVLA(config)
+    modality_dropout_cfg = cfg.get("modality_dropout")
     trainer = JaxSmolVLATrainer(
         model,
         params,
         seed=int(cfg.get("seed", 0)),
         total_steps=int(require(cfg, "steps")),
+        modality_dropout=modality_dropout_cfg,
+    )
+    md = trainer.modality_dropout
+    print(
+        "modality_dropout="
+        + (
+            f"enabled every_n={md.every_n_steps} prob={md.prob:g} "
+            f"drop_language={md.drop_language} drop_state={md.drop_state} "
+            f"camera_indices={md.camera_indices}"
+            if md.enable
+            else "disabled"
+        )
     )
     trainable_count = sum(int(value.size) for value in trainer.state.params.values())
     frozen_count = sum(int(value.size) for value in trainer.frozen_params.values())
@@ -338,6 +352,18 @@ def main() -> None:
         while int(trainer.state.step) < steps:
             metrics = trainer.step(next(batches))
             step = int(trainer.state.step)
+            drop_applied = float(jax.device_get(metrics.get("modality_dropout_applied", 0.0)))
+            drop_code = int(jax.device_get(metrics.get("modality_dropout_code", -1)))
+            if drop_code == -1:
+                drop_name = "none"
+            elif drop_code == -2:
+                drop_name = "language"
+            elif drop_code == -3:
+                drop_name = "state"
+            else:
+                drop_name = f"camera_{drop_code}"
+            if drop_applied > 0.5:
+                print(f"step={step} drop={drop_name}")
             if step == 1 or step % log_freq == 0:
                 metrics = jax.device_get(metrics)
                 elapsed = time.perf_counter() - start
@@ -348,6 +374,7 @@ def main() -> None:
                     f"step={step} loss={loss:.6f} "
                     f"grad_norm={grad_norm:.4f} "
                     f"lr={lr:.3e} elapsed={elapsed:.1f}s"
+                    + (f" drop={drop_name}" if drop_applied > 0.5 else "")
                 )
                 if wandb_run is not None:
                     import wandb
