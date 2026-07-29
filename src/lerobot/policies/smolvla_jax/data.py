@@ -177,6 +177,34 @@ class _KeyMappedLeRobotDataset(Dataset):
         return mapped
 
 
+def resolve_source_visual_keys(
+    model_image_keys: Sequence[str],
+    rename_map: Mapping[str, str] | None,
+    available_cameras: Sequence[str],
+) -> list[str]:
+    """Map model ``image_keys`` back to dataset camera names before rename."""
+
+    rename_map = dict(rename_map or {})
+    inverse = {dst: src for src, dst in rename_map.items()}
+    available = set(available_cameras)
+    resolved: list[str] = []
+    missing: list[str] = []
+    for key in model_image_keys:
+        source = inverse.get(key, key)
+        if source in available:
+            resolved.append(source)
+        elif key in available:
+            resolved.append(key)
+        else:
+            missing.append(key)
+    if missing:
+        raise KeyError(
+            f"could not resolve model image keys {missing} via rename_map={rename_map} "
+            f"against cameras={list(available_cameras)}"
+        )
+    return list(dict.fromkeys(resolved))
+
+
 def parse_dataset_sources(cfg: Mapping[str, Any]) -> list[DatasetSource]:
     """Build dataset sources from YAML ``datasets: [{repo_id, ...}, ...]``."""
     raw_datasets = cfg.get("datasets")
@@ -323,6 +351,12 @@ class LeRobotJaxDataLoader:
                 config.chunk_size,
                 metadata.fps,
             )
+            source_rename = dict(source.rename_map or {})
+            visual_keys = resolve_source_visual_keys(
+                config.image_keys,
+                source_rename,
+                metadata.camera_keys,
+            )
             dataset = LeRobotDataset(
                 repo_id=source.repo_id,
                 root=metadata.root,
@@ -332,11 +366,11 @@ class LeRobotJaxDataLoader:
                 image_transforms=image_transforms,
                 video_backend=video_backend,
                 download_videos=True,
+                visual_keys=visual_keys,
             )
             if len(dataset) == 0:
                 raise ValueError(f"dataset {source.repo_id!r} contains no frames")
 
-            source_rename = dict(source.rename_map or {})
             self._validate_features(
                 config,
                 dataset.features,
@@ -365,6 +399,7 @@ class LeRobotJaxDataLoader:
                     "fps": dataset.fps,
                     "action_key": resolved_action_key,
                     "weight": source.weight,
+                    "visual_keys": list(visual_keys),
                 }
             )
 

@@ -155,6 +155,7 @@ class JaxSmolVLA:
         language_tokens: Array,
         language_masks: Array,
         state: Array,
+        state_mask: Array | None = None,
     ) -> tuple[Array, Array, Array]:
         if isinstance(images, jax.Array):
             if images.ndim != 5:
@@ -173,6 +174,12 @@ class JaxSmolVLA:
         pad_masks: list[Array] = []
         attention_segments: list[Array] = []
         batch = state.shape[0]
+        if state_mask is None:
+            state_mask = jnp.ones((batch,), dtype=jnp.bool_)
+        else:
+            state_mask = jnp.asarray(state_mask, dtype=jnp.bool_)
+            if state_mask.shape != (batch,):
+                raise ValueError(f"state_mask must have shape [B]={batch}, got {state_mask.shape}")
         for image, mask in zip(image_list, mask_list, strict=True):
             if self.config.add_image_special_tokens:
                 start_tokens = jnp.broadcast_to(
@@ -211,7 +218,7 @@ class JaxSmolVLA:
         state = pad_last_dim(state, self.config.max_state_dim)
         state_embedding = self._linear(params, "model.state_proj", state, bias=True)[:, None, :]
         embeddings.append(state_embedding)
-        pad_masks.append(jnp.ones((batch, 1), dtype=jnp.bool_))
+        pad_masks.append(state_mask[:, None])
         attention_segments.append(jnp.ones(1, dtype=jnp.bool_))
 
         embedding = jnp.concatenate(embeddings, axis=1)
@@ -506,9 +513,16 @@ class JaxSmolVLA:
         state: Array,
         noisy_actions: Array,
         timestep: Array,
+        state_mask: Array | None = None,
     ) -> Array:
         prefix, prefix_pad, prefix_ar = self.embed_prefix(
-            params, images, image_masks, language_tokens, language_masks, state
+            params,
+            images,
+            image_masks,
+            language_tokens,
+            language_masks,
+            state,
+            state_mask=state_mask,
         )
         suffix, suffix_pad, suffix_ar = self.embed_suffix(params, noisy_actions, timestep)
         pad_mask = jnp.concatenate((prefix_pad, suffix_pad), axis=1)
@@ -550,6 +564,7 @@ class JaxSmolVLA:
             batch["state"],
             x_t,
             time,
+            state_mask=batch.get("state_mask"),
         )
         losses = jnp.square(target - velocity)[..., : self.config.action_dim]
         action_is_pad = batch.get("action_is_pad")
@@ -573,9 +588,16 @@ class JaxSmolVLA:
         language_tokens: Array,
         language_masks: Array,
         state: Array,
+        state_mask: Array | None = None,
     ) -> PrefixContext:
         prefix, pad_mask, attention_ar = self.embed_prefix(
-            params, images, image_masks, language_tokens, language_masks, state
+            params,
+            images,
+            image_masks,
+            language_tokens,
+            language_masks,
+            state,
+            state_mask=state_mask,
         )
         attention_mask = make_att_2d_masks(pad_mask, attention_ar)
         position_ids = jnp.cumsum(pad_mask, axis=1) - 1

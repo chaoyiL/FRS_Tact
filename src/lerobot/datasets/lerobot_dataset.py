@@ -72,6 +72,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         encoder_threads: int | None = None,
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
+        visual_keys: list[str] | tuple[str, ...] | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -221,6 +222,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self._depth_output_unit = depth_output_unit
         self._batch_encoding_size = batch_encoding_size
         self._encoder_threads = encoder_threads
+        self._visual_keys = None if visual_keys is None else tuple(visual_keys)
 
         if self._requested_root is not None:
             self._requested_root.mkdir(exist_ok=True, parents=True)
@@ -261,6 +263,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             image_transforms=image_transforms,
             return_uint8=self._return_uint8,
             depth_output_unit=self._depth_output_unit,
+            visual_keys=self._visual_keys,
         )
         self.image_transforms = image_transforms
 
@@ -332,6 +335,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 image_transforms=self.image_transforms,
                 return_uint8=self._return_uint8,
                 depth_output_unit=self._depth_output_unit,
+                visual_keys=self._visual_keys,
             )
         return self.reader
 
