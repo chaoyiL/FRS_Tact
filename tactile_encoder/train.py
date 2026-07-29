@@ -11,6 +11,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import yaml
 
 from utils.model import make_learning_rate_schedule
 
@@ -34,6 +35,12 @@ from tactile_encoder.utils.model import init_memory_bank
 from tactile_encoder.utils.model import init_trainable_params
 from tactile_encoder.utils.model import make_train_step
 from tactile_encoder.utils.prefetch import prefetch_iterator
+from tactile_encoder.utils.visualize import plot_training_history
+
+
+DEFAULT_CONFIG = (
+    pathlib.Path(__file__).resolve().parents[1] / "configs" / "train_tactile_encoder.yaml"
+)
 
 
 HISTORY_FIELDS = [
@@ -48,6 +55,10 @@ HISTORY_FIELDS = [
     "val_recall@1",
     "val_recall@5",
     "val_mean_rank",
+    "val_recall@1_left",
+    "val_recall@1_right",
+    "val_recall@5_left",
+    "val_recall@5_right",
 ]
 
 
@@ -154,10 +165,15 @@ def train(
     hard_negatives_k: int,
     early_stop_patience: int,
     tactile_history: int,
+    write_plots: bool = True,
     config_name: str | None = None,
 ) -> None:
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
+    if batch_size % 2 != 0:
+        raise ValueError(
+            f"batch_size must be even for equal left/right sampling, got {batch_size}."
+        )
     if warmup_epochs < 0:
         raise ValueError("warmup_epochs must be non-negative.")
     if clip_microbatch <= 0:
@@ -343,6 +359,7 @@ def train(
     base_key = jax.random.key(seed)
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
+    plot_path = output_dir / "training_curves.png"
     best_recall_at_1, best_mean_rank = _load_best_metrics(output_dir)
     records_sha256 = _records_digest(record_set.records)
     data_metadata = {
@@ -424,6 +441,18 @@ def train(
     if best_recall_at_1 >= 0.0:
         # Existing best/ in output_dir: treat "last improve" as just before this run.
         best_epoch = max(0, start_epoch - 1)
+
+    def _refresh_training_plot(*, announce: bool = False) -> None:
+        if not write_plots:
+            return
+        try:
+            written = plot_training_history(history_path, output_path=plot_path)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            print(f"warning: could not refresh training plot: {exc}", flush=True)
+            return
+        if announce:
+            print(f"plot={written}", flush=True)
+
     try:
         with history_path.open(history_mode, newline="", encoding="utf-8") as history_file:
             writer = csv.DictWriter(history_file, fieldnames=HISTORY_FIELDS)
@@ -552,10 +581,18 @@ def train(
                     val_recall1 = float(val_metrics["recall@1"])
                     val_recall5 = float(val_metrics["recall@5"])
                     val_mean_rank = float(val_metrics["mean_rank"])
+                    val_recall1_left = float(val_metrics["recall@1_left"])
+                    val_recall1_right = float(val_metrics["recall@1_right"])
+                    val_recall5_left = float(val_metrics["recall@5_left"])
+                    val_recall5_right = float(val_metrics["recall@5_right"])
                 else:
                     val_recall1 = float("nan")
                     val_recall5 = float("nan")
                     val_mean_rank = float("nan")
+                    val_recall1_left = float("nan")
+                    val_recall1_right = float("nan")
+                    val_recall5_left = float("nan")
+                    val_recall5_right = float("nan")
                 row = {
                     "epoch": epoch,
                     "train_loss": train_loss,
@@ -568,9 +605,14 @@ def train(
                     "val_recall@1": val_recall1,
                     "val_recall@5": val_recall5,
                     "val_mean_rank": val_mean_rank,
+                    "val_recall@1_left": val_recall1_left,
+                    "val_recall@1_right": val_recall1_right,
+                    "val_recall@5_left": val_recall5_left,
+                    "val_recall@5_right": val_recall5_right,
                 }
                 writer.writerow(row)
                 history_file.flush()
+                _refresh_training_plot()
                 checkpoint_metrics = {
                     "train_loss": train_loss,
                     "train_batch_recall@1": train_recall1,
@@ -582,6 +624,10 @@ def train(
                     "val_recall@1": val_recall1,
                     "val_recall@5": val_recall5,
                     "val_mean_rank": val_mean_rank,
+                    "val_recall@1_left": val_recall1_left,
+                    "val_recall@1_right": val_recall1_right,
+                    "val_recall@5_left": val_recall5_left,
+                    "val_recall@5_right": val_recall5_right,
                 }
                 save_checkpoint(
                     output_dir / "last",
@@ -619,7 +665,8 @@ def train(
                     print(
                         f"epoch={epoch}/{epochs} train_loss={train_loss:.6f} "
                         f"val_recall@1={val_recall1:.6f} val_recall@5={val_recall5:.6f} "
-                        f"val_mean_rank={val_mean_rank:.2f}"
+                        f"val_mean_rank={val_mean_rank:.2f} "
+                        f"left@1={val_recall1_left:.6f} right@1={val_recall1_right:.6f}"
                         + (
                             f" early_stop={epochs_since_improve}/{early_stop_patience}"
                             if early_stop_patience > 0
@@ -648,10 +695,85 @@ def train(
     finally:
         if mp_loader is not None:
             mp_loader.close()
+    _refresh_training_plot(announce=True)
     if stopped_early:
         print(f"stopped_early=true best_epoch={best_epoch}")
     print(f"best_val_recall@1={best_recall_at_1:.6f} best_val_mean_rank={best_mean_rank:.2f}")
     print(f"checkpoints={output_dir}")
+
+
+def load_yaml_config(path: pathlib.Path) -> dict[str, Any]:
+    if not path.is_file():
+        raise FileNotFoundError(f"config not found: {path}")
+    with path.open(encoding="utf-8") as file:
+        data = yaml.safe_load(file) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"config root must be a mapping: {path}")
+    return data
+
+
+def _yaml_argparse_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Map YAML keys onto argparse destination names for ``set_defaults``."""
+
+    defaults: dict[str, Any] = {}
+    direct_keys = (
+        "config_name",
+        "clip_model_id",
+        "masked_rgb_key",
+        "future_offset",
+        "split_seed",
+        "val_fraction",
+        "frame_stride",
+        "positive_temporal_window",
+        "batch_size",
+        "clip_microbatch",
+        "loader",
+        "num_workers",
+        "pair_threads",
+        "pipeline_prefetch",
+        "prefetch_batches",
+        "image_cache_size",
+        "preload_images",
+        "epochs",
+        "learning_rate",
+        "weight_decay",
+        "grad_clip_norm",
+        "warmup_epochs",
+        "min_lr_ratio",
+        "lr_schedule",
+        "rgb_mask_patch_size",
+        "rgb_mask_ratio",
+        "eval_mask_seed",
+        "seed",
+        "resume",
+        "eval_every",
+        "memory_bank_size",
+        "hard_negatives_k",
+        "early_stop_patience",
+        "tactile_history",
+        "write_plots",
+    )
+    for key in direct_keys:
+        if key in cfg:
+            defaults[key] = cfg[key]
+
+    if "output_dir" in cfg and cfg["output_dir"] is not None:
+        defaults["output_dir"] = pathlib.Path(cfg["output_dir"])
+    if "resume_from" in cfg:
+        value = cfg["resume_from"]
+        defaults["resume_from"] = None if value in (None, "") else pathlib.Path(value)
+    return defaults
+
+
+def _dataset_repo_ids_from_cfg(cfg: dict[str, Any]) -> list[str] | None:
+    repo_ids = cfg.get("dataset_repo_ids")
+    if repo_ids is None and cfg.get("dataset_repo_id") is not None:
+        repo_ids = cfg["dataset_repo_id"]
+    if repo_ids is None:
+        return None
+    if isinstance(repo_ids, str):
+        return [repo_ids]
+    return [str(item) for item in repo_ids]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -659,12 +781,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="Train tactile ResNet18 + frozen CLIP future contrastive pretraining."
     )
     parser.add_argument(
+        "--config",
+        type=pathlib.Path,
+        default=DEFAULT_CONFIG,
+        help=f"YAML config path (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
         "--dataset-repo-id",
         action="append",
-        required=True,
         dest="dataset_repo_ids",
         help=(
-            "LeRobot dataset repo id (repeatable). "
+            "LeRobot dataset repo id (repeatable). Overrides YAML. "
             "Example: --dataset-repo-id org/dataset_a --dataset-repo-id org/dataset_b"
         ),
     )
@@ -673,7 +800,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional run label stored in checkpoint metadata (defaults to repo id).",
     )
-    parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+    parser.add_argument("--output-dir", type=pathlib.Path, default=None)
     parser.add_argument("--clip-model-id", default=DEFAULT_CLIP_MODEL_ID)
     parser.add_argument(
         "--masked-rgb-key",
@@ -764,12 +891,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--resume",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=False,
         help="Resume from output-dir/last (params + optimizer state if present).",
     )
     parser.add_argument(
         "--resume-from",
         type=pathlib.Path,
+        default=None,
         help="Resume from an explicit checkpoint directory (overrides --resume).",
     )
     parser.add_argument(
@@ -819,12 +948,41 @@ def build_parser() -> argparse.ArgumentParser:
             "concatenates vision + two GRU hiddens into the future FC."
         ),
     )
+    parser.add_argument(
+        "--plots",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="write_plots",
+        help="Refresh output-dir/training_curves.png after each epoch (default: on).",
+    )
 
     return parser
 
 
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    argv_list = list(argv) if argv is not None else None
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config", type=pathlib.Path, default=DEFAULT_CONFIG)
+    pre_args, _ = pre.parse_known_args(argv_list)
+
+    parser = build_parser()
+    cfg = load_yaml_config(pre_args.config)
+    parser.set_defaults(**_yaml_argparse_defaults(cfg))
+    args = parser.parse_args(argv_list)
+
+    if not args.dataset_repo_ids:
+        args.dataset_repo_ids = _dataset_repo_ids_from_cfg(cfg)
+    if not args.dataset_repo_ids:
+        raise SystemExit(
+            "missing dataset_repo_ids: set them in the YAML config or pass --dataset-repo-id"
+        )
+    if args.output_dir is None:
+        raise SystemExit("missing output_dir: set it in the YAML config or pass --output-dir")
+    return args
+
+
 def main(argv: Sequence[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
+    args = parse_args(argv)
     train(
         dataset_repo_ids=args.dataset_repo_ids,
         output_dir=args.output_dir,
@@ -854,7 +1012,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         loader=args.loader,
         pair_threads=args.pair_threads,
         pipeline_prefetch=args.pipeline_prefetch,
-        resume=args.resume,
+        resume=bool(args.resume),
         resume_from=args.resume_from,
         eval_every=args.eval_every,
         positive_temporal_window=(
@@ -866,6 +1024,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         hard_negatives_k=args.hard_negatives_k,
         early_stop_patience=args.early_stop_patience,
         tactile_history=args.tactile_history,
+        write_plots=bool(args.write_plots),
         config_name=args.config_name,
     )
 

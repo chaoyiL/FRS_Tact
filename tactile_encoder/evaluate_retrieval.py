@@ -19,7 +19,7 @@ from tactile_encoder.utils.data import batches
 from tactile_encoder.utils.data import build_future_records
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.metrics import retrieval_metrics
+from tactile_encoder.utils.metrics import retrieval_metrics_by_side
 from tactile_encoder.utils.model import TactileClipConfig
 from tactile_encoder.utils.model import forward_embeddings
 from tactile_encoder.utils.model import tactile_clip_config_from_dict
@@ -82,6 +82,7 @@ def collect_retrieval_embeddings(
     dataset_indices: list[np.ndarray] = []
     future_indices: list[np.ndarray] = []
     episode_indices: list[np.ndarray] = []
+    side_ids: list[np.ndarray] = []
     eval_key = jax.random.key(eval_mask_seed)
     for batch_number, batch_np in enumerate(
         batches(
@@ -107,12 +108,14 @@ def collect_retrieval_embeddings(
         dataset_indices.append(np.asarray(batch_np["dataset_index"], dtype=np.int64))
         future_indices.append(np.asarray(batch_np["future_dataset_index"], dtype=np.int64))
         episode_indices.append(np.asarray(batch_np["episode_index"], dtype=np.int64))
+        side_ids.append(np.asarray(batch_np["side_id"], dtype=np.int64))
     return {
         "query": np.concatenate(query_parts, axis=0),
         "future": np.concatenate(future_parts, axis=0),
         "dataset_index": np.concatenate(dataset_indices, axis=0),
         "future_dataset_index": np.concatenate(future_indices, axis=0),
         "episode_index": np.concatenate(episode_indices, axis=0),
+        "side_id": np.concatenate(side_ids, axis=0),
     }
 
 
@@ -147,14 +150,12 @@ def evaluate_records(
         tactile_history=tactile_history,
         history_stride=history_stride,
     )
-    metrics, ranks = retrieval_metrics(jnp.asarray(embeddings["query"]), jnp.asarray(embeddings["future"]))
-    metric_dict: dict[str, float | int] = {
-        "recall@1": metrics.recall_at_1,
-        "recall@5": metrics.recall_at_5,
-        "mean_rank": metrics.mean_rank,
-        "sample_count": metrics.sample_count,
-    }
-    embeddings["rank"] = np.asarray(jax.device_get(ranks), dtype=np.int64)
+    metric_dict, ranks = retrieval_metrics_by_side(
+        jnp.asarray(embeddings["query"]),
+        jnp.asarray(embeddings["future"]),
+        embeddings["side_id"],
+    )
+    embeddings["rank"] = np.asarray(ranks, dtype=np.int64)
     return metric_dict, embeddings
 
 
@@ -169,29 +170,41 @@ def write_retrieval_outputs(
     atomic_write_json(output_dir / "metrics.json", metrics)
     query = embeddings["query"]
     future = embeddings["future"]
-    similarity = query @ future.T
-    top_k = min(top_k, similarity.shape[1])
-    top_indices = np.argsort(-similarity, axis=1)[:, :top_k]
+    sides = np.asarray(embeddings["side_id"], dtype=np.int64)
+    # Per-query top-k is computed within the same wrist gallery only.
+    top_rows: list[np.ndarray] = [np.zeros(0, dtype=np.int64) for _ in range(query.shape[0])]
+    for side_value in np.unique(sides):
+        mask = sides == int(side_value)
+        indices = np.flatnonzero(mask)
+        if indices.size == 0:
+            continue
+        sim = query[indices] @ future[indices].T
+        k = min(top_k, sim.shape[1])
+        local_top = np.argsort(-sim, axis=1)[:, :k]
+        for row_i, local_idx in enumerate(local_top):
+            top_rows[int(indices[row_i])] = indices[local_idx]
     with (output_dir / "per_query.csv").open("w", newline="", encoding="utf-8") as file:
         fieldnames = [
             "query_position",
             "dataset_index",
             "future_dataset_index",
             "episode_index",
+            "side_id",
             "rank",
             "top_gallery_positions",
             "top_future_dataset_indices",
         ]
         writer = csv.DictWriter(file, fieldnames=fieldnames)
         writer.writeheader()
-        for row in range(similarity.shape[0]):
-            top = top_indices[row]
+        for row in range(query.shape[0]):
+            top = top_rows[row]
             writer.writerow(
                 {
                     "query_position": row,
                     "dataset_index": int(embeddings["dataset_index"][row]),
                     "future_dataset_index": int(embeddings["future_dataset_index"][row]),
                     "episode_index": int(embeddings["episode_index"][row]),
+                    "side_id": int(embeddings["side_id"][row]),
                     "rank": int(embeddings["rank"][row]) + 1,
                     "top_gallery_positions": " ".join(str(int(index)) for index in top),
                     "top_future_dataset_indices": " ".join(
@@ -276,7 +289,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     write_retrieval_outputs(args.output_dir, metrics, embeddings)
     print(
         f"validation_samples={metrics['sample_count']} recall@1={metrics['recall@1']:.6f} "
-        f"recall@5={metrics['recall@5']:.6f} mean_rank={metrics['mean_rank']:.2f}"
+        f"recall@5={metrics['recall@5']:.6f} mean_rank={metrics['mean_rank']:.2f} "
+        f"left@1={metrics.get('recall@1_left', float('nan')):.6f} "
+        f"right@1={metrics.get('recall@1_right', float('nan')):.6f}"
     )
     print(f"evaluation={args.output_dir}")
 

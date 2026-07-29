@@ -395,6 +395,12 @@ def batches(
 ) -> Iterator[dict[str, np.ndarray]]:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}.")
+    if batch_size % 2 != 0:
+        raise ValueError(
+            f"batch_size must be even for equal left/right sampling, got {batch_size}."
+        )
+    if len(keys.sides) != 2:
+        raise ValueError(f"Expected exactly 2 wrist sides, got {len(keys.sides)}.")
     if prefetch_batches <= 0:
         raise ValueError(f"prefetch_batches must be positive, got {prefetch_batches}.")
     if loader not in ("thread", "mp"):
@@ -404,10 +410,17 @@ def batches(
     if history_stride <= 0:
         raise ValueError(f"history_stride must be positive, got {history_stride}.")
     # Expand each temporal record into one contrastive sample per wrist side.
-    sample_index = [(record_i, side_i) for record_i in range(len(records)) for side_i in range(len(keys.sides))]
-    order = np.arange(len(sample_index))
+    # Order is always (r, left), (r, right) interleaved so every even-sized batch
+    # contains equal left/right counts. Shuffle permutes records, not free samples.
+    num_sides = len(keys.sides)
+    record_order = np.arange(len(records))
     if shuffle:
-        order = np.random.default_rng(seed).permutation(order)
+        record_order = np.random.default_rng(seed).permutation(record_order)
+    sample_index: list[tuple[int, int]] = []
+    for record_i in record_order.tolist():
+        for side_i in range(num_sides):
+            sample_index.append((int(record_i), side_i))
+    order = np.arange(len(sample_index))
 
     starts = list(range(0, len(order), batch_size))
     if not starts:

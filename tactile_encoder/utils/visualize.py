@@ -24,6 +24,10 @@ HISTORY_FIELDS = (
     "val_recall@1",
     "val_recall@5",
     "val_mean_rank",
+    "val_recall@1_left",
+    "val_recall@1_right",
+    "val_recall@5_left",
+    "val_recall@5_right",
 )
 
 
@@ -108,6 +112,8 @@ def plot_training_history(
     val_epochs, val_recall1 = _finite_series(rows, "val_recall@1")
     _, val_recall5 = _finite_series(rows, "val_recall@5")
     _, val_mean_rank = _finite_series(rows, "val_mean_rank")
+    left_epochs, val_recall1_left = _finite_series(rows, "val_recall@1_left")
+    right_epochs, val_recall1_right = _finite_series(rows, "val_recall@1_right")
 
     hard_epochs, hard_neg_logit = _finite_series(rows, "train_bank_hard_neg_logit_mean")
     gap_epochs, pos_gap = _finite_series(rows, "train_batch_vs_positive_gap")
@@ -151,13 +157,30 @@ def plot_training_history(
             marker="s",
             markersize=5,
         )
+    if left_epochs:
+        axes[1].plot(
+            left_epochs,
+            val_recall1_left,
+            label="val_recall@1_left",
+            linewidth=1.8,
+            color="#64B5CD",
+            linestyle="--",
+        )
+    if right_epochs:
+        axes[1].plot(
+            right_epochs,
+            val_recall1_right,
+            label="val_recall@1_right",
+            linewidth=1.8,
+            color="#8172B2",
+            linestyle="--",
+        )
+    if val_epochs or left_epochs or right_epochs:
         axes[1].set_ylim(bottom=0.0)
-    axes[1].set_ylabel("recall")
-    axes[1].set_title("Validation recall")
-    axes[1].grid(True, alpha=0.3)
-    if val_epochs:
         axes[1].legend(loc="upper right")
-
+    axes[1].set_ylabel("recall")
+    axes[1].set_title("Validation recall (side-isolated)")
+    axes[1].grid(True, alpha=0.3)
     if val_epochs:
         axes[2].plot(
             val_epochs,
@@ -216,6 +239,9 @@ def plot_training_history(
         axes[2].set_xlabel("epoch")
 
     fig.suptitle(f"Training history: {history_path.parent.name}/{history_path.name}", fontsize=12)
-    fig.savefig(destination, dpi=150)
+    # Atomic replace so live viewers never open a half-written PNG.
+    temporary = destination.with_name(destination.stem + ".tmp.png")
+    fig.savefig(temporary, dpi=150)
     plt.close(fig)
+    temporary.replace(destination)
     return destination

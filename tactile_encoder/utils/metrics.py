@@ -69,3 +69,63 @@ def retrieval_metrics(
     ranks = ranks_from_similarity(similarity, positive_indices)
     return retrieval_metrics_from_ranks(ranks), ranks
 
+
+_SIDE_NAMES = {0: "left", 1: "right"}
+
+
+def retrieval_metrics_by_side(
+    query_embeddings: Array,
+    gallery_embeddings: Array,
+    side_id: Array | np.ndarray,
+) -> tuple[dict[str, float | int], np.ndarray]:
+    """Compute per-wrist square retrieval, then micro-average totals.
+
+    Returns ``(metric_dict, ranks)`` where ``ranks`` aligns with the original
+    query order (zero-based). Queries whose side has no peers receive rank 0.
+    """
+
+    query = np.asarray(jax.device_get(l2_normalize(jnp.asarray(query_embeddings))), dtype=np.float32)
+    gallery = np.asarray(
+        jax.device_get(l2_normalize(jnp.asarray(gallery_embeddings))), dtype=np.float32
+    )
+    sides = np.asarray(side_id, dtype=np.int64)
+    if query.shape[0] != sides.shape[0] or gallery.shape[0] != sides.shape[0]:
+        raise ValueError(
+            f"query/gallery/side_id length mismatch: "
+            f"{query.shape[0]}, {gallery.shape[0]}, {sides.shape[0]}"
+        )
+
+    ranks = np.zeros((query.shape[0],), dtype=np.int64)
+    side_metrics: dict[int, RetrievalMetrics] = {}
+    for side_value in sorted(np.unique(sides).tolist()):
+        mask = sides == int(side_value)
+        indices = np.flatnonzero(mask)
+        if indices.size == 0:
+            continue
+        side_query = jnp.asarray(query[indices])
+        side_gallery = jnp.asarray(gallery[indices])
+        metrics, side_ranks = retrieval_metrics(side_query, side_gallery)
+        ranks[indices] = np.asarray(jax.device_get(side_ranks), dtype=np.int64)
+        side_metrics[int(side_value)] = metrics
+
+    total = retrieval_metrics_from_ranks(jnp.asarray(ranks))
+    metric_dict: dict[str, float | int] = {
+        "recall@1": total.recall_at_1,
+        "recall@5": total.recall_at_5,
+        "mean_rank": total.mean_rank,
+        "sample_count": total.sample_count,
+    }
+    for side_value, name in _SIDE_NAMES.items():
+        if side_value not in side_metrics:
+            metric_dict[f"recall@1_{name}"] = float("nan")
+            metric_dict[f"recall@5_{name}"] = float("nan")
+            metric_dict[f"mean_rank_{name}"] = float("nan")
+            metric_dict[f"sample_count_{name}"] = 0
+            continue
+        metrics = side_metrics[side_value]
+        metric_dict[f"recall@1_{name}"] = metrics.recall_at_1
+        metric_dict[f"recall@5_{name}"] = metrics.recall_at_5
+        metric_dict[f"mean_rank_{name}"] = metrics.mean_rank
+        metric_dict[f"sample_count_{name}"] = metrics.sample_count
+    return metric_dict, ranks
+

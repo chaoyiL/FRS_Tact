@@ -527,6 +527,7 @@ def symmetric_contrastive_loss(
     bank_positive_mask: Array | None = None,
     hard_negatives_k: int = 0,
     query_episode_index: Array | None = None,
+    side_id: Array | None = None,
 ) -> tuple[Array, dict[str, Array]]:
     if hard_negatives_k < 0:
         raise ValueError(f"hard_negatives_k must be non-negative, got {hard_negatives_k}.")
@@ -536,6 +537,13 @@ def symmetric_contrastive_loss(
     scale = jnp.asarray(config.logit_scale, dtype=jnp.float32)
     neg_inf = jnp.asarray(-jnp.inf, dtype=query.dtype)
     logits_batch = scale * (query @ target.T)
+    if side_id is None:
+        side = jnp.zeros((logits_batch.shape[0],), dtype=jnp.int32)
+    else:
+        side = jnp.asarray(side_id, dtype=jnp.int32)
+    same_side = side[:, None] == side[None, :]
+    # Block-diagonal isolation: left only sees left, right only sees right.
+    logits_batch = jnp.where(same_side, logits_batch, neg_inf)
     if positive_mask is None:
         positive_mask = jnp.eye(logits_batch.shape[0], dtype=bool)
     else:
@@ -560,9 +568,11 @@ def symmetric_contrastive_loss(
         else:
             bank_positive_mask = jnp.asarray(bank_positive_mask, dtype=bool)
 
-        # Bank negatives are always mined from other episodes only.
+        # Bank negatives: other episodes only, and same wrist side.
         query_episode = jnp.asarray(query_episode_index, dtype=jnp.int32)
-        candidate_mask = query_episode[:, None] != memory_bank["episode_index"][None, :]
+        candidate_mask = (query_episode[:, None] != memory_bank["episode_index"][None, :]) & (
+            side[:, None] == memory_bank["side_id"][None, :]
+        )
 
         logits_bank_for_loss, hard_logits = _filter_bank_logits_hard_negatives(
             logits_bank,
@@ -696,6 +706,7 @@ def loss_fn(
         bank_positive_mask=bank_positive,
         hard_negatives_k=hard_negatives_k,
         query_episode_index=batch["episode_index"],
+        side_id=_batch_side_id(batch),
     )
 
 
@@ -785,6 +796,7 @@ def make_train_step(
                 bank_positive_mask=bank_positive,
                 hard_negatives_k=effective_hard_k,
                 query_episode_index=batch["episode_index"],
+                side_id=_batch_side_id(batch),
             )
             if new_batch_stats is None:
                 raise RuntimeError("Expected BatchNorm batch_stats updates during training.")
