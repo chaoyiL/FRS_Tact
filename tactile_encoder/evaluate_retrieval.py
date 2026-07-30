@@ -19,6 +19,8 @@ from tactile_encoder.utils.data import batches
 from tactile_encoder.utils.data import build_future_records
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.image_dataset import create_image_dataset
+from tactile_encoder.utils.masking import resolve_eval_rgb_mask
+from tactile_encoder.utils.metrics import pooled_retrieval_metrics_by_side
 from tactile_encoder.utils.metrics import retrieval_metrics_by_side
 from tactile_encoder.utils.model import TactileClipConfig
 from tactile_encoder.utils.model import forward_embeddings
@@ -134,6 +136,8 @@ def evaluate_records(
     config: TactileClipConfig,
     tactile_history: int | None = None,
     history_stride: int = 5,
+    retrieval_pool_size: int = 0,
+    retrieval_pool_seed: int = 0,
 ) -> tuple[dict[str, float | int], dict[str, np.ndarray]]:
     embeddings = collect_retrieval_embeddings(
         clip_model=clip_model,
@@ -150,11 +154,22 @@ def evaluate_records(
         tactile_history=tactile_history,
         history_stride=history_stride,
     )
-    metric_dict, ranks = retrieval_metrics_by_side(
-        jnp.asarray(embeddings["query"]),
-        jnp.asarray(embeddings["future"]),
-        embeddings["side_id"],
-    )
+    if retrieval_pool_size > 1:
+        metric_dict, ranks = pooled_retrieval_metrics_by_side(
+            jnp.asarray(embeddings["query"]),
+            jnp.asarray(embeddings["future"]),
+            embeddings["side_id"],
+            pool_size=retrieval_pool_size,
+            seed=retrieval_pool_seed,
+        )
+        metric_dict["retrieval_mode"] = "pool"
+    else:
+        metric_dict, ranks = retrieval_metrics_by_side(
+            jnp.asarray(embeddings["query"]),
+            jnp.asarray(embeddings["future"]),
+            embeddings["side_id"],
+        )
+        metric_dict["retrieval_mode"] = "full"
     embeddings["rank"] = np.asarray(ranks, dtype=np.int64)
     return metric_dict, embeddings
 
@@ -241,6 +256,39 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgb-mask-patch-size", type=int, default=16)
     parser.add_argument("--rgb-mask-ratio", type=float, default=0.5)
     parser.add_argument(
+        "--eval-rgb-mask-patch-size",
+        type=int,
+        default=None,
+        help=(
+            "RGB patch size for query masking during evaluation. "
+            "Defaults to checkpoint train rgb_mask_patch_size when unset."
+        ),
+    )
+    parser.add_argument(
+        "--eval-rgb-mask-ratio",
+        type=float,
+        default=None,
+        help=(
+            "RGB patch mask ratio for query encoding during evaluation. "
+            "Defaults to checkpoint eval_rgb_mask_ratio or train rgb_mask_ratio when unset."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-pool-size",
+        type=int,
+        default=0,
+        help=(
+            "If >1, evaluate each query against a sampled same-side pool containing "
+            "its positive and pool_size-1 negatives. 0 keeps full-gallery retrieval."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-pool-seed",
+        type=int,
+        default=0,
+        help="Random seed for sampled validation retrieval pools.",
+    )
+    parser.add_argument(
         "--masked-rgb-key",
         default="",
         help="Optional RGB key used instead of each side's current camera for masking.",
@@ -271,6 +319,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     config = tactile_clip_config_from_dict(metadata["tactile_clip_config"])
     history_stride = int(extra.get("history_stride") or args.frame_stride)
+    train_rgb_mask_patch_size = int(extra.get("rgb_mask_patch_size", args.rgb_mask_patch_size))
+    train_rgb_mask_ratio = float(extra.get("rgb_mask_ratio", args.rgb_mask_ratio))
+    eval_rgb_mask_patch_size = extra.get("eval_rgb_mask_patch_size", args.eval_rgb_mask_patch_size)
+    eval_rgb_mask_ratio = extra.get("eval_rgb_mask_ratio", args.eval_rgb_mask_ratio)
+    if eval_rgb_mask_patch_size is not None:
+        eval_rgb_mask_patch_size = int(eval_rgb_mask_patch_size)
+    if eval_rgb_mask_ratio is not None:
+        eval_rgb_mask_ratio = float(eval_rgb_mask_ratio)
+    eval_rgb_mask_patch_size, eval_rgb_mask_ratio = resolve_eval_rgb_mask(
+        train_patch_size=train_rgb_mask_patch_size,
+        train_ratio=train_rgb_mask_ratio,
+        eval_patch_size=eval_rgb_mask_patch_size,
+        eval_ratio=eval_rgb_mask_ratio,
+    )
     metrics, embeddings = evaluate_records(
         clip_model=backend.model,
         params=params,
@@ -280,11 +342,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         keys=keys,
         batch_size=args.batch_size,
         eval_mask_seed=args.eval_mask_seed,
-        rgb_mask_patch_size=args.rgb_mask_patch_size,
-        rgb_mask_ratio=args.rgb_mask_ratio,
+        rgb_mask_patch_size=eval_rgb_mask_patch_size,
+        rgb_mask_ratio=eval_rgb_mask_ratio,
         config=config,
         tactile_history=int(config.tactile_history),
         history_stride=history_stride,
+        retrieval_pool_size=args.retrieval_pool_size,
+        retrieval_pool_seed=args.retrieval_pool_seed,
     )
     write_retrieval_outputs(args.output_dir, metrics, embeddings)
     print(

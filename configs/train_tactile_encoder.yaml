@@ -8,7 +8,7 @@ dataset_repo_ids:
   - chaoyi/tactile_test_05
 # 可选：写入 checkpoint metadata 的 run 标签；null = 用 repo id
 config_name: null
-output_dir: checkpoints/encoder_ckpt
+output_dir: checkpoints/encoder_ckpt_04
 
 # ---- CLIP / 数据键 ----
 clip_model_id: openai/clip-vit-base-patch16
@@ -22,7 +22,7 @@ split_seed: 0
 val_fraction: 0.1
 # 同 episode + 同腕、future index 在 ±window 内视为多正样本。
 # null = 等于 frame_stride；0 = 仅对角线正样本
-positive_temporal_window: null
+positive_temporal_window: 0
 
 # ---- Batch / DataLoader ----
 # 必须为偶数（左右腕各半）
@@ -37,8 +37,8 @@ image_cache_size: 1024
 preload_images: false
 
 # ---- 优化器 / 调度 ----
-epochs: 100
-learning_rate: 1.0e-3
+epochs: 40
+learning_rate: 8.0e-4
 weight_decay: 1.0e-4
 grad_clip_norm: 1.0     # <=0 关闭梯度裁剪
 warmup_epochs: 1
@@ -48,20 +48,26 @@ seed: 0
 
 # ---- RGB patch mask（仅当前帧 RGB）----
 rgb_mask_patch_size: 16
-rgb_mask_ratio: 0.5
+rgb_mask_ratio: 0.3          # 训练 query 端 mask
+eval_rgb_mask_patch_size: null  # null = 沿用 rgb_mask_patch_size
+eval_rgb_mask_ratio: 0.0         # 验证/独立评估时不 mask query RGB
 eval_mask_seed: 0
 
 # ---- 对比学习扩展（默认关）----
 # MoCo 式 future-RGB embedding 队列；0 = 关闭。可试 8192 / 16384
-memory_bank_size: 0
+memory_bank_size: 8192
 # bank 内 top-K hard neg；需 memory_bank_size>0。0 = 用全部跨 episode bank 负样本。可试 256
-hard_negatives_k: 0
+hard_negatives_k: 256
 # 触觉历史 GRU 步数（回看步长 = frame_stride）；0 = 不用 GRU
 tactile_history: 0
 
 # ---- 验证 / 早停 / 恢复 ----
-eval_every: 5
-early_stop_patience: 10   # 0 = 关闭；按总 val_recall@1
-resume: true             # true = 从 output_dir/last 恢复
+eval_every: 2
+early_stop_patience: 8   # 0 = 关闭；按总 val_recall@1
+# 0 = 全验证集同侧检索；>1 = 每个 query 抽一个同侧验证池：
+# 1 个正样本 + pool_size-1 个负样本。例如 64 更接近固定规模候选集成功率。
+retrieval_pool_size: 32
+retrieval_pool_seed: 0
+resume: false             # true = 从 output_dir/last 恢复
 resume_from: null         # 显式 checkpoint 目录；非 null 时覆盖 resume
 write_plots: true         # 每个 epoch 刷新 output_dir/training_curves.png

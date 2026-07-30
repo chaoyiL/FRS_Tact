@@ -9,6 +9,7 @@ from tactile_encoder.utils.data import FutureRecord
 from tactile_encoder.utils.data import batches
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.metrics import l2_normalize
+from tactile_encoder.utils.metrics import pooled_retrieval_metrics_by_side
 from tactile_encoder.utils.metrics import retrieval_metrics_by_side
 from tactile_encoder.utils.model import TactileClipConfig
 from tactile_encoder.utils.model import symmetric_contrastive_loss
@@ -158,6 +159,25 @@ class SideIsolationTest(unittest.TestCase):
             metrics["recall@1_right"]
         )
         self.assertAlmostEqual(float(metrics["recall@1"]), expected_total)
+
+    def test_pooled_retrieval_metrics_sample_same_side_pools(self):
+        query = np.eye(6, dtype=np.float32)
+        future = np.eye(6, dtype=np.float32)
+        side_id = np.asarray([0, 0, 0, 1, 1, 1], dtype=np.int64)
+
+        metrics, ranks = pooled_retrieval_metrics_by_side(
+            query,
+            future,
+            side_id,
+            pool_size=3,
+            seed=123,
+        )
+
+        self.assertEqual(int(metrics["sample_count"]), 6)
+        self.assertEqual(int(metrics["pool_size"]), 3)
+        self.assertTrue(np.all(ranks == 0))
+        self.assertEqual(float(metrics["recall@1"]), 1.0)
+        self.assertEqual(float(metrics["recall@5"]), 1.0)
 
 
 if __name__ == "__main__":

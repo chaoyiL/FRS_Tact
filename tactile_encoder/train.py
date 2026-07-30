@@ -31,6 +31,7 @@ from tactile_encoder.utils.data import history_dataset_indices
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.image_dataset import create_image_dataset
 from tactile_encoder.utils.model import TactileClipConfig
+from tactile_encoder.utils.masking import resolve_eval_rgb_mask
 from tactile_encoder.utils.model import init_memory_bank
 from tactile_encoder.utils.model import init_trainable_params
 from tactile_encoder.utils.model import make_train_step
@@ -147,6 +148,8 @@ def train(
     cosine_decay: bool,
     rgb_mask_patch_size: int,
     rgb_mask_ratio: float,
+    eval_rgb_mask_patch_size: int | None,
+    eval_rgb_mask_ratio: float | None,
     eval_mask_seed: int,
     seed: int,
     clip_microbatch: int,
@@ -164,6 +167,8 @@ def train(
     memory_bank_size: int,
     hard_negatives_k: int,
     early_stop_patience: int,
+    retrieval_pool_size: int,
+    retrieval_pool_seed: int,
     tactile_history: int,
     write_plots: bool = True,
     config_name: str | None = None,
@@ -194,6 +199,8 @@ def train(
         raise ValueError("hard_negatives_k must be non-negative.")
     if early_stop_patience < 0:
         raise ValueError("early_stop_patience must be non-negative.")
+    if retrieval_pool_size < 0:
+        raise ValueError("retrieval_pool_size must be non-negative.")
     if tactile_history < 0:
         raise ValueError("tactile_history must be non-negative.")
     if loader not in ("thread", "mp"):
@@ -204,6 +211,13 @@ def train(
         raise ValueError("pipeline_prefetch must be positive.")
     if not 0.0 < val_fraction < 1.0:
         raise ValueError(f"val_fraction must be in (0, 1), got {val_fraction}.")
+
+    eval_rgb_mask_patch_size_resolved, eval_rgb_mask_ratio_resolved = resolve_eval_rgb_mask(
+        train_patch_size=rgb_mask_patch_size,
+        train_ratio=rgb_mask_ratio,
+        eval_patch_size=eval_rgb_mask_patch_size,
+        eval_ratio=eval_rgb_mask_ratio,
+    )
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
     start_epoch = 1
@@ -352,6 +366,8 @@ def train(
         f"memory_bank_size={memory_bank_size} hard_negatives_k={hard_negatives_k} "
         f"temperature={model_config.temperature} "
         f"tactile_history={tactile_history} history_stride={frame_stride} "
+        f"train_rgb_mask_ratio={rgb_mask_ratio} "
+        f"eval_rgb_mask_ratio={eval_rgb_mask_ratio_resolved} "
         f"early_stop_patience={early_stop_patience} "
         f"train_samples={train_sample_count} steps_per_epoch={steps_per_epoch} "
         f"start_epoch={start_epoch} epochs={epochs}"
@@ -382,11 +398,15 @@ def train(
         "frame_stride": frame_stride,
         "rgb_mask_patch_size": rgb_mask_patch_size,
         "rgb_mask_ratio": rgb_mask_ratio,
+        "eval_rgb_mask_patch_size": eval_rgb_mask_patch_size,
+        "eval_rgb_mask_ratio": eval_rgb_mask_ratio,
         "eval_mask_seed": eval_mask_seed,
         "clip_microbatch": clip_microbatch,
         "positive_temporal_window": positive_temporal_window,
         "memory_bank_size": memory_bank_size,
         "hard_negatives_k": hard_negatives_k,
+        "retrieval_pool_size": retrieval_pool_size,
+        "retrieval_pool_seed": retrieval_pool_seed,
         "temperature": model_config.temperature,
         "tactile_history": tactile_history,
         "history_stride": frame_stride,
@@ -572,11 +592,13 @@ def train(
                         keys=keys,
                         batch_size=batch_size,
                         eval_mask_seed=eval_mask_seed,
-                        rgb_mask_patch_size=rgb_mask_patch_size,
-                        rgb_mask_ratio=rgb_mask_ratio,
+                        rgb_mask_patch_size=eval_rgb_mask_patch_size_resolved,
+                        rgb_mask_ratio=eval_rgb_mask_ratio_resolved,
                         config=model_config,
                         tactile_history=tactile_history,
                         history_stride=frame_stride,
+                        retrieval_pool_size=retrieval_pool_size,
+                        retrieval_pool_seed=retrieval_pool_seed + epoch,
                     )
                     val_recall1 = float(val_metrics["recall@1"])
                     val_recall5 = float(val_metrics["recall@5"])
@@ -662,10 +684,18 @@ def train(
                 elif run_eval:
                     epochs_since_improve = epoch - best_epoch if best_epoch > 0 else epochs_since_improve + eval_every
                 if run_eval:
+                    val_mode = str(val_metrics.get("retrieval_mode", "full"))
                     print(
                         f"epoch={epoch}/{epochs} train_loss={train_loss:.6f} "
                         f"val_recall@1={val_recall1:.6f} val_recall@5={val_recall5:.6f} "
                         f"val_mean_rank={val_mean_rank:.2f} "
+                        f"val_mode={val_mode}"
+                        + (
+                            f":{int(val_metrics['pool_size'])}"
+                            if "pool_size" in val_metrics
+                            else ""
+                        )
+                        + " "
                         f"left@1={val_recall1_left:.6f} right@1={val_recall1_right:.6f}"
                         + (
                             f" early_stop={epochs_since_improve}/{early_stop_patience}"
@@ -743,6 +773,8 @@ def _yaml_argparse_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "lr_schedule",
         "rgb_mask_patch_size",
         "rgb_mask_ratio",
+        "eval_rgb_mask_patch_size",
+        "eval_rgb_mask_ratio",
         "eval_mask_seed",
         "seed",
         "resume",
@@ -750,6 +782,8 @@ def _yaml_argparse_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
         "memory_bank_size",
         "hard_negatives_k",
         "early_stop_patience",
+        "retrieval_pool_size",
+        "retrieval_pool_seed",
         "tactile_history",
         "write_plots",
     )
@@ -887,6 +921,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lr-schedule", choices=("cosine", "constant"), default="cosine")
     parser.add_argument("--rgb-mask-patch-size", type=int, default=16)
     parser.add_argument("--rgb-mask-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--eval-rgb-mask-patch-size",
+        type=int,
+        default=None,
+        help=(
+            "RGB patch size for validation/inference query masking. "
+            "Defaults to --rgb-mask-patch-size when unset."
+        ),
+    )
+    parser.add_argument(
+        "--eval-rgb-mask-ratio",
+        type=float,
+        default=None,
+        help=(
+            "RGB patch mask ratio for validation/inference query encoding. "
+            "Defaults to --rgb-mask-ratio when unset; use 0.0 to disable eval masking."
+        ),
+    )
     parser.add_argument("--eval-mask-seed", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -935,6 +987,21 @@ def build_parser() -> argparse.ArgumentParser:
             "Stop after this many epochs without val_recall@1 improvement "
             "(checked on eval epochs). 0 disables early stopping."
         ),
+    )
+    parser.add_argument(
+        "--retrieval-pool-size",
+        type=int,
+        default=0,
+        help=(
+            "If >1, validate each query against a sampled same-side pool containing "
+            "its positive and pool_size-1 negatives. 0 keeps full-gallery validation."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-pool-seed",
+        type=int,
+        default=0,
+        help="Base random seed for sampled validation retrieval pools.",
     )
     parser.add_argument(
         "--tactile-history",
@@ -1002,6 +1069,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         cosine_decay=args.lr_schedule == "cosine",
         rgb_mask_patch_size=args.rgb_mask_patch_size,
         rgb_mask_ratio=args.rgb_mask_ratio,
+        eval_rgb_mask_patch_size=args.eval_rgb_mask_patch_size,
+        eval_rgb_mask_ratio=args.eval_rgb_mask_ratio,
         eval_mask_seed=args.eval_mask_seed,
         seed=args.seed,
         clip_microbatch=args.clip_microbatch,
@@ -1023,6 +1092,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         memory_bank_size=args.memory_bank_size,
         hard_negatives_k=args.hard_negatives_k,
         early_stop_patience=args.early_stop_patience,
+        retrieval_pool_size=args.retrieval_pool_size,
+        retrieval_pool_seed=args.retrieval_pool_seed,
         tactile_history=args.tactile_history,
         write_plots=bool(args.write_plots),
         config_name=args.config_name,

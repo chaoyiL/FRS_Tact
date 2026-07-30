@@ -129,3 +129,78 @@ def retrieval_metrics_by_side(
         metric_dict[f"sample_count_{name}"] = metrics.sample_count
     return metric_dict, ranks
 
+
+def pooled_retrieval_metrics_by_side(
+    query_embeddings: Array,
+    gallery_embeddings: Array,
+    side_id: Array | np.ndarray,
+    *,
+    pool_size: int,
+    seed: int = 0,
+) -> tuple[dict[str, float | int], np.ndarray]:
+    """Compute retrieval with one positive and sampled same-side negatives per query.
+
+    ``pool_size`` includes the positive gallery item. For each query, negatives are
+    sampled from the same wrist side and exclude the query's paired positive.
+    """
+
+    if pool_size <= 1:
+        raise ValueError(f"pool_size must be greater than 1, got {pool_size}.")
+    query = np.asarray(jax.device_get(l2_normalize(jnp.asarray(query_embeddings))), dtype=np.float32)
+    gallery = np.asarray(
+        jax.device_get(l2_normalize(jnp.asarray(gallery_embeddings))), dtype=np.float32
+    )
+    sides = np.asarray(side_id, dtype=np.int64)
+    if query.shape[0] != gallery.shape[0] or query.shape[0] != sides.shape[0]:
+        raise ValueError(
+            f"query/gallery/side_id length mismatch: "
+            f"{query.shape[0]}, {gallery.shape[0]}, {sides.shape[0]}"
+        )
+
+    rng = np.random.default_rng(seed)
+    ranks = np.zeros((query.shape[0],), dtype=np.int64)
+    side_metrics: dict[int, RetrievalMetrics] = {}
+    for side_value in sorted(np.unique(sides).tolist()):
+        mask = sides == int(side_value)
+        indices = np.flatnonzero(mask)
+        if indices.size == 0:
+            continue
+        side_ranks = np.zeros((indices.size,), dtype=np.int64)
+        side_gallery = gallery[indices]
+        for local_query_index, global_query_index in enumerate(indices):
+            negative_pool = np.delete(np.arange(indices.size, dtype=np.int64), local_query_index)
+            negative_count = min(pool_size - 1, negative_pool.size)
+            if negative_count > 0:
+                negatives = rng.choice(negative_pool, size=negative_count, replace=False)
+                pool = np.concatenate(
+                    [np.asarray([local_query_index], dtype=np.int64), negatives], axis=0
+                )
+            else:
+                pool = np.asarray([local_query_index], dtype=np.int64)
+            scores = query[global_query_index] @ side_gallery[pool].T
+            positive_score = scores[0]
+            side_ranks[local_query_index] = int(np.sum(scores > positive_score))
+        ranks[indices] = side_ranks
+        side_metrics[int(side_value)] = retrieval_metrics_from_ranks(jnp.asarray(side_ranks))
+
+    total = retrieval_metrics_from_ranks(jnp.asarray(ranks))
+    metric_dict: dict[str, float | int] = {
+        "recall@1": total.recall_at_1,
+        "recall@5": total.recall_at_5,
+        "mean_rank": total.mean_rank,
+        "sample_count": total.sample_count,
+        "pool_size": int(pool_size),
+    }
+    for side_value, name in _SIDE_NAMES.items():
+        if side_value not in side_metrics:
+            metric_dict[f"recall@1_{name}"] = float("nan")
+            metric_dict[f"recall@5_{name}"] = float("nan")
+            metric_dict[f"mean_rank_{name}"] = float("nan")
+            metric_dict[f"sample_count_{name}"] = 0
+            continue
+        metrics = side_metrics[side_value]
+        metric_dict[f"recall@1_{name}"] = metrics.recall_at_1
+        metric_dict[f"recall@5_{name}"] = metrics.recall_at_5
+        metric_dict[f"mean_rank_{name}"] = metrics.mean_rank
+        metric_dict[f"sample_count_{name}"] = metrics.sample_count
+    return metric_dict, ranks

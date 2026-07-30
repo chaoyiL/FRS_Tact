@@ -13,6 +13,36 @@ def validate_patch_mask_config(*, patch_size: int, mask_ratio: float) -> None:
         raise ValueError(f"mask_ratio must be in [0, 1], got {mask_ratio}.")
 
 
+def resolve_eval_rgb_mask(
+    *,
+    train_patch_size: int,
+    train_ratio: float,
+    eval_patch_size: int | None,
+    eval_ratio: float | None,
+) -> tuple[int, float]:
+    """Resolve eval-time RGB mask settings, falling back to train values when unset."""
+
+    patch_size = train_patch_size if eval_patch_size is None else int(eval_patch_size)
+    ratio = train_ratio if eval_ratio is None else float(eval_ratio)
+    validate_patch_mask_config(patch_size=patch_size, mask_ratio=ratio)
+    return patch_size, ratio
+
+
+def resolve_eval_rgb_mask(
+    *,
+    train_patch_size: int,
+    train_ratio: float,
+    eval_patch_size: int | None,
+    eval_ratio: float | None,
+) -> tuple[int, float]:
+    """Resolve eval-time RGB mask settings, falling back to train values when unset."""
+
+    patch_size = train_patch_size if eval_patch_size is None else eval_patch_size
+    ratio = train_ratio if eval_ratio is None else eval_ratio
+    validate_patch_mask_config(patch_size=patch_size, mask_ratio=ratio)
+    return patch_size, ratio
+
+
 def random_patch_zero(
     images: Array,
     key: Array,
