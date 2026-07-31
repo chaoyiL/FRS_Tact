@@ -1,5 +1,5 @@
 在开始前：
-1. 请询问用户使用的数据集，并根据数据集名称修改 download_data.sh 若用户未给出，则直接使用当前配置
+1. 请询问用户使用的数据集，并根据数据集名称修改 download_data.sh和 ./configs/train_smolvla_jax.yaml 中的数据配置。 若用户未给出，则直接使用当前配置
 2. 询问用户的 hf token
 3. 询问用户的 wandb token
 请执行如下管线，进行训练：
