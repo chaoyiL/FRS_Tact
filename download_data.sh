@@ -35,6 +35,7 @@ DATASETS=(
     # black_smash_07
     # tactile_test_02
     tactile_test_05
+    tactile_test_06
 )
 
 log() {
