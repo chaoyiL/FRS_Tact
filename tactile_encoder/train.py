@@ -104,6 +104,50 @@ def _load_best_metrics(output_dir: pathlib.Path) -> tuple[float, float]:
     return float(metrics.get("val_recall@1", -1.0)), float(metrics.get("val_mean_rank", float("inf")))
 
 
+def _load_best_epoch(output_dir: pathlib.Path) -> int | None:
+    best_dir = output_dir / "best"
+    if not (best_dir / CHECKPOINT_NAME).exists():
+        return None
+    _, metadata = load_checkpoint(best_dir)
+    epoch = metadata.get("epoch")
+    return None if epoch is None else int(epoch)
+
+
+def _val_improved(
+    val_recall1: float,
+    val_mean_rank: float,
+    *,
+    best_recall1: float,
+    best_mean_rank: float,
+) -> bool:
+    return val_recall1 > best_recall1 or (
+        val_recall1 == best_recall1 and val_mean_rank < best_mean_rank
+    )
+
+
+def _early_stop_state_after_eval(
+    *,
+    epoch: int,
+    val_recall1: float,
+    val_mean_rank: float,
+    track_recall1: float,
+    track_mean_rank: float,
+    last_improve_epoch: int,
+) -> tuple[float, float, int, int]:
+    """Update per-run early-stop tracker after one validation epoch."""
+
+    if _val_improved(
+        val_recall1,
+        val_mean_rank,
+        best_recall1=track_recall1,
+        best_mean_rank=track_mean_rank,
+    ):
+        track_recall1 = val_recall1
+        track_mean_rank = val_mean_rank
+        last_improve_epoch = epoch
+    return track_recall1, track_mean_rank, last_improve_epoch, epoch - last_improve_epoch
+
+
 def _make_optimizer(
     *,
     learning_rate: float,
@@ -455,12 +499,17 @@ def train(
             history_stride=frame_stride,
         )
         mp_loader.start()
+    stop_track_recall1 = -1.0
+    stop_track_mean_rank = float("inf")
+    last_improve_epoch = start_epoch - 1
+    if resume_dir is not None:
+        best_epoch_loaded = _load_best_epoch(output_dir)
+        if best_epoch_loaded is not None:
+            last_improve_epoch = best_epoch_loaded
+            stop_track_recall1, stop_track_mean_rank = _load_best_metrics(output_dir)
     epochs_since_improve = 0
     best_epoch = 0
     stopped_early = False
-    if best_recall_at_1 >= 0.0:
-        # Existing best/ in output_dir: treat "last improve" as just before this run.
-        best_epoch = max(0, start_epoch - 1)
 
     def _refresh_training_plot(*, announce: bool = False) -> None:
         if not write_plots:
@@ -662,14 +711,15 @@ def train(
                     opt_state=opt_state,
                     memory_bank=memory_bank if memory_bank_size > 0 else None,
                 )
-                if run_eval and (
-                    val_recall1 > best_recall_at_1
-                    or (val_recall1 == best_recall_at_1 and val_mean_rank < best_mean_rank)
+                if run_eval and _val_improved(
+                    val_recall1,
+                    val_mean_rank,
+                    best_recall1=best_recall_at_1,
+                    best_mean_rank=best_mean_rank,
                 ):
                     best_recall_at_1 = val_recall1
                     best_mean_rank = val_mean_rank
                     best_epoch = epoch
-                    epochs_since_improve = 0
                     save_checkpoint(
                         output_dir / "best",
                         params,
@@ -681,8 +731,20 @@ def train(
                         opt_state=opt_state,
                         memory_bank=memory_bank if memory_bank_size > 0 else None,
                     )
-                elif run_eval:
-                    epochs_since_improve = epoch - best_epoch if best_epoch > 0 else epochs_since_improve + eval_every
+                if run_eval:
+                    (
+                        stop_track_recall1,
+                        stop_track_mean_rank,
+                        last_improve_epoch,
+                        epochs_since_improve,
+                    ) = _early_stop_state_after_eval(
+                        epoch=epoch,
+                        val_recall1=val_recall1,
+                        val_mean_rank=val_mean_rank,
+                        track_recall1=stop_track_recall1,
+                        track_mean_rank=stop_track_mean_rank,
+                        last_improve_epoch=last_improve_epoch,
+                    )
                 if run_eval:
                     val_mode = str(val_metrics.get("retrieval_mode", "full"))
                     print(
@@ -711,12 +773,11 @@ def train(
                 if (
                     early_stop_patience > 0
                     and run_eval
-                    and best_epoch > 0
                     and epochs_since_improve >= early_stop_patience
                 ):
                     print(
                         f"early stopping at epoch={epoch}: no val improvement for "
-                        f"{epochs_since_improve} epochs since best_epoch={best_epoch} "
+                        f"{epochs_since_improve} epochs since last_improve_epoch={last_improve_epoch} "
                         f"(patience={early_stop_patience})",
                         flush=True,
                     )

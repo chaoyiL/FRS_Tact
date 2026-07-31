@@ -8,7 +8,7 @@ dataset_repo_ids:
   - chaoyi/tactile_test_05
 # 可选：写入 checkpoint metadata 的 run 标签；null = 用 repo id
 config_name: null
-output_dir: checkpoints/encoder_ckpt_04
+output_dir: checkpoints/encoder_ckpt_05
 
 # ---- CLIP / 数据键 ----
 clip_model_id: openai/clip-vit-base-patch16
@@ -55,15 +55,15 @@ eval_mask_seed: 0
 
 # ---- 对比学习扩展（默认关）----
 # MoCo 式 future-RGB embedding 队列；0 = 关闭。可试 8192 / 16384
-memory_bank_size: 8192
+memory_bank_size: 16384
 # bank 内 top-K hard neg；需 memory_bank_size>0。0 = 用全部跨 episode bank 负样本。可试 256
-hard_negatives_k: 256
+hard_negatives_k: 15
 # 触觉历史 GRU 步数（回看步长 = frame_stride）；0 = 不用 GRU
 tactile_history: 0
 
 # ---- 验证 / 早停 / 恢复 ----
 eval_every: 2
-early_stop_patience: 8   # 0 = 关闭；按总 val_recall@1
+early_stop_patience: 6   # 0 = 关闭；按总 val_recall@1
 # 0 = 全验证集同侧检索；>1 = 每个 query 抽一个同侧验证池：
 # 1 个正样本 + pool_size-1 个负样本。例如 64 更接近固定规模候选集成功率。
 retrieval_pool_size: 32
