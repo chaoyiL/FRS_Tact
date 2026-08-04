@@ -34,8 +34,12 @@ DATASETS=(
     # black_smash_06
     # black_smash_07
     # tactile_test_02
-    tactile_test_05
-    tactile_test_06
+    # tactile_test_05
+    # tactile_test_06
+    # pick_cube_01
+    # pick_cube_02
+    # pick_cube_03
+    # pick_cube_fix
 )
 
 log() {

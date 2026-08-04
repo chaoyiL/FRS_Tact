@@ -74,6 +74,14 @@ class JaxSmolVLAConfig:
     module_modes: dict[str, str] | None = None
     lora_rank: int = 8
     lora_alpha: float = 16.0
+    vlm_lora_target_modules: tuple[str, ...] = ()
+    use_tactile_encoder: bool = False
+    tactile_encoder_path: str | None = None
+    freeze_tactile_encoder: bool = True
+    tactile_keys: tuple[str, ...] = ()
+    tactile_embedding_dim: int = 512
+    tactile_num_tokens: int = 4
+    tactile_image_size: int = 224
     adapt_to_pi_aloha: bool = False
     optimizer_lr: float = 1e-4
     optimizer_beta1: float = 0.9
@@ -169,6 +177,14 @@ class JaxSmolVLAConfig:
             module_modes=raw.get("module_modes"),
             lora_rank=int(raw.get("lora_rank", 8)),
             lora_alpha=float(raw.get("lora_alpha", 16.0)),
+            vlm_lora_target_modules=tuple(raw.get("vlm_lora_target_modules") or ()),
+            use_tactile_encoder=bool(raw.get("use_tactile_encoder", False)),
+            tactile_encoder_path=raw.get("tactile_encoder_path"),
+            freeze_tactile_encoder=bool(raw.get("freeze_tactile_encoder", True)),
+            tactile_keys=tuple(raw.get("tactile_keys") or ()),
+            tactile_embedding_dim=int(raw.get("tactile_embedding_dim", 512)),
+            tactile_num_tokens=int(raw.get("tactile_num_tokens", 4)),
+            tactile_image_size=int(raw.get("tactile_image_size", 224)),
             adapt_to_pi_aloha=bool(raw.get("adapt_to_pi_aloha", False)),
             optimizer_lr=float(raw.get("optimizer_lr", 1e-4)),
             optimizer_beta1=float(raw.get("optimizer_betas", [0.9, 0.95])[0]),
@@ -201,7 +217,7 @@ class JaxSmolVLAConfig:
 
         cleaned: dict[str, Any] = {}
         for key, value in overrides.items():
-            if key == "image_keys" and value is not None:
+            if key in {"image_keys", "tactile_keys", "vlm_lora_target_modules"} and value is not None:
                 cleaned[key] = tuple(value)
             else:
                 # PyYAML 1.2 treats bare scientific notation like ``1e-4`` as a
@@ -226,6 +242,37 @@ class JaxSmolVLAConfig:
             raise ValueError(
                 f"VLM/expert layer counts must be positive, got "
                 f"{num_vlm_layers}/{num_expert_layers}"
+            )
+        if updated.use_tactile_encoder:
+            if not updated.tactile_encoder_path:
+                raise ValueError("tactile_encoder_path is required when use_tactile_encoder=True")
+            if not updated.tactile_keys:
+                raise ValueError("tactile_keys is required when use_tactile_encoder=True")
+            if len(updated.tactile_keys) != int(updated.tactile_num_tokens):
+                raise ValueError(
+                    "tactile_keys length must match tactile_num_tokens "
+                    f"({len(updated.tactile_keys)} != {updated.tactile_num_tokens})"
+                )
+            overlap = sorted(set(updated.image_keys) & set(updated.tactile_keys))
+            if overlap:
+                raise ValueError(f"tactile_keys must not also appear in image_keys: {overlap}")
+        valid_vlm_lora_targets = {
+            "q_proj",
+            "k_proj",
+            "v_proj",
+            "o_proj",
+            "gate_proj",
+            "up_proj",
+            "down_proj",
+        }
+        unknown_vlm_lora_targets = sorted(
+            set(updated.vlm_lora_target_modules) - valid_vlm_lora_targets
+        )
+        if unknown_vlm_lora_targets:
+            raise ValueError(
+                "unknown vlm_lora_target_modules: "
+                f"{unknown_vlm_lora_targets}; expected a subset of "
+                f"{sorted(valid_vlm_lora_targets)}"
             )
         if num_vlm_layers % num_expert_layers:
             raise ValueError(

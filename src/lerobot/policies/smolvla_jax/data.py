@@ -143,7 +143,7 @@ def prepare_lerobot_batch(
 
 
 class _KeyMappedLeRobotDataset(Dataset):
-    """Normalize per-dataset camera/action keys before concatenation."""
+    """Normalize keys and apply RGB-only augmentation before concatenation."""
 
     def __init__(
         self,
@@ -151,10 +151,14 @@ class _KeyMappedLeRobotDataset(Dataset):
         *,
         action_key: str,
         rename_map: Mapping[str, str] | None,
+        image_transforms: Callable | None = None,
+        image_transform_keys: Sequence[str] = (),
     ):
         self.dataset = dataset
         self.action_key = action_key
         self.rename_map = dict(rename_map or {})
+        self.image_transforms = image_transforms
+        self.image_transform_keys = frozenset(image_transform_keys)
         self.padding_key = f"{action_key}_is_pad"
 
     def __len__(self) -> int:
@@ -172,6 +176,10 @@ class _KeyMappedLeRobotDataset(Dataset):
                 mapped[self.rename_map.get(key, key)] = value
             elif key == "task":
                 mapped["task"] = value
+        if self.image_transforms is not None:
+            for key in self.image_transform_keys:
+                if key in mapped:
+                    mapped[key] = self.image_transforms(mapped[key])
         if CANONICAL_ACTION_KEY not in mapped:
             raise KeyError(f"sample is missing action feature {self.action_key!r}")
         return mapped
@@ -203,6 +211,15 @@ def resolve_source_visual_keys(
             f"against cameras={list(available_cameras)}"
         )
     return list(dict.fromkeys(resolved))
+
+
+def resolve_model_visual_keys(config: JaxSmolVLAConfig) -> tuple[str, ...]:
+    """All dataset image/video columns needed by the configured model."""
+
+    keys = list(config.image_keys)
+    if config.use_tactile_encoder:
+        keys.extend(config.tactile_keys)
+    return tuple(dict.fromkeys(keys))
 
 
 def parse_dataset_sources(cfg: Mapping[str, Any]) -> list[DatasetSource]:
@@ -353,7 +370,7 @@ class LeRobotJaxDataLoader:
             )
             source_rename = dict(source.rename_map or {})
             visual_keys = resolve_source_visual_keys(
-                config.image_keys,
+                resolve_model_visual_keys(config),
                 source_rename,
                 metadata.camera_keys,
             )
@@ -363,7 +380,8 @@ class LeRobotJaxDataLoader:
                 revision=metadata.revision,
                 episodes=list(source.episodes) if source.episodes is not None else None,
                 delta_timestamps=delta_timestamps,
-                image_transforms=image_transforms,
+                # Apply transforms after key mapping so tactile images can stay untouched.
+                image_transforms=None,
                 video_backend=video_backend,
                 download_videos=True,
                 visual_keys=visual_keys,
@@ -382,6 +400,8 @@ class LeRobotJaxDataLoader:
                 dataset,
                 action_key=resolved_action_key,
                 rename_map=source_rename,
+                image_transforms=image_transforms,
+                image_transform_keys=config.image_keys,
             )
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
@@ -492,6 +512,19 @@ class LeRobotJaxDataLoader:
             for key, feature in features.items()
             if feature.get("dtype") in ("image", "video")
         }
+        missing_images = sorted(set(config.image_keys) - dataset_cameras)
+        if missing_images:
+            raise ValueError(
+                f"dataset {repo_id!r}: missing image keys after renaming: {missing_images}; "
+                f"dataset={sorted(dataset_cameras)}"
+            )
+        if config.use_tactile_encoder:
+            missing_tactile = sorted(set(config.tactile_keys) - dataset_cameras)
+            if missing_tactile:
+                raise ValueError(
+                    f"dataset {repo_id!r}: missing tactile keys after renaming: {missing_tactile}; "
+                    f"dataset={sorted(dataset_cameras)}"
+                )
         if not dataset_cameras.intersection(config.image_keys):
             raise ValueError(
                 f"dataset {repo_id!r}: none of the cameras match checkpoint image features "

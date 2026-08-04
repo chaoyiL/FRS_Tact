@@ -35,7 +35,7 @@ class JaxSmolVLAPolicy:
             rename_map=rename_map,
             local_files_only=local_files_only,
         )
-        self._compiled_samples: dict[tuple[int, int | None, int | None, bool], Any] = {}
+        self._compiled_samples: dict[tuple[int, int | None, int | None, bool, bool], Any] = {}
         self.reset()
 
     @classmethod
@@ -52,12 +52,24 @@ class JaxSmolVLAPolicy:
         inference_delay: int | None,
         execution_horizon: int | None,
         has_previous_chunk: bool,
+        has_tactile: bool,
     ):
-        cache_key = (num_steps, inference_delay, execution_horizon, has_previous_chunk)
+        cache_key = (num_steps, inference_delay, execution_horizon, has_previous_chunk, has_tactile)
         if cache_key not in self._compiled_samples:
             model = self.model
 
-            def sample(params, images, image_masks, tokens, language_masks, state, noise, previous):
+            def sample(
+                params,
+                images,
+                image_masks,
+                tokens,
+                language_masks,
+                state,
+                tactile_images,
+                tactile_masks,
+                noise,
+                previous,
+            ):
                 return model.sample_actions(
                     params,
                     images,
@@ -66,6 +78,8 @@ class JaxSmolVLAPolicy:
                     language_masks,
                     state,
                     jax.random.key(0),
+                    tactile_images=tactile_images if has_tactile else None,
+                    tactile_masks=tactile_masks if has_tactile else None,
                     noise=noise,
                     num_steps=num_steps,
                     previous_chunk=previous if has_previous_chunk else None,
@@ -103,12 +117,16 @@ class JaxSmolVLAPolicy:
         previous_argument = previous_chunk
         if previous_argument is None:
             previous_argument = jnp.zeros_like(noise)
+        tactile_images = batch.get("tactile_images")
+        tactile_masks = batch.get("tactile_masks")
+        has_tactile = tactile_images is not None and tactile_masks is not None
         if jit:
             actions = self._get_compiled_sample(
                 num_steps,
                 inference_delay,
                 execution_horizon,
                 previous_chunk is not None,
+                has_tactile,
             )(
                 self.params,
                 batch["images"],
@@ -116,6 +134,8 @@ class JaxSmolVLAPolicy:
                 batch["language_tokens"],
                 batch["language_masks"],
                 batch["state"],
+                tactile_images,
+                tactile_masks,
                 noise,
                 previous_argument,
             )
@@ -128,6 +148,8 @@ class JaxSmolVLAPolicy:
                 batch["language_masks"],
                 batch["state"],
                 jax.random.key(seed),
+                tactile_images=tactile_images,
+                tactile_masks=tactile_masks,
                 noise=noise,
                 num_steps=num_steps,
                 previous_chunk=previous_chunk,

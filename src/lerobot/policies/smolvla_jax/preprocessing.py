@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from safetensors.flax import load_file as load_safetensors_file, save_file as save_safetensors_file
+from tactile_encoder.utils.image_dataset import parse_image_to_unit
 from transformers import AutoTokenizer
 
 from .configuration import JaxSmolVLAConfig
@@ -98,6 +99,20 @@ def _as_bchw(image: Any) -> np.ndarray:
         if image.size and float(np.max(image)) > 1.0:
             image = image / 255.0
     return image
+
+
+def prepare_tactile_batch(image: Any, image_size: int) -> np.ndarray:
+    """Apply the tactile encoder's exact per-frame preprocessing to a batch."""
+
+    image = np.asarray(image)
+    if image.ndim == 3:
+        image = image[None, ...]
+    if image.ndim != 4:
+        raise ValueError(f"expected a tactile image or batch, got {image.shape}")
+    return np.stack(
+        [parse_image_to_unit(frame, image_size=image_size) for frame in image],
+        axis=0,
+    ).astype(np.float32, copy=False)
 
 
 class JaxSmolVLAPreprocessor:
@@ -334,16 +349,36 @@ class JaxSmolVLAPreprocessor:
         for _ in missing_keys[: self.config.empty_cameras]:
             images.append(-jnp.ones_like(images[-1]))
             masks.append(jnp.zeros_like(masks[-1]))
+        tactile_images: list[Array] = []
+        tactile_masks: list[Array] = []
+        if self.config.use_tactile_encoder:
+            missing_tactile = [key for key in self.config.tactile_keys if key not in renamed]
+            if missing_tactile:
+                raise KeyError(f"missing tactile image keys: {missing_tactile}")
+            for key in self.config.tactile_keys:
+                tactile = jnp.asarray(
+                    prepare_tactile_batch(
+                        renamed[key],
+                        self.config.tactile_image_size,
+                    ),
+                    dtype=jnp.float32,
+                )
+                tactile_images.append(tactile)
+                tactile_masks.append(jnp.ones((tactile.shape[0],), dtype=jnp.bool_))
         tokens, language_masks = self.tokenize(task)
         if tokens.shape[0] == 1 and state.shape[0] != 1:
             tokens = jnp.broadcast_to(tokens, (state.shape[0], tokens.shape[1]))
             language_masks = jnp.broadcast_to(language_masks, tokens.shape)
         elif tokens.shape[0] != state.shape[0]:
             raise ValueError(f"received {tokens.shape[0]} tasks for an observation batch of {state.shape[0]}")
-        return {
+        prepared = {
             "images": jnp.stack(images, axis=1),
             "image_masks": jnp.stack(masks, axis=1),
             "language_tokens": tokens,
             "language_masks": language_masks,
             "state": state,
         }
+        if self.config.use_tactile_encoder:
+            prepared["tactile_images"] = jnp.stack(tactile_images, axis=1)
+            prepared["tactile_masks"] = jnp.stack(tactile_masks, axis=1)
+        return prepared

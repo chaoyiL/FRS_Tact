@@ -1,0 +1,167 @@
+# 视觉 + 触觉 encoder 版 SmolVLA JAX 微调配置。
+# 这个文件和 train_smolvla_jax.yaml 分开；后者保留为纯视觉基线配置。
+# 运行：
+#   uv run python tools/train_vtsmolvla_jax.py --config configs/train_vtsmolvla_jax.yaml
+
+# ---- 预训练权重 ----
+checkpoint: lerobot/smolvla_base
+revision: null
+allow_download: true
+# 仅当 num_vlm_layers 超过 SmolVLA checkpoint 已有层数时，用这个完整 VLM checkpoint 补齐缺失层。
+full_vlm_checkpoint: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
+
+# ---- 数据集 ----
+# 触觉图像和 RGB/state/action 来自同一个 LeRobot 数据集。
+datasets:
+  - repo_id: chaoyi/tactile_test_05
+    # root: /workspace/lerobot_v30/chaoyi/tactile_test_05
+    action_key: actions
+    weight: 1.0
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+# ---- 输出与训练超参 ----
+output: /workspace/vtsmolvla_tactile_01
+steps: 40000
+batch_size: 64
+num_workers: 16
+prefetch_factor: 4
+video_backend: null
+log_freq: 10
+save_freq: 5000
+eval_freq: 500
+seed: 42
+resume: null
+data_parallel: true
+allow_tokenizer_download: true
+
+# ---- 图像增强 ----
+# 仅对 model.image_keys 中的 RGB 图像生效，触觉图像保持原始分布。
+image_transforms:
+  enable: true
+  # 与 VB3 训练一致：每张 RGB 图像按 weight 无放回抽取 2 种增强。
+  max_num_transforms: 2
+  random_order: false
+  tfs:
+    brightness:
+      weight: 1.0
+      type: ColorJitter
+      kwargs:
+        brightness: [0.8, 1.2]
+    contrast:
+      weight: 1.0
+      type: ColorJitter
+      kwargs:
+        contrast: [0.8, 1.2]
+    saturation:
+      weight: 1.0
+      type: ColorJitter
+      kwargs:
+        saturation: [0.85, 1.15]
+    hue:
+      weight: 0.5
+      type: ColorJitter
+      kwargs:
+        hue: [-0.01, 0.01]
+    sharpness:
+      weight: 0.5
+      type: SharpnessJitter
+      kwargs:
+        sharpness: [0.8, 1.2]
+
+# ---- 模态 dropout ----
+# 第一版先保守一些。触觉融合验证通过后，再加专门针对触觉 token 的 dropout；
+# 不把触觉 token 当作普通相机处理。
+modality_dropout:
+  enable: false
+  every_n_steps: 10
+  prob: 1.0
+  drop_language: true
+  drop_state: false
+  camera_indices: [0, 1]
+
+# ---- Flow-matching 验证 ----
+validation:
+  enabled: true
+  fraction: 0.1
+  rollout: true
+  rollout_steps: null
+  max_batches: 5
+
+# ---- Weights & Biases ----
+wandb:
+  enabled: true
+  project: smolvla-jax
+  entity: null
+  name: vtsmolvla_tactile_encoder_01
+  mode: online
+  tags:
+    - smolvla
+    - tactile
+    - tactile-encoder
+    - vtsmolvla
+  log_checkpoints: false
+
+# ---- 模型配置覆盖 ----
+# RGB 仍然走 SmolVLA 原本的视觉分支。触觉图像不要加入 image_keys；
+# 它们会先经过冻结的 tactile encoder，再作为 tactile tokens 融合进模型。
+model:
+  # 每个模块选择一种训练模式：frozen | full | lora。
+  # tactile_proj 是新增的融合投影层：把 tactile encoder embedding 投到 SmolVLA hidden space。
+  module_modes:
+    vision: frozen
+    # 与 VB3 PEFT 设置一致：视觉 encoder 和 connector 都冻结。
+    connector: frozen
+    vlm_text: lora
+    expert: full
+    action: full
+    state_proj: full
+    tactile_proj: full
+  lora_rank: 16
+  lora_alpha: 16.0
+  # 只微调 VLM self-attention 的 Q/V。
+  vlm_lora_target_modules:
+    - q_proj
+    - v_proj
+
+  action_dim: 20
+  state_dim: 20
+  max_action_dim: 32
+  max_state_dim: 32
+
+  # 每个数据集应用 rename_map 后的纯视觉相机 keys。
+  image_keys:
+    - observation.images.camera1
+    - observation.images.camera2
+  empty_cameras: 0
+
+  # ---- 触觉 encoder ----
+  # 只复用当前帧的 ResNet backbone；不加载 checkpoint 中可能存在的 GRU/history 分支。
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_06
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+
+  chunk_size: 20
+  n_action_steps: 5
+
+  # ---- VLM / expert 架构 ----
+  num_vlm_layers: 16
+  num_expert_layers: -1
+  self_attn_every_n_layers: 2
+  attention_mode: cross_attn
+  expert_width_multiplier: 0.75
+
+  optimizer_lr: 5.0e-5
+  optimizer_weight_decay: 1.0e-4
+  optimizer_grad_clip_norm: 10.0
+  scheduler_warmup_steps: 1000
+  scheduler_decay_steps: 40000

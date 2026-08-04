@@ -121,6 +121,7 @@ def test_effective_config_persists_dimensions_and_lora_settings(tmp_path: Path) 
         },
         lora_rank=4,
         lora_alpha=8.0,
+        vlm_lora_target_modules=("q_proj", "v_proj"),
         optimizer_beta1=0.91,
         optimizer_beta2=0.96,
         freeze_vision_encoder=True,
@@ -154,6 +155,7 @@ def test_effective_config_persists_dimensions_and_lora_settings(tmp_path: Path) 
     assert raw["module_modes"]["vision"] == "lora"
     assert raw["lora_rank"] == 4
     assert raw["lora_alpha"] == 8.0
+    assert raw["vlm_lora_target_modules"] == ["q_proj", "v_proj"]
     # module_modes is the source of truth for the legacy boolean switches.
     assert raw["freeze_vision_encoder"] is False
     assert raw["train_expert_only"] is False
@@ -164,6 +166,39 @@ def test_effective_config_persists_dimensions_and_lora_settings(tmp_path: Path) 
     assert reloaded.state_dim == 20
     assert reloaded.action_dim == 20
     assert reloaded.module_modes["vision"] == "lora"
+    assert reloaded.vlm_lora_target_modules == ("q_proj", "v_proj")
+
+
+def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
+    config = replace(
+        JaxSmolVLAConfig(),
+        image_keys=("observation.images.camera1", "observation.images.camera2"),
+        use_tactile_encoder=True,
+        tactile_encoder_path="checkpoints/encoder_ckpt_05/best",
+        freeze_tactile_encoder=True,
+        tactile_keys=(
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ),
+        tactile_embedding_dim=512,
+        tactile_num_tokens=4,
+        tactile_image_size=224,
+    )
+    write_effective_config(tmp_path, config)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    assert raw["use_tactile_encoder"] is True
+    assert raw["tactile_encoder_path"] == "checkpoints/encoder_ckpt_05/best"
+    assert raw["freeze_tactile_encoder"] is True
+    assert raw["tactile_keys"] == list(config.tactile_keys)
+    assert raw["tactile_embedding_dim"] == 512
+    assert raw["tactile_num_tokens"] == 4
+    assert raw["tactile_image_size"] == 224
+
+    reloaded = JaxSmolVLAConfig.from_pretrained(tmp_path)
+    assert reloaded.use_tactile_encoder is True
+    assert reloaded.tactile_keys == config.tactile_keys
 
 
 def test_processor_configs_sync_rename_map_and_feature_shapes(tmp_path: Path) -> None:

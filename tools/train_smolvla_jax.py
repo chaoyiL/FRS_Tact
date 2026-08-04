@@ -16,6 +16,7 @@ from lerobot.policies.smolvla_jax.checkpoint import (
     count_expert_layers,
     count_vlm_layers,
     extend_vlm_layers,
+    initialize_tactile_fusion_params,
     load_params,
     resolve_checkpoint,
 )
@@ -223,6 +224,7 @@ def main() -> None:
             local_files_only=not allow_download,
         )
         print(f"extended VLM parameters to {count_vlm_layers(params)} layers")
+    params = initialize_tactile_fusion_params(params, config, seed=int(cfg.get("seed", 0)))
 
     model = JaxSmolVLA(config)
     modality_dropout_cfg = cfg.get("modality_dropout")

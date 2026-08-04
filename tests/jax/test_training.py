@@ -14,6 +14,7 @@ from lerobot.policies.smolvla_jax.training import (
     JaxSmolVLATrainer,
     cosine_warmup_schedule,
     partition_params,
+    promote_trainable_params_to_fp32,
 )
 
 
@@ -54,6 +55,21 @@ def test_partition_and_schedule() -> None:
     schedule = cosine_warmup_schedule(config)
     assert float(schedule(0)) < float(schedule(2))
     assert np.isclose(float(schedule(10)), config.scheduler_decay_lr)
+
+
+def test_trainable_bfloat16_params_are_promoted_but_frozen_params_are_not() -> None:
+    config = JaxSmolVLAConfig()
+    expert_key = "model.vlm_with_expert.lm_expert.layers.0.self_attn.q_proj.weight"
+    frozen_key = "model.vlm_with_expert.vlm.model.text_model.norm.weight"
+    params = {
+        expert_key: jnp.ones((2, 2), dtype=jnp.bfloat16),
+        frozen_key: jnp.ones((2,), dtype=jnp.bfloat16),
+    }
+
+    promoted = promote_trainable_params_to_fp32(params, config)
+
+    assert promoted[expert_key].dtype == jnp.float32
+    assert promoted[frozen_key].dtype == jnp.bfloat16
 
 
 def test_partition_freezes_both_unused_tail_layers_for_a_shallow_expert() -> None:

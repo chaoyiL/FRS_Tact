@@ -11,6 +11,7 @@ from typing import Any
 import jax
 import numpy as np
 import orbax.checkpoint as ocp
+from flax import traverse_util
 from huggingface_hub import snapshot_download
 from safetensors import safe_open
 from safetensors.flax import load_file as load_safetensors_file, save_file as save_safetensors_file
@@ -31,6 +32,7 @@ ASSET_FILENAMES = (
 _VLM_LAYER_PREFIX = "model.vlm_with_expert.vlm.model.text_model.layers."
 _EXPERT_LAYER_PREFIX = "model.vlm_with_expert.lm_expert.layers."
 _SOURCE_VLM_LAYER_PREFIX = "model.text_model.layers."
+_TACTILE_ENCODER_PREFIX = "model.tactile_encoder."
 
 
 def resolve_checkpoint(
@@ -167,6 +169,69 @@ def parameter_summary(params: Mapping[str, Array]) -> dict[str, Any]:
         "parameters_by_dtype": dtypes,
         "layout": "pytorch_source_layout",
     }
+
+
+def _flatten_tactile_resnet_params(tactile_resnet: Mapping[str, Any]) -> dict[str, Array]:
+    flat = traverse_util.flatten_dict(dict(tactile_resnet))
+    return {
+        _TACTILE_ENCODER_PREFIX + "/".join(str(part) for part in path): jax.device_put(value)
+        for path, value in flat.items()
+    }
+
+
+def initialize_tactile_fusion_params(
+    params: Mapping[str, Array],
+    config: JaxSmolVLAConfig,
+    *,
+    seed: int = 0,
+) -> dict[str, Array]:
+    """Attach the frozen single-frame ResNet backbone and a trainable projection layer.
+
+    A checkpoint may also contain a temporal GRU. VT-SmolVLA intentionally does
+    not load it: every configured tactile image is encoded as one current-frame token.
+    """
+
+    if not config.use_tactile_encoder:
+        return dict(params)
+    if not config.freeze_tactile_encoder:
+        raise NotImplementedError("第一版 VT-SmolVLA 只支持 freeze_tactile_encoder=True")
+    if not config.tactile_encoder_path:
+        raise ValueError("tactile_encoder_path is required when use_tactile_encoder=True")
+
+    output = dict(params)
+    if not any(name.startswith(_TACTILE_ENCODER_PREFIX) for name in output):
+        from tactile_encoder.utils.checkpoint import load_tactile_encoder
+        from tactile_encoder.utils.model import tactile_clip_config_from_dict
+
+        bundle = load_tactile_encoder(config.tactile_encoder_path)
+        tactile_cfg = tactile_clip_config_from_dict(bundle.metadata["tactile_clip_config"])
+        if int(tactile_cfg.embedding_dim) != int(config.tactile_embedding_dim):
+            raise ValueError(
+                "tactile_embedding_dim does not match tactile encoder checkpoint "
+                f"({config.tactile_embedding_dim} != {tactile_cfg.embedding_dim})"
+            )
+        if int(tactile_cfg.tactile_image_size) != int(config.tactile_image_size):
+            raise ValueError(
+                "tactile_image_size does not match tactile encoder checkpoint "
+                f"({config.tactile_image_size} != {tactile_cfg.tactile_image_size})"
+            )
+        if "tactile_resnet" not in bundle.params:
+            raise KeyError("tactile encoder checkpoint is missing tactile_resnet params")
+        output.update(_flatten_tactile_resnet_params(bundle.params["tactile_resnet"]))
+
+    weight_key = "model.tactile_proj.weight"
+    bias_key = "model.tactile_proj.bias"
+    if weight_key not in output:
+        rng = np.random.default_rng(seed + 101)
+        in_dim = int(config.tactile_embedding_dim)
+        out_dim = int(config.text_hidden_size)
+        limit = np.sqrt(6.0 / float(in_dim + out_dim))
+        output[weight_key] = jax.device_put(
+            rng.uniform(-limit, limit, (out_dim, in_dim)).astype(np.float32)
+        )
+    if bias_key not in output:
+        output[bias_key] = jax.device_put(np.zeros((int(config.text_hidden_size),), dtype=np.float32))
+    return output
 
 
 def _sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -323,6 +388,14 @@ def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) ->
             "module_modes": config.module_modes,
             "lora_rank": config.lora_rank,
             "lora_alpha": config.lora_alpha,
+            "vlm_lora_target_modules": list(config.vlm_lora_target_modules),
+            "use_tactile_encoder": config.use_tactile_encoder,
+            "tactile_encoder_path": config.tactile_encoder_path,
+            "freeze_tactile_encoder": config.freeze_tactile_encoder,
+            "tactile_keys": list(config.tactile_keys),
+            "tactile_embedding_dim": config.tactile_embedding_dim,
+            "tactile_num_tokens": config.tactile_num_tokens,
+            "tactile_image_size": config.tactile_image_size,
             "optimizer_lr": config.optimizer_lr,
             "optimizer_betas": [config.optimizer_beta1, config.optimizer_beta2],
             "optimizer_eps": config.optimizer_eps,

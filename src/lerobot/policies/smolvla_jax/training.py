@@ -12,7 +12,12 @@ import numpy as np
 import optax
 from flax import struct
 
-from .checkpoint import load_params, save_portable_params, write_effective_config
+from .checkpoint import (
+    initialize_tactile_fusion_params,
+    load_params,
+    save_portable_params,
+    write_effective_config,
+)
 from .configuration import JaxSmolVLAConfig
 from .lora import initialize_lora_params, is_trainable_parameter
 from .modeling import JaxSmolVLA
@@ -37,6 +42,24 @@ def partition_params(params: Mapping[str, Array], config: JaxSmolVLAConfig) -> t
     for name, value in params.items():
         (trainable if is_trainable_parameter(name, config) else frozen)[name] = value
     return trainable, frozen
+
+
+def promote_trainable_params_to_fp32(
+    params: Mapping[str, Array],
+    config: JaxSmolVLAConfig,
+) -> Params:
+    """Keep FP32 master weights for every trainable floating-point parameter."""
+
+    promoted: Params = {}
+    for name, value in params.items():
+        if (
+            is_trainable_parameter(name, config)
+            and jnp.issubdtype(value.dtype, jnp.inexact)
+            and value.dtype != jnp.float32
+        ):
+            value = value.astype(jnp.float32)
+        promoted[name] = value
+    return promoted
 
 
 def merge_params(trainable: Mapping[str, Array], frozen: Mapping[str, Array]) -> Params:
@@ -99,6 +122,7 @@ class JaxSmolVLATrainer:
             self.modality_dropout = ModalityDropoutConfig.from_dict(modality_dropout)
         self._modality_dropout_rng = np.random.default_rng(seed + 17)
         params = initialize_lora_params(params, self.config, seed=seed)
+        params = promote_trainable_params_to_fp32(params, self.config)
         trainable, self.frozen_params = partition_params(params, self.config)
         self.optimizer, self.learning_rate = create_optimizer(self.config, total_steps)
         self.state = TrainState(
@@ -200,6 +224,8 @@ class JaxSmolVLATrainer:
             batch["language_masks"],
             batch["state"],
             sample_rng,
+            tactile_images=batch.get("tactile_images"),
+            tactile_masks=batch.get("tactile_masks"),
             num_steps=rollout_steps,
         )
         target = batch["actions"][..., : self.config.action_dim]
@@ -297,7 +323,9 @@ class JaxSmolVLATrainer:
 
     def restore(self, checkpoint: str | Path) -> None:
         checkpoint = Path(checkpoint)
-        params = initialize_lora_params(load_params(checkpoint), self.config)
+        params = initialize_tactile_fusion_params(load_params(checkpoint), self.config)
+        params = initialize_lora_params(params, self.config)
+        params = promote_trainable_params_to_fp32(params, self.config)
         trainable, frozen = partition_params(params, self.config)
         target = {
             "step": self.state.step,

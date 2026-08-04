@@ -12,7 +12,9 @@ from .configuration import JaxSmolVLAConfig
 Array = jax.Array
 TrainMode = Literal["frozen", "full", "lora"]
 
-MODULE_NAMES = ("vision", "connector", "vlm_text", "expert", "action", "state_proj")
+BASE_MODULE_NAMES = ("vision", "connector", "vlm_text", "expert", "action", "state_proj")
+OPTIONAL_MODULE_NAMES = ("tactile_proj",)
+MODULE_NAMES = (*BASE_MODULE_NAMES, *OPTIONAL_MODULE_NAMES)
 VALID_TRAIN_MODES = frozenset(("frozen", "full", "lora"))
 
 _ACTION_PREFIXES = (
@@ -41,6 +43,7 @@ _EXACT_LINEAR_WEIGHTS = frozenset(
         "model.action_time_mlp_in.weight",
         "model.action_time_mlp_out.weight",
         "model.vlm_with_expert.vlm.model.connector.modality_projection.proj.weight",
+        "model.tactile_proj.weight",
     }
 )
 
@@ -60,6 +63,8 @@ def module_for_parameter(name: str) -> str | None:
         return "action"
     if name.startswith("model.state_proj."):
         return "state_proj"
+    if name.startswith("model.tactile_proj."):
+        return "tactile_proj"
     return None
 
 
@@ -73,6 +78,7 @@ def legacy_module_modes(config: JaxSmolVLAConfig) -> dict[str, TrainMode]:
         "expert": "full",
         "action": "full",
         "state_proj": "full" if config.train_state_proj else "frozen",
+        "tactile_proj": "full" if config.use_tactile_encoder else "frozen",
     }
     if not config.train_expert_only:
         modes["connector"] = "full"
@@ -91,13 +97,23 @@ def resolve_module_modes(config: JaxSmolVLAConfig) -> dict[str, TrainMode]:
     unknown_modules = sorted(set(raw_modes) - set(MODULE_NAMES))
     if unknown_modules:
         raise ValueError(f"unknown module_modes keys: {unknown_modules}")
-    missing_modules = sorted(set(MODULE_NAMES) - set(raw_modes))
+    missing_modules = sorted(set(BASE_MODULE_NAMES) - set(raw_modes))
     if missing_modules:
         raise ValueError(f"module_modes must configure every module; missing: {missing_modules}")
 
     modes: dict[str, TrainMode] = {}
-    for module in MODULE_NAMES:
+    for module in BASE_MODULE_NAMES:
         mode = str(raw_modes[module]).lower()
+        if mode not in VALID_TRAIN_MODES:
+            raise ValueError(
+                f"invalid mode for module {module!r}: {mode!r}; "
+                f"expected one of {sorted(VALID_TRAIN_MODES)}"
+            )
+        modes[module] = mode  # type: ignore[assignment]
+    for module in OPTIONAL_MODULE_NAMES:
+        mode = str(
+            raw_modes.get(module, "full" if config.use_tactile_encoder else "frozen")
+        ).lower()
         if mode not in VALID_TRAIN_MODES:
             raise ValueError(
                 f"invalid mode for module {module!r}: {mode!r}; "
@@ -126,6 +142,14 @@ def lora_prefix_from_key(name: str) -> str | None:
     return None
 
 
+def _matches_vlm_lora_target(name: str, config: JaxSmolVLAConfig) -> bool:
+    targets = config.vlm_lora_target_modules
+    if not targets:
+        return True
+    prefix = lora_prefix_from_key(name) or name.removesuffix(".weight")
+    return prefix.rsplit(".", 1)[-1] in targets
+
+
 def initialize_lora_params(
     params: Mapping[str, Array],
     config: JaxSmolVLAConfig,
@@ -148,6 +172,8 @@ def initialize_lora_params(
     for name, value in tuple(params.items()):
         module = module_for_parameter(name)
         if module is None or modes[module] != "lora" or not is_lora_eligible_weight(name, value):
+            continue
+        if module == "vlm_text" and not _matches_vlm_lora_target(name, config):
             continue
         prefix = name.removesuffix(".weight")
         a_key = f"{prefix}.lora_a"
@@ -197,5 +223,7 @@ def is_trainable_parameter(name: str, config: JaxSmolVLAConfig) -> bool:
     mode = resolve_module_modes(config)[module]
     adapter_prefix = lora_prefix_from_key(name)
     if adapter_prefix is not None:
+        if module == "vlm_text" and not _matches_vlm_lora_target(name, config):
+            return False
         return mode == "lora" and not name.endswith(".lora_scale")
     return mode == "full"

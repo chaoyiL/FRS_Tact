@@ -94,6 +94,46 @@ def test_every_module_accepts_each_train_mode() -> None:
             assert resolve_module_modes(config)[module] == mode
 
 
+def test_tactile_projection_module_is_optional_and_trainable() -> None:
+    base_modes = all_modes()
+    config = replace(
+        JaxSmolVLAConfig(),
+        use_tactile_encoder=True,
+        tactile_encoder_path="checkpoints/encoder/best",
+        tactile_keys=("t0", "t1"),
+        tactile_num_tokens=2,
+        module_modes=base_modes,
+    )
+    assert resolve_module_modes(config)["tactile_proj"] == "full"
+    assert is_trainable_parameter("model.tactile_proj.weight", config)
+    assert is_trainable_parameter("model.tactile_proj.bias", config)
+    assert not is_trainable_parameter("model.tactile_encoder.params/conv1/kernel", config)
+
+
+def test_vlm_lora_targets_can_match_vb3_qv_only() -> None:
+    config = replace(
+        JaxSmolVLAConfig(),
+        module_modes=all_modes(vlm_text="lora"),
+        lora_rank=2,
+        vlm_lora_target_modules=("q_proj", "v_proj"),
+    )
+    prefix = "model.vlm_with_expert.vlm.model.text_model.layers.0"
+    params = {
+        f"{prefix}.self_attn.{name}.weight": jnp.ones((4, 4))
+        for name in ("q_proj", "k_proj", "v_proj", "o_proj")
+    }
+    params[f"{prefix}.mlp.gate_proj.weight"] = jnp.ones((8, 4))
+
+    adapted = initialize_lora_params(params, config, seed=0)
+    assert f"{prefix}.self_attn.q_proj.lora_a" in adapted
+    assert f"{prefix}.self_attn.v_proj.lora_a" in adapted
+    assert f"{prefix}.self_attn.k_proj.lora_a" not in adapted
+    assert f"{prefix}.self_attn.o_proj.lora_a" not in adapted
+    assert f"{prefix}.mlp.gate_proj.lora_a" not in adapted
+    assert is_trainable_parameter(f"{prefix}.self_attn.q_proj.lora_a", config)
+    assert not is_trainable_parameter(f"{prefix}.self_attn.k_proj.lora_a", config)
+
+
 def test_adapter_scale_is_never_trainable() -> None:
     config = replace(JaxSmolVLAConfig(), module_modes=all_modes(expert="lora"))
     assert is_trainable_parameter(
