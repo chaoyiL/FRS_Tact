@@ -286,8 +286,8 @@ def prepare_cache(
 ) -> dict[str, Any]:
     if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
         raise ValueError("model_sample_steps, reverse_steps, and batch_size must all be positive.")
-    if reverse_solver not in ("euler", "fireflow"):
-        raise ValueError(f"reverse_solver must be 'euler' or 'fireflow', got {reverse_solver!r}.")
+    if reverse_solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(f"reverse_solver must be 'euler' , 'fireflow' or 'slerpflow' , got {reverse_solver!r}.")
     if flush_every <= 0:
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
     if drop_tail_action_chunks < 0:
@@ -495,9 +495,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse-steps", type=int, default=50)
     parser.add_argument(
         "--reverse-solver",
-        choices=("euler", "fireflow"),
-        default="fireflow",
-        help="Numerical integrator for reverse action integration (default: fireflow).",
+        choices=("euler", "fireflow", "slerpflow"),
+        default="slerpflow",
+        help="Numerical integrator for reverse action integration (default: slerpflow).",
     )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(
