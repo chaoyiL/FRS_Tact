@@ -52,9 +52,10 @@ observation:
 control:
   control_frequency: 30.0
   controller_frequency: 80.0
-  # 必须与 checkpoint.chunk_size 一致
-  action_horizon: 50
-  steps_per_inference: 20
+  # 必须与 checkpoint.chunk_size 一致：模型每次预测 20 步 action chunk
+  action_horizon: 20
+  # 每次只执行前 5 步，然后读取新视觉/触觉观测并重新规划
+  steps_per_inference: 5
   # 仅当 checkpoint 开启 RTC 时使用；不设则默认用 steps_per_inference
   inference_delay: null
   execution_horizon: null

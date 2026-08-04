@@ -237,7 +237,20 @@ def _parse_rename_map(config: Mapping[str, Any]) -> dict[str, str] | None:
 def _robot_image_keys(policy: JaxSmolVLAPolicy, rename_map: Mapping[str, str] | None) -> tuple[str, ...]:
     """Map checkpoint image keys back to keys expected on the robot observation dict."""
     reverse = {value: key for key, value in (rename_map or {}).items()}
-    return tuple(reverse.get(key, key) for key in policy.config.image_keys)
+    model_keys = list(policy.config.image_keys)
+    if policy.config.use_tactile_encoder:
+        model_keys.extend(policy.config.tactile_keys)
+    return tuple(reverse.get(key, key) for key in model_keys)
+
+
+def _robot_tactile_keys(
+    policy: JaxSmolVLAPolicy,
+    rename_map: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    if not policy.config.use_tactile_encoder:
+        return ()
+    reverse = {value: key for key, value in (rename_map or {}).items()}
+    return tuple(reverse.get(key, key) for key in policy.config.tactile_keys)
 
 
 def _validate_observation(
@@ -246,11 +259,17 @@ def _validate_observation(
     state_dim: int,
     image_keys: Sequence[str],
     empty_cameras: int,
+    required_image_keys: Sequence[str] = (),
 ) -> None:
     if "observation.state" not in observation:
         raise ValueError("Robot observation is missing keys: ['observation.state']")
+    missing_required = [key for key in required_image_keys if key not in observation]
+    if missing_required:
+        raise ValueError(f"Robot observation is missing required tactile keys: {missing_required}")
+    required = set(required_image_keys)
+    optional_image_keys = [key for key in image_keys if key not in required]
     present = [key for key in image_keys if key in observation]
-    missing = [key for key in image_keys if key not in observation]
+    missing = [key for key in optional_image_keys if key not in observation]
     if not present:
         raise ValueError(f"Robot observation is missing all image keys: {list(image_keys)}")
     if len(missing) > max(empty_cameras, 0):
@@ -275,12 +294,14 @@ def _prepare_observation(
     state_dim: int,
     image_keys: Sequence[str],
     empty_cameras: int,
+    required_image_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     _validate_observation(
         observation,
         state_dim=state_dim,
         image_keys=image_keys,
         empty_cameras=empty_cameras,
+        required_image_keys=required_image_keys,
     )
     prepared = {
         key: np.asarray(observation[key]).copy()
@@ -378,11 +399,13 @@ def run(
         raise ValueError("Checkpoint does not declare any visual observation keys")
 
     robot_image_keys = _robot_image_keys(policy, rename_map)
+    robot_tactile_keys = _robot_tactile_keys(policy, rename_map)
     state_dim = int(policy.config.state_dim)
     empty_cameras = int(policy.config.empty_cameras)
     print(
         f"[client] Contract: state_dim={state_dim} action_dim={policy.config.action_dim} "
-        f"images={list(robot_image_keys)} empty_cameras={empty_cameras}"
+        f"images={list(robot_image_keys)} tactile={list(robot_tactile_keys)} "
+        f"empty_cameras={empty_cameras}"
     )
 
     steps_per_inference = int(control["steps_per_inference"])
@@ -449,6 +472,7 @@ def run(
             state_dim=state_dim,
             image_keys=robot_image_keys,
             empty_cameras=empty_cameras,
+            required_image_keys=robot_tactile_keys,
         )
         for warmup_index in range(warmup_runs):
             start = time.perf_counter()
@@ -481,6 +505,7 @@ def run(
                 state_dim=state_dim,
                 image_keys=robot_image_keys,
                 empty_cameras=empty_cameras,
+                required_image_keys=robot_tactile_keys,
             )
             start = time.perf_counter()
             action, action_norm = _predict_chunk(

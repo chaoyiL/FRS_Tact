@@ -12,7 +12,9 @@ from lerobot.policies.smolvla_jax.functional import linear
 from lerobot.policies.smolvla_jax.sharding import create_data_parallel_mesh, shard_batch
 from lerobot.policies.smolvla_jax.training import (
     JaxSmolVLATrainer,
+    cast_trainable_params_for_compute,
     cosine_warmup_schedule,
+    create_optimizer,
     partition_params,
     promote_trainable_params_to_fp32,
 )
@@ -70,6 +72,20 @@ def test_trainable_bfloat16_params_are_promoted_but_frozen_params_are_not() -> N
 
     assert promoted[expert_key].dtype == jnp.float32
     assert promoted[frozen_key].dtype == jnp.bfloat16
+
+    trainable, _ = partition_params(promoted, config)
+    compute_params = cast_trainable_params_for_compute(trainable)
+    assert compute_params[expert_key].dtype == jnp.bfloat16
+
+    optimizer, _ = create_optimizer(config)
+    opt_state = optimizer.init(trainable)
+    floating_state = [
+        leaf
+        for leaf in jax.tree.leaves(opt_state)
+        if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact)
+    ]
+    assert floating_state
+    assert all(leaf.dtype == jnp.float32 for leaf in floating_state)
 
 
 def test_partition_freezes_both_unused_tail_layers_for_a_shallow_expert() -> None:

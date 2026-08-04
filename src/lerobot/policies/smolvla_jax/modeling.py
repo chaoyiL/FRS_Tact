@@ -30,6 +30,14 @@ type KVCache = tuple[tuple[Array, Array], ...]
 _TACTILE_ENCODER_PREFIX = "model.tactile_encoder."
 
 
+def normalize_tactile_embeddings(embeddings: Array, eps: float = 1e-6) -> Array:
+    """Normalize each frozen ResNet embedding to unit RMS before projection."""
+
+    embeddings = jnp.asarray(embeddings, dtype=jnp.float32)
+    inverse_rms = jax.lax.rsqrt(jnp.mean(jnp.square(embeddings), axis=-1, keepdims=True) + eps)
+    return embeddings * inverse_rms
+
+
 @dataclass(frozen=True)
 class PrefixContext:
     pad_mask: Array
@@ -183,10 +191,8 @@ class JaxSmolVLA:
         if self.config.freeze_tactile_encoder:
             tactile_tokens = jax.lax.stop_gradient(tactile_tokens)
         tactile_tokens = tactile_tokens.reshape(batch, token_count, self.config.tactile_embedding_dim)
+        tactile_tokens = normalize_tactile_embeddings(tactile_tokens)
         tactile_tokens = self._linear(params, "model.tactile_proj", tactile_tokens, bias=True)
-        tactile_tokens = tactile_tokens * jnp.sqrt(
-            jnp.asarray(tactile_tokens.shape[-1], dtype=tactile_tokens.dtype)
-        )
         return tactile_tokens
 
     def embed_prefix(

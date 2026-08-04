@@ -4,11 +4,15 @@ set -euo pipefail
 
 # ===================== 配置区域 =====================
 HF_NAMESPACE="KaiyueChen"
-# LeRobot 本地缓存 / v3.0 转换路径用的命名空间（原从 openpi config.py 的 DATASET_REPO_NAMESPACE 读取）
-# LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
-LEROBOT_NAMESPACE="chaoyi"
-HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${HOME}/.cache/huggingface/dataset}" # for server
-# HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-/workspace}" # for runpods
+# Hub 下载、LeRobot 缓存和 v3.0 转换结果统一使用同一个命名空间。
+LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
+# 让脚本内的 Hub、Transformers 和 LeRobot 下载统一使用 workspace 缓存。
+export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-${HF_HOME}/lerobot}"
+# 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
+HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
 if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
     HF_DATASET_CACHE_DIR="$1"
 fi
@@ -36,10 +40,10 @@ DATASETS=(
     # tactile_test_02
     # tactile_test_05
     # tactile_test_06
-    # pick_cube_01
-    # pick_cube_02
-    # pick_cube_03
-    # pick_cube_fix
+    pick_cube_01
+    pick_cube_02
+    pick_cube_03
+    pick_cube_fix
 )
 
 log() {
@@ -48,12 +52,9 @@ log() {
 }
 
 load_lerobot_config() {
-    LEROBOT_CACHE_DIR="${HOME}/.cache/huggingface/lerobot/${LEROBOT_NAMESPACE}"
-    # 最终 v3.0 产物目录（可在 /workspace 网络盘上，供软链接指向）
-    V30_CONVERT_ROOT="${HF_DATASET_CACHE_DIR}/lerobot_v30"
-    # 转换工作目录：默认放容器本地盘，避免 MooseFS 上 to_parquet close 失败
-    # 可通过环境变量覆盖，例如: V30_CONVERT_WORK_ROOT=/tmp/lerobot_v30_work
-    V30_CONVERT_WORK_ROOT="${V30_CONVERT_WORK_ROOT:-${HOME}/.cache/lerobot_v30_work}"
+    LEROBOT_CACHE_DIR="${HF_LEROBOT_HOME:-${WORKSPACE_ROOT}/huggingface/lerobot}/${LEROBOT_NAMESPACE}"
+    V30_CONVERT_ROOT="${V30_CONVERT_ROOT:-${WORKSPACE_ROOT}/lerobot_v30}"
+    V30_CONVERT_WORK_ROOT="${V30_CONVERT_WORK_ROOT:-${WORKSPACE_ROOT}/lerobot_v30_work}"
 }
 
 check_deps() {
@@ -167,7 +168,7 @@ get_hf_repo_cache_dir() {
     echo "${HF_DATASET_CACHE_DIR}/datasets--${HF_NAMESPACE//\//--}--${dataset_name}"
 }
 
-# 搬迁成功后清理本地盘上的转换残留（工作目录 / _old / _v30）
+# 搬迁成功后清理转换残留（工作目录 / _old / _v30）
 cleanup_local_convert_work() {
     local dataset_name="$1"
     local work_dir
@@ -184,7 +185,7 @@ cleanup_local_convert_work() {
 
     before_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
 
-    log "清理本地盘转换残留:"
+    log "清理转换残留:"
     for p in "$work_dir" "$old_backup" "$leftover_v30"; do
         if [[ -e "$p" || -L "$p" ]]; then
             log "  删除: ${p}"
@@ -200,15 +201,15 @@ cleanup_local_convert_work() {
         rmdir "$V30_CONVERT_WORK_ROOT" 2>/dev/null || true
     fi
 
-    after_kb="$(df -Pk / 2>/dev/null | awk 'NR==2{print $4}')"
+    after_kb="$(df -Pk "$WORKSPACE_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
     if [[ -n "$before_kb" && -n "$after_kb" && "$after_kb" -ge "$before_kb" ]]; then
-        log "本地盘清理完成，可用空间约 $((after_kb / 1024 / 1024))G（清理前约 $((before_kb / 1024 / 1024))G）"
+        log "转换残留清理完成，可用空间约 $((after_kb / 1024 / 1024))G（清理前约 $((before_kb / 1024 / 1024))G）"
     else
-        log "本地盘清理完成"
+        log "转换残留清理完成"
     fi
 }
 
-# 按文件拷贝到 MooseFS：单文件超时则杀进程重试，避免整次 rsync 卡死
+# 按文件拷贝到最终目录：单文件超时则杀进程重试，支持中断后续传
 rsync_to_workspace_resilient() {
     local src_dir="$1"
     local dst_dir="$2"
@@ -274,8 +275,7 @@ rsync_to_workspace_resilient() {
     log "按文件 rsync 完成: ${n_done}/${n_total}"
 }
 
-# 本地转换成功后：先删 workspace 旧版，再把 v3.0 挪过去，避免新旧各占一份爆盘
-# 注意：跨盘禁止用 mv / 整包 rsync（MooseFS 易卡在 request_wait_answer）
+# 转换成功后：先删 workspace 旧版，再把 v3.0 放到最终目录，避免长期保留双份数据
 promote_v30_to_workspace() {
     local dataset_name="$1"
     local work_dir
@@ -321,7 +321,7 @@ promote_v30_to_workspace() {
         return 1
     fi
 
-    # 3) 按文件拷到 workspace（可续传）；成功后再切软链、清理本地盘
+    # 3) 按文件拷到最终目录（可续传）；成功后再切软链、清理转换目录
     local xfer_dir="${final_dir}_xfer"
     mkdir -p "$(dirname "$final_dir")"
     log "将 v3.0 按文件搬迁到 workspace:"
@@ -465,7 +465,7 @@ upgrade_dataset_to_v30() {
 
     repair_corrupt_parquets "$dataset_name" "$snapshot_dir"
 
-    # 容器本地盘至少留约 50G，避免写到一半空间不足
+    # workspace 至少留约 50G，避免写到一半空间不足
     avail_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
     if [[ -n "$avail_kb" && "$avail_kb" -lt 52428800 ]]; then
         log "警告: 转换工作盘可用空间约 $((avail_kb / 1024 / 1024))G，建议 >= 50G（目录: ${V30_CONVERT_WORK_ROOT}）"
@@ -473,16 +473,16 @@ upgrade_dataset_to_v30() {
 
     log "准备本地升级到 v3.0: ${repo_id}"
     log "  源 snapshot: ${snapshot_dir}"
-    log "  转换工作目录(本地盘): ${work_dir}"
+    log "  转换工作目录: ${work_dir}"
     log "  最终目录: ${final_dir}"
 
-    # 清理残留；在本地盘工作目录软链接入 snapshot，转换输出也写本地盘
+    # 清理残留；在转换工作目录软链接入 snapshot，并在旁路目录写出 v3.0
     mkdir -p "${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}"
     rm -rf "$old_backup" "$leftover_v30" "$work_dir"
     link_snapshot_for_convert "$snapshot_dir" "$work_dir"
 
     # 仅本地升级：指定 --root，跳过 hub 上 v3.0 检索；不上传
-    # 写在本地盘，规避 /workspace(MooseFS) 上 ParquetWriter.close OSError
+    # 显式指定转换工作目录，避免改写原始 Hub snapshot
     # convert 的 print 走 stderr，避免污染路径变量
     if ! uv run python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
         --repo-id="$repo_id" \
@@ -511,7 +511,7 @@ upgrade_dataset_to_v30() {
         return 1
     fi
 
-    # 本地转完 → 删 workspace 旧版 → 再挪到 workspace
+    # 转换完成后删除旧版缓存，再放入 workspace 最终目录
     promote_v30_to_workspace "$dataset_name"
 
     version="$(get_dataset_version "$final_dir")"
@@ -575,12 +575,14 @@ main() {
 
     log "============================================"
     log "Hugging Face smash 数据集下载脚本启动"
+    log "workspace 根目录: ${WORKSPACE_ROOT}"
+    log "HF_HOME: ${HF_HOME}"
     log "命名空间: ${HF_NAMESPACE}"
     log "HF dataset cache: ${HF_DATASET_CACHE_DIR}"
     log "LeRobot namespace: ${LEROBOT_NAMESPACE}"
     log "LeRobot 链接目录: ${LEROBOT_CACHE_DIR}"
     log "v3.0 最终目录: ${V30_CONVERT_ROOT}"
-    log "v3.0 转换工作目录(本地盘): ${V30_CONVERT_WORK_ROOT}"
+    log "v3.0 转换工作目录: ${V30_CONVERT_WORK_ROOT}"
     log "数据集数量: ${#DATASETS[@]}"
     log "============================================"
 

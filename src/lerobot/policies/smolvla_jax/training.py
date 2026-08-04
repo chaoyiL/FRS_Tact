@@ -62,6 +62,17 @@ def promote_trainable_params_to_fp32(
     return promoted
 
 
+def cast_trainable_params_for_compute(params: Mapping[str, Array]) -> Params:
+    """Use BF16 trainable weights for forward/backward while retaining FP32 masters."""
+
+    return {
+        name: value.astype(jnp.bfloat16)
+        if jnp.issubdtype(value.dtype, jnp.inexact)
+        else value
+        for name, value in params.items()
+    }
+
+
 def merge_params(trainable: Mapping[str, Array], frozen: Mapping[str, Array]) -> Params:
     return {**frozen, **trainable}
 
@@ -151,7 +162,8 @@ class JaxSmolVLATrainer:
         loss_rng = jax.random.fold_in(loss_rng, state.step)
 
         def loss_fn(trainable_params: Mapping[str, Array]) -> Array:
-            params = merge_params(trainable_params, frozen_params)
+            compute_params = cast_trainable_params_for_compute(trainable_params)
+            params = merge_params(compute_params, frozen_params)
             return self.model.loss(params, batch, loss_rng)
 
         loss, gradients = jax.value_and_grad(loss_fn)(state.params)
@@ -272,7 +284,7 @@ class JaxSmolVLATrainer:
         total_weight = 0.0
         n_batches = 0
         rng = jax.random.key(seed)
-        params = self.full_params
+        params = self.compute_params
 
         for batch in batches:
             if max_batches is not None and n_batches >= max_batches:
@@ -301,6 +313,13 @@ class JaxSmolVLATrainer:
     @property
     def full_params(self) -> Params:
         return merge_params(self.state.params, self.frozen_params)
+
+    @property
+    def compute_params(self) -> Params:
+        return merge_params(
+            cast_trainable_params_for_compute(self.state.params),
+            self.frozen_params,
+        )
 
     def save(self, destination: str | Path, *, source_dir: str | Path | None = None) -> Path:
         destination = save_portable_params(
