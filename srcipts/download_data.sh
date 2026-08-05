@@ -4,6 +4,16 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/.env.frs"
+
+if [[ -f "${ENV_FILE}" ]]; then
+    # 复用 setup_env.sh 创建的 uv 环境，避免在 workspace 中重复安装依赖。
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+fi
+
 # ===================== 配置区域 =====================
 HF_NAMESPACE="KaiyueChen"
 # Hub 下载、LeRobot 缓存和 v3.0 转换结果统一使用同一个命名空间。
@@ -71,21 +81,21 @@ check_deps() {
         exit 1
     fi
 
-    if ! uv run hf version &>/dev/null; then
+    if ! uv run --no-sync hf version &>/dev/null; then
         echo "=========================================="
         echo " uv 环境中未检测到 hf 命令，请执行:"
-        echo "   uv add huggingface_hub"
+        echo "   bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
         echo ""
         echo " 安装后如需登录，请执行:"
-        echo "   uv run hf auth login"
+        echo "   uv run --no-sync hf auth login"
         echo "=========================================="
         exit 1
     fi
 
-    if ! uv run python -c "import lerobot" &>/dev/null; then
+    if ! uv run --no-sync python -c "import lerobot" &>/dev/null; then
         echo "=========================================="
         echo " uv 环境中未检测到 lerobot，请执行:"
-        echo "   uv add lerobot"
+        echo "   bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
         echo "=========================================="
         exit 1
     fi
@@ -412,7 +422,7 @@ repair_corrupt_parquets() {
 
     log "重新下载缺失文件: ${repo_id}"
     # stdout 重定向，避免污染外层 $(...) 路径捕获
-    uv run hf download "$repo_id" \
+    uv run --no-sync hf download "$repo_id" \
         --repo-type dataset \
         --cache-dir "$HF_DATASET_CACHE_DIR" >&2
 
@@ -486,7 +496,7 @@ upgrade_dataset_to_v30() {
     # 仅本地升级：指定 --root，跳过 hub 上 v3.0 检索；不上传
     # 显式指定转换工作目录，避免改写原始 Hub snapshot
     # convert 的 print 走 stderr，避免污染路径变量
-    if ! uv run python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
+    if ! uv run --no-sync python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
         --repo-id="$repo_id" \
         --root="$work_dir" \
         --push-to-hub=false \
@@ -546,7 +556,7 @@ download_dataset() {
 
     log "开始下载 ${repo_id} (cache: ${HF_DATASET_CACHE_DIR})"
 
-    uv run hf download "$repo_id" \
+    uv run --no-sync hf download "$repo_id" \
         --repo-type dataset \
         --cache-dir "$HF_DATASET_CACHE_DIR" >&2
 
@@ -569,6 +579,7 @@ download_dataset() {
 }
 
 main() {
+    cd "${PROJECT_ROOT}"
     check_deps
     load_lerobot_config
     mkdir -p "$HF_DATASET_CACHE_DIR"

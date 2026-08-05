@@ -56,6 +56,12 @@ tactile_embedding_cache:
   root: /workspace/tactile_embeddings
   # float16 总计约 1.3 GiB；模型投影前会转回 float32 并做 RMS normalization。
   dtype: float16
+  # 以下参数只控制首次预计算，不影响正式训练超参。
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
 
 # ---- 输出与训练超参 ----
 output: /workspace/vtsmolvla_tactile_01

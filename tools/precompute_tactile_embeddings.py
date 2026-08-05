@@ -272,20 +272,36 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output-root", type=Path)
     parser.add_argument("--dtype", choices=("float16", "float32"))
-    parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--prefetch-factor", type=int, default=2)
-    parser.add_argument("--video-backend", default="torchcodec")
-    parser.add_argument("--flush-every", type=int, default=20)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-workers", type=int)
+    parser.add_argument("--prefetch-factor", type=int)
+    parser.add_argument("--video-backend")
+    parser.add_argument("--flush-every", type=int)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if min(args.batch_size, args.prefetch_factor, args.flush_every) <= 0 or args.num_workers < 0:
-        raise ValueError("batch/prefetch/flush 必须为正数，num_workers 不能为负数")
     config = _load_config(args.config)
+    cache_config = config.get("tactile_embedding_cache") or {}
+    if not isinstance(cache_config, Mapping):
+        raise ValueError("tactile_embedding_cache 必须是 mapping")
+    batch_size = int(args.batch_size or cache_config.get("precompute_batch_size", 128))
+    num_workers = int(
+        args.num_workers
+        if args.num_workers is not None
+        else cache_config.get("precompute_num_workers", 4)
+    )
+    prefetch_factor = int(
+        args.prefetch_factor or cache_config.get("precompute_prefetch_factor", 2)
+    )
+    video_backend = args.video_backend or cache_config.get(
+        "precompute_video_backend", "torchcodec"
+    )
+    flush_every = int(args.flush_every or cache_config.get("precompute_flush_every", 20))
+    if min(batch_size, prefetch_factor, flush_every) <= 0 or num_workers < 0:
+        raise ValueError("batch/prefetch/flush 必须为正数，num_workers 不能为负数")
     model_config = config.get("model") or {}
     if not bool(model_config.get("use_tactile_encoder", False)):
         raise ValueError("model.use_tactile_encoder 必须为 true")
@@ -300,7 +316,7 @@ def main() -> None:
     print(f"JAX devices={jax.devices()}", flush=True)
     print(
         f"cache_root={cache_root.resolve()} dtype={cache_dtype.name} "
-        f"batch={args.batch_size} workers={args.num_workers}",
+        f"batch={batch_size} workers={num_workers}",
         flush=True,
     )
     for source in parse_dataset_sources(config):
@@ -310,11 +326,11 @@ def main() -> None:
             encoder_bundle=encoder_bundle,
             cache_root=cache_root,
             cache_dtype=cache_dtype,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            prefetch_factor=args.prefetch_factor,
-            video_backend=args.video_backend,
-            flush_every=args.flush_every,
+            batch_size=batch_size,
+            num_workers=num_workers,
+            prefetch_factor=prefetch_factor,
+            video_backend=video_backend,
+            flush_every=flush_every,
             overwrite=args.overwrite,
         )
 
