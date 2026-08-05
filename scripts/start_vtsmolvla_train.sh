@@ -9,6 +9,12 @@ ENV_FILE="${PROJECT_ROOT}/.env.frs"
 SCRIPT_PATH="${SCRIPT_DIR}/start_vtsmolvla_train.sh"
 TMUX_SESSION="${FRS_TMUX_SESSION:-vtsmolvla_train}"
 
+if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
+    STORAGE_ROOT="${FRS_STORAGE_ROOT:-/workspace}"
+else
+    STORAGE_ROOT="${FRS_STORAGE_ROOT:-${PROJECT_ROOT}/.cache}"
+fi
+
 log() {
     echo "[vtsmolvla] $*"
 }
@@ -33,7 +39,7 @@ load_environment() {
         export UV_PROJECT_ENVIRONMENT="/opt/venvs/frs_tact"
         export UV_CACHE_DIR="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
     elif [[ ! -d "${PROJECT_ROOT}/.venv" ]]; then
-        fail "没有找到 Python 环境。请先运行：bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
+        fail "没有找到 Python 环境。请先运行：bash ${PROJECT_ROOT}/scripts/setup_env.sh"
     fi
 
     if command -v uv >/dev/null 2>&1; then
@@ -43,9 +49,15 @@ load_environment() {
     elif [[ -x "${HOME}/.cargo/bin/uv" ]]; then
         UV_BIN="${HOME}/.cargo/bin/uv"
     else
-        fail "找不到 uv。请先运行：bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
+        fail "找不到 uv。请先运行：bash ${PROJECT_ROOT}/scripts/setup_env.sh"
     fi
     export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+    export HF_HOME="${STORAGE_ROOT}/huggingface"
+    export HF_HUB_CACHE="${HF_HOME}/hub"
+    export HF_DATASETS_CACHE="${HF_HOME}/datasets_arrow"
+    export HF_LEROBOT_HOME="${HF_HOME}/lerobot"
+    export TMPDIR="${STORAGE_ROOT}/tmp"
+    mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
 }
 
 start_tmux_if_needed() {
@@ -136,6 +148,7 @@ run_pipeline() {
 
     log "config=${CONFIG_PATH}"
     log "output=${OUTPUT_DIR}"
+    log "HF_DATASETS_CACHE=${HF_DATASETS_CACHE}"
     if [[ "${CACHE_ENABLED}" == "1" ]]; then
         log "检查并补齐 tactile embedding cache"
         "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py \

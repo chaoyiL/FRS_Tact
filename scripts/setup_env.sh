@@ -9,11 +9,19 @@ ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
 if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
     DEFAULT_VENV_DIR="/opt/venvs/frs_tact"
+    DEFAULT_STORAGE_ROOT="/workspace"
 else
     DEFAULT_VENV_DIR="${PROJECT_ROOT}/.venv"
+    DEFAULT_STORAGE_ROOT="${PROJECT_ROOT}/.cache"
 fi
 VENV_DIR="${FRS_VENV_DIR:-${DEFAULT_VENV_DIR}}"
 UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+STORAGE_ROOT="${FRS_STORAGE_ROOT:-${DEFAULT_STORAGE_ROOT}}"
+HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
+HF_HUB_CACHE_VALUE="${HF_HOME_VALUE}/hub"
+HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
+HF_LEROBOT_HOME_VALUE="${HF_HOME_VALUE}/lerobot"
+TMPDIR_VALUE="${STORAGE_ROOT}/tmp"
 UV_BIN=""
 
 log() {
@@ -112,12 +120,30 @@ configure_uv_storage() {
     fi
 }
 
+configure_runtime_storage() {
+    mkdir -p \
+        "${HF_HUB_CACHE_VALUE}" \
+        "${HF_DATASETS_CACHE_VALUE}" \
+        "${HF_LEROBOT_HOME_VALUE}" \
+        "${TMPDIR_VALUE}"
+    export HF_HOME="${HF_HOME_VALUE}"
+    export HF_HUB_CACHE="${HF_HUB_CACHE_VALUE}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_VALUE}"
+    export HF_LEROBOT_HOME="${HF_LEROBOT_HOME_VALUE}"
+    export TMPDIR="${TMPDIR_VALUE}"
+}
+
 write_environment_file() {
     {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
         printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "${UV_PROJECT_ENVIRONMENT}"
         printf 'export UV_CACHE_DIR=%q\n' "${UV_CACHE_DIR}"
+        printf 'export HF_HOME=%q\n' "${HF_HOME}"
+        printf 'export HF_HUB_CACHE=%q\n' "${HF_HUB_CACHE}"
+        printf 'export HF_DATASETS_CACHE=%q\n' "${HF_DATASETS_CACHE}"
+        printf 'export HF_LEROBOT_HOME=%q\n' "${HF_LEROBOT_HOME}"
+        printf 'export TMPDIR=%q\n' "${TMPDIR}"
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
         fi
@@ -198,6 +224,7 @@ main() {
     install_uv
     persist_uv_path
     configure_uv_storage
+    configure_runtime_storage
     sync_environment
     verify_python_environment
     check_gpu
@@ -206,6 +233,8 @@ main() {
     echo
     echo "环境目录：${VENV_DIR}"
     echo "环境变量：${ENV_FILE}"
+    echo "Hugging Face 缓存：${HF_HOME}"
+    echo "Arrow 数据缓存：${HF_DATASETS_CACHE}"
     echo
     echo "首次使用时登录："
     echo "  cd ${PROJECT_ROOT}"
@@ -214,7 +243,7 @@ main() {
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
     echo "一键启动 VT-SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/srcipts/start_vtsmolvla_train.sh"
+    echo "  bash ${PROJECT_ROOT}/scripts/start_vtsmolvla_train.sh"
 }
 
 main "$@"

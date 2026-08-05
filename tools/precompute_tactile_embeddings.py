@@ -42,8 +42,10 @@ def _start_cpu_only_workers(loader: DataLoader, num_workers: int):
 
     old_jax_platforms = os.environ.get("JAX_PLATFORMS")
     old_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    old_skip_cuda_check = os.environ.get("JAX_SKIP_CUDA_CONSTRAINTS_CHECK")
     os.environ["JAX_PLATFORMS"] = "cpu"
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = "1"
     try:
         # Spawn captures this environment. Restoring it keeps the parent JAX
         # process on the GPU while all decode workers remain CPU-only.
@@ -57,6 +59,10 @@ def _start_cpu_only_workers(loader: DataLoader, num_workers: int):
             os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         else:
             os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_devices
+        if old_skip_cuda_check is None:
+            os.environ.pop("JAX_SKIP_CUDA_CONSTRAINTS_CHECK", None)
+        else:
+            os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = old_skip_cuda_check
 
 
 def _scalar(value: Any) -> int:

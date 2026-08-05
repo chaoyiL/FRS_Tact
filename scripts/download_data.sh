@@ -20,9 +20,12 @@ HF_NAMESPACE="KaiyueChen"
 LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
 # 让脚本内的 Hub、Transformers 和 LeRobot 下载统一使用 workspace 缓存。
-export HF_HOME="${HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
-export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
-export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-${HF_HOME}/lerobot}"
+export HF_HOME="${FRS_HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
+export HF_HUB_CACHE="${HF_HOME}/hub"
+export HF_DATASETS_CACHE="${HF_HOME}/datasets_arrow"
+export HF_LEROBOT_HOME="${HF_HOME}/lerobot"
+export TMPDIR="${FRS_TMPDIR:-${WORKSPACE_ROOT}/tmp}"
+mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
 # 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
 if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
@@ -87,7 +90,7 @@ check_deps() {
     if ! uv run --no-sync hf version &>/dev/null; then
         echo "=========================================="
         echo " uv 环境中未检测到 hf 命令，请执行:"
-        echo "   bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
+        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
         echo ""
         echo " 安装后如需登录，请执行:"
         echo "   uv run --no-sync hf auth login"
@@ -98,7 +101,7 @@ check_deps() {
     if ! uv run --no-sync python -c "import lerobot" &>/dev/null; then
         echo "=========================================="
         echo " uv 环境中未检测到 lerobot，请执行:"
-        echo "   bash ${PROJECT_ROOT}/srcipts/setup_env.sh"
+        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
         echo "=========================================="
         exit 1
     fi
