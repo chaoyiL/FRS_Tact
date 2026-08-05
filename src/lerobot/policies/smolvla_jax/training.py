@@ -132,6 +132,12 @@ class JaxSmolVLATrainer:
         else:
             self.modality_dropout = ModalityDropoutConfig.from_dict(modality_dropout)
         self._modality_dropout_rng = np.random.default_rng(seed + 17)
+        self._host_step = 0
+        self.last_dropout_info: dict[str, Any] = {
+            "applied": False,
+            "modality": "none",
+            "camera_index": -1,
+        }
         params = initialize_lora_params(params, self.config, seed=seed)
         params = promote_trainable_params_to_fp32(params, self.config)
         trainable, self.frozen_params = partition_params(params, self.config)
@@ -183,18 +189,19 @@ class JaxSmolVLATrainer:
 
     def step(self, batch: Mapping[str, Any]) -> dict[str, Array]:
         batch = jax.tree.map(jnp.asarray, batch)
-        step = int(np.asarray(jax.device_get(self.state.step)))
         batch, drop_info = apply_modality_dropout(
             batch,
-            step=step,
+            step=self._host_step,
             rng=self._modality_dropout_rng,
             config=self.modality_dropout,
         )
         if self.mesh is not None:
             batch = shard_batch(batch, self.mesh)
         self.state, metrics = self._compiled_step(self.state, self.frozen_params, batch)
+        self._host_step += 1
+        self.last_dropout_info = drop_info
         metrics = dict(metrics)
-        metrics["modality_dropout_applied"] = jnp.asarray(
+        metrics["modality_dropout_applied"] = np.asarray(
             1.0 if drop_info["applied"] else 0.0, dtype=jnp.float32
         )
         # Encode dropped modality for logging: -1=none, -2=language, -3=state, >=0=camera index.
@@ -206,8 +213,14 @@ class JaxSmolVLATrainer:
             dropped_code = -3
         else:
             dropped_code = int(drop_info["camera_index"])
-        metrics["modality_dropout_code"] = jnp.asarray(dropped_code, dtype=jnp.int32)
+        metrics["modality_dropout_code"] = np.asarray(dropped_code, dtype=jnp.int32)
         return metrics
+
+    @property
+    def step_count(self) -> int:
+        """Host-side step counter that avoids synchronizing the GPU every iteration."""
+
+        return self._host_step
 
     def _eval_batch(
         self,
@@ -237,6 +250,7 @@ class JaxSmolVLATrainer:
             batch["state"],
             sample_rng,
             tactile_images=batch.get("tactile_images"),
+            tactile_embeddings=batch.get("tactile_embeddings"),
             tactile_masks=batch.get("tactile_masks"),
             num_steps=rollout_steps,
         )
@@ -362,3 +376,4 @@ class JaxSmolVLATrainer:
             opt_state=restored["opt_state"],
             rng=jax.random.wrap_key_data(restored["rng_data"]),
         )
+        self._host_step = int(np.asarray(jax.device_get(restored["step"])))

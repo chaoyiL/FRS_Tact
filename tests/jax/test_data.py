@@ -25,6 +25,7 @@ from lerobot.policies.smolvla_jax.data import (
     split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor, prepare_tactile_batch
+from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 from tactile_encoder.utils.image_dataset import parse_image_to_unit
 
 
@@ -111,6 +112,41 @@ def test_key_mapped_dataset_augments_rgb_but_not_tactile() -> None:
     np.testing.assert_array_equal(sample["observation.images.tactile"], np.ones((3, 4, 4)))
 
 
+def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
+    class FakeCache:
+        def __getitem__(self, index):
+            assert index == 105
+            return np.full((4, 8), index, dtype=np.float16)
+
+    class FakeDataset:
+        meta = type("Meta", (), {"episodes": {3: {"dataset_from_index": 100}}})()
+
+        def __len__(self):
+            return 1
+
+        def __getitem__(self, index):
+            assert index == 0
+            return {
+                "actions": torch.zeros(2, 3),
+                "observation.images.cam0": torch.zeros(3, 4, 4),
+                "episode_index": torch.tensor(3),
+                "frame_index": torch.tensor(5),
+                "task": "pick cube",
+            }
+
+    dataset = _KeyMappedLeRobotDataset(
+        FakeDataset(),
+        action_key="actions",
+        rename_map={},
+        tactile_embedding_cache=FakeCache(),
+    )
+    sample = dataset[0]
+    np.testing.assert_array_equal(
+        sample[TACTILE_EMBEDDING_OBSERVATION_KEY],
+        np.full((4, 8), 105, dtype=np.float16),
+    )
+
+
 def test_training_stats_are_saved_for_future_inference(tmp_path: Path) -> None:
     processor = object.__new__(JaxSmolVLAPreprocessor)
     processor.checkpoint = tmp_path / "source"
@@ -159,6 +195,39 @@ def test_preprocessor_prepares_tactile_images_separately() -> None:
     assert batch["tactile_images"].shape == (1, 2, 8, 8, 3)
     assert batch["tactile_masks"].shape == (1, 2)
     np.testing.assert_allclose(np.asarray(batch["tactile_images"][0, 1]), 1.0)
+
+
+def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
+    processor = object.__new__(JaxSmolVLAPreprocessor)
+    processor.config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        image_keys=("observation.images.camera1",),
+        use_tactile_encoder=True,
+        tactile_encoder_path="checkpoints/encoder/best",
+        tactile_keys=("observation.images.tactile_left_0", "observation.images.tactile_right_0"),
+        tactile_num_tokens=2,
+        tactile_embedding_dim=8,
+        resize_height=8,
+        resize_width=8,
+    )
+    processor.rename_map = {}
+    processor.stats = {}
+    processor.post_stats = {}
+    processor.tokenize = lambda task: (
+        jnp.ones((1, 3), dtype=jnp.int32),
+        jnp.ones((1, 3), dtype=jnp.bool_),
+    )
+    cached = np.arange(16, dtype=np.float16).reshape(2, 8)
+    observation = {
+        "observation.state": np.ones((4,), dtype=np.float32),
+        "observation.images.camera1": np.zeros((8, 8, 3), dtype=np.uint8),
+        TACTILE_EMBEDDING_OBSERVATION_KEY: cached,
+    }
+    batch = processor.prepare(observation, "task")
+    assert "tactile_images" not in batch
+    assert batch["tactile_embeddings"].dtype == jnp.float16
+    np.testing.assert_array_equal(batch["tactile_embeddings"][0], cached)
+    np.testing.assert_array_equal(batch["tactile_masks"], [[True, True]])
 
 
 def test_tactile_preprocessing_matches_encoder_for_non_square_bchw() -> None:
@@ -282,4 +351,8 @@ def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
         "observation.images.camera2",
         "observation.images.tactile_left_0",
         "observation.images.tactile_right_0",
+    )
+    assert resolve_model_visual_keys(config, use_tactile_embedding_cache=True) == (
+        "observation.images.camera1",
+        "observation.images.camera2",
     )

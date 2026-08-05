@@ -78,6 +78,14 @@ def _validate_vt_config(path: Path) -> None:
             f" 重复字段：{overlap}"
         )
 
+    cache = cfg.get("tactile_embedding_cache") or {}
+    if not isinstance(cache, dict):
+        raise ValueError("tactile_embedding_cache 必须是 mapping")
+    if bool(cache.get("enabled", False)) and not cache.get("root"):
+        raise ValueError(
+            "tactile_embedding_cache.enabled=true 时必须配置 root"
+        )
+
 
 def main() -> None:
     argv = _argv_with_default_config(sys.argv[1:])

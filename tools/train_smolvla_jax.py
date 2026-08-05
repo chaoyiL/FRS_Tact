@@ -132,6 +132,7 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
             "data_parallel": cfg.get("data_parallel"),
             "validation": cfg.get("validation"),
             "image_transforms": cfg.get("image_transforms"),
+            "tactile_embedding_cache": cfg.get("tactile_embedding_cache"),
             "modality_dropout": cfg.get("modality_dropout"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
@@ -282,10 +283,28 @@ def main() -> None:
         "num_workers": int(cfg.get("num_workers", 4)),
         "prefetch_factor": int(cfg.get("prefetch_factor", 2)),
         "video_backend": cfg.get("video_backend"),
+        "return_uint8": bool(cfg.get("return_uint8", True)),
         "seed": int(cfg.get("seed", 0)),
         "local_files_only": not (allow_tokenizer_download or allow_download),
     }
+    tactile_cache_cfg = cfg.get("tactile_embedding_cache") or {}
+    if not isinstance(tactile_cache_cfg, dict):
+        raise ValueError("tactile_embedding_cache must be a mapping")
+    tactile_cache_enabled = bool(tactile_cache_cfg.get("enabled", False))
+    tactile_cache_root = tactile_cache_cfg.get("root") if tactile_cache_enabled else None
+    if tactile_cache_enabled and not tactile_cache_root:
+        raise ValueError(
+            "tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root"
+        )
+    common_loader_kwargs["tactile_embedding_cache_root"] = tactile_cache_root
     train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
+    print(
+        f"data_loader: video_backend={cfg.get('video_backend') or 'auto'} "
+        f"return_uint8={common_loader_kwargs['return_uint8']} "
+        f"num_workers={common_loader_kwargs['num_workers']} "
+        f"prefetch_factor={common_loader_kwargs['prefetch_factor']} "
+        f"tactile_embedding_cache={tactile_cache_root or 'disabled'}"
+    )
     print(
         "image_transforms="
         + (
@@ -308,7 +327,8 @@ def main() -> None:
             f"train_dataset={summary['repo_id']} frames={summary['frames']} "
             f"episodes={summary['episodes']} fps={summary['fps']} "
             f"action_key={summary['action_key']!r} weight={summary['weight']} "
-            f"visual_keys={summary.get('visual_keys')}"
+            f"visual_keys={summary.get('visual_keys')} "
+            f"tactile_cache={summary.get('tactile_embedding_cache')}"
         )
     print(f"train_frames={len(data.dataset)}")
 
@@ -351,33 +371,36 @@ def main() -> None:
     eval_count = 0
 
     start = time.perf_counter()
+    last_log_time = start
+    last_log_step = trainer.step_count
     try:
-        while int(trainer.state.step) < steps:
+        while trainer.step_count < steps:
             metrics = trainer.step(next(batches))
-            step = int(trainer.state.step)
-            drop_applied = float(jax.device_get(metrics.get("modality_dropout_applied", 0.0)))
-            drop_code = int(jax.device_get(metrics.get("modality_dropout_code", -1)))
-            if drop_code == -1:
-                drop_name = "none"
-            elif drop_code == -2:
-                drop_name = "language"
-            elif drop_code == -3:
-                drop_name = "state"
-            else:
-                drop_name = f"camera_{drop_code}"
-            if drop_applied > 0.5:
+            step = trainer.step_count
+            drop_info = trainer.last_dropout_info
+            drop_applied = bool(drop_info["applied"])
+            drop_name = str(drop_info["modality"])
+            if drop_applied:
                 print(f"step={step} drop={drop_name}")
             if step == 1 or step % log_freq == 0:
                 metrics = jax.device_get(metrics)
-                elapsed = time.perf_counter() - start
+                now = time.perf_counter()
+                elapsed = now - start
+                window_steps = step - last_log_step
+                window_seconds = max(now - last_log_time, 1e-9)
+                steps_per_s = window_steps / window_seconds
+                samples_per_s = steps_per_s * int(cfg.get("batch_size", 8))
+                last_log_time = now
+                last_log_step = step
                 loss = float(metrics["loss"])
                 grad_norm = float(metrics["grad_norm"])
                 lr = float(metrics["learning_rate"])
                 print(
                     f"step={step} loss={loss:.6f} "
                     f"grad_norm={grad_norm:.4f} "
-                    f"lr={lr:.3e} elapsed={elapsed:.1f}s"
-                    + (f" drop={drop_name}" if drop_applied > 0.5 else "")
+                    f"lr={lr:.3e} steps_per_s={steps_per_s:.3f} "
+                    f"samples_per_s={samples_per_s:.1f} elapsed={elapsed:.1f}s"
+                    + (f" drop={drop_name}" if drop_applied else "")
                 )
                 if wandb_run is not None:
                     import wandb
@@ -387,6 +410,8 @@ def main() -> None:
                             "train/loss": loss,
                             "train/grad_norm": grad_norm,
                             "train/learning_rate": lr,
+                            "train/steps_per_s": steps_per_s,
+                            "train/samples_per_s": samples_per_s,
                             "train/elapsed_s": elapsed,
                         },
                         step=step,

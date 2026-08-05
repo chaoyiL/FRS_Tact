@@ -16,6 +16,11 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_s
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
+from .tactile_cache import (
+    TACTILE_EMBEDDING_OBSERVATION_KEY,
+    TactileEmbeddingCache,
+    tactile_cache_dir,
+)
 
 Array = jax.Array
 CANONICAL_ACTION_KEY = "action"
@@ -153,12 +158,14 @@ class _KeyMappedLeRobotDataset(Dataset):
         rename_map: Mapping[str, str] | None,
         image_transforms: Callable | None = None,
         image_transform_keys: Sequence[str] = (),
+        tactile_embedding_cache: TactileEmbeddingCache | None = None,
     ):
         self.dataset = dataset
         self.action_key = action_key
         self.rename_map = dict(rename_map or {})
         self.image_transforms = image_transforms
         self.image_transform_keys = frozenset(image_transform_keys)
+        self.tactile_embedding_cache = tactile_embedding_cache
         self.padding_key = f"{action_key}_is_pad"
 
     def __len__(self) -> int:
@@ -180,6 +187,14 @@ class _KeyMappedLeRobotDataset(Dataset):
             for key in self.image_transform_keys:
                 if key in mapped:
                     mapped[key] = self.image_transforms(mapped[key])
+        if self.tactile_embedding_cache is not None:
+            episode_index = int(_to_numpy(sample["episode_index"]).reshape(()).item())
+            frame_index = int(_to_numpy(sample["frame_index"]).reshape(()).item())
+            episode = self.dataset.meta.episodes[episode_index]
+            absolute_index = int(episode["dataset_from_index"]) + frame_index
+            mapped[TACTILE_EMBEDDING_OBSERVATION_KEY] = self.tactile_embedding_cache[
+                absolute_index
+            ]
         if CANONICAL_ACTION_KEY not in mapped:
             raise KeyError(f"sample is missing action feature {self.action_key!r}")
         return mapped
@@ -213,11 +228,15 @@ def resolve_source_visual_keys(
     return list(dict.fromkeys(resolved))
 
 
-def resolve_model_visual_keys(config: JaxSmolVLAConfig) -> tuple[str, ...]:
+def resolve_model_visual_keys(
+    config: JaxSmolVLAConfig,
+    *,
+    use_tactile_embedding_cache: bool = False,
+) -> tuple[str, ...]:
     """All dataset image/video columns needed by the configured model."""
 
     keys = list(config.image_keys)
-    if config.use_tactile_encoder:
+    if config.use_tactile_encoder and not use_tactile_embedding_cache:
         keys.extend(config.tactile_keys)
     return tuple(dict.fromkeys(keys))
 
@@ -329,6 +348,7 @@ class LeRobotJaxDataLoader:
         num_workers: int = 4,
         prefetch_factor: int = 2,
         video_backend: str | None = None,
+        return_uint8: bool = True,
         seed: int = 0,
         local_files_only: bool = True,
         shuffle: bool = True,
@@ -336,6 +356,7 @@ class LeRobotJaxDataLoader:
         drop_last: bool | None = None,
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
+        tactile_embedding_cache_root: str | Path | None = None,
     ):
         if batch_size <= 0:
             raise ValueError(f"batch size must be positive, got {batch_size}")
@@ -350,6 +371,13 @@ class LeRobotJaxDataLoader:
         self.infinite = bool(infinite)
         self.shuffle = bool(shuffle)
         self.image_transforms = image_transforms
+        self.tactile_embedding_cache_root = (
+            None
+            if tactile_embedding_cache_root is None
+            else Path(tactile_embedding_cache_root).expanduser()
+        )
+        if self.tactile_embedding_cache_root is not None and not config.use_tactile_encoder:
+            raise ValueError("tactile embedding cache requires use_tactile_encoder=True")
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -369,8 +397,37 @@ class LeRobotJaxDataLoader:
                 metadata.fps,
             )
             source_rename = dict(source.rename_map or {})
+            source_tactile_keys: tuple[str, ...] = ()
+            tactile_embedding_cache = None
+            if config.use_tactile_encoder:
+                source_tactile_keys = tuple(
+                    resolve_source_visual_keys(
+                        config.tactile_keys,
+                        source_rename,
+                        metadata.camera_keys,
+                    )
+                )
+            if self.tactile_embedding_cache_root is not None:
+                cache_dir = tactile_cache_dir(
+                    self.tactile_embedding_cache_root,
+                    source.repo_id,
+                )
+                tactile_embedding_cache = TactileEmbeddingCache(
+                    cache_dir,
+                    repo_id=source.repo_id,
+                    revision=metadata.revision,
+                    total_frames=metadata.total_frames,
+                    tactile_keys=config.tactile_keys,
+                    source_tactile_keys=source_tactile_keys,
+                    embedding_dim=config.tactile_embedding_dim,
+                    image_size=config.tactile_image_size,
+                    encoder_path=config.tactile_encoder_path,
+                )
             visual_keys = resolve_source_visual_keys(
-                resolve_model_visual_keys(config),
+                resolve_model_visual_keys(
+                    config,
+                    use_tactile_embedding_cache=tactile_embedding_cache is not None,
+                ),
                 source_rename,
                 metadata.camera_keys,
             )
@@ -383,6 +440,9 @@ class LeRobotJaxDataLoader:
                 # Apply transforms after key mapping so tactile images can stay untouched.
                 image_transforms=None,
                 video_backend=video_backend,
+                # Keep decoded frames compact across worker boundaries. The RGB and
+                # tactile preprocessors perform the same uint8 -> float conversion.
+                return_uint8=return_uint8,
                 download_videos=True,
                 visual_keys=visual_keys,
             )
@@ -402,6 +462,7 @@ class LeRobotJaxDataLoader:
                 rename_map=source_rename,
                 image_transforms=image_transforms,
                 image_transform_keys=config.image_keys,
+                tactile_embedding_cache=tactile_embedding_cache,
             )
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
@@ -420,6 +481,11 @@ class LeRobotJaxDataLoader:
                     "action_key": resolved_action_key,
                     "weight": source.weight,
                     "visual_keys": list(visual_keys),
+                    "tactile_embedding_cache": (
+                        None
+                        if tactile_embedding_cache is None
+                        else str(tactile_embedding_cache.cache_dir)
+                    ),
                 }
             )
 

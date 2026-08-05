@@ -115,11 +115,13 @@ def test_train_step_and_exact_resume(tmp_path: Path) -> None:
     first_metrics = jax.device_get(trainer.step(batch))
     assert np.isfinite(first_metrics["loss"])
     assert int(trainer.state.step) == 1
+    assert trainer.step_count == 1
     checkpoint = trainer.save(tmp_path / "checkpoint")
 
     resumed = JaxSmolVLATrainer(TinyModel(config), params, seed=999, total_steps=10)
     resumed.restore(checkpoint)
     assert int(resumed.state.step) == 1
+    assert resumed.step_count == 1
     reference_metrics = jax.device_get(trainer.step(batch))
     resumed_metrics = jax.device_get(resumed.step(batch))
     np.testing.assert_allclose(resumed_metrics["loss"], reference_metrics["loss"], rtol=0, atol=0)
