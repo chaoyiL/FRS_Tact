@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -31,6 +32,31 @@ from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_fro
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = ROOT / "configs" / "train_vtsmolvla_jax.yaml"
+
+
+def _start_cpu_only_workers(loader: DataLoader, num_workers: int):
+    """Spawn decode workers without allowing them to initialize CUDA/JAX GPU."""
+
+    if num_workers <= 0:
+        return iter(loader)
+
+    old_jax_platforms = os.environ.get("JAX_PLATFORMS")
+    old_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    try:
+        # Spawn captures this environment. Restoring it keeps the parent JAX
+        # process on the GPU while all decode workers remain CPU-only.
+        return iter(loader)
+    finally:
+        if old_jax_platforms is None:
+            os.environ.pop("JAX_PLATFORMS", None)
+        else:
+            os.environ["JAX_PLATFORMS"] = old_jax_platforms
+        if old_cuda_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_devices
 
 
 def _scalar(value: Any) -> int:
@@ -216,6 +242,7 @@ def _precompute_source(
         loader_kwargs["prefetch_factor"] = prefetch_factor
         loader_kwargs["multiprocessing_context"] = "spawn"
     loader = DataLoader(**loader_kwargs)
+    loader_iterator = _start_cpu_only_workers(loader, num_workers)
 
     resnet_params = encoder_bundle.params["tactile_resnet"]
 
@@ -231,7 +258,7 @@ def _precompute_source(
 
     started = time.perf_counter()
     last_index = completed
-    for batch_number, (frame_indices, image_batch) in enumerate(loader, start=1):
+    for batch_number, (frame_indices, image_batch) in enumerate(loader_iterator, start=1):
         images = np.asarray(image_batch.numpy(), dtype=np.uint8)
         batch_count, token_count = images.shape[:2]
         flat = images.reshape((batch_count * token_count,) + images.shape[2:])
