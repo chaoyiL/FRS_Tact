@@ -13,32 +13,32 @@ full_vlm_checkpoint: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 # ---- 数据集 ----
 # 触觉图像和 RGB/state/action 来自同一个 LeRobot 数据集。
 datasets:
-  - repo_id: KaiyueChen/pick_cube_01
-    root: /workspace/lerobot_v30/KaiyueChen/pick_cube_01
+  - repo_id: KaiyueChen/pick_tube_01
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_01
     action_key: actions
     weight: 1.0
     rename_map:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
 
-  - repo_id: KaiyueChen/pick_cube_02
-    root: /workspace/lerobot_v30/KaiyueChen/pick_cube_02
+  - repo_id: KaiyueChen/pick_tube_02
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_02
     action_key: actions
     weight: 1.0
     rename_map:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
 
-  - repo_id: KaiyueChen/pick_cube_03
-    root: /workspace/lerobot_v30/KaiyueChen/pick_cube_03
+  - repo_id: KaiyueChen/pick_tube_03
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_03
     action_key: actions
     weight: 1.0
     rename_map:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
 
-  - repo_id: KaiyueChen/pick_cube_fix
-    root: /workspace/lerobot_v30/KaiyueChen/pick_cube_fix
+  - repo_id: KaiyueChen/pick_tube_04
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_04
     action_key: actions
     weight: 1.0
     rename_map:
