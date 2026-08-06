@@ -48,6 +48,23 @@ class CheckpointContract:
     vlm_lora_target_modules: tuple[str, ...] = ()
 
 
+def contract_from_config(config: Any) -> CheckpointContract:
+    """Build the validator contract from an effective training configuration."""
+
+    use_tactile_encoder = bool(config.use_tactile_encoder)
+    return CheckpointContract(
+        state_dim=int(config.state_dim),
+        action_dim=int(config.action_dim),
+        chunk_size=int(config.chunk_size),
+        image_keys=tuple(config.image_keys),
+        tactile_keys=tuple(config.tactile_keys) if use_tactile_encoder else (),
+        tactile_embedding_dim=int(config.tactile_embedding_dim),
+        tactile_num_tokens=int(config.tactile_num_tokens) if use_tactile_encoder else 0,
+        lora_rank=int(config.lora_rank),
+        vlm_lora_target_modules=tuple(config.vlm_lora_target_modules),
+    )
+
+
 @dataclass(frozen=True)
 class CheckpointValidationReport:
     path: Path

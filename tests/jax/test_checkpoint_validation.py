@@ -6,6 +6,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,6 +17,7 @@ pytest.importorskip("jax")
 
 from lerobot.policies.smolvla_jax.validation import (  # noqa: E402
     CheckpointContract,
+    contract_from_config,
     validate_checkpoint,
 )
 
@@ -44,6 +46,23 @@ SIDECAR_FILENAMES = (
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
 )
 RUNTIME_TEXT_HIDDEN_SIZE = 960
+
+
+def test_contract_from_config_preserves_effective_vt_contract() -> None:
+    config = SimpleNamespace(
+        state_dim=20,
+        action_dim=20,
+        chunk_size=20,
+        image_keys=VT_CONTRACT.image_keys,
+        use_tactile_encoder=True,
+        tactile_keys=VT_CONTRACT.tactile_keys,
+        tactile_embedding_dim=512,
+        tactile_num_tokens=4,
+        lora_rank=16,
+        vlm_lora_target_modules=("q_proj", "v_proj"),
+    )
+
+    assert contract_from_config(config) == VT_CONTRACT
 
 
 def _write_json(path: Path, value: object) -> None:

@@ -8,7 +8,12 @@ parameter tree round-trip between the reference and JAX implementations.
 from importlib import import_module
 from typing import Any
 
-from .validation import CheckpointContract, CheckpointValidationReport, validate_checkpoint
+from .validation import (
+    CheckpointContract,
+    CheckpointValidationReport,
+    contract_from_config,
+    validate_checkpoint,
+)
 
 _LAZY_IMPORTS = {
     "JaxSmolVLA": (".modeling", "JaxSmolVLA"),
@@ -22,6 +27,7 @@ __all__ = [
     "JaxSmolVLA",
     "JaxSmolVLAConfig",
     "JaxSmolVLAPolicy",
+    "contract_from_config",
     "validate_checkpoint",
 ]
 

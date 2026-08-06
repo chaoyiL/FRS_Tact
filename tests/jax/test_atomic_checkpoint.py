@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from lerobot.policies.smolvla_jax import atomic_checkpoint
 from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically
 
 
@@ -85,3 +87,65 @@ def test_existing_checkpoint_paths_are_rejected_without_modification(
 
     assert not writer_called
     assert (existing / "user-data").read_text(encoding="utf-8") == "keep"
+
+
+def test_publish_does_not_replace_final_created_after_last_exists_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final = tmp_path / "checkpoint-00000020"
+    staging = final.with_name(final.name + ".incomplete")
+    original_path_exists = atomic_checkpoint._path_exists
+    final_checks = 0
+    competitor_inode: int | None = None
+
+    def path_exists_with_race(path: Path) -> bool:
+        nonlocal competitor_inode, final_checks
+        exists = original_path_exists(path)
+        if path == final:
+            final_checks += 1
+            if final_checks == 2:
+                assert not exists
+                final.mkdir()
+                competitor_inode = final.stat().st_ino
+                # The competitor appears immediately after this check.
+                return False
+        return exists
+
+    monkeypatch.setattr(atomic_checkpoint, "_path_exists", path_exists_with_race)
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        assemble_checkpoint_atomically(
+            final,
+            lambda path: (path / "marker").write_text("checkpoint", encoding="utf-8"),
+            lambda path: None,
+        )
+
+    assert competitor_inode is not None
+    assert final.stat().st_ino == competitor_inode
+    assert list(final.iterdir()) == []
+    assert (staging / "marker").read_text(encoding="utf-8") == "checkpoint"
+
+
+def test_unsupported_posix_refuses_unsafe_rename_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final = tmp_path / "checkpoint-00000020"
+    staging = final.with_name(final.name + ".incomplete")
+    monkeypatch.setattr(
+        atomic_checkpoint,
+        "sys",
+        SimpleNamespace(platform="unsupported-posix"),
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="no-replace"):
+        assemble_checkpoint_atomically(
+            final,
+            lambda path: (path / "marker").write_text("checkpoint", encoding="utf-8"),
+            lambda path: None,
+        )
+
+    assert not final.exists()
+    assert (staging / "marker").read_text(encoding="utf-8") == "checkpoint"

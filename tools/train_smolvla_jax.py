@@ -33,7 +33,7 @@ from lerobot.policies.smolvla_jax.data import (
 )
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
-from lerobot.policies.smolvla_jax.validation import validate_checkpoint
+from lerobot.policies.smolvla_jax.validation import contract_from_config, validate_checkpoint
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
 DATA_SPLIT_FILENAME = "data_split.json"
@@ -162,6 +162,8 @@ def _save_training_checkpoint_atomically(
     source_dir: str | Path,
     data_split_path: str | Path | None,
 ) -> Path:
+    expected = contract_from_config(trainer.config)
+
     def writer(staging: Path) -> None:
         trainer.save(staging, source_dir=source_dir)
         preprocessor.save_normalization_assets(staging)
@@ -169,7 +171,11 @@ def _save_training_checkpoint_atomically(
             shutil.copy2(data_split_path, staging / DATA_SPLIT_FILENAME)
 
     def validator(staging: Path) -> None:
-        validate_checkpoint(staging).require_valid()
+        validate_checkpoint(
+            staging,
+            expected=expected,
+            base_sidecars=source_dir,
+        ).require_valid()
 
     return assemble_checkpoint_atomically(final_path, writer, validator)
 
