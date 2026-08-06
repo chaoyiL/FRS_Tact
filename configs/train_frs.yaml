@@ -52,7 +52,7 @@ datasets:
 action_cache:
   root: /workspace/frs_pick_tube/action_cache_slerpflow
   model_sample_steps: 10
-  reverse_steps: 50
+  reverse_steps: 20
   reverse_solver: slerpflow
   batch_size: 16
   flush_every: 8
@@ -67,8 +67,8 @@ action_cache:
 
 # 在生成完整 action cache 前，用相同样本和 seed 比较 FireFlow/SlerpFlow。
 reverse_solver_ab:
-  enabled: true
-  root: /workspace/frs_pick_tube/reverse_solver_ab
+  enabled: false
+  root: /workspace/frs_pick_tube/reverse_solver_ab_k20
   max_samples_per_dataset: 512
   max_episodes: null
   # SlerpFlow 全局 mean inversion MSE 不得高于 FireFlow。
@@ -88,7 +88,7 @@ tactile_embedding_cache:
 # 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
 model:
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_05
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_06
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_left_0
@@ -100,7 +100,7 @@ model:
   tactile_image_size: 224
 
 frs_training:
-  output: /workspace/frs_pick_tube/run_gated_slerpflow_01
+  output: /workspace/frs_pick_tube/run_gated_slerpflow_01_k20
   # checkpoint chunk_size=10，因此 tactile_window=10/1=10。
   tactile_window_divisor: 1
   # 10 个 token 每隔 3 帧回看一次，在 30Hz 下覆盖约 0.9 秒。

@@ -17,8 +17,8 @@ from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import HfHubHTTPError
 
 
-DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_05"
-DEFAULT_OUTPUT_DIR = Path("/workspace/checkpoints/encoder_ckpt_05")
+DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_06"
+DEFAULT_OUTPUT_DIR = Path("/workspace/checkpoints/encoder_ckpt_06")
 MINIMAL_CHECKPOINT_PATTERNS = ("checkpoint.json", "params.npz", "params-*.npz")
 FULL_CHECKPOINT_PATTERNS = (
     "checkpoint.json",
