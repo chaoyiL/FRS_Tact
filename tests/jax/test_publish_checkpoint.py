@@ -183,6 +183,35 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         assert metadata["size"] == (bundle / filename).stat().st_size
 
 
+def test_bundle_copies_model_into_an_independent_file(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundled_hash = _sha256(bundle / "model.safetensors")
+
+    assert (source / "model.safetensors").stat().st_ino != (bundle / "model.safetensors").stat().st_ino
+    with (source / "model.safetensors").open("ab") as file:
+        file.write(b"source changed")
+    assert _sha256(bundle / "model.safetensors") == bundled_hash
+
+
+def test_without_model_bundle_is_explicitly_not_publishable(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    bundle = build_inference_bundle(
+        source,
+        tmp_path / "sidecars",
+        expected=VT_CONTRACT,
+        include_model=False,
+    )
+    assert not (bundle / "model.safetensors").exists()
+    with pytest.raises(ValueError, match="not publishable without model.safetensors"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(_sha256(source / "model.safetensors")),
+        )
+
+
 @pytest.mark.parametrize("relative", ["checkpoint.incomplete", "checkpoint.incomplete/child"])
 def test_bundle_refuses_incomplete_source(tmp_path: Path, relative: str) -> None:
     source = _valid_checkpoint(tmp_path / relative)
@@ -205,19 +234,47 @@ def test_bundle_refuses_existing_destination_and_invalid_source(tmp_path: Path) 
 
 
 class RecordingApi:
-    def __init__(self, weight_sha: str, *, mutate_after_commit: str | None = None) -> None:
+    def __init__(
+        self,
+        weight_sha: str,
+        *,
+        mutate_after_commit: str | None = None,
+        repo_sha: str = "a" * 40,
+        lfs: bool = True,
+    ) -> None:
         self.weight_sha = weight_sha
         self.mutate_after_commit = mutate_after_commit
+        self.repo_sha = repo_sha
+        self.lfs = lfs
         self.operations: list[object] = []
+        self.commit_kwargs: dict[str, object] = {}
+        self.path_revisions: list[str | None] = []
+        self.repo_revisions: list[str | None] = []
+        self.operation_sources: list[str] = []
+
+    def repo_info(self, *args: object, revision: str | None = None, **kwargs: object) -> object:
+        self.repo_revisions.append(revision)
+        return SimpleNamespace(sha=self.repo_sha)
 
     def get_paths_info(self, *args: object, **kwargs: object) -> list[object]:
-        return [SimpleNamespace(path="model.safetensors", lfs={"sha256": self.weight_sha})]
+        self.path_revisions.append(kwargs.get("revision"))
+        return [
+            SimpleNamespace(
+                path="model.safetensors",
+                lfs={"sha256": self.weight_sha} if self.lfs else None,
+                blob_id=self.weight_sha,
+            )
+        ]
 
     def create_commit(self, *, operations: list[object], **kwargs: object) -> object:
         self.operations = operations
+        self.commit_kwargs = kwargs
+        self.operation_sources = [str(operation.path_or_fileobj) for operation in operations]
+        assert all(Path(path).is_file() for path in self.operation_sources)
         if self.mutate_after_commit is not None:
             self.weight_sha = self.mutate_after_commit
-        return SimpleNamespace(oid="b" * 40, commit_url="https://huggingface.co/owner/model/commit/b")
+        self.repo_sha = "b" * 40
+        return SimpleNamespace(oid=self.repo_sha, commit_url="https://huggingface.co/owner/model/commit/b")
 
 
 def test_sidecar_publish_never_uploads_weight_and_preserves_remote_hash(tmp_path: Path) -> None:
@@ -226,13 +283,69 @@ def test_sidecar_publish_never_uploads_weight_and_preserves_remote_hash(tmp_path
     expected_sha = _sha256(source / "model.safetensors")
     api = RecordingApi(expected_sha)
 
-    result = publish_bundle(bundle, repo_id="owner/model", api=api, sidecars_only=True)
+    result = publish_bundle(
+        bundle,
+        repo_id="owner/model",
+        expected=VT_CONTRACT,
+        api=api,
+        sidecars_only=True,
+    )
 
     uploaded = {operation.path_in_repo for operation in api.operations}
     assert uploaded == set(SIDECAR_FILENAMES) | {"conversion_manifest.json"}
     assert "model.safetensors" not in uploaded
     assert result["weight_sha256_before"] == expected_sha
     assert result["weight_sha256_after"] == expected_sha
+    assert api.commit_kwargs["parent_commit"] == "a" * 40
+    assert api.path_revisions == ["a" * 40, "b" * 40]
+    assert all(not path.startswith(str(bundle)) for path in api.operation_sources)
+
+
+def test_publish_validates_manifest_against_payload_and_external_contract(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    expected_sha = _sha256(source / "model.safetensors")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    manifest_path = bundle / "conversion_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["files"] = {}
+    _json(manifest_path, manifest)
+    with pytest.raises(ValueError, match="manifest files must exactly match"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha),
+        )
+
+    bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VT_CONTRACT)
+    manifest_path = bundle / "conversion_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["contract"]["state_dim"] = 6
+    _json(manifest_path, manifest)
+    with pytest.raises(ValueError, match="manifest contract does not match expected contract"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha),
+        )
+
+
+def test_publish_refuses_symlinked_payload(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    expected_sha = _sha256(source / "model.safetensors")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    external = tmp_path / "external-config.json"
+    (bundle / "config.json").replace(external)
+    (bundle / "config.json").symlink_to(external)
+
+    with pytest.raises(ValueError, match="symbolic links"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha),
+        )
 
 
 def test_publish_refuses_invalid_or_unexpected_bundle(tmp_path: Path) -> None:
@@ -240,13 +353,23 @@ def test_publish_refuses_invalid_or_unexpected_bundle(tmp_path: Path) -> None:
     bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
     expected_sha = _sha256(source / "model.safetensors")
     (bundle / "config.json").unlink()
-    with pytest.raises(ValueError, match="checkpoint validation failed"):
-        publish_bundle(bundle, repo_id="owner/model", api=RecordingApi(expected_sha))
+    with pytest.raises(ValueError, match="missing inference files"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha),
+        )
 
     bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VT_CONTRACT)
     (bundle / "training_state.msgpack").write_bytes(b"forbidden")
     with pytest.raises(ValueError, match="unexpected files"):
-        publish_bundle(bundle, repo_id="owner/model", api=RecordingApi(expected_sha))
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha),
+        )
 
 
 def test_publish_refuses_remote_weight_change_before_or_after_commit(tmp_path: Path) -> None:
@@ -255,12 +378,72 @@ def test_publish_refuses_remote_weight_change_before_or_after_commit(tmp_path: P
     expected_sha = _sha256(source / "model.safetensors")
 
     with pytest.raises(ValueError, match="remote model.safetensors SHA-256"):
-        publish_bundle(bundle, repo_id="owner/model", api=RecordingApi("0" * 64))
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi("0" * 64),
+        )
     with pytest.raises(RuntimeError, match="changed during publication"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
+            expected=VT_CONTRACT,
             api=RecordingApi(expected_sha, mutate_after_commit="f" * 64),
+        )
+
+
+def test_publish_pins_nonmain_parent_and_checks_new_commit(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    expected_sha = _sha256(source / "model.safetensors")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    api = RecordingApi(expected_sha, repo_sha="c" * 40)
+
+    publish_bundle(
+        bundle,
+        repo_id="owner/model",
+        expected=VT_CONTRACT,
+        api=api,
+        revision="repair-branch",
+    )
+
+    assert api.repo_revisions == ["repair-branch"]
+    assert api.commit_kwargs["revision"] == "repair-branch"
+    assert api.commit_kwargs["parent_commit"] == "c" * 40
+    assert api.path_revisions == ["c" * 40, "b" * 40]
+
+
+def test_publish_relies_on_parent_commit_to_atomically_reject_branch_move(tmp_path: Path) -> None:
+    class MovingBranchApi(RecordingApi):
+        def create_commit(self, *, operations: list[object], **kwargs: object) -> object:
+            assert kwargs["parent_commit"] == "a" * 40
+            raise RuntimeError("parent commit does not match branch head")
+
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    api = MovingBranchApi(_sha256(source / "model.safetensors"))
+
+    with pytest.raises(RuntimeError, match="parent commit"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=api,
+            revision="repair-branch",
+        )
+
+
+def test_publish_refuses_non_lfs_remote_weight(tmp_path: Path) -> None:
+    source = _valid_checkpoint(tmp_path / "checkpoint")
+    expected_sha = _sha256(source / "model.safetensors")
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+
+    with pytest.raises(ValueError, match="no LFS SHA-256"):
+        publish_bundle(
+            bundle,
+            repo_id="owner/model",
+            expected=VT_CONTRACT,
+            api=RecordingApi(expected_sha, lfs=False),
         )
 
 
@@ -275,7 +458,13 @@ class DatasetApi:
             return SimpleNamespace(sha=revision, last_modified=self.modified)
         return SimpleNamespace(sha=self.head, last_modified=self.modified)
 
-    def list_repo_commits(self, repo_id: str, *, repo_type: str) -> list[object]:
+    def list_repo_commits(
+        self,
+        repo_id: str,
+        *,
+        repo_type: str,
+        revision: str | None = None,
+    ) -> list[object]:
         return self.commits
 
 
@@ -312,10 +501,16 @@ def test_dataset_revision_proof_accepts_explicit_sha_or_historical_head() -> Non
         modified=weight_time - timedelta(days=1),
         commits=[SimpleNamespace(commit_id=head, created_at=weight_time - timedelta(days=1))],
     )
+    explicit_sha = "b" * 40
+    explicit_api = DatasetApi(
+        head=explicit_sha,
+        modified=weight_time - timedelta(days=2),
+        commits=[SimpleNamespace(commit_id=explicit_sha, created_at=weight_time - timedelta(days=2))],
+    )
     explicit = resolve_dataset_revisions(
         [{"repo_id": "owner/explicit", "revision": "b" * 40}],
         model_weight_uploaded_at=weight_time,
-        api=api,
+        api=explicit_api,
     )
     inferred = resolve_dataset_revisions(
         [{"repo_id": "owner/head"}], model_weight_uploaded_at=weight_time, api=api
@@ -336,6 +531,24 @@ def test_dataset_revision_proof_rejects_mutable_or_late_history() -> None:
     )
     with pytest.raises(ValueError, match="cannot prove training-time dataset revision"):
         resolve_dataset_revisions([{"repo_id": "owner/data"}], model_weight_uploaded_at=weight_time, api=api)
+
+
+def test_explicit_dataset_revision_must_predate_model_weight() -> None:
+    weight_time = datetime(2026, 1, 2, tzinfo=UTC)
+    requested = "b" * 40
+    late = weight_time + timedelta(days=1)
+    api = DatasetApi(
+        head=requested,
+        modified=late,
+        commits=[SimpleNamespace(commit_id=requested, created_at=late)],
+    )
+
+    with pytest.raises(ValueError, match="explicit dataset revision.*postdates model weight"):
+        resolve_dataset_revisions(
+            [{"repo_id": "owner/data", "revision": requested}],
+            model_weight_uploaded_at=weight_time,
+            api=api,
+        )
 
 
 def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
@@ -438,6 +651,30 @@ model:
             "revision_proof": "repository head predates model weight",
         }
     ]
+
+
+def test_current_unpinned_training_yaml_fails_closed_without_weight_history(tmp_path: Path) -> None:
+    class UnprovenApi:
+        def get_paths_info(self, *args: object, **kwargs: object) -> list[object]:
+            return [
+                SimpleNamespace(
+                    path="model.safetensors",
+                    lfs={"sha256": "9" * 64},
+                    last_commit=None,
+                )
+            ]
+
+    output = tmp_path / "repair"
+    with pytest.raises(ValueError, match="model weight upload time is unavailable"):
+        repair_sidecars(
+            repo_id="owner/model",
+            training_config="configs/train_vtsmolvla_jax.yaml",
+            output=output,
+            api=UnprovenApi(),
+            snapshot_resolver=lambda repo_id, revision: pytest.fail("must fail before download"),
+            metadata_loader=lambda repo_id, revision: pytest.fail("must fail before metadata"),
+        )
+    assert not output.exists()
 
 
 def test_cli_help_and_invalid_validate_return_json(tmp_path: Path) -> None:

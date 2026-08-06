@@ -9,7 +9,9 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
+import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict
@@ -33,7 +35,7 @@ SIDECAR_FILENAMES = (
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
 )
 INFERENCE_FILENAMES = (MODEL_FILENAME, *SIDECAR_FILENAMES, MANIFEST_FILENAME)
-_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$", re.IGNORECASE)
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 
 def _sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -119,11 +121,10 @@ def _reject_incomplete(path: Path) -> None:
         raise ValueError(f"refusing an incomplete checkpoint or bundle: {path}")
 
 
-def _copy_or_link(source: Path, destination: Path) -> None:
-    try:
-        os.link(source, destination)
-    except OSError:
-        shutil.copy2(source, destination)
+def _copy_payload(source: Path, destination: Path) -> None:
+    """Copy payload bytes so the bundle cannot be mutated through a shared inode."""
+
+    shutil.copy2(source, destination)
 
 
 def _manifest(
@@ -182,7 +183,7 @@ def build_inference_bundle(
     source_weight = source_path / MODEL_FILENAME
     weight_sha = _sha256(source_weight)
     if include_model:
-        _copy_or_link(source_weight, staging / MODEL_FILENAME)
+        _copy_payload(source_weight, staging / MODEL_FILENAME)
     _write_json(
         staging / MANIFEST_FILENAME,
         _manifest(
@@ -235,15 +236,41 @@ def resolve_dataset_revisions(
         requested = source.get("revision")
         if requested is not None:
             requested = str(requested)
-            if not _SHA_RE.fullmatch(requested):
+            if not _COMMIT_SHA_RE.fullmatch(requested):
                 raise ValueError(
                     f"dataset {repo_id!r} revision must be an immutable commit SHA, got {requested!r}"
+                )
+            if weight_time is None:
+                raise ValueError(
+                    f"cannot prove training-time dataset revision for {repo_id!r}: "
+                    "model weight upload time is unavailable"
                 )
             info = api.dataset_info(repo_id, revision=requested)
             actual = str(_attribute(info, "sha", ""))
             if actual != requested:
                 raise ValueError(
                     f"dataset {repo_id!r} resolved to {actual!r}, expected explicit SHA {requested!r}"
+                )
+            commits = list(
+                api.list_repo_commits(
+                    repo_id,
+                    repo_type="dataset",
+                    revision=requested,
+                )
+            )
+            matching = next(
+                (commit for commit in commits if str(_attribute(commit, "commit_id", "")) == requested),
+                None,
+            )
+            created_at = _as_datetime(_attribute(matching, "created_at"))
+            if created_at is None:
+                raise ValueError(
+                    f"cannot prove explicit dataset revision {requested} for {repo_id!r}: "
+                    "commit timestamp is unavailable"
+                )
+            if created_at > weight_time:
+                raise ValueError(
+                    f"explicit dataset revision {requested} for {repo_id!r} postdates model weight upload"
                 )
             proof = "explicit immutable revision"
         else:
@@ -259,7 +286,7 @@ def resolve_dataset_revisions(
             commit_time = _as_datetime(_attribute(commits[0], "created_at")) if commits else None
             modified_time = _as_datetime(_attribute(info, "last_modified"))
             if (
-                not _SHA_RE.fullmatch(actual)
+                not _COMMIT_SHA_RE.fullmatch(actual)
                 or head != actual
                 or commit_time is None
                 or modified_time is None
@@ -282,9 +309,15 @@ def resolve_dataset_revisions(
 def _lfs_sha(value: Any) -> str | None:
     lfs = _attribute(value, "lfs")
     sha = _attribute(lfs, "sha256") if lfs is not None else None
-    if sha is None:
-        sha = _attribute(value, "blob_id")
     return str(sha) if sha else None
+
+
+def _remote_repo_sha(api: Any, repo_id: str, revision: str | None) -> str:
+    info = api.repo_info(repo_id, repo_type="model", revision=revision)
+    sha = str(_attribute(info, "sha", ""))
+    if not _COMMIT_SHA_RE.fullmatch(sha):
+        raise ValueError(f"could not resolve immutable model revision for {repo_id!r}: {sha!r}")
+    return sha
 
 
 def _remote_weight_info(api: Any, repo_id: str, revision: str | None = None) -> tuple[str, datetime | None]:
@@ -320,10 +353,55 @@ def _load_manifest(bundle: Path) -> tuple[dict[str, Any], CheckpointContract]:
     return manifest, _contract_from_dict(manifest["contract"])
 
 
-def _verify_manifest_files(bundle: Path, manifest: Mapping[str, Any]) -> None:
+def _safe_bundle_files(bundle: Path) -> set[str]:
+    entries = list(bundle.iterdir())
+    names = {entry.name for entry in entries}
+    for entry in entries:
+        if entry.is_symlink():
+            raise ValueError(f"bundle payload must not contain symbolic links: {entry.name}")
+        try:
+            resolved = entry.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError(f"could not resolve bundle payload {entry.name!r}: {exc}") from exc
+        if resolved.parent != bundle or not entry.is_file():
+            raise ValueError(f"bundle payload must be a regular child file: {entry.name}")
+    return names
+
+
+def _snapshot_regular_child(source: Path, destination: Path) -> None:
+    """Copy one already-screened child through a no-follow file descriptor."""
+
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise ValueError(f"could not securely open bundle payload {source.name!r}: {exc}") from exc
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError(f"bundle payload must be a regular file: {source.name}")
+        with (
+            os.fdopen(descriptor, "rb", closefd=False) as input_file,
+            destination.open("xb") as output_file,
+        ):
+            shutil.copyfileobj(input_file, output_file, length=1024 * 1024)
+    finally:
+        os.close(descriptor)
+
+
+def _verify_manifest_files(
+    bundle: Path,
+    manifest: Mapping[str, Any],
+    *,
+    payload_names: set[str],
+) -> None:
     files = manifest.get("files")
     if not isinstance(files, Mapping):
         raise ValueError("invalid bundle manifest: files must be a mapping")
+    if set(files) != payload_names:
+        raise ValueError(
+            "manifest files must exactly match bundle payload allowlist "
+            f"(manifest={sorted(files)}, payload={sorted(payload_names)})"
+        )
     for filename, metadata in files.items():
         if filename == MANIFEST_FILENAME or filename not in INFERENCE_FILENAMES:
             raise ValueError(f"invalid bundle manifest file: {filename!r}")
@@ -340,6 +418,7 @@ def publish_bundle(
     bundle: str | Path,
     *,
     repo_id: str,
+    expected: CheckpointContract,
     api: Any | None = None,
     revision: str | None = None,
     sidecars_only: bool = True,
@@ -349,17 +428,22 @@ def publish_bundle(
 
     bundle_path = Path(bundle).expanduser().resolve()
     _reject_incomplete(bundle_path)
-    manifest, expected = _load_manifest(bundle_path)
-    report = validate_checkpoint(bundle_path, expected=expected, require_weight=True)
-    report.require_valid()
-    actual_files = {path.name for path in bundle_path.iterdir() if path.is_file()}
+    actual_files = _safe_bundle_files(bundle_path)
     unexpected = sorted(actual_files - set(INFERENCE_FILENAMES))
     if unexpected:
         raise ValueError(f"bundle contains unexpected files: {unexpected}")
     missing = sorted(set(INFERENCE_FILENAMES) - actual_files)
     if missing:
+        if missing == [MODEL_FILENAME]:
+            raise ValueError("sidecar artifact is not publishable without model.safetensors")
         raise ValueError(f"bundle is missing inference files: {missing}")
-    _verify_manifest_files(bundle_path, manifest)
+    manifest, manifest_contract = _load_manifest(bundle_path)
+    if manifest_contract != expected:
+        raise ValueError("manifest contract does not match expected contract")
+    report = validate_checkpoint(bundle_path, expected=expected, require_weight=True)
+    report.require_valid()
+    payload_names = actual_files - {MANIFEST_FILENAME}
+    _verify_manifest_files(bundle_path, manifest, payload_names=payload_names)
 
     expected_weight_sha = str(manifest.get("source_weight_sha256") or "")
     if expected_weight_sha != _sha256(bundle_path / MODEL_FILENAME):
@@ -368,9 +452,10 @@ def publish_bundle(
         from huggingface_hub import HfApi
 
         api = HfApi()
+    parent_sha = _remote_repo_sha(api, repo_id, revision)
     before_sha: str | None = None
     if sidecars_only:
-        before_sha, _ = _remote_weight_info(api, repo_id, revision)
+        before_sha, _ = _remote_weight_info(api, repo_id, parent_sha)
         if before_sha != expected_weight_sha:
             raise ValueError(
                 "remote model.safetensors SHA-256 does not match the validated source weight "
@@ -382,17 +467,49 @@ def publish_bundle(
 
     from huggingface_hub import CommitOperationAdd
 
-    operations = [
-        CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(bundle_path / name)) for name in names
-    ]
-    commit = api.create_commit(
-        repo_id=repo_id,
-        repo_type="model",
-        operations=operations,
-        commit_message=commit_message,
-        revision=revision,
+    # Upload from an immutable private snapshot. Any mutation of the user-facing
+    # bundle after validation cannot change the bytes sent to the Hub.
+    with tempfile.TemporaryDirectory(prefix="smolvla-publish-", dir=bundle_path.parent) as temp:
+        upload_snapshot = Path(temp)
+        for name in names:
+            _snapshot_regular_child(bundle_path / name, upload_snapshot / name)
+        snapshot_manifest, snapshot_contract = _load_manifest(upload_snapshot)
+        if snapshot_contract != expected or snapshot_manifest != manifest:
+            raise ValueError("bundle manifest changed while preparing publication")
+        snapshot_report = validate_checkpoint(
+            upload_snapshot,
+            expected=expected,
+            require_weight=not sidecars_only,
+        )
+        snapshot_report.require_valid()
+        snapshot_files = snapshot_manifest["files"]
+        for name in names:
+            if name == MANIFEST_FILENAME:
+                continue
+            metadata = snapshot_files[name]
+            if (
+                _attribute(metadata, "sha256") != _sha256(upload_snapshot / name)
+                or _attribute(metadata, "size") != (upload_snapshot / name).stat().st_size
+            ):
+                raise ValueError(f"bundle file changed while preparing publication: {name}")
+        operations = [
+            CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(upload_snapshot / name))
+            for name in names
+        ]
+        commit = api.create_commit(
+            repo_id=repo_id,
+            repo_type="model",
+            operations=operations,
+            commit_message=commit_message,
+            revision=revision,
+            parent_commit=parent_sha,
+        )
+    commit_sha = str(_attribute(commit, "oid", ""))
+    if not _COMMIT_SHA_RE.fullmatch(commit_sha):
+        raise RuntimeError(f"Hub publication returned an invalid commit SHA: {commit_sha!r}")
+    after_sha, _ = (
+        _remote_weight_info(api, repo_id, commit_sha) if sidecars_only else (expected_weight_sha, None)
     )
-    after_sha, _ = _remote_weight_info(api, repo_id, None) if sidecars_only else (expected_weight_sha, None)
     if sidecars_only and after_sha != before_sha:
         raise RuntimeError(
             f"remote model.safetensors changed during publication ({before_sha} -> {after_sha})"
@@ -400,7 +517,7 @@ def publish_bundle(
     return {
         "ok": True,
         "repo_id": repo_id,
-        "commit_sha": _attribute(commit, "oid"),
+        "commit_sha": commit_sha,
         "commit_url": _attribute(commit, "commit_url"),
         "sidecars_only": sidecars_only,
         "weight_sha256_before": before_sha,
@@ -522,7 +639,7 @@ def repair_sidecars(
     source_weight = snapshot / MODEL_FILENAME
     if _sha256(source_weight) != remote_sha:
         raise ValueError("downloaded model.safetensors does not match remote LFS SHA-256")
-    _copy_or_link(source_weight, staging / MODEL_FILENAME)
+    _copy_payload(source_weight, staging / MODEL_FILENAME)
 
     from lerobot.policies.smolvla_jax.checkpoint import write_effective_config
     from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
@@ -568,7 +685,11 @@ def _parser() -> argparse.ArgumentParser:
     bundle.add_argument("source", type=Path)
     bundle.add_argument("destination", type=Path)
     bundle.add_argument("--training-config", type=Path, required=True)
-    bundle.add_argument("--without-model", action="store_true")
+    bundle.add_argument(
+        "--without-model",
+        action="store_true",
+        help="build a validation-only sidecar artifact; this output cannot be published",
+    )
 
     repair = commands.add_parser("repair-sidecars", help="reconstruct sidecars from training metadata")
     repair.add_argument("--repo-id", required=True)
@@ -580,6 +701,7 @@ def _parser() -> argparse.ArgumentParser:
     publish = commands.add_parser("publish", help="publish an already validated bundle")
     publish.add_argument("--bundle", type=Path, required=True)
     publish.add_argument("--repo-id", required=True)
+    publish.add_argument("--training-config", type=Path, required=True)
     publish.add_argument("--revision")
     publish.add_argument("--sidecars-only", action=argparse.BooleanOptionalAction, default=True)
     return parser
@@ -617,9 +739,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = {**_report_dict(report), "manifest": manifest}
             code = 0
         else:
+            expected = contract_from_training_yaml(args.training_config)
             result = publish_bundle(
                 args.bundle,
                 repo_id=args.repo_id,
+                expected=expected,
                 revision=args.revision,
                 sidecars_only=args.sidecars_only,
             )

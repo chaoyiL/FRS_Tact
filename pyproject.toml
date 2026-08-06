@@ -67,7 +67,6 @@ dependencies = [
     # Config & Hub
     "draccus==0.10.0", # TODO: Relax version constraint
     "huggingface-hub>=0.34.0,<1.0.0",
-    "PyYAML>=6.0.0,<7.0.0",
     "requests>=2.32.0,<3.0.0",
     # Serialization & checkpointing
     "safetensors>=0.4.3,<1.0.0",
