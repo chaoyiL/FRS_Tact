@@ -24,7 +24,13 @@ _SIDECAR_FILENAMES = (
 _BASE_MODULE_NAMES = frozenset(("vision", "connector", "vlm_text", "expert", "action", "state_proj"))
 _MODULE_NAMES = _BASE_MODULE_NAMES | {"tactile_proj"}
 _VALID_MODULE_MODES = frozenset(("frozen", "full", "lora"))
+_ATTENTION_LORA_TARGETS = frozenset(("q_proj", "k_proj", "v_proj", "o_proj"))
+_MLP_LORA_TARGETS = frozenset(("gate_proj", "up_proj", "down_proj"))
+_VLM_LORA_TARGETS = _ATTENTION_LORA_TARGETS | _MLP_LORA_TARGETS
 _VLM_LAYER_RE = re.compile(r"^model\.vlm_with_expert\.vlm\.model\.text_model\.layers\.(\d+)\.")
+_VLM_TEXT_PREFIX = "model.vlm_with_expert.vlm.model.text_model"
+_VLM_EMBED_TOKENS = f"{_VLM_TEXT_PREFIX}.embed_tokens.weight"
+_TACTILE_ENCODER_PARAMS_PREFIX = "model.tactile_encoder.params/"
 
 
 @dataclass(frozen=True)
@@ -72,6 +78,8 @@ class _ConfigView:
     tactile_num_tokens: int | None
     lora_rank: int | None
     vlm_lora_target_modules: tuple[str, ...]
+    num_vlm_layers: int | None
+    text_hidden_size: int | None
 
     def as_contract(self) -> CheckpointContract | None:
         required = (
@@ -197,6 +205,8 @@ def _parse_config(raw: Mapping[str, Any], issues: list[str]) -> _ConfigView:
         tactile_num_tokens=tactile_num_tokens,
         lora_rank=_integer(raw.get("lora_rank"), "lora_rank", issues, default=0),
         vlm_lora_target_modules=lora_targets,
+        num_vlm_layers=_integer(raw.get("num_vlm_layers"), "num_vlm_layers", issues),
+        text_hidden_size=_integer(raw.get("text_hidden_size"), "text_hidden_size", issues),
     )
 
 
@@ -276,9 +286,19 @@ def _validate_config_consistency(
             issues.append(
                 "config module_modes.vlm_text must be 'lora' when vlm_lora_target_modules is configured"
             )
+        if config.num_vlm_layers is None or config.num_vlm_layers <= 0:
+            issues.append("config num_vlm_layers must be positive when vlm_lora_target_modules is configured")
+        unknown_targets = sorted(set(config.vlm_lora_target_modules) - _VLM_LORA_TARGETS)
+        if unknown_targets:
+            issues.append(f"config has unknown vlm_lora_target_modules: {unknown_targets}")
 
 
-def _step(processor: Mapping[str, Any], registry_name: str, filename: str, issues: list[str]):
+def _step(
+    processor: Mapping[str, Any],
+    registry_name: str,
+    filename: str,
+    issues: list[str],
+) -> Mapping[str, Any] | None:
     steps = processor.get("steps")
     if not isinstance(steps, list):
         issues.append(f"{filename} steps must be a list")
@@ -292,6 +312,17 @@ def _step(processor: Mapping[str, Any], registry_name: str, filename: str, issue
     if len(matches) > 1:
         issues.append(f"{filename} contains multiple {registry_name} steps")
     return matches[0]
+
+
+def _validate_state_file(
+    step: Mapping[str, Any],
+    registry_name: str,
+    expected_filename: str,
+    issues: list[str],
+) -> None:
+    actual = step.get("state_file")
+    if actual != expected_filename:
+        issues.append(f"{registry_name} state_file expected {expected_filename!r}, got {actual!r}")
 
 
 def _processor_shape(
@@ -321,6 +352,12 @@ def _validate_processors(
     if preprocessor is not None:
         normalizer = _step(preprocessor, "normalizer_processor", _PREPROCESSOR_FILE, issues)
         if normalizer is not None:
+            _validate_state_file(
+                normalizer,
+                "normalizer_processor",
+                _PREPROCESSOR_STATS_FILE,
+                issues,
+            )
             normalizer_config = normalizer.get("config")
             features = normalizer_config.get("features") if isinstance(normalizer_config, Mapping) else None
             if not isinstance(features, Mapping):
@@ -354,6 +391,12 @@ def _validate_processors(
     if postprocessor is not None:
         unnormalizer = _step(postprocessor, "unnormalizer_processor", _POSTPROCESSOR_FILE, issues)
         if unnormalizer is not None:
+            _validate_state_file(
+                unnormalizer,
+                "unnormalizer_processor",
+                _POSTPROCESSOR_STATS_FILE,
+                issues,
+            )
             unnormalizer_config = unnormalizer.get("config")
             features = (
                 unnormalizer_config.get("features") if isinstance(unnormalizer_config, Mapping) else None
@@ -393,9 +436,85 @@ def _inspect_stats(
         issues.append(f"could not inspect {path.name}: {exc}")
 
 
+def _vlm_target_prefix(layer_index: int, target: str) -> str:
+    block = "self_attn" if target in _ATTENTION_LORA_TARGETS else "mlp"
+    return f"{_VLM_TEXT_PREFIX}.layers.{layer_index}.{block}.{target}"
+
+
+def _validate_lora_target(
+    tensors: Any,
+    keys: set[str],
+    *,
+    path: Path,
+    layer_index: int,
+    target: str,
+    rank: int,
+    hidden_size: int | None,
+    issues: list[str],
+) -> None:
+    prefix = _vlm_target_prefix(layer_index, target)
+    base_key = f"{prefix}.weight"
+    adapter_keys = {component: f"{prefix}.{component}" for component in ("lora_a", "lora_b", "lora_scale")}
+    if base_key not in keys:
+        issues.append(f"{path.name}: missing {target} base weight for VLM layer {layer_index}")
+        base_shape = None
+    else:
+        base_shape = list(tensors.get_slice(base_key).get_shape())
+        if len(base_shape) != 2:
+            issues.append(
+                f"{path.name}: {target} base weight for VLM layer {layer_index} "
+                f"must be rank 2, got {base_shape}"
+            )
+            base_shape = None
+
+    missing = [component for component, key in adapter_keys.items() if key not in keys]
+    if missing:
+        issues.append(f"{path.name}: missing {target} LoRA tensors for VLM layer {layer_index}: {missing}")
+
+    if base_shape is not None:
+        out_features, in_features = base_shape
+        if hidden_size is not None:
+            if target in {"q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"}:
+                if in_features != hidden_size:
+                    issues.append(
+                        f"{path.name}: {target} base weight input dimension expected "
+                        f"{hidden_size}, got {in_features} for VLM layer {layer_index}"
+                    )
+            elif out_features != hidden_size:
+                issues.append(
+                    f"{path.name}: {target} base weight output dimension expected "
+                    f"{hidden_size}, got {out_features} for VLM layer {layer_index}"
+                )
+
+        expected_shapes = {
+            "lora_a": [rank, in_features],
+            "lora_b": [out_features, rank],
+        }
+        for component, expected_shape in expected_shapes.items():
+            key = adapter_keys[component]
+            if key not in keys:
+                continue
+            actual_shape = list(tensors.get_slice(key).get_shape())
+            if actual_shape != expected_shape:
+                issues.append(
+                    f"{path.name}: {target} {component} expected shape {expected_shape}, "
+                    f"got {actual_shape} for VLM layer {layer_index}"
+                )
+
+    scale_key = adapter_keys["lora_scale"]
+    if scale_key in keys:
+        scale_shape = list(tensors.get_slice(scale_key).get_shape())
+        if scale_shape:
+            issues.append(
+                f"{path.name}: {target} lora_scale expected scalar shape [], got "
+                f"{scale_shape} for VLM layer {layer_index}"
+            )
+
+
 def _validate_model(
     path: Path,
     contract: CheckpointContract | None,
+    config: _ConfigView | None,
     issues: list[str],
 ) -> None:
     if not path.is_file() or contract is None:
@@ -403,67 +522,98 @@ def _validate_model(
     try:
         with safe_open(path, framework="numpy") as tensors:
             keys = set(tensors.keys())
+            needs_vlm_structure = bool(
+                contract.tactile_keys or contract.tactile_num_tokens or contract.vlm_lora_target_modules
+            )
+            hidden_size = config.text_hidden_size if config is not None else None
+            if needs_vlm_structure:
+                if _VLM_EMBED_TOKENS not in keys:
+                    issues.append(f"{path.name}: missing tensor {_VLM_EMBED_TOKENS!r}")
+                else:
+                    embed_shape = list(tensors.get_slice(_VLM_EMBED_TOKENS).get_shape())
+                    if len(embed_shape) != 2:
+                        issues.append(
+                            f"{path.name}: tensor {_VLM_EMBED_TOKENS!r} must be rank 2, got {embed_shape}"
+                        )
+                    else:
+                        model_hidden_size = embed_shape[1]
+                        if hidden_size is not None and model_hidden_size != hidden_size:
+                            issues.append(
+                                f"{path.name}: text_hidden_size expected {hidden_size}, got "
+                                f"{model_hidden_size} from {_VLM_EMBED_TOKENS!r}"
+                            )
+                        hidden_size = model_hidden_size
+
             if contract.tactile_keys or contract.tactile_num_tokens:
-                if not any(key.startswith("model.tactile_encoder.") for key in keys):
-                    issues.append(f"{path.name}: missing tactile encoder tensors")
+                if not any(key.startswith(_TACTILE_ENCODER_PARAMS_PREFIX) for key in keys):
+                    issues.append(
+                        f"{path.name}: missing tactile encoder tensors under "
+                        f"{_TACTILE_ENCODER_PARAMS_PREFIX!r}"
+                    )
                 projection_weight = "model.tactile_proj.weight"
                 projection_bias = "model.tactile_proj.bias"
                 for key in (projection_weight, projection_bias):
                     if key not in keys:
                         issues.append(f"{path.name}: missing tensor {key!r}")
                 if projection_weight in keys:
-                    shape = list(tensors.get_slice(projection_weight).get_shape())
-                    if len(shape) != 2 or shape[-1] != contract.tactile_embedding_dim:
+                    weight_shape = list(tensors.get_slice(projection_weight).get_shape())
+                    expected_weight_shape = (
+                        [hidden_size, contract.tactile_embedding_dim] if hidden_size is not None else None
+                    )
+                    if expected_weight_shape is not None and weight_shape != expected_weight_shape:
+                        issues.append(
+                            f"{path.name}: tensor {projection_weight!r} expected shape "
+                            f"{expected_weight_shape}, got {weight_shape}"
+                        )
+                    elif expected_weight_shape is None and (
+                        len(weight_shape) != 2 or weight_shape[-1] != contract.tactile_embedding_dim
+                    ):
                         issues.append(
                             f"{path.name}: tensor {projection_weight!r} expected input dimension "
-                            f"{contract.tactile_embedding_dim}, got shape {shape}"
+                            f"{contract.tactile_embedding_dim}, got shape {weight_shape}"
                         )
-                if projection_weight in keys and projection_bias in keys:
-                    weight_shape = list(tensors.get_slice(projection_weight).get_shape())
+                if projection_bias in keys:
                     bias_shape = list(tensors.get_slice(projection_bias).get_shape())
-                    if len(weight_shape) == 2 and bias_shape != [weight_shape[0]]:
+                    if hidden_size is not None and bias_shape != [hidden_size]:
                         issues.append(
-                            f"{path.name}: tactile projection bias shape {bias_shape} does not match "
-                            f"weight output dimension {weight_shape[0]}"
+                            f"{path.name}: tensor {projection_bias!r} expected shape "
+                            f"[{hidden_size}], got {bias_shape}"
                         )
 
             if contract.vlm_lora_target_modules:
-                layer_indices = sorted(
-                    {int(match.group(1)) for key in keys if (match := _VLM_LAYER_RE.match(key)) is not None}
-                )
-                if not layer_indices:
+                actual_layers = {
+                    int(match.group(1)) for key in keys if (match := _VLM_LAYER_RE.match(key)) is not None
+                }
+                num_layers = config.num_vlm_layers if config is not None else None
+                if num_layers is None or num_layers <= 0:
+                    issues.append(
+                        f"{path.name}: cannot validate VLM layers without positive config num_vlm_layers"
+                    )
+                    layers_to_validate = sorted(actual_layers)
+                else:
+                    expected_layers = set(range(num_layers))
+                    missing_layers = sorted(expected_layers - actual_layers)
+                    unexpected_layers = sorted(actual_layers - expected_layers)
+                    if missing_layers:
+                        issues.append(f"{path.name}: missing VLM text layers: {missing_layers}")
+                    if unexpected_layers:
+                        issues.append(f"{path.name}: unexpected VLM text layers: {unexpected_layers}")
+                    layers_to_validate = range(num_layers)
+
+                for layer_index in layers_to_validate:
                     for target in contract.vlm_lora_target_modules:
-                        issues.append(f"{path.name}: missing {target} LoRA tensors; no VLM text layers found")
-                for layer_index in layer_indices:
-                    for target in contract.vlm_lora_target_modules:
-                        prefix = (
-                            "model.vlm_with_expert.vlm.model.text_model.layers."
-                            f"{layer_index}.self_attn.{target}"
-                        )
-                        adapter_keys = tuple(
-                            f"{prefix}.{suffix}" for suffix in ("lora_a", "lora_b", "lora_scale")
-                        )
-                        missing = [key.rsplit(".", 1)[-1] for key in adapter_keys if key not in keys]
-                        if missing:
-                            issues.append(
-                                f"{path.name}: missing {target} LoRA tensors for VLM layer "
-                                f"{layer_index}: {missing}"
-                            )
+                        if target not in _VLM_LORA_TARGETS:
                             continue
-                        a_shape = list(tensors.get_slice(adapter_keys[0]).get_shape())
-                        b_shape = list(tensors.get_slice(adapter_keys[1]).get_shape())
-                        if not a_shape or a_shape[0] != contract.lora_rank:
-                            actual = a_shape[0] if a_shape else a_shape
-                            issues.append(
-                                f"{path.name}: {target} LoRA rank expected {contract.lora_rank}, "
-                                f"got {actual} from {adapter_keys[0]!r}"
-                            )
-                        if not b_shape or b_shape[-1] != contract.lora_rank:
-                            actual = b_shape[-1] if b_shape else b_shape
-                            issues.append(
-                                f"{path.name}: {target} LoRA rank expected {contract.lora_rank}, "
-                                f"got {actual} from {adapter_keys[1]!r}"
-                            )
+                        _validate_lora_target(
+                            tensors,
+                            keys,
+                            path=path,
+                            layer_index=layer_index,
+                            target=target,
+                            rank=contract.lora_rank,
+                            hidden_size=hidden_size,
+                            issues=issues,
+                        )
     except (OSError, SafetensorError, ValueError) as exc:
         issues.append(f"could not inspect {path.name}: {exc}")
 
@@ -566,7 +716,7 @@ def validate_checkpoint(
     )
     model_path = checkpoint / "model.safetensors"
     if model_path.is_file():
-        _validate_model(model_path, target, issues)
+        _validate_model(model_path, target, config, issues)
 
     if base_sidecars is not None:
         _check_base_sidecars(

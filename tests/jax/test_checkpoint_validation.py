@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pytest
+from safetensors import safe_open
 from safetensors.numpy import save_file as save_safetensors_file
 
 pytest.importorskip("jax")
@@ -45,21 +47,54 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
-def _model_tensors(*, tactile: bool = True, lora_targets: tuple[str, ...] = ("q_proj", "v_proj")):
-    tensors: dict[str, np.ndarray] = {"model.state_proj.weight": np.zeros((2, 2), dtype=np.float32)}
+def _target_prefix(layer: int, target: str) -> str:
+    block = "self_attn" if target in {"q_proj", "k_proj", "v_proj", "o_proj"} else "mlp"
+    return f"model.vlm_with_expert.vlm.model.text_model.layers.{layer}.{block}.{target}"
+
+
+def _target_weight_shape(target: str, hidden_size: int) -> tuple[int, int]:
+    if target in {"q_proj", "o_proj"}:
+        return hidden_size, hidden_size
+    if target in {"k_proj", "v_proj"}:
+        return hidden_size // 2, hidden_size
+    if target in {"gate_proj", "up_proj"}:
+        return hidden_size * 2, hidden_size
+    if target == "down_proj":
+        return hidden_size, hidden_size * 2
+    raise ValueError(f"unsupported target: {target}")
+
+
+def _model_tensors(
+    *,
+    contract: CheckpointContract = VT_CONTRACT,
+    tactile: bool = True,
+    num_layers: int = 2,
+    hidden_size: int = 8,
+) -> dict[str, np.ndarray]:
+    tensors: dict[str, np.ndarray] = {
+        "model.state_proj.weight": np.zeros((2, 2), dtype=np.float32),
+        "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight": np.zeros(
+            (32, hidden_size), dtype=np.float32
+        ),
+    }
     if tactile:
         tensors.update(
             {
-                "model.tactile_encoder.conv.weight": np.zeros((1,), dtype=np.float32),
-                "model.tactile_proj.weight": np.zeros((2, 512), dtype=np.float32),
-                "model.tactile_proj.bias": np.zeros((2,), dtype=np.float32),
+                "model.tactile_encoder.params/conv_init/kernel": np.zeros((1,), dtype=np.float32),
+                "model.tactile_proj.weight": np.zeros(
+                    (hidden_size, contract.tactile_embedding_dim), dtype=np.float32
+                ),
+                "model.tactile_proj.bias": np.zeros((hidden_size,), dtype=np.float32),
             }
         )
-    for target in lora_targets:
-        prefix = f"model.vlm_with_expert.vlm.model.text_model.layers.0.self_attn.{target}"
-        tensors[f"{prefix}.lora_a"] = np.zeros((16, 2), dtype=np.float32)
-        tensors[f"{prefix}.lora_b"] = np.zeros((2, 16), dtype=np.float32)
-        tensors[f"{prefix}.lora_scale"] = np.asarray(1.0, dtype=np.float32)
+    for layer in range(num_layers):
+        for target in contract.vlm_lora_target_modules:
+            prefix = _target_prefix(layer, target)
+            out_features, in_features = _target_weight_shape(target, hidden_size)
+            tensors[f"{prefix}.weight"] = np.zeros((out_features, in_features), dtype=np.float32)
+            tensors[f"{prefix}.lora_a"] = np.zeros((contract.lora_rank, in_features), dtype=np.float32)
+            tensors[f"{prefix}.lora_b"] = np.zeros((out_features, contract.lora_rank), dtype=np.float32)
+            tensors[f"{prefix}.lora_scale"] = np.asarray(1.0, dtype=np.float32)
     return tensors
 
 
@@ -74,6 +109,7 @@ def _write_bundle(path: Path, contract: CheckpointContract, *, include_weight: b
         path / "config.json",
         {
             "chunk_size": contract.chunk_size,
+            "num_vlm_layers": 2,
             "input_features": input_features,
             "output_features": {"action": {"type": "ACTION", "shape": [contract.action_dim]}},
             "use_tactile_encoder": use_tactile,
@@ -143,7 +179,7 @@ def _write_bundle(path: Path, contract: CheckpointContract, *, include_weight: b
     )
     if include_weight:
         save_safetensors_file(
-            _model_tensors(tactile=use_tactile, lora_targets=contract.vlm_lora_target_modules),
+            _model_tensors(contract=contract, tactile=use_tactile),
             path / "model.safetensors",
         )
     return path
@@ -219,6 +255,18 @@ def test_processor_feature_specs_must_agree_with_config(vt_bundle: Path) -> None
     assert "unnormalizer action shape" in errors
 
 
+def test_processor_state_files_must_point_to_canonical_assets(vt_bundle: Path) -> None:
+    pre_path = vt_bundle / "policy_preprocessor.json"
+    pre = json.loads(pre_path.read_text(encoding="utf-8"))
+    pre["steps"][0]["state_file"] = "wrong-normalizer.safetensors"
+    _write_json(pre_path, pre)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("normalizer_processor state_file" in issue for issue in report.issues)
+    assert any("wrong-normalizer.safetensors" in issue for issue in report.issues)
+
+
 def test_missing_and_wrong_dimensional_stats_are_rejected(vt_bundle: Path) -> None:
     save_safetensors_file(
         {
@@ -255,17 +303,119 @@ def test_missing_tactile_tensors_are_rejected(vt_bundle: Path) -> None:
     assert "model.tactile_proj.bias" in errors
 
 
-def test_configured_lora_targets_and_rank_are_checked(vt_bundle: Path) -> None:
-    tensors = _model_tensors(lora_targets=("q_proj",))
-    q_prefix = "model.vlm_with_expert.vlm.model.text_model.layers.0.self_attn.q_proj"
-    tensors[f"{q_prefix}.lora_a"] = np.zeros((8, 2), dtype=np.float32)
+def test_fake_tactile_encoder_prefix_is_rejected(vt_bundle: Path) -> None:
+    tensors = _model_tensors()
+    tensors.pop("model.tactile_encoder.params/conv_init/kernel")
+    tensors["model.tactile_encoder.conv.weight"] = np.zeros((1,), dtype=np.float32)
     save_safetensors_file(tensors, vt_bundle / "model.safetensors")
 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
-    errors = report.format_errors()
 
-    assert "q_proj LoRA rank expected 16, got 8" in errors
-    assert "v_proj LoRA tensors" in errors
+    assert any("tactile encoder tensors" in issue for issue in report.issues)
+
+
+def test_truncated_vlm_layers_are_rejected(vt_bundle: Path) -> None:
+    tensors = {key: value for key, value in _model_tensors().items() if ".text_model.layers.1." not in key}
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("missing VLM text layers: [1]" in issue for issue in report.issues)
+
+
+def test_model_hidden_size_must_match_config(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["text_hidden_size"] = 9
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("text_hidden_size expected 9, got 8" in issue for issue in report.issues)
+
+
+@pytest.mark.parametrize(
+    ("target", "block"),
+    (
+        ("q_proj", "self_attn"),
+        ("k_proj", "self_attn"),
+        ("v_proj", "self_attn"),
+        ("o_proj", "self_attn"),
+        ("gate_proj", "mlp"),
+        ("up_proj", "mlp"),
+        ("down_proj", "mlp"),
+    ),
+)
+def test_all_vlm_lora_targets_use_real_module_paths(
+    tmp_path: Path,
+    target: str,
+    block: str,
+) -> None:
+    contract = replace(VT_CONTRACT, vlm_lora_target_modules=(target,))
+    bundle = _write_bundle(tmp_path / target, contract)
+    expected_key = f"model.vlm_with_expert.vlm.model.text_model.layers.0.{block}.{target}.weight"
+    with safe_open(bundle / "model.safetensors", framework="numpy") as tensors:
+        assert expected_key in set(tensors.keys())
+
+    report = validate_checkpoint(bundle, expected=contract)
+
+    assert report.ok, report.format_errors()
+
+
+def test_missing_target_base_weight_is_rejected(vt_bundle: Path) -> None:
+    tensors = _model_tensors()
+    tensors.pop(f"{_target_prefix(0, 'q_proj')}.weight")
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("missing q_proj base weight for VLM layer 0" in issue for issue in report.issues)
+
+
+def test_target_base_weight_shape_must_match_model_hidden_size(vt_bundle: Path) -> None:
+    tensors = _model_tensors()
+    tensors[f"{_target_prefix(0, 'q_proj')}.weight"] = np.zeros((8, 7), dtype=np.float32)
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("q_proj base weight input dimension expected 8, got 7" in issue for issue in report.issues)
+
+
+@pytest.mark.parametrize(
+    ("component", "wrong_shape", "expected_message"),
+    (
+        ("lora_a", (16, 9), "lora_a expected shape [16, 8], got [16, 9]"),
+        ("lora_b", (9, 16), "lora_b expected shape [8, 16], got [9, 16]"),
+        ("lora_scale", (1,), "lora_scale expected scalar shape [], got [1]"),
+    ),
+)
+def test_lora_tensor_shapes_are_checked_against_base_weight(
+    vt_bundle: Path,
+    component: str,
+    wrong_shape: tuple[int, ...],
+    expected_message: str,
+) -> None:
+    tensors = _model_tensors()
+    tensors[f"{_target_prefix(0, 'q_proj')}.{component}"] = np.zeros(wrong_shape, dtype=np.float32)
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any(expected_message in issue for issue in report.issues)
+
+
+def test_tactile_projection_shape_uses_model_hidden_size(vt_bundle: Path) -> None:
+    tensors = _model_tensors()
+    tensors["model.tactile_proj.weight"] = np.zeros((7, 512), dtype=np.float32)
+    tensors["model.tactile_proj.bias"] = np.zeros((7,), dtype=np.float32)
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any(
+        "model.tactile_proj.weight' expected shape [8, 512], got [7, 512]" in issue for issue in report.issues
+    )
 
 
 def test_diagnostics_are_aggregated_and_require_valid_raises(vt_bundle: Path) -> None:
