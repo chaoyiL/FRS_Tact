@@ -41,6 +41,7 @@ SIDECAR_FILENAMES = (
     "policy_preprocessor_step_5_normalizer_processor.safetensors",
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
 )
+RUNTIME_TEXT_HIDDEN_SIZE = 960
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -68,13 +69,13 @@ def _model_tensors(
     *,
     contract: CheckpointContract = VT_CONTRACT,
     tactile: bool = True,
-    num_layers: int = 2,
-    hidden_size: int = 8,
+    num_layers: int = 1,
+    hidden_size: int = RUNTIME_TEXT_HIDDEN_SIZE,
 ) -> dict[str, np.ndarray]:
     tensors: dict[str, np.ndarray] = {
         "model.state_proj.weight": np.zeros((2, 2), dtype=np.float32),
         "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight": np.zeros(
-            (32, hidden_size), dtype=np.float32
+            (32, hidden_size), dtype=np.float16
         ),
     }
     if tactile:
@@ -82,18 +83,18 @@ def _model_tensors(
             {
                 "model.tactile_encoder.params/conv_init/kernel": np.zeros((1,), dtype=np.float32),
                 "model.tactile_proj.weight": np.zeros(
-                    (hidden_size, contract.tactile_embedding_dim), dtype=np.float32
+                    (hidden_size, contract.tactile_embedding_dim), dtype=np.float16
                 ),
-                "model.tactile_proj.bias": np.zeros((hidden_size,), dtype=np.float32),
+                "model.tactile_proj.bias": np.zeros((hidden_size,), dtype=np.float16),
             }
         )
     for layer in range(num_layers):
         for target in contract.vlm_lora_target_modules:
             prefix = _target_prefix(layer, target)
             out_features, in_features = _target_weight_shape(target, hidden_size)
-            tensors[f"{prefix}.weight"] = np.zeros((out_features, in_features), dtype=np.float32)
-            tensors[f"{prefix}.lora_a"] = np.zeros((contract.lora_rank, in_features), dtype=np.float32)
-            tensors[f"{prefix}.lora_b"] = np.zeros((out_features, contract.lora_rank), dtype=np.float32)
+            tensors[f"{prefix}.weight"] = np.zeros((out_features, in_features), dtype=np.float16)
+            tensors[f"{prefix}.lora_a"] = np.zeros((contract.lora_rank, in_features), dtype=np.float16)
+            tensors[f"{prefix}.lora_b"] = np.zeros((out_features, contract.lora_rank), dtype=np.float16)
             tensors[f"{prefix}.lora_scale"] = np.asarray(1.0, dtype=np.float32)
     return tensors
 
@@ -109,7 +110,7 @@ def _write_bundle(path: Path, contract: CheckpointContract, *, include_weight: b
         path / "config.json",
         {
             "chunk_size": contract.chunk_size,
-            "num_vlm_layers": 2,
+            "num_vlm_layers": 1,
             "input_features": input_features,
             "output_features": {"action": {"type": "ACTION", "shape": [contract.action_dim]}},
             "use_tactile_encoder": use_tactile,
@@ -238,6 +239,49 @@ def test_wrong_config_dimensions_are_reported_together(vt_bundle: Path) -> None:
     assert "chunk_size" in errors and "expected 20, got 50" in errors
 
 
+def test_missing_chunk_size_is_rejected(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.pop("chunk_size")
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert not report.ok
+    assert report.issues.count("config chunk_size is missing") == 1
+
+
+@pytest.mark.parametrize(
+    ("feature_group", "feature_key", "expected_message"),
+    (
+        (
+            "input_features",
+            "observation.state",
+            "config input_features.observation.state is missing or is not an object",
+        ),
+        (
+            "output_features",
+            "action",
+            "config output_features.action is missing or is not an object",
+        ),
+    ),
+)
+def test_missing_state_and_action_dimensions_have_one_parse_diagnostic(
+    vt_bundle: Path,
+    feature_group: str,
+    feature_key: str,
+    expected_message: str,
+) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config[feature_group].pop(feature_key)
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert report.issues.count(expected_message) == 1
+
+
 def test_processor_feature_specs_must_agree_with_config(vt_bundle: Path) -> None:
     pre_path = vt_bundle / "policy_preprocessor.json"
     pre = json.loads(pre_path.read_text(encoding="utf-8"))
@@ -315,23 +359,25 @@ def test_fake_tactile_encoder_prefix_is_rejected(vt_bundle: Path) -> None:
 
 
 def test_truncated_vlm_layers_are_rejected(vt_bundle: Path) -> None:
-    tensors = {key: value for key, value in _model_tensors().items() if ".text_model.layers.1." not in key}
-    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["num_vlm_layers"] = 2
+    _write_json(config_path, config)
 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
 
     assert any("missing VLM text layers: [1]" in issue for issue in report.issues)
 
 
-def test_model_hidden_size_must_match_config(vt_bundle: Path) -> None:
-    config_path = vt_bundle / "config.json"
-    config = json.loads(config_path.read_text(encoding="utf-8"))
-    config["text_hidden_size"] = 9
-    _write_json(config_path, config)
+def test_self_consistent_1024_hidden_checkpoint_is_rejected(vt_bundle: Path) -> None:
+    save_safetensors_file(
+        _model_tensors(hidden_size=1024),
+        vt_bundle / "model.safetensors",
+    )
 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
 
-    assert any("text_hidden_size expected 9, got 8" in issue for issue in report.issues)
+    assert any("runtime text_hidden_size expected 960, got 1024" in issue for issue in report.issues)
 
 
 @pytest.mark.parametrize(
@@ -374,19 +420,19 @@ def test_missing_target_base_weight_is_rejected(vt_bundle: Path) -> None:
 
 def test_target_base_weight_shape_must_match_model_hidden_size(vt_bundle: Path) -> None:
     tensors = _model_tensors()
-    tensors[f"{_target_prefix(0, 'q_proj')}.weight"] = np.zeros((8, 7), dtype=np.float32)
+    tensors[f"{_target_prefix(0, 'q_proj')}.weight"] = np.zeros((960, 959), dtype=np.float16)
     save_safetensors_file(tensors, vt_bundle / "model.safetensors")
 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
 
-    assert any("q_proj base weight input dimension expected 8, got 7" in issue for issue in report.issues)
+    assert any("q_proj base weight input dimension expected 960, got 959" in issue for issue in report.issues)
 
 
 @pytest.mark.parametrize(
     ("component", "wrong_shape", "expected_message"),
     (
-        ("lora_a", (16, 9), "lora_a expected shape [16, 8], got [16, 9]"),
-        ("lora_b", (9, 16), "lora_b expected shape [8, 16], got [9, 16]"),
+        ("lora_a", (16, 961), "lora_a expected shape [16, 960], got [16, 961]"),
+        ("lora_b", (961, 16), "lora_b expected shape [960, 16], got [961, 16]"),
         ("lora_scale", (1,), "lora_scale expected scalar shape [], got [1]"),
     ),
 )
@@ -407,14 +453,15 @@ def test_lora_tensor_shapes_are_checked_against_base_weight(
 
 def test_tactile_projection_shape_uses_model_hidden_size(vt_bundle: Path) -> None:
     tensors = _model_tensors()
-    tensors["model.tactile_proj.weight"] = np.zeros((7, 512), dtype=np.float32)
-    tensors["model.tactile_proj.bias"] = np.zeros((7,), dtype=np.float32)
+    tensors["model.tactile_proj.weight"] = np.zeros((959, 512), dtype=np.float16)
+    tensors["model.tactile_proj.bias"] = np.zeros((959,), dtype=np.float16)
     save_safetensors_file(tensors, vt_bundle / "model.safetensors")
 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
 
     assert any(
-        "model.tactile_proj.weight' expected shape [8, 512], got [7, 512]" in issue for issue in report.issues
+        "model.tactile_proj.weight' expected shape [960, 512], got [959, 512]" in issue
+        for issue in report.issues
     )
 
 

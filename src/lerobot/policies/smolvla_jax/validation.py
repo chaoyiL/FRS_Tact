@@ -10,6 +10,8 @@ from typing import Any
 
 from safetensors import SafetensorError, safe_open
 
+from .configuration import JaxSmolVLAConfig
+
 _PREPROCESSOR_FILE = "policy_preprocessor.json"
 _POSTPROCESSOR_FILE = "policy_postprocessor.json"
 _PREPROCESSOR_STATS_FILE = "policy_preprocessor_step_5_normalizer_processor.safetensors"
@@ -31,6 +33,7 @@ _VLM_LAYER_RE = re.compile(r"^model\.vlm_with_expert\.vlm\.model\.text_model\.la
 _VLM_TEXT_PREFIX = "model.vlm_with_expert.vlm.model.text_model"
 _VLM_EMBED_TOKENS = f"{_VLM_TEXT_PREFIX}.embed_tokens.weight"
 _TACTILE_ENCODER_PARAMS_PREFIX = "model.tactile_encoder.params/"
+_RUNTIME_TEXT_HIDDEN_SIZE = int(JaxSmolVLAConfig.text_hidden_size)
 
 
 @dataclass(frozen=True)
@@ -79,7 +82,6 @@ class _ConfigView:
     lora_rank: int | None
     vlm_lora_target_modules: tuple[str, ...]
     num_vlm_layers: int | None
-    text_hidden_size: int | None
 
     def as_contract(self) -> CheckpointContract | None:
         required = (
@@ -189,10 +191,15 @@ def _parse_config(raw: Mapping[str, Any], issues: list[str]) -> _ConfigView:
     # The effective inference contract has no tactile tokens in that case.
     if not use_tactile:
         tactile_num_tokens = 0
+    if "chunk_size" not in raw or raw.get("chunk_size") is None:
+        issues.append("config chunk_size is missing")
+        chunk_size = None
+    else:
+        chunk_size = _integer(raw.get("chunk_size"), "chunk_size", issues)
     return _ConfigView(
         state_dim=state_dim,
         action_dim=action_dim,
-        chunk_size=_integer(raw.get("chunk_size"), "chunk_size", issues),
+        chunk_size=chunk_size,
         image_keys=image_keys,
         use_tactile_encoder=use_tactile,
         tactile_keys=tactile_keys,
@@ -206,7 +213,6 @@ def _parse_config(raw: Mapping[str, Any], issues: list[str]) -> _ConfigView:
         lora_rank=_integer(raw.get("lora_rank"), "lora_rank", issues, default=0),
         vlm_lora_target_modules=lora_targets,
         num_vlm_layers=_integer(raw.get("num_vlm_layers"), "num_vlm_layers", issues),
-        text_hidden_size=_integer(raw.get("text_hidden_size"), "text_hidden_size", issues),
     )
 
 
@@ -525,7 +531,7 @@ def _validate_model(
             needs_vlm_structure = bool(
                 contract.tactile_keys or contract.tactile_num_tokens or contract.vlm_lora_target_modules
             )
-            hidden_size = config.text_hidden_size if config is not None else None
+            hidden_size = _RUNTIME_TEXT_HIDDEN_SIZE
             if needs_vlm_structure:
                 if _VLM_EMBED_TOKENS not in keys:
                     issues.append(f"{path.name}: missing tensor {_VLM_EMBED_TOKENS!r}")
@@ -537,12 +543,11 @@ def _validate_model(
                         )
                     else:
                         model_hidden_size = embed_shape[1]
-                        if hidden_size is not None and model_hidden_size != hidden_size:
+                        if model_hidden_size != hidden_size:
                             issues.append(
-                                f"{path.name}: text_hidden_size expected {hidden_size}, got "
+                                f"{path.name}: runtime text_hidden_size expected {hidden_size}, got "
                                 f"{model_hidden_size} from {_VLM_EMBED_TOKENS!r}"
                             )
-                        hidden_size = model_hidden_size
 
             if contract.tactile_keys or contract.tactile_num_tokens:
                 if not any(key.startswith(_TACTILE_ENCODER_PARAMS_PREFIX) for key in keys):
