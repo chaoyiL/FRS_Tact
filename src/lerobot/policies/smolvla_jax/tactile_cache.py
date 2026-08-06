@@ -182,6 +182,14 @@ class TactileEmbeddingCache:
         # Copy only 4x512 values so default_collate receives writable storage.
         return np.array(self._array()[index], copy=True)
 
+    def get_many(self, frame_indices: Sequence[int] | np.ndarray) -> np.ndarray:
+        """Return copied embeddings for an arbitrary array of absolute frame indices."""
+
+        indices = np.asarray(frame_indices, dtype=np.int64)
+        if np.any(indices < 0) or np.any(indices >= len(self)):
+            raise IndexError("tactile embedding frame index out of range")
+        return np.array(self._array()[indices], copy=True)
+
     def __getstate__(self) -> dict[str, Any]:
         state = dict(self.__dict__)
         state["_embeddings"] = None

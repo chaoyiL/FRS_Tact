@@ -5,7 +5,7 @@
 
 # ---- 模型 ----
 # 本地 checkpoint 目录，或 Hugging Face model id
-checkpoint: /home/typhon/models/tactile_test_L32_4k
+checkpoint: /workspace/vtsmolvla_tactile_01/checkpoint-00040000
 revision: null
 # true 时允许下载缺失的 Hub 资源（tokenizer / checkpoint）
 allow_download: false
@@ -41,7 +41,7 @@ connection:
 
 # ---- 观测 / 任务（下发给 robot server）----
 observation:
-  data_type: vision
+  data_type: vitac
   language_prompt: Pick up the left tube firstly, and then pick up the right tube.
   # language_prompt: I know it's a tube, but I don't know which one is left or right. Please pick up the left tube firstly, and then pick up the right tube.
   # 当前 JAX 部署要求双臂 + 带 state 观测

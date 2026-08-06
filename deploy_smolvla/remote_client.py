@@ -23,6 +23,7 @@ from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
 from .bridge_client import RobotBridgeClient
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "deploy_smolvla_jax.yaml"
+SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
 
 
 class ObservationSaver:
@@ -172,8 +173,8 @@ def load_config(path: Path) -> dict[str, Any]:
     ):
         _required(control, key, "control")
 
-    if observation["data_type"] != "vision":
-        raise ValueError("The current SmolVLA deployment supports data_type='vision' only")
+    if observation["data_type"] not in SUPPORTED_DATA_TYPES:
+        raise ValueError("observation.data_type must be 'vision' or 'vitac'")
     if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
         raise ValueError("The current checkpoint contract requires bimanual state mode")
     if int(control["action_horizon"]) <= 0:
@@ -232,6 +233,14 @@ def _parse_rename_map(config: Mapping[str, Any]) -> dict[str, str] | None:
     if not rename_map:
         return None
     return {str(key): str(value) for key, value in rename_map.items()}
+
+
+def _validate_observation_mode(data_type: str, *, use_tactile_encoder: bool) -> None:
+    expected = "vitac" if use_tactile_encoder else "vision"
+    if data_type != expected:
+        raise ValueError(
+            f"Checkpoint requires observation.data_type={expected!r}, got {data_type!r}"
+        )
 
 
 def _robot_image_keys(policy: JaxSmolVLAPolicy, rename_map: Mapping[str, str] | None) -> tuple[str, ...]:
@@ -386,6 +395,10 @@ def run(
         local_files_only=not allow_download,
     )
     policy.reset()
+    _validate_observation_mode(
+        str(observation_config["data_type"]),
+        use_tactile_encoder=bool(policy.config.use_tactile_encoder),
+    )
 
     configured_horizon = int(control["action_horizon"])
     if policy.config.chunk_size != configured_horizon:

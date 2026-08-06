@@ -133,6 +133,63 @@ def test_train_step_and_exact_resume(tmp_path: Path) -> None:
     )
 
 
+def test_resume_restores_modality_dropout_rng(tmp_path: Path) -> None:
+    config, params, batch = tiny_setup()
+    dropout = {
+        "enable": True,
+        "every_n_steps": 1,
+        "prob": 1.0,
+        "drop_language": True,
+        "camera_indices": [0, 1],
+    }
+    batch = {
+        **batch,
+        "image_masks": jnp.ones((2, 2), dtype=jnp.bool_),
+        "language_masks": jnp.ones((2, 3), dtype=jnp.bool_),
+    }
+    trainer = JaxSmolVLATrainer(
+        TinyModel(config), params, seed=4, total_steps=10, modality_dropout=dropout
+    )
+    for _ in range(3):
+        trainer.step(batch)
+    checkpoint = trainer.save(tmp_path / "checkpoint")
+
+    resumed = JaxSmolVLATrainer(
+        TinyModel(config), params, seed=999, total_steps=10, modality_dropout=dropout
+    )
+    resumed.restore(checkpoint)
+
+    assert resumed._modality_dropout_rng.bit_generator.state == trainer._modality_dropout_rng.bit_generator.state
+
+
+def test_resume_rejects_changed_lora_rank(tmp_path: Path) -> None:
+    config, params, batch = tiny_setup()
+    modes = {
+        "vision": "frozen",
+        "connector": "frozen",
+        "vlm_text": "lora",
+        "expert": "frozen",
+        "action": "full",
+        "state_proj": "frozen",
+        "tactile_proj": "frozen",
+    }
+    config = dataclasses.replace(config, module_modes=modes, lora_rank=2, lora_alpha=2.0)
+    params = {
+        **params,
+        "model.vlm_with_expert.vlm.model.text_model.layers.0.self_attn.q_proj.weight": (
+            jnp.ones((4, 4), dtype=jnp.float32)
+        ),
+    }
+    trainer = JaxSmolVLATrainer(TinyModel(config), params, seed=4, total_steps=10)
+    trainer.step(batch)
+    checkpoint = trainer.save(tmp_path / "checkpoint")
+
+    changed = dataclasses.replace(config, lora_rank=4, lora_alpha=4.0)
+    resumed = JaxSmolVLATrainer(TinyModel(changed), params, seed=4, total_steps=10)
+    with np.testing.assert_raises_regex(ValueError, "lora_(rank|alpha)"):
+        resumed.restore(checkpoint)
+
+
 def test_data_parallel_batch_sharding_on_visible_devices() -> None:
     mesh = create_data_parallel_mesh()
     count = mesh.size

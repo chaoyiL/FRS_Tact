@@ -16,6 +16,7 @@ from lerobot.policies.smolvla_jax.data import (
     action_delta_timestamps,
     canonicalize_dataset_stats,
     ensure_stats_counts,
+    fixed_stratified_subset_indices,
     parse_dataset_sources,
     prepare_lerobot_batch,
     rename_dataset_stats,
@@ -296,6 +297,20 @@ def test_split_sources_train_val_uses_explicit_episodes(monkeypatch) -> None:
     assert set(train[0].episodes).isdisjoint(val[0].episodes)
     assert len(train[0].episodes) + len(val[0].episodes) == 10
     assert len(val[0].episodes) == 2
+
+
+def test_fixed_stratified_subset_is_reproducible_and_covers_every_dataset() -> None:
+    lengths = [1000, 100, 500, 200]
+    first = fixed_stratified_subset_indices(lengths, sample_count=64, seed=23)
+    second = fixed_stratified_subset_indices(lengths, sample_count=64, seed=23)
+    different = fixed_stratified_subset_indices(lengths, sample_count=64, seed=24)
+
+    assert first == second
+    assert first != different
+    assert len(first) == len(set(first)) == 64
+    offsets = np.cumsum([0, *lengths])
+    for start, stop in zip(offsets[:-1], offsets[1:], strict=True):
+        assert any(start <= index < stop for index in first)
 
 
 def test_rename_and_count_stats_for_aggregation() -> None:

@@ -129,6 +129,7 @@ def _configuration(
     dataset_revision: str | None,
     action_key: str | None,
     rename_map: Mapping[str, str] | None,
+    normalization_source: str,
     model_sample_steps: int,
     reverse_steps: int,
     reverse_solver: str,
@@ -148,6 +149,7 @@ def _configuration(
         "dataset_revision": dataset_revision,
         "action_key": action_key,
         "rename_map": dict(rename_map) if rename_map is not None else None,
+        "normalization_source": normalization_source,
         "model_sample_steps": model_sample_steps,
         "reverse_steps": reverse_steps,
         "reverse_solver": reverse_solver,
@@ -270,6 +272,7 @@ def prepare_cache(
     dataset_revision: str | None = None,
     action_key: str | None = None,
     rename_map: Mapping[str, str] | None = None,
+    normalization_source: str = "checkpoint",
     allow_download: bool = False,
     model_sample_steps: int,
     reverse_steps: int,
@@ -300,6 +303,7 @@ def prepare_cache(
         dataset_revision=dataset_revision,
         action_key=action_key,
         rename_map=rename_map,
+        normalization_source=normalization_source,
         local_files_only=not allow_download,
     )
     metadata = LeRobotDatasetMetadata(
@@ -325,6 +329,7 @@ def prepare_cache(
         dataset_revision=model.dataset_revision,
         action_key=model.action_key,
         rename_map=rename_map,
+        normalization_source=normalization_source,
         model_sample_steps=model_sample_steps,
         reverse_steps=reverse_steps,
         reverse_solver=reverse_solver,
@@ -490,6 +495,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_eval_data_arguments(parser, required=True)
+    # FRS must stay in the base policy's normalized action/state space across
+    # every source dataset.  Individual dataset stats would make four
+    # incompatible cache spaces.
+    parser.set_defaults(normalization_source="checkpoint")
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--model-sample-steps", type=int, default=10)
     parser.add_argument("--reverse-steps", type=int, default=50)
@@ -534,6 +543,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         dataset_revision=args.dataset_revision,
         action_key=args.action_key,
         rename_map=parse_rename_map(args.rename_map),
+        normalization_source=args.normalization_source,
         allow_download=args.allow_download,
         model_sample_steps=args.model_sample_steps,
         reverse_steps=args.reverse_steps,

@@ -131,6 +131,10 @@ modality_dropout:
 validation:
   enabled: true
   fraction: 0.1
+  # 与训练 seed 解耦；每次验证复用相同的 flow-matching 与 rollout 噪声。
+  seed: 20240805
+  # 只在首次创建 data_split.json 时使用，固定抽取覆盖所有数据集的验证帧。
+  sample_seed: 20240806
   rollout: true
   rollout_steps: null
   max_batches: 5

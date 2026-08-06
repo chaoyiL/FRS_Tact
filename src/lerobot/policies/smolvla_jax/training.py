@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,8 @@ from .sharding import create_data_parallel_mesh, replicate_tree, shard_batch
 
 Array = jax.Array
 Params = dict[str, Array]
+RESUME_METADATA_FILENAME = "resume_metadata.json"
+RESUME_METADATA_VERSION = 1
 
 
 @struct.dataclass
@@ -75,6 +78,53 @@ def cast_trainable_params_for_compute(params: Mapping[str, Array]) -> Params:
 
 def merge_params(trainable: Mapping[str, Array], frozen: Mapping[str, Array]) -> Params:
     return {**frozen, **trainable}
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _parameter_signature(params: Mapping[str, Array]) -> dict[str, dict[str, Any]]:
+    return {
+        name: {"shape": list(value.shape), "dtype": str(value.dtype)}
+        for name, value in sorted(params.items())
+    }
+
+
+def _dropout_signature(config: ModalityDropoutConfig) -> dict[str, Any]:
+    return {
+        "enable": config.enable,
+        "every_n_steps": config.every_n_steps,
+        "prob": config.prob,
+        "drop_language": config.drop_language,
+        "drop_state": config.drop_state,
+        "camera_indices": config.camera_indices,
+    }
+
+
+def _mapping_differences(saved: Any, current: Any, prefix: str = "") -> list[str]:
+    if isinstance(saved, Mapping) and isinstance(current, Mapping):
+        differences: list[str] = []
+        for key in sorted(set(saved) | set(current)):
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if key not in saved:
+                differences.append(f"{path}: missing from checkpoint")
+            elif key not in current:
+                differences.append(f"{path}: missing from current configuration")
+            else:
+                differences.extend(_mapping_differences(saved[key], current[key], path))
+        return differences
+    if saved != current:
+        return [f"{prefix}: checkpoint={saved!r}, current={current!r}"]
+    return []
 
 
 def cosine_warmup_schedule(config: JaxSmolVLAConfig, total_steps: int | None = None):
@@ -127,26 +177,28 @@ class JaxSmolVLATrainer:
     ):
         self.model = model
         self.config = model.config
+        self.seed = int(seed)
+        self.total_steps = None if total_steps is None else int(total_steps)
         if isinstance(modality_dropout, ModalityDropoutConfig):
             self.modality_dropout = modality_dropout
         else:
             self.modality_dropout = ModalityDropoutConfig.from_dict(modality_dropout)
-        self._modality_dropout_rng = np.random.default_rng(seed + 17)
+        self._modality_dropout_rng = np.random.default_rng(self.seed + 17)
         self._host_step = 0
         self.last_dropout_info: dict[str, Any] = {
             "applied": False,
             "modality": "none",
             "camera_index": -1,
         }
-        params = initialize_lora_params(params, self.config, seed=seed)
+        params = initialize_lora_params(params, self.config, seed=self.seed)
         params = promote_trainable_params_to_fp32(params, self.config)
         trainable, self.frozen_params = partition_params(params, self.config)
-        self.optimizer, self.learning_rate = create_optimizer(self.config, total_steps)
+        self.optimizer, self.learning_rate = create_optimizer(self.config, self.total_steps)
         self.state = TrainState(
             step=jnp.asarray(0, dtype=jnp.int32),
             params=trainable,
             opt_state=self.optimizer.init(trainable),
-            rng=jax.random.key(seed),
+            rng=jax.random.key(self.seed),
         )
         self._compiled_step = jax.jit(self._train_step, donate_argnums=(0,))
         self.mesh = None
@@ -335,6 +387,84 @@ class JaxSmolVLATrainer:
             self.frozen_params,
         )
 
+    def _resume_signature(self) -> dict[str, Any]:
+        return _jsonable(
+            {
+                "total_steps": self.total_steps,
+                "model": self.config.to_dict(),
+                "modality_dropout": _dropout_signature(self.modality_dropout),
+            }
+        )
+
+    def _validate_resume_compatibility(
+        self,
+        checkpoint: Path,
+        trainable: Mapping[str, Array],
+    ) -> dict[str, Any] | None:
+        trainable_keys_file = checkpoint / "trainable_keys.json"
+        if not trainable_keys_file.is_file():
+            raise FileNotFoundError(
+                f"resume checkpoint is missing trainable key manifest: {trainable_keys_file}"
+            )
+        with trainable_keys_file.open(encoding="utf-8") as file:
+            saved_keys = set(json.load(file))
+        current_keys = set(trainable)
+        if saved_keys != current_keys:
+            added = sorted(current_keys - saved_keys)
+            removed = sorted(saved_keys - current_keys)
+            raise ValueError(
+                "resume trainable parameter set does not match the checkpoint; "
+                f"newly trainable={added[:8]} no longer trainable={removed[:8]}. "
+                "Keep module_modes and LoRA targets unchanged for strict resume."
+            )
+
+        metadata_path = checkpoint / RESUME_METADATA_FILENAME
+        if metadata_path.is_file():
+            with metadata_path.open(encoding="utf-8") as file:
+                metadata = json.load(file)
+            if int(metadata.get("version", -1)) != RESUME_METADATA_VERSION:
+                raise ValueError(f"unsupported resume metadata version in {metadata_path}")
+            differences = _mapping_differences(
+                metadata.get("resume_signature"),
+                self._resume_signature(),
+            )
+            saved_parameters = metadata.get("trainable_parameters")
+            differences.extend(
+                _mapping_differences(saved_parameters, _parameter_signature(trainable), "trainable")
+            )
+            if differences:
+                preview = "\n  ".join(differences[:20])
+                raise ValueError(
+                    "resume configuration is incompatible with the checkpoint:\n  " + preview
+                )
+            return metadata
+
+        # Checkpoints produced before resume_metadata.json still contain the
+        # effective LoRA configuration in config.json.
+        config_path = checkpoint / "config.json"
+        if config_path.is_file():
+            with config_path.open(encoding="utf-8") as file:
+                saved_config = json.load(file)
+            legacy_saved = {
+                "module_modes": saved_config.get("module_modes"),
+                "lora_rank": saved_config.get("lora_rank"),
+                "lora_alpha": saved_config.get("lora_alpha"),
+                "vlm_lora_target_modules": saved_config.get("vlm_lora_target_modules", []),
+            }
+            legacy_current = {
+                "module_modes": self.config.module_modes,
+                "lora_rank": self.config.lora_rank,
+                "lora_alpha": self.config.lora_alpha,
+                "vlm_lora_target_modules": list(self.config.vlm_lora_target_modules),
+            }
+            differences = _mapping_differences(legacy_saved, _jsonable(legacy_current))
+            if differences:
+                raise ValueError(
+                    "resume LoRA configuration is incompatible with the checkpoint:\n  "
+                    + "\n  ".join(differences)
+                )
+        return None
+
     def save(self, destination: str | Path, *, source_dir: str | Path | None = None) -> Path:
         destination = save_portable_params(
             self.full_params,
@@ -352,14 +482,28 @@ class JaxSmolVLATrainer:
         with (destination / "trainable_keys.json").open("w") as file:
             json.dump(sorted(self.state.params), file, indent=2)
             file.write("\n")
+        resume_metadata = {
+            "version": RESUME_METADATA_VERSION,
+            "resume_signature": self._resume_signature(),
+            "trainable_parameters": _parameter_signature(self.state.params),
+            "modality_dropout_rng_state": _jsonable(
+                self._modality_dropout_rng.bit_generator.state
+            ),
+        }
+        with (destination / RESUME_METADATA_FILENAME).open("w", encoding="utf-8") as file:
+            json.dump(resume_metadata, file, indent=2, sort_keys=True)
+            file.write("\n")
         return destination
 
     def restore(self, checkpoint: str | Path) -> None:
         checkpoint = Path(checkpoint)
-        params = initialize_tactile_fusion_params(load_params(checkpoint), self.config)
-        params = initialize_lora_params(params, self.config)
+        params = initialize_tactile_fusion_params(
+            load_params(checkpoint), self.config, seed=self.seed
+        )
+        params = initialize_lora_params(params, self.config, seed=self.seed)
         params = promote_trainable_params_to_fp32(params, self.config)
         trainable, frozen = partition_params(params, self.config)
+        resume_metadata = self._validate_resume_compatibility(checkpoint, trainable)
         target = {
             "step": self.state.step,
             "opt_state": self.optimizer.init(trainable),
@@ -377,3 +521,14 @@ class JaxSmolVLATrainer:
             rng=jax.random.wrap_key_data(restored["rng_data"]),
         )
         self._host_step = int(np.asarray(jax.device_get(restored["step"])))
+        if resume_metadata is not None:
+            dropout_rng_state = resume_metadata.get("modality_dropout_rng_state")
+            if dropout_rng_state is None:
+                raise ValueError("resume metadata is missing modality_dropout_rng_state")
+            self._modality_dropout_rng.bit_generator.state = dropout_rng_state
+        elif self.modality_dropout.enable:
+            warnings.warn(
+                "legacy checkpoint has no modality-dropout RNG state; "
+                "the dropout sequence cannot resume exactly",
+                stacklevel=2,
+            )

@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import argparse
 import pathlib
-from collections.abc import Sequence
-from typing import Literal
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal
 
 LossMode = Literal["gt", "predicted", "gated"]
 
@@ -30,7 +30,7 @@ def _resolve_resume_dir(
 
 def train_decoder(
     *,
-    cache_dir: pathlib.Path,
+    cache_dir: pathlib.Path | None,
     tactile_encoder_dir: pathlib.Path,
     output_dir: pathlib.Path,
     dataset_repo_id: str | None,
@@ -68,6 +68,12 @@ def train_decoder(
     encode_batch_size: int,
     resume: bool = False,
     resume_from: pathlib.Path | None = None,
+    cache_dirs: Sequence[pathlib.Path] | None = None,
+    dataset_sources: Sequence[Mapping[str, Any]] | None = None,
+    tactile_embedding_cache_root: pathlib.Path | None = None,
+    tactile_keys: Sequence[str] | None = None,
+    tactile_embedding_dim: int = 512,
+    tactile_image_size: int = 224,
 ) -> None:
     import csv
     import json
@@ -77,23 +83,30 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
-    from tactile_flow_steering.utils.checkpoint import CHECKPOINT_NAME
-    from tactile_flow_steering.utils.checkpoint import load_checkpoint
-    from tactile_flow_steering.utils.checkpoint import load_optimizer_state
-    from tactile_flow_steering.utils.checkpoint import restore_optimizer_state
-    from tactile_flow_steering.utils.checkpoint import save_checkpoint
-    from tactile_flow_steering.utils.data import TactileConditionedBatches
-    from tactile_flow_steering.utils.data import gate_weights_from_change
-    from tactile_flow_steering.utils.data import resolve_tactile_window
-    from tactile_flow_steering.utils.metrics import evaluate_split
-    from tactile_flow_steering.utils.model import DEFAULT_GRU_HIDDEN_DIM
-    from tactile_flow_steering.utils.model import DecoderConfig
-    from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-    from tactile_flow_steering.utils.model import make_optimizer
-    from tactile_flow_steering.utils.model import resolve_peak_learning_rate
-    from tactile_flow_steering.utils.model import train_step
+    from tactile_flow_steering.utils.checkpoint import (
+        CHECKPOINT_NAME,
+        load_checkpoint,
+        load_optimizer_state,
+        restore_optimizer_state,
+        save_checkpoint,
+    )
+    from tactile_flow_steering.utils.data import (
+        CachedTactileEmbeddingBatches,
+        TactileConditionedBatches,
+        gate_weights_from_change,
+        resolve_tactile_window,
+    )
     from tactile_flow_steering.utils.history_plot import plot_training_history
-    from utils.cache import CachedPairs
+    from tactile_flow_steering.utils.metrics import evaluate_split
+    from tactile_flow_steering.utils.model import (
+        DEFAULT_GRU_HIDDEN_DIM,
+        DecoderConfig,
+        TactileConditionedFlowDecoder,
+        make_optimizer,
+        resolve_peak_learning_rate,
+        train_step,
+    )
+    from utils.cache import CachedPairs, MultiCachedPairs
 
     history_fields = [
         "epoch",
@@ -120,7 +133,7 @@ def train_decoder(
     ]
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
-        row: dict[str, float | int | str] = {field: "" for field in history_fields}
+        row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
         row["epoch"] = epoch
         row.update(filled)
         return row
@@ -172,27 +185,59 @@ def train_decoder(
             flush=True,
         )
 
-    pairs = CachedPairs(cache_dir)
+    use_cached_embeddings = cache_dirs is not None
+    if use_cached_embeddings:
+        if not cache_dirs:
+            raise ValueError("cache_dirs must be non-empty when provided")
+        if dataset_sources is None or len(dataset_sources) != len(cache_dirs):
+            raise ValueError("dataset_sources must have one entry per cache_dirs entry")
+        if tactile_embedding_cache_root is None:
+            raise ValueError("tactile_embedding_cache_root is required for multi-source FRS")
+        if not tactile_keys:
+            raise ValueError("tactile_keys is required for multi-source FRS")
+        source_names = [str(source["repo_id"]) for source in dataset_sources]
+        pairs = MultiCachedPairs(cache_dirs, source_names=source_names)
+    else:
+        if cache_dir is None:
+            raise ValueError("cache_dir is required when cache_dirs is not provided")
+        pairs = CachedPairs(cache_dir)
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
         window_divisor=tactile_window_divisor,
     )
-    conditioner = TactileConditionedBatches(
-        pairs,
-        tactile_encoder_dir=tactile_encoder_dir,
-        tactile_window=tactile_window,
-        dataset_repo_id=dataset_repo_id,
-        dataset_root=dataset_root,
-        history_stride=history_stride,
-        build_episode_baselines=(loss_mode == "gated"),
-        num_workers=num_workers,
-        prefetch_batches=prefetch_batches,
-        load_threads=load_threads,
-        pipeline_prefetch=pipeline_prefetch,
-        image_cache_size=image_cache_size,
-        encode_batch_size=encode_batch_size,
-    )
+    if use_cached_embeddings:
+        assert dataset_sources is not None
+        assert tactile_embedding_cache_root is not None
+        assert tactile_keys is not None
+        conditioner = CachedTactileEmbeddingBatches(
+            pairs,
+            sources=dataset_sources,
+            tactile_cache_root=tactile_embedding_cache_root,
+            tactile_encoder_dir=tactile_encoder_dir,
+            tactile_keys=tactile_keys,
+            tactile_window=tactile_window,
+            history_stride=history_stride,
+            embedding_dim=tactile_embedding_dim,
+            image_size=tactile_image_size,
+            build_episode_baselines=(loss_mode == "gated"),
+        )
+    else:
+        conditioner = TactileConditionedBatches(
+            pairs,
+            tactile_encoder_dir=tactile_encoder_dir,
+            tactile_window=tactile_window,
+            dataset_repo_id=dataset_repo_id,
+            dataset_root=dataset_root,
+            history_stride=history_stride,
+            build_episode_baselines=(loss_mode == "gated"),
+            num_workers=num_workers,
+            prefetch_batches=prefetch_batches,
+            load_threads=load_threads,
+            pipeline_prefetch=pipeline_prefetch,
+            image_cache_size=image_cache_size,
+            encode_batch_size=encode_batch_size,
+        )
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
         action_horizon=action_horizon,
@@ -254,12 +299,19 @@ def train_decoder(
         f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
         f"(frozen ResNet + trainable shared GRU)"
     )
-    print(
-        f"dataloader=num_workers={num_workers} prefetch_batches={prefetch_batches} "
-        f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
-        f"image_cache_size={image_cache_size} encode_batch_size={encode_batch_size} "
-        f"eval_every={eval_every} start_epoch={start_epoch} epochs={epochs}"
-    )
+    if use_cached_embeddings:
+        print(
+            f"dataloader=precomputed_tactile_embeddings sources={len(dataset_sources or ())} "
+            f"cache_root={tactile_embedding_cache_root} "
+            f"eval_every={eval_every} start_epoch={start_epoch} epochs={epochs}"
+        )
+    else:
+        print(
+            f"dataloader=num_workers={num_workers} prefetch_batches={prefetch_batches} "
+            f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
+            f"image_cache_size={image_cache_size} encode_batch_size={encode_batch_size} "
+            f"eval_every={eval_every} start_epoch={start_epoch} epochs={epochs}"
+        )
     if aux_decode_weight < 0:
         raise ValueError(f"aux_decode_weight must be >= 0, got {aux_decode_weight}.")
     if aux_decode_steps <= 0:

@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +25,7 @@ from lerobot.policies.smolvla_jax.checkpoint import (
 )
 from lerobot.datasets.transforms import build_image_transforms
 from lerobot.policies.smolvla_jax.data import (
+    DatasetSource,
     LeRobotJaxDataLoader,
     parse_dataset_sources,
     split_sources_train_val,
@@ -30,6 +34,8 @@ from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
+DATA_SPLIT_FILENAME = "data_split.json"
+DATA_SPLIT_VERSION = 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,7 +111,113 @@ def apply_model_overrides(config: JaxSmolVLAConfig, overrides: dict[str, Any] | 
     return config.with_overrides(overrides)
 
 
-def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, model: JaxSmolVLAConfig):
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+        file.write("\n")
+    temporary.replace(path)
+
+
+def _split_manifest(
+    sources: list[DatasetSource],
+    train_sources: list[DatasetSource],
+    val_sources: list[DatasetSource],
+    *,
+    val_fraction: float,
+    split_seed: int,
+    eval_seed: int,
+    sample_seed: int,
+) -> dict[str, Any]:
+    if len({source.repo_id for source in sources}) != len(sources):
+        raise ValueError("data split persistence requires unique dataset repo_id values")
+    train_by_repo = {source.repo_id: source for source in train_sources}
+    val_by_repo = {source.repo_id: source for source in val_sources}
+    datasets = []
+    for source in sources:
+        train = train_by_repo[source.repo_id]
+        val = val_by_repo.get(source.repo_id)
+        datasets.append(
+            {
+                "repo_id": source.repo_id,
+                "revision": source.revision,
+                "train_episodes": list(train.episodes or []),
+                "val_episodes": list(val.episodes or []) if val is not None else [],
+            }
+        )
+    return {
+        "version": DATA_SPLIT_VERSION,
+        "val_fraction": float(val_fraction),
+        "split_seed": int(split_seed),
+        "eval_seed": int(eval_seed),
+        "sample_seed": int(sample_seed),
+        "validation_sample_indices": [],
+        "datasets": datasets,
+    }
+
+
+def _sources_from_split_manifest(
+    sources: list[DatasetSource],
+    manifest: dict[str, Any],
+    *,
+    val_fraction: float,
+) -> tuple[list[DatasetSource], list[DatasetSource]]:
+    if int(manifest.get("version", -1)) != DATA_SPLIT_VERSION:
+        raise ValueError(f"unsupported data split version: {manifest.get('version')}")
+    saved_fraction = float(manifest.get("val_fraction", -1.0))
+    if not abs(saved_fraction - val_fraction) < 1e-12:
+        raise ValueError(
+            f"validation fraction changed since split creation: {saved_fraction} != {val_fraction}"
+        )
+    entries = manifest.get("datasets")
+    if not isinstance(entries, list) or len(entries) != len(sources):
+        raise ValueError("data split datasets do not match the configured dataset count")
+
+    train_sources: list[DatasetSource] = []
+    val_sources: list[DatasetSource] = []
+    for source, entry in zip(sources, entries, strict=True):
+        if not isinstance(entry, dict) or entry.get("repo_id") != source.repo_id:
+            raise ValueError(
+                f"data split dataset order mismatch: expected {source.repo_id!r}, "
+                f"got {entry.get('repo_id') if isinstance(entry, dict) else entry!r}"
+            )
+        if entry.get("revision") != source.revision:
+            raise ValueError(
+                f"data split revision mismatch for {source.repo_id}: "
+                f"{entry.get('revision')!r} != {source.revision!r}"
+            )
+        train_ids = [int(value) for value in entry.get("train_episodes", [])]
+        val_ids = [int(value) for value in entry.get("val_episodes", [])]
+        if not train_ids or set(train_ids) & set(val_ids):
+            raise ValueError(f"invalid persisted episode split for {source.repo_id}")
+        if source.episodes is not None and set(train_ids) | set(val_ids) != set(source.episodes):
+            raise ValueError(f"persisted split is incompatible with explicit episodes for {source.repo_id}")
+        train_sources.append(replace(source, episodes=train_ids))
+        if val_ids:
+            val_sources.append(replace(source, episodes=val_ids))
+    return train_sources, val_sources
+
+
+def _load_split_manifest(paths: list[Path]) -> tuple[dict[str, Any] | None, Path | None]:
+    for path in paths:
+        if path.is_file():
+            with path.open(encoding="utf-8") as file:
+                manifest = json.load(file)
+            if not isinstance(manifest, dict):
+                raise ValueError(f"data split manifest must be a mapping: {path}")
+            return manifest, path
+    return None, None
+
+
+def init_wandb(
+    cfg: dict[str, Any],
+    *,
+    config_path: Path,
+    checkpoint: Path,
+    model: JaxSmolVLAConfig,
+    data_split: dict[str, Any] | None,
+):
     wandb_cfg = cfg.get("wandb") or {}
     if not bool(wandb_cfg.get("enabled", False)):
         return None
@@ -131,6 +243,7 @@ def init_wandb(cfg: dict[str, Any], *, config_path: Path, checkpoint: Path, mode
             "seed": cfg.get("seed"),
             "data_parallel": cfg.get("data_parallel"),
             "validation": cfg.get("validation"),
+            "resolved_data_split": data_split,
             "image_transforms": cfg.get("image_transforms"),
             "tactile_embedding_cache": cfg.get("tactile_embedding_cache"),
             "modality_dropout": cfg.get("modality_dropout"),
@@ -157,7 +270,7 @@ def run_validation(
     rollout_steps = val_cfg.get("rollout_steps")
     metrics = trainer.evaluate(
         val_data.batches(),
-        seed=seed + step,
+        seed=seed,
         max_batches=None if max_batches in (None, 0) else int(max_batches),
         rollout=rollout,
         rollout_steps=None if rollout_steps in (None, 0) else int(rollout_steps),
@@ -166,7 +279,7 @@ def run_validation(
     print(
         f"val step={step} loss={metrics['loss']:.6f} "
         f"action_mse={metrics['action_mse']:.6f} "
-        f"eval_count={eval_count}"
+        f"samples={int(metrics['n_samples'])} eval_count={eval_count}"
     )
     if wandb_run is not None:
         import wandb
@@ -261,18 +374,51 @@ def main() -> None:
         trainer.enable_data_parallel()
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
+    output = Path(require(cfg, "output"))
+    output.mkdir(parents=True, exist_ok=True)
     sources = parse_dataset_sources(cfg)
     val_cfg = dict(cfg.get("validation") or {})
     val_enabled = bool(val_cfg.get("enabled", True))
     val_fraction = float(val_cfg.get("fraction", 0.1))
+    split_seed = int(val_cfg.get("split_seed", cfg.get("seed", 0)))
+    eval_seed = int(val_cfg.get("seed", 0))
+    sample_seed = int(val_cfg.get("sample_seed", eval_seed + 1))
     train_sources = sources
     val_sources = []
+    split_manifest = None
+    split_path = output / DATA_SPLIT_FILENAME
     if val_enabled:
-        train_sources, val_sources = split_sources_train_val(
-            sources,
-            val_fraction=val_fraction,
-            seed=int(cfg.get("seed", 0)),
-        )
+        split_candidates = []
+        if resume:
+            split_candidates.append(Path(resume) / DATA_SPLIT_FILENAME)
+        split_candidates.append(split_path)
+        split_manifest, loaded_split_path = _load_split_manifest(split_candidates)
+        if split_manifest is None:
+            train_sources, val_sources = split_sources_train_val(
+                sources,
+                val_fraction=val_fraction,
+                seed=split_seed,
+            )
+            split_manifest = _split_manifest(
+                sources,
+                train_sources,
+                val_sources,
+                val_fraction=val_fraction,
+                split_seed=split_seed,
+                eval_seed=eval_seed,
+                sample_seed=sample_seed,
+            )
+            print(f"created data split: {split_path}")
+        else:
+            train_sources, val_sources = _sources_from_split_manifest(
+                sources,
+                split_manifest,
+                val_fraction=val_fraction,
+            )
+            eval_seed = int(split_manifest.get("eval_seed", eval_seed))
+            sample_seed = int(split_manifest.get("sample_seed", sample_seed))
+            print(f"loaded data split: {loaded_split_path}")
+        _write_json(split_path, split_manifest)
         if not val_sources:
             print("warning: validation enabled but no held-out episodes; disabling val")
             val_enabled = False
@@ -334,6 +480,26 @@ def main() -> None:
 
     val_data = None
     if val_enabled:
+        max_batches = val_cfg.get("max_batches")
+        validation_protocol = {
+            "batch_size": int(common_loader_kwargs["batch_size"]),
+            "max_batches": None if max_batches in (None, 0) else int(max_batches),
+            "rollout": bool(val_cfg.get("rollout", True)),
+            "rollout_steps": val_cfg.get("rollout_steps"),
+        }
+        saved_protocol = split_manifest.get("validation_protocol")
+        if saved_protocol is not None and saved_protocol != validation_protocol:
+            raise ValueError(
+                "validation protocol changed since data_split.json was created: "
+                f"{saved_protocol} != {validation_protocol}"
+            )
+        split_manifest["validation_protocol"] = validation_protocol
+        fixed_subset_size = (
+            None
+            if max_batches in (None, 0)
+            else int(max_batches) * int(common_loader_kwargs["batch_size"])
+        )
+        persisted_indices = tuple(split_manifest.get("validation_sample_indices", []))
         # Validation must stay unaugmented for stable metrics.
         val_data = LeRobotJaxDataLoader(
             checkpoint,
@@ -344,8 +510,29 @@ def main() -> None:
             infinite=False,
             drop_last=True,
             image_transforms=None,
+            fixed_subset_size=fixed_subset_size if not persisted_indices else None,
+            fixed_subset_seed=sample_seed,
+            subset_indices=persisted_indices or None,
             **common_loader_kwargs,
         )
+        validation_dataset_frames = {
+            summary["repo_id"]: int(summary["frames"])
+            for summary in val_data.dataset_summaries
+        }
+        saved_dataset_frames = split_manifest.get("validation_dataset_frames")
+        if (
+            saved_dataset_frames is not None
+            and saved_dataset_frames != validation_dataset_frames
+        ):
+            raise ValueError(
+                "validation dataset frame counts changed since data_split.json was created: "
+                f"{saved_dataset_frames} != {validation_dataset_frames}"
+            )
+        split_manifest["validation_dataset_frames"] = validation_dataset_frames
+        split_manifest["validation_sample_indices"] = list(val_data.subset_indices)
+        split_manifest["eval_seed"] = eval_seed
+        split_manifest["sample_seed"] = sample_seed
+        _write_json(split_path, split_manifest)
         for summary in val_data.dataset_summaries:
             print(
                 f"val_dataset={summary['repo_id']} frames={summary['frames']} "
@@ -353,12 +540,11 @@ def main() -> None:
                 f"action_key={summary['action_key']!r} weight={summary['weight']}"
             )
         print(
-            f"val_frames={len(val_data.dataset)} fraction={val_fraction:g} "
+            f"val_frames={val_data.full_dataset_size} sampled_frames={len(val_data.dataset)} "
+            f"fraction={val_fraction:g} eval_seed={eval_seed} sample_seed={sample_seed} "
             f"rollout={bool(val_cfg.get('rollout', True))}"
         )
 
-    output = Path(require(cfg, "output"))
-    output.mkdir(parents=True, exist_ok=True)
     steps = int(require(cfg, "steps"))
     log_freq = int(cfg.get("log_freq", 10))
     save_freq = int(cfg.get("save_freq", 1000))
@@ -366,7 +552,13 @@ def main() -> None:
     if eval_freq <= 0:
         raise ValueError(f"eval_freq must be positive, got {eval_freq}")
     wandb_cfg = cfg.get("wandb") or {}
-    wandb_run = init_wandb(cfg, config_path=args.config, checkpoint=checkpoint, model=config)
+    wandb_run = init_wandb(
+        cfg,
+        config_path=args.config,
+        checkpoint=checkpoint,
+        model=config,
+        data_split=split_manifest,
+    )
     log_checkpoints = bool(wandb_cfg.get("log_checkpoints", False))
     eval_count = 0
 
@@ -422,7 +614,7 @@ def main() -> None:
                     val_data,
                     step=step,
                     eval_count=eval_count,
-                    seed=int(cfg.get("seed", 0)),
+                    seed=eval_seed,
                     val_cfg=val_cfg,
                     wandb_run=wandb_run,
                 )
@@ -430,6 +622,8 @@ def main() -> None:
                 path = output / f"checkpoint-{step:08d}"
                 trainer.save(path, source_dir=checkpoint)
                 data.preprocessor.save_normalization_assets(path)
+                if split_manifest is not None:
+                    shutil.copy2(split_path, path / DATA_SPLIT_FILENAME)
                 print(f"saved checkpoint: {path}")
                 if wandb_run is not None:
                     import wandb

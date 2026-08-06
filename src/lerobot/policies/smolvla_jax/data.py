@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler, default_collate
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, WeightedRandomSampler, default_collate
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
 
@@ -335,6 +335,51 @@ def split_sources_train_val(
     return train_sources, val_sources
 
 
+def fixed_stratified_subset_indices(
+    dataset_lengths: Sequence[int],
+    *,
+    sample_count: int,
+    seed: int,
+) -> tuple[int, ...]:
+    """Choose one fixed random subset while retaining coverage across datasets."""
+
+    lengths = np.asarray(dataset_lengths, dtype=np.int64)
+    if lengths.ndim != 1 or lengths.size == 0 or np.any(lengths <= 0):
+        raise ValueError(f"dataset_lengths must contain positive values, got {list(dataset_lengths)}")
+    total_frames = int(lengths.sum())
+    if sample_count <= 0:
+        raise ValueError(f"sample_count must be positive, got {sample_count}")
+    target = min(int(sample_count), total_frames)
+    if target == total_frames:
+        return tuple(range(total_frames))
+
+    ideal = target * lengths.astype(np.float64) / total_frames
+    quotas = np.floor(ideal).astype(np.int64)
+    if target >= lengths.size:
+        quotas = np.maximum(quotas, 1)
+    quotas = np.minimum(quotas, lengths)
+
+    while int(quotas.sum()) < target:
+        candidates = np.flatnonzero(quotas < lengths)
+        index = int(candidates[np.argmax(ideal[candidates] - quotas[candidates])])
+        quotas[index] += 1
+    while int(quotas.sum()) > target:
+        minimum = 1 if target >= lengths.size else 0
+        candidates = np.flatnonzero(quotas > minimum)
+        index = int(candidates[np.argmax(quotas[candidates] - ideal[candidates])])
+        quotas[index] -= 1
+
+    rng = np.random.default_rng(seed)
+    selected: list[int] = []
+    offset = 0
+    for length, quota in zip(lengths.tolist(), quotas.tolist(), strict=True):
+        local = rng.choice(length, size=quota, replace=False)
+        selected.extend(offset + int(index) for index in local)
+        offset += length
+    rng.shuffle(selected)
+    return tuple(selected)
+
+
 class LeRobotJaxDataLoader:
     """JAX batch stream backed by one or more LeRobot datasets."""
 
@@ -357,6 +402,9 @@ class LeRobotJaxDataLoader:
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
         tactile_embedding_cache_root: str | Path | None = None,
+        fixed_subset_size: int | None = None,
+        fixed_subset_seed: int = 0,
+        subset_indices: Sequence[int] | None = None,
     ):
         if batch_size <= 0:
             raise ValueError(f"batch size must be positive, got {batch_size}")
@@ -489,11 +537,39 @@ class LeRobotJaxDataLoader:
                 }
             )
 
-        self.dataset: Dataset
+        full_dataset: Dataset
         if len(mapped_datasets) == 1:
-            self.dataset = mapped_datasets[0]
+            full_dataset = mapped_datasets[0]
         else:
-            self.dataset = ConcatDataset(mapped_datasets)
+            full_dataset = ConcatDataset(mapped_datasets)
+        self.full_dataset_size = len(full_dataset)
+        if fixed_subset_size is not None and subset_indices is not None:
+            raise ValueError("pass either fixed_subset_size or subset_indices, not both")
+        if (fixed_subset_size is not None or subset_indices is not None) and self.shuffle:
+            raise ValueError("fixed validation subsets require shuffle=False")
+
+        if subset_indices is not None:
+            selected = tuple(int(index) for index in subset_indices)
+            if not selected:
+                raise ValueError("subset_indices cannot be empty")
+            if len(set(selected)) != len(selected):
+                raise ValueError("subset_indices must be unique")
+            if min(selected) < 0 or max(selected) >= self.full_dataset_size:
+                raise ValueError(
+                    f"subset index outside [0, {self.full_dataset_size}): "
+                    f"min={min(selected)} max={max(selected)}"
+                )
+        elif fixed_subset_size is not None:
+            selected = fixed_stratified_subset_indices(
+                [len(dataset) for dataset in mapped_datasets],
+                sample_count=int(fixed_subset_size),
+                seed=int(fixed_subset_seed),
+            )
+        else:
+            selected = ()
+
+        self.subset_indices = selected
+        self.dataset = Subset(full_dataset, list(selected)) if selected else full_dataset
         effective_batch_size = min(batch_size, len(self.dataset))
         if effective_batch_size <= 0:
             raise ValueError("dataset is empty")

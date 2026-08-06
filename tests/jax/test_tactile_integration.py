@@ -6,7 +6,12 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from deploy_smolvla.remote_client import _prepare_observation, _robot_image_keys, _robot_tactile_keys
+from deploy_smolvla.remote_client import (
+    _prepare_observation,
+    _robot_image_keys,
+    _robot_tactile_keys,
+    _validate_observation_mode,
+)
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA, normalize_tactile_embeddings
 
@@ -91,3 +96,13 @@ def test_remote_observation_keeps_and_requires_tactile_images() -> None:
             empty_cameras=0,
             required_image_keys=tactile_keys,
         )
+
+
+def test_remote_observation_mode_must_match_checkpoint() -> None:
+    _validate_observation_mode("vitac", use_tactile_encoder=True)
+    _validate_observation_mode("vision", use_tactile_encoder=False)
+
+    with pytest.raises(ValueError, match="requires observation.data_type='vitac'"):
+        _validate_observation_mode("vision", use_tactile_encoder=True)
+    with pytest.raises(ValueError, match="requires observation.data_type='vision'"):
+        _validate_observation_mode("vitac", use_tactile_encoder=False)
