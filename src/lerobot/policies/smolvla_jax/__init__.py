@@ -8,5 +8,13 @@ parameter tree round-trip between the reference and JAX implementations.
 from .configuration import JaxSmolVLAConfig
 from .modeling import JaxSmolVLA
 from .policy import JaxSmolVLAPolicy
+from .validation import CheckpointContract, CheckpointValidationReport, validate_checkpoint
 
-__all__ = ["JaxSmolVLA", "JaxSmolVLAConfig", "JaxSmolVLAPolicy"]
+__all__ = [
+    "CheckpointContract",
+    "CheckpointValidationReport",
+    "JaxSmolVLA",
+    "JaxSmolVLAConfig",
+    "JaxSmolVLAPolicy",
+    "validate_checkpoint",
+]
