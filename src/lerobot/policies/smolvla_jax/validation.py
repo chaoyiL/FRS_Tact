@@ -659,16 +659,10 @@ def _sidecar_contract_differs(
             effective.state_dim,
             effective.action_dim,
             effective.image_keys,
-            effective.tactile_keys,
-            effective.tactile_embedding_dim,
-            effective.tactile_num_tokens,
         ) != (
             base.state_dim,
             base.action_dim,
             base.image_keys,
-            base.tactile_keys,
-            base.tactile_embedding_dim,
-            base.tactile_num_tokens,
         )
     if filename in {_POSTPROCESSOR_FILE, _POSTPROCESSOR_STATS_FILE}:
         return effective.action_dim != base.action_dim
