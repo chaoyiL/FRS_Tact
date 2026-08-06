@@ -672,6 +672,7 @@ def test_legacy_metadata_fallback_matches_v21_converter_semantics(tmp_path: Path
     from lerobot.datasets import aggregate_stats
     from lerobot.datasets.io_utils import cast_stats_to_numpy
     from lerobot.datasets.utils import BackwardCompatibilityError
+    from lerobot.utils.constants import HF_LEROBOT_HUB_CACHE
 
     revision = "e" * 40
     dataset = tmp_path / "legacy-dataset"
@@ -770,6 +771,7 @@ def test_legacy_metadata_fallback_matches_v21_converter_semantics(tmp_path: Path
             "repo_type": "dataset",
             "revision": revision,
             "allow_patterns": ["meta/info.json", "meta/episodes_stats.jsonl"],
+            "cache_dir": HF_LEROBOT_HUB_CACHE,
         }
     ]
 

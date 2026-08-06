@@ -623,6 +623,8 @@ def _default_metadata_loader(
     try:
         metadata = metadata_class(repo_id, revision=revision, force_cache_sync=True)
     except BackwardCompatibilityError:
+        from lerobot.utils.constants import HF_LEROBOT_HUB_CACHE
+
         if snapshot_download_fn is None:
             from huggingface_hub import snapshot_download
 
@@ -633,6 +635,7 @@ def _default_metadata_loader(
                 repo_type="dataset",
                 revision=revision,
                 allow_patterns=list(_LEGACY_METADATA_ALLOW_PATTERNS),
+                cache_dir=HF_LEROBOT_HUB_CACHE,
             )
         )
         return _load_legacy_metadata_stats(snapshot)
