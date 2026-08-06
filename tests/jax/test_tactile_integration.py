@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from deploy_smolvla import remote_client
 from deploy_smolvla.remote_client import (
     _prepare_observation,
     _remaining_action_chunk,
@@ -16,6 +19,61 @@ from deploy_smolvla.remote_client import (
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA, normalize_tactile_embeddings
 from lerobot.policies.smolvla_jax.policy import JaxSmolVLAPolicy
+from lerobot.policies.smolvla_jax.validation import CheckpointValidationReport
+
+
+def _write_remote_config(
+    path: Path,
+    checkpoint: str,
+    *,
+    revision: str | None = None,
+    allow_download: bool = False,
+) -> Path:
+    config = {
+        "checkpoint": checkpoint,
+        "revision": revision,
+        "allow_download": allow_download,
+        "checkpoint_contract": {
+            "state_dim": 20,
+            "action_dim": 20,
+            "chunk_size": 20,
+            "image_keys": [
+                "observation.images.camera1",
+                "observation.images.camera2",
+            ],
+            "tactile_keys": [
+                "observation.images.tactile_left_0",
+                "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1",
+                "observation.images.tactile_right_1",
+            ],
+            "tactile_embedding_dim": 512,
+            "tactile_num_tokens": 4,
+            "lora_rank": 16,
+            "vlm_lora_target_modules": ["q_proj", "v_proj"],
+        },
+        "connection": {
+            "address": "127.0.0.1",
+            "port": 26421,
+            "action_ack_timeout_s": 1.0,
+            "require_token": False,
+        },
+        "observation": {
+            "data_type": "vitac",
+            "language_prompt": "test",
+            "single_arm_mode": False,
+            "no_state_obs_mode": False,
+        },
+        "control": {
+            "control_frequency": 30.0,
+            "controller_frequency": 80.0,
+            "steps_per_inference": 5,
+            "action_horizon": 20,
+        },
+        "runtime": {"warmup_runs": 1, "max_iterations": 0},
+    }
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
 
 
 def _tactile_policy():
@@ -28,6 +86,183 @@ def _tactile_policy():
         ),
     )
     return SimpleNamespace(config=config)
+
+
+def test_invalid_checkpoint_fails_before_policy_or_robot_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "invalid-checkpoint"
+    checkpoint.mkdir()
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", str(checkpoint))
+    calls: list[str] = []
+
+    def policy_loader(*args, **kwargs):
+        del args, kwargs
+        calls.append("policy")
+        pytest.fail("policy must not load before checkpoint validation")
+
+    def bridge_loader(*args, **kwargs):
+        del args, kwargs
+        calls.append("bridge")
+        pytest.fail("robot bridge must not be constructed before checkpoint validation")
+
+    monkeypatch.setattr(remote_client.JaxSmolVLAPolicy, "from_pretrained", policy_loader)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", bridge_loader)
+
+    with pytest.raises(ValueError, match="checkpoint validation failed"):
+        remote_client.run(config_path)
+
+    assert calls == []
+
+
+def test_checkpoint_revision_is_resolved_and_validated_before_robot_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    revision = "a" * 40
+    config_path = _write_remote_config(
+        tmp_path / "deploy.yaml",
+        "owner/vt-model",
+        revision=revision,
+        allow_download=True,
+    )
+    events: list[str] = []
+
+    def resolve_checkpoint(checkpoint, *, revision, local_files_only):
+        events.append("resolve")
+        assert checkpoint == "owner/vt-model"
+        assert revision == "a" * 40
+        assert local_files_only is False
+        return snapshot
+
+    def validate_checkpoint(path, *, expected, base_sidecars=None, require_weight=True):
+        events.append("validate")
+        assert path == snapshot
+        assert expected.state_dim == 20
+        assert expected.action_dim == 20
+        assert expected.chunk_size == 20
+        assert expected.tactile_num_tokens == 4
+        assert expected.vlm_lora_target_modules == ("q_proj", "v_proj")
+        assert base_sidecars is None
+        assert require_weight is True
+        return CheckpointValidationReport(snapshot, ())
+
+    policy = SimpleNamespace(
+        config=SimpleNamespace(
+            state_dim=20,
+            action_dim=20,
+            chunk_size=20,
+            n_action_steps=5,
+            image_keys=("observation.images.camera1", "observation.images.camera2"),
+            tactile_keys=(
+                "observation.images.tactile_left_0",
+                "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1",
+                "observation.images.tactile_right_1",
+            ),
+            tactile_num_tokens=4,
+            use_tactile_encoder=True,
+            empty_cameras=0,
+            rtc_config=None,
+        ),
+        reset=lambda: None,
+    )
+
+    def policy_loader(checkpoint, **kwargs):
+        events.append("policy")
+        assert checkpoint == snapshot
+        assert kwargs["local_files_only"] is True
+        assert kwargs["revision"] is None
+        return policy
+
+    def bridge_loader(*args, **kwargs):
+        del args, kwargs
+        events.append("bridge")
+        raise RuntimeError("stop after bridge construction")
+
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", resolve_checkpoint, raising=False)
+    monkeypatch.setattr(remote_client, "validate_checkpoint", validate_checkpoint, raising=False)
+    monkeypatch.setattr(remote_client.JaxSmolVLAPolicy, "from_pretrained", policy_loader)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", bridge_loader)
+
+    with pytest.raises(RuntimeError, match="stop after bridge construction"):
+        remote_client.run(config_path)
+
+    assert events == ["resolve", "validate", "policy", "bridge"]
+
+
+def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = _write_remote_config(
+        tmp_path / "deploy.yaml",
+        "owner/not-cached",
+        revision="b" * 40,
+        allow_download=False,
+    )
+    events: list[str] = []
+
+    def resolve_checkpoint(checkpoint, *, revision, local_files_only):
+        events.append("resolve")
+        assert checkpoint == "owner/not-cached"
+        assert revision == "b" * 40
+        assert local_files_only is True
+        raise FileNotFoundError("offline snapshot is unavailable")
+
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", resolve_checkpoint, raising=False)
+    monkeypatch.setattr(
+        remote_client.JaxSmolVLAPolicy,
+        "from_pretrained",
+        lambda *args, **kwargs: pytest.fail("policy must not load"),
+    )
+    monkeypatch.setattr(
+        remote_client,
+        "RobotBridgeClient",
+        lambda *args, **kwargs: pytest.fail("robot bridge must not be constructed"),
+    )
+
+    with pytest.raises(FileNotFoundError, match="offline snapshot is unavailable"):
+        remote_client.run(config_path)
+
+    assert events == ["resolve"]
+
+
+def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
+    config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
+    contract = remote_client._checkpoint_contract(config, config["control"])
+
+    assert config["checkpoint"] == "KaiyueChen/vtsmolvla_01_4w"
+    assert config["revision"] is None
+    assert config["allow_download"] is True
+    assert contract.state_dim == 20
+    assert contract.action_dim == 20
+    assert contract.chunk_size == 20
+    assert contract.image_keys == (
+        "observation.images.camera1",
+        "observation.images.camera2",
+    )
+    assert contract.tactile_keys == (
+        "observation.images.tactile_left_0",
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_1",
+        "observation.images.tactile_right_1",
+    )
+    assert contract.tactile_embedding_dim == 512
+    assert contract.tactile_num_tokens == 4
+    assert contract.lora_rank == 16
+    assert contract.vlm_lora_target_modules == ("q_proj", "v_proj")
+    assert config["rename_map"] == {
+        "observation.images.camera0": "observation.images.camera1",
+        "observation.images.camera1": "observation.images.camera2",
+    }
+    assert config["observation"]["data_type"] == "vitac"
+    assert config["observation"]["single_arm_mode"] is False
+    assert config["control"]["action_horizon"] == 20
+    assert config["control"]["steps_per_inference"] == 5
 
 
 def test_tactile_embedding_normalization_has_unit_rms() -> None:

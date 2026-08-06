@@ -19,6 +19,8 @@ import numpy as np
 import yaml
 
 from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
+from lerobot.policies.smolvla_jax.checkpoint import resolve_checkpoint
+from lerobot.policies.smolvla_jax.validation import CheckpointContract, validate_checkpoint
 
 from .bridge_client import RobotBridgeClient
 
@@ -204,6 +206,88 @@ def _resolve_checkpoint(value: str, config_path: Path) -> str:
         return str(checkpoint)
     relative = (config_path.parent / checkpoint).resolve()
     return str(relative) if relative.exists() else value
+
+
+def _checkpoint_contract(
+    config: Mapping[str, Any],
+    control: Mapping[str, Any],
+) -> CheckpointContract:
+    """Parse the explicit robot/checkpoint boundary; never trust checkpoint metadata alone."""
+
+    raw = config.get("checkpoint_contract")
+    if not isinstance(raw, Mapping):
+        raise ValueError("Missing YAML section: checkpoint_contract")
+
+    def integer(key: str, *, allow_zero: bool = False) -> int:
+        value = int(_required(raw, key, "checkpoint_contract"))
+        if value < 0 or (value == 0 and not allow_zero):
+            qualifier = "non-negative" if allow_zero else "positive"
+            raise ValueError(f"checkpoint_contract.{key} must be {qualifier}")
+        return value
+
+    def string_tuple(key: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+        value = _required(raw, key, "checkpoint_contract")
+        if (
+            not isinstance(value, list | tuple)
+            or (not value and not allow_empty)
+            or any(not isinstance(item, str) or not item for item in value)
+        ):
+            qualifier = "a list" if allow_empty else "a non-empty list"
+            raise ValueError(f"checkpoint_contract.{key} must be {qualifier} of strings")
+        return tuple(value)
+
+    contract = CheckpointContract(
+        state_dim=integer("state_dim"),
+        action_dim=integer("action_dim"),
+        chunk_size=integer("chunk_size"),
+        image_keys=string_tuple("image_keys"),
+        tactile_keys=string_tuple("tactile_keys", allow_empty=True),
+        tactile_embedding_dim=integer("tactile_embedding_dim"),
+        tactile_num_tokens=integer("tactile_num_tokens", allow_zero=True),
+        lora_rank=integer("lora_rank", allow_zero=True),
+        vlm_lora_target_modules=string_tuple("vlm_lora_target_modules", allow_empty=True),
+    )
+    if contract.chunk_size != int(control["action_horizon"]):
+        raise ValueError(
+            f"checkpoint_contract.chunk_size={contract.chunk_size} does not match "
+            f"control.action_horizon={control['action_horizon']}"
+    )
+    if contract.tactile_num_tokens != len(contract.tactile_keys):
+        raise ValueError("checkpoint_contract.tactile_num_tokens must equal the number of tactile_keys")
+    overlap = sorted(set(contract.image_keys) & set(contract.tactile_keys))
+    if overlap:
+        raise ValueError(f"checkpoint_contract RGB and tactile keys overlap: {overlap}")
+    return contract
+
+
+def _load_validated_policy(
+    checkpoint: str,
+    *,
+    revision: str | None,
+    allow_download: bool,
+    expected: CheckpointContract,
+    rename_map: Mapping[str, str] | None,
+    base_sidecars: str | Path | None = None,
+) -> JaxSmolVLAPolicy:
+    """Resolve and validate a snapshot before materializing any model tensors."""
+
+    snapshot = resolve_checkpoint(
+        checkpoint,
+        revision=revision,
+        local_files_only=not allow_download,
+    )
+    validate_checkpoint(
+        snapshot,
+        expected=expected,
+        base_sidecars=base_sidecars,
+        require_weight=True,
+    ).require_valid()
+    return JaxSmolVLAPolicy.from_pretrained(
+        snapshot,
+        rename_map=rename_map,
+        revision=None,
+        local_files_only=True,
+    )
 
 
 def _resolve_token(connection: dict[str, Any]) -> str | None:
@@ -396,6 +480,8 @@ def run(
     rename_map = _parse_rename_map(config)
     allow_download = bool(config.get("allow_download", False))
     revision = config.get("revision")
+    revision = None if revision is None else str(revision)
+    expected_contract = _checkpoint_contract(config, control)
     seed = int(config.get("seed", 0))
     jit = bool(config.get("jit", True))
     num_steps = config.get("num_steps")
@@ -403,13 +489,14 @@ def run(
         num_steps = int(num_steps)
 
     print(f"[client] Loading JAX SmolVLA checkpoint: {checkpoint}")
-    print(f"[client] JAX backend: {jax.default_backend()}")
-    policy = JaxSmolVLAPolicy.from_pretrained(
+    policy = _load_validated_policy(
         checkpoint,
+        revision=revision,
+        allow_download=allow_download,
+        expected=expected_contract,
         rename_map=rename_map,
-        revision=None if revision is None else str(revision),
-        local_files_only=not allow_download,
     )
+    print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
     _validate_observation_mode(
         str(observation_config["data_type"]),
@@ -424,6 +511,12 @@ def run(
         )
     if policy.config.action_dim <= 0:
         raise ValueError(f"Checkpoint action_dim must be positive, got {policy.config.action_dim}")
+    configured_steps = int(control["steps_per_inference"])
+    if policy.config.n_action_steps != configured_steps:
+        raise ValueError(
+            f"Checkpoint n_action_steps={policy.config.n_action_steps} does not match "
+            f"steps_per_inference={configured_steps}"
+        )
     if not policy.config.image_keys:
         raise ValueError("Checkpoint does not declare any visual observation keys")
 
@@ -437,7 +530,7 @@ def run(
         f"empty_cameras={empty_cameras}"
     )
 
-    steps_per_inference = int(control["steps_per_inference"])
+    steps_per_inference = configured_steps
     rtc_on = _rtc_enabled(policy)
     configured_inference_delay = control.get("inference_delay")
     if rtc_on:
