@@ -262,7 +262,49 @@ def test_mixed_base_sidecars_are_rejected(vt_bundle: Path, base_sidecars: Path) 
     report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT, base_sidecars=base_sidecars)
 
     assert not report.ok
-    assert any("byte-identical to base" in issue for issue in report.issues)
+    fingerprinted = {
+        filename
+        for filename in SIDECAR_FILENAMES
+        if any(f"sidecar {filename!r} is byte-identical to base" in issue for issue in report.issues)
+    }
+    assert fingerprinted == set(SIDECAR_FILENAMES)
+
+
+def test_lora_only_change_allows_identical_processor_and_stats_sidecars(tmp_path: Path) -> None:
+    base_contract = replace(
+        VT_CONTRACT,
+        lora_rank=0,
+        vlm_lora_target_modules=(),
+    )
+    base = _write_bundle(tmp_path / "base", base_contract)
+    checkpoint = _write_bundle(tmp_path / "checkpoint", VT_CONTRACT)
+    reusable_sidecars = SIDECAR_FILENAMES[1:]
+    for filename in reusable_sidecars:
+        shutil.copy2(base / filename, checkpoint / filename)
+        assert (checkpoint / filename).read_bytes() == (base / filename).read_bytes()
+
+    report = validate_checkpoint(checkpoint, expected=VT_CONTRACT, base_sidecars=base)
+
+    assert report.ok, report.format_errors()
+
+
+def test_lora_only_change_still_rejects_identical_base_config(tmp_path: Path) -> None:
+    base_contract = replace(
+        VT_CONTRACT,
+        lora_rank=0,
+        vlm_lora_target_modules=(),
+    )
+    base = _write_bundle(tmp_path / "base", base_contract)
+    checkpoint = _write_bundle(tmp_path / "checkpoint", VT_CONTRACT)
+    for filename in SIDECAR_FILENAMES:
+        shutil.copy2(base / filename, checkpoint / filename)
+
+    report = validate_checkpoint(checkpoint, expected=VT_CONTRACT, base_sidecars=base)
+
+    fingerprint_issues = tuple(issue for issue in report.issues if "byte-identical to base" in issue)
+    assert fingerprint_issues == (
+        "sidecar 'config.json' is byte-identical to base despite differing checkpoint contracts",
+    )
 
 
 def test_wrong_config_dimensions_are_reported_together(vt_bundle: Path) -> None:

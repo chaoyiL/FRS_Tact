@@ -647,6 +647,34 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _sidecar_contract_differs(
+    filename: str,
+    effective: CheckpointContract,
+    base: CheckpointContract,
+) -> bool:
+    if filename == "config.json":
+        return effective != base
+    if filename in {_PREPROCESSOR_FILE, _PREPROCESSOR_STATS_FILE}:
+        return (
+            effective.state_dim,
+            effective.action_dim,
+            effective.image_keys,
+            effective.tactile_keys,
+            effective.tactile_embedding_dim,
+            effective.tactile_num_tokens,
+        ) != (
+            base.state_dim,
+            base.action_dim,
+            base.image_keys,
+            base.tactile_keys,
+            base.tactile_embedding_dim,
+            base.tactile_num_tokens,
+        )
+    if filename in {_POSTPROCESSOR_FILE, _POSTPROCESSOR_STATS_FILE}:
+        return effective.action_dim != base.action_dim
+    return False
+
+
 def _check_base_sidecars(
     checkpoint: Path,
     base: Path,
@@ -664,9 +692,12 @@ def _check_base_sidecars(
     if base_parse_issues:
         issues.extend(f"base config: {issue}" for issue in base_parse_issues)
         return
-    if base_config.as_contract() == effective:
+    base_contract = base_config.as_contract()
+    if base_contract is None or base_contract == effective:
         return
     for filename in _SIDECAR_FILENAMES:
+        if not _sidecar_contract_differs(filename, effective, base_contract):
+            continue
         candidate = checkpoint / filename
         base_file = base / filename
         if not candidate.is_file() or not base_file.is_file():
