@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.smolvla_jax.data import action_delta_timestamps
+from lerobot.policies.smolvla_jax.data import resolve_source_visual_keys
 
 from modalities_eval.utils import EvalObservation
 from modalities_eval.utils import SmolVLAEvalModel
@@ -224,6 +225,12 @@ def _checkpoint_fingerprint(checkpoint_dir: pathlib.Path) -> str:
 
 
 def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -> LeRobotDataset:
+    visual_keys = resolve_source_visual_keys(
+        model.config.image_keys,
+        model.preprocessor.rename_map,
+        metadata.camera_keys,
+    )
+    print(f"action-cache visual_keys={visual_keys}", flush=True)
     return LeRobotDataset(
         model.dataset_repo_id,
         root=model.dataset_root,
@@ -233,6 +240,7 @@ def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -
             model.config.chunk_size,
             metadata.fps,
         ),
+        visual_keys=visual_keys,
     )
 
 
@@ -248,10 +256,18 @@ def _load_observation_batch(
     model: SmolVLAEvalModel,
     dataset: LeRobotDataset,
     batch_records: Sequence[SampleRecord],
+    *,
+    report_progress: bool = False,
 ) -> tuple[EvalObservation, jax.Array]:
     observations: list[EvalObservation] = []
     gt_actions: list[jax.Array] = []
-    for record in batch_records:
+    for offset, record in enumerate(batch_records, start=1):
+        if report_progress:
+            print(
+                f"first batch data load: sample {offset}/{len(batch_records)} "
+                f"dataset_index={record.dataset_index}",
+                flush=True,
+            )
         observation, actions = _load_observation_and_gt(model, dataset, record.dataset_index)
         observations.append(observation)
         gt_actions.append(actions)
@@ -507,7 +523,12 @@ def prepare_cache(
                 f"(samples={start}:{stop}, batch_size={batch_size})",
                 flush=True,
             )
-        observation_batch, gt_action_batch = _load_observation_batch(model, dataset, batch_records)
+        observation_batch, gt_action_batch = _load_observation_batch(
+            model,
+            dataset,
+            batch_records,
+            report_progress=batch_number == 0,
+        )
         if batch_number == 0:
             print("first batch data load: finished", flush=True)
         if valid < batch_size:
