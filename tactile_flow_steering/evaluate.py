@@ -63,6 +63,7 @@ def evaluate_decoder(
     track_gate = loss_mode == "gated" or bool(model.config.gate_conditioning)
     gate_tau = float(extra["gate_tau"]) if track_gate else None
     gate_temperature = float(extra["gate_temperature"]) if track_gate else None
+    rank_margin = float(extra.get("rank_margin", 0.0)) if track_gate else 0.0
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -106,6 +107,7 @@ def evaluate_decoder(
             target=target,
             gate_tau=gate_tau,
             gate_temperature=gate_temperature,
+            rank_margin=rank_margin,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, float | int | str] = {
@@ -146,6 +148,10 @@ def evaluate_decoder(
                     "gt_gain_low_w": float(result.gt_gain_low_w),
                     "relative_gt_error_high_w": float(result.relative_gt_error_high_w),
                     "relative_gt_error_low_w": float(result.relative_gt_error_low_w),
+                    "rank_penalty_high_w": float(result.rank_penalty_high_w),
+                    "rank_penalty_low_w": float(result.rank_penalty_low_w),
+                    "rank_satisfied_high_frac": float(result.rank_satisfied_high_frac),
+                    "rank_satisfied_low_frac": float(result.rank_satisfied_low_frac),
                     "gate_w_mean": float(result.gate_w),
                     "gate_active_frac": float(result.gate_active_frac),
                     "gate_w_high_mean": float(result.gate_w_high_mean),

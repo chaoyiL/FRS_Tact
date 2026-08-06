@@ -40,6 +40,10 @@ HISTORY_FIELDS = (
     "val_gt_gain_low_w",
     "val_relative_gt_error_high_w",
     "val_relative_gt_error_low_w",
+    "val_rank_penalty_high_w",
+    "val_rank_penalty_low_w",
+    "val_rank_satisfied_high_frac",
+    "val_rank_satisfied_low_frac",
     "val_gate_w",
     "val_gate_active_frac",
     "val_gate_w_high_mean",
@@ -137,6 +141,12 @@ def plot_training_history(
     low_relative_epochs, relative_low = _finite_series(
         rows, "val_relative_gt_error_low_w"
     )
+    rank_high_epochs, rank_satisfied_high = _finite_series(
+        rows, "val_rank_satisfied_high_frac"
+    )
+    rank_low_epochs, rank_satisfied_low = _finite_series(
+        rows, "val_rank_satisfied_low_frac"
+    )
     gate_p10_epochs, gate_p10 = _finite_series(rows, "val_gate_w_p10")
     gate_p50_epochs, gate_p50 = _finite_series(rows, "val_gate_w_p50")
     gate_p90_epochs, gate_p90 = _finite_series(rows, "val_gate_w_p90")
@@ -154,12 +164,20 @@ def plot_training_history(
     has_val_mse = has_stratified or has_overall_mse
     has_counts = bool(n_high_epochs or n_low_epochs)
     has_repair = bool(high_gain_epochs or low_gain_epochs)
+    has_rank_stats = bool(rank_high_epochs or rank_low_epochs)
     has_gate_stats = bool(gate_p50_epochs or change_p50_epochs)
 
     destination = output_path or history_path.with_name("training_curves.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    n_rows = 1 + int(has_val_mse) + int(has_repair) + int(has_gate_stats) + int(has_counts)
+    n_rows = (
+        1
+        + int(has_val_mse)
+        + int(has_repair)
+        + int(has_rank_stats)
+        + int(has_gate_stats)
+        + int(has_counts)
+    )
     fig, axes = plt.subplots(
         n_rows,
         1,
@@ -330,6 +348,33 @@ def plot_training_history(
         handles, labels = repair_axis.get_legend_handles_labels()
         rel_handles, rel_labels = relative_axis.get_legend_handles_labels()
         repair_axis.legend(handles + rel_handles, labels + rel_labels, loc="best", fontsize=8)
+        row += 1
+
+    if has_rank_stats:
+        if rank_high_epochs:
+            axes[row].plot(
+                rank_high_epochs,
+                rank_satisfied_high,
+                label="preference satisfied (w>0.5)",
+                color="#55A868",
+                marker="o",
+                linewidth=2.0,
+            )
+        if rank_low_epochs:
+            axes[row].plot(
+                rank_low_epochs,
+                rank_satisfied_low,
+                label="preference satisfied (w≤0.5)",
+                color="#4C72B0",
+                marker="s",
+                linewidth=2.0,
+            )
+        axes[row].axhline(1.0, color="#888888", linestyle="--", linewidth=1.0)
+        axes[row].set_ylim(-0.02, 1.02)
+        axes[row].set_ylabel("satisfied fraction")
+        axes[row].set_title("Gate-preference ranking satisfaction", pad=8)
+        axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=8)
         row += 1
 
     if has_gate_stats:

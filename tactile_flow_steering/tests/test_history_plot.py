@@ -30,6 +30,8 @@ class HistoryPlotTest(unittest.TestCase):
                     "val_gt_gain_low_w": 0.01,
                     "val_relative_gt_error_high_w": 0.75,
                     "val_relative_gt_error_low_w": 0.92,
+                    "val_rank_satisfied_high_frac": 0.8,
+                    "val_rank_satisfied_low_frac": 0.9,
                     "val_gate_w_p10": 0.1,
                     "val_gate_w_p50": 0.5,
                     "val_gate_w_p90": 0.9,

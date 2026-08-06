@@ -67,6 +67,10 @@ class EvaluationResult:
     gt_gain_low_w: float | None = None
     relative_gt_error_high_w: float | None = None
     relative_gt_error_low_w: float | None = None
+    rank_penalty_high_w: float | None = None
+    rank_penalty_low_w: float | None = None
+    rank_satisfied_high_frac: float | None = None
+    rank_satisfied_low_frac: float | None = None
     gate_w_high_mean: float | None = None
     gate_w_low_mean: float | None = None
     tactile_change_high_mean: float | None = None
@@ -120,8 +124,12 @@ def gate_stratified_decode_metrics(
     tactile_changes: np.ndarray | None = None,
     *,
     high_w_threshold: float = 0.5,
+    ranking_margin: float = 0.0,
 ) -> dict[str, float | int]:
-    """Split decode MSE by gate weight ``w > threshold`` vs ``w <= threshold``."""
+    """Split decode metrics and gate-preference satisfaction by gate group."""
+
+    if ranking_margin < 0:
+        raise ValueError(f"ranking_margin must be non-negative, got {ranking_margin}.")
 
     mse_gt = np.asarray(sample_mse_gt, dtype=np.float64)
     mse_pred = np.asarray(sample_mse_pred, dtype=np.float64)
@@ -139,6 +147,10 @@ def gate_stratified_decode_metrics(
         )
     high = weights > float(high_w_threshold)
     low = ~high
+    high_rank_penalty = np.maximum(mse_gt - mse_pred + float(ranking_margin), 0.0)
+    low_rank_penalty = np.maximum(mse_pred - mse_gt + float(ranking_margin), 0.0)
+    high_rank_satisfied = mse_gt + float(ranking_margin) <= mse_pred
+    low_rank_satisfied = mse_pred + float(ranking_margin) <= mse_gt
     result: dict[str, float | int] = {
         "mse_gt_high_w": _mean_or_nan(mse_gt[high]),
         "mse_gt_low_w": _mean_or_nan(mse_gt[low]),
@@ -150,6 +162,10 @@ def gate_stratified_decode_metrics(
         "gt_gain_low_w": _mean_or_nan((mse_vla_gt - mse_gt)[low]),
         "relative_gt_error_high_w": _ratio_of_means(mse_gt[high], mse_vla_gt[high]),
         "relative_gt_error_low_w": _ratio_of_means(mse_gt[low], mse_vla_gt[low]),
+        "rank_penalty_high_w": _mean_or_nan(high_rank_penalty[high]),
+        "rank_penalty_low_w": _mean_or_nan(low_rank_penalty[low]),
+        "rank_satisfied_high_frac": _mean_or_nan(high_rank_satisfied[high]),
+        "rank_satisfied_low_frac": _mean_or_nan(low_rank_satisfied[low]),
         "gate_w_high_mean": _mean_or_nan(weights[high]),
         "gate_w_low_mean": _mean_or_nan(weights[low]),
         "n_high_w": int(np.count_nonzero(high)),
@@ -184,6 +200,7 @@ def evaluate_split(
     target: EvalTarget = "gt",
     gate_tau: float | None = None,
     gate_temperature: float | None = None,
+    rank_margin: float = 0.0,
 ) -> EvaluationResult:
     from tactile_flow_steering.utils.data import gate_weights_from_change
 
@@ -294,6 +311,7 @@ def evaluate_split(
             all_mse_vla_gt,
             all_gate,
             all_change,
+            ranking_margin=rank_margin,
         )
         gate_quantiles = _quantiles(all_gate)
         change_quantiles = _quantiles(all_change)
@@ -315,6 +333,10 @@ def evaluate_split(
             "gt_gain_low_w": None,
             "relative_gt_error_high_w": None,
             "relative_gt_error_low_w": None,
+            "rank_penalty_high_w": None,
+            "rank_penalty_low_w": None,
+            "rank_satisfied_high_frac": None,
+            "rank_satisfied_low_frac": None,
             "gate_w_high_mean": None,
             "gate_w_low_mean": None,
             "tactile_change_high_mean": None,
@@ -371,6 +393,10 @@ def evaluate_split(
         gt_gain_low_w=stratified["gt_gain_low_w"],  # type: ignore[arg-type]
         relative_gt_error_high_w=stratified["relative_gt_error_high_w"],  # type: ignore[arg-type]
         relative_gt_error_low_w=stratified["relative_gt_error_low_w"],  # type: ignore[arg-type]
+        rank_penalty_high_w=stratified["rank_penalty_high_w"],  # type: ignore[arg-type]
+        rank_penalty_low_w=stratified["rank_penalty_low_w"],  # type: ignore[arg-type]
+        rank_satisfied_high_frac=stratified["rank_satisfied_high_frac"],  # type: ignore[arg-type]
+        rank_satisfied_low_frac=stratified["rank_satisfied_low_frac"],  # type: ignore[arg-type]
         gate_w_high_mean=stratified["gate_w_high_mean"],  # type: ignore[arg-type]
         gate_w_low_mean=stratified["gate_w_low_mean"],  # type: ignore[arg-type]
         tactile_change_high_mean=stratified["tactile_change_high_mean"],  # type: ignore[arg-type]

@@ -305,6 +305,27 @@ def gt_supervised_loss_per_sample(
     return flow + float(aux_decode_weight) * decode_mse
 
 
+def gate_preference_ranking_loss_per_sample(
+    decoded_action: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    gate_weights: Array,
+    *,
+    margin: float,
+    threshold: float = 0.5,
+) -> Array:
+    """Penalize decoded actions that are closer to the wrong endpoint for their gate group."""
+
+    if margin < 0:
+        raise ValueError(f"ranking margin must be non-negative, got {margin}.")
+    mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
+    mse_pred = jnp.mean(jnp.square(decoded_action - predicted_action), axis=(1, 2))
+    weights = jax.lax.stop_gradient(gate_weights)
+    high_penalty = jax.nn.relu(mse_gt - mse_pred + float(margin))
+    low_penalty = jax.nn.relu(mse_pred - mse_gt + float(margin))
+    return jnp.where(weights > float(threshold), high_penalty, low_penalty)
+
+
 def gated_flow_matching_loss_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -318,29 +339,47 @@ def gated_flow_matching_loss_per_sample(
     aux_decode_weight: float = 1.0,
     aux_decode_steps: int = 10,
     aux_decode_solver: FlowSolver = "euler",
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
 ) -> Array:
-    """Per-sample ``w L* + λ (1-w) L_stop`` with shared noise time ``t``.
+    """Gated endpoint loss plus an optional gate-preference ranking constraint."""
 
-    ``L*`` is the GT-supervised loss (FM + aux decode MSE). ``L_stop`` remains
-    FM toward predicted actions only (no decode aux).
-    """
+    if rank_weight < 0:
+        raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
 
-    loss_star = gt_supervised_loss_per_sample(
-        model,
-        x_base,
-        gt_action,
-        t,
-        tactile_seq,
-        gate_weights,
-        aux_decode_weight=aux_decode_weight,
-        aux_decode_steps=aux_decode_steps,
-        aux_decode_solver=aux_decode_solver,
+    loss_star = flow_matching_loss_per_sample(
+        model, x_base, gt_action, t, tactile_seq, gate_weights
     )
     loss_stop = flow_matching_loss_per_sample(
         model, x_base, predicted_action, t, tactile_seq, gate_weights
     )
+    decoded = None
+    if aux_decode_weight != 0.0 or rank_weight != 0.0:
+        decoded = decode_actions(
+            model,
+            x_base,
+            tactile_seq,
+            gate_weights,
+            num_steps=aux_decode_steps,
+            solver=aux_decode_solver,
+        )
+    if aux_decode_weight != 0.0:
+        assert decoded is not None
+        mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
+        loss_star = loss_star + float(aux_decode_weight) * mse_gt
     weights = jax.lax.stop_gradient(gate_weights)
-    return weights * loss_star + float(gate_lambda) * (1.0 - weights) * loss_stop
+    loss = weights * loss_star + float(gate_lambda) * (1.0 - weights) * loss_stop
+    if rank_weight == 0.0:
+        return loss
+    assert decoded is not None
+    rank_loss = gate_preference_ranking_loss_per_sample(
+        decoded,
+        gt_action,
+        predicted_action,
+        gate_weights,
+        margin=rank_margin,
+    )
+    return loss + float(rank_weight) * rank_loss
 
 
 @partial(
@@ -351,6 +390,8 @@ def gated_flow_matching_loss_per_sample(
         "aux_decode_weight",
         "aux_decode_steps",
         "aux_decode_solver",
+        "rank_weight",
+        "rank_margin",
     ),
 )
 def train_step(
@@ -368,6 +409,8 @@ def train_step(
     aux_decode_weight: float = 1.0,
     aux_decode_steps: int = 10,
     aux_decode_solver: FlowSolver = "euler",
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
 ) -> Array:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
@@ -406,6 +449,8 @@ def train_step(
                     aux_decode_weight=aux_decode_weight,
                     aux_decode_steps=aux_decode_steps,
                     aux_decode_solver=aux_decode_solver,
+                    rank_weight=rank_weight,
+                    rank_margin=rank_margin,
                 )
             )
         raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
