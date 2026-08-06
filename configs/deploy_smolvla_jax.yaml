@@ -1,7 +1,8 @@
 # SmolVLA JAX 远程部署配置。改这里即可切换 checkpoint / 机器人地址 / 任务指令。
 # 运行:
-#   uv run python -m deploy_smolvla.remote_client --config configs/deploy_smolvla_jax.yaml
-#   ./deploy_smolvla/run_client.sh configs/deploy_smolvla_jax.yaml
+#   ./deploy_smolvla/start_vtsmolvla.sh
+# 仅检查 token/config，不加载模型:
+#   ./deploy_smolvla/start_vtsmolvla.sh --check
 
 # ---- 模型 ----
 # 本地 checkpoint 目录，或 Hugging Face model id
