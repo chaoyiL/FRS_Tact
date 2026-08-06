@@ -116,7 +116,7 @@ def test_invalid_checkpoint_fails_before_policy_or_robot_connection(
     assert calls == []
 
 
-def test_checkpoint_revision_is_resolved_and_validated_before_robot_connection(
+def test_checkpoint_steps_override_is_sent_to_robot_server_after_validation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -130,6 +130,7 @@ def test_checkpoint_revision_is_resolved_and_validated_before_robot_connection(
         allow_download=True,
     )
     events: list[str] = []
+    sent_server_config: dict[str, object] = {}
 
     def resolve_checkpoint(checkpoint, *, revision, local_files_only):
         events.append("resolve")
@@ -178,20 +179,28 @@ def test_checkpoint_revision_is_resolved_and_validated_before_robot_connection(
         assert kwargs["revision"] is None
         return policy
 
-    def bridge_loader(*args, **kwargs):
-        del args, kwargs
-        events.append("bridge")
-        raise RuntimeError("stop after bridge construction")
+    class RecordingBridge:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+            events.append("bridge")
+
+        def send_config(self, server_config):
+            events.append("send_config")
+            sent_server_config.update(server_config)
+            raise RuntimeError("stop after server config")
 
     monkeypatch.setattr(remote_client, "resolve_checkpoint", resolve_checkpoint, raising=False)
     monkeypatch.setattr(remote_client, "validate_checkpoint", validate_checkpoint, raising=False)
     monkeypatch.setattr(remote_client.JaxSmolVLAPolicy, "from_pretrained", policy_loader)
-    monkeypatch.setattr(remote_client, "RobotBridgeClient", bridge_loader)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", RecordingBridge)
 
-    with pytest.raises(RuntimeError, match="stop after bridge construction"):
+    with pytest.raises(RuntimeError, match="stop after server config"):
         remote_client.run(config_path)
 
-    assert events == ["resolve", "validate", "policy", "bridge"]
+    assert events == ["resolve", "validate", "policy", "bridge", "send_config"]
+    assert policy.config.n_action_steps == 5
+    assert sent_server_config["steps_per_inference"] == 10
+    assert sent_server_config["action_horizon"] == 20
 
 
 def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(
@@ -279,6 +288,23 @@ def test_load_config_rejects_non_integer_steps_per_inference(
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
     with pytest.raises(ValueError, match="steps_per_inference must be an integer"):
+        remote_client.load_config(config_path)
+
+
+@pytest.mark.parametrize("steps_per_inference", [0, 21])
+def test_load_config_rejects_out_of_range_steps_per_inference(
+    tmp_path: Path,
+    steps_per_inference: int,
+) -> None:
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", "owner/vt-model")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["control"]["steps_per_inference"] = steps_per_inference
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="steps_per_inference must be between 1 and action_horizon",
+    ):
         remote_client.load_config(config_path)
 
 
