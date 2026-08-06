@@ -109,7 +109,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube/run_gated_slerpflow_gatecond_rank_tau020_k20
+  output: /workspace/frs_pick_tube/run_gated_slerpflow_rankw10_repairw20_tau020_k20
   # checkpoint chunk_size=10，因此 tactile_window=10/1=10。
   tactile_window_divisor: 1
   # 10 个 token 每隔 3 帧回看一次，在 30Hz 下覆盖约 0.9 秒。
@@ -123,8 +123,11 @@ frs_training:
   aux_decode_weight: 1.0
   aux_decode_steps: 10
   # 高 w 强制 decode 更靠近 GT；低 w 强制 decode 更靠近原始 VLA。
-  rank_weight: 0.5
+  rank_weight: 1.0
   rank_margin: 0.01
+  # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
+  repair_weight: 2.0
+  repair_margin: 0.01
 
   model_dim: 256
   depth: 6

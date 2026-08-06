@@ -326,6 +326,26 @@ def gate_preference_ranking_loss_per_sample(
     return jnp.where(weights > float(threshold), high_penalty, low_penalty)
 
 
+def high_gate_repair_loss_per_sample(
+    decoded_action: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    gate_weights: Array,
+    *,
+    margin: float,
+    threshold: float = 0.5,
+) -> Array:
+    """Require high-gate decodes to improve on the frozen VLA-to-GT baseline."""
+
+    if margin < 0:
+        raise ValueError(f"repair margin must be non-negative, got {margin}.")
+    mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
+    mse_vla_gt = jnp.mean(jnp.square(predicted_action - gt_action), axis=(1, 2))
+    weights = jax.lax.stop_gradient(gate_weights)
+    penalty = jax.nn.relu(mse_gt - mse_vla_gt + float(margin))
+    return jnp.where(weights > float(threshold), penalty, 0.0)
+
+
 def gated_flow_matching_loss_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -341,11 +361,15 @@ def gated_flow_matching_loss_per_sample(
     aux_decode_solver: FlowSolver = "euler",
     rank_weight: float = 0.0,
     rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
 ) -> Array:
-    """Gated endpoint loss plus an optional gate-preference ranking constraint."""
+    """Gated endpoint loss plus preference and absolute-repair constraints."""
 
     if rank_weight < 0:
         raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
+    if repair_weight < 0:
+        raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
 
     loss_star = flow_matching_loss_per_sample(
         model, x_base, gt_action, t, tactile_seq, gate_weights
@@ -354,7 +378,7 @@ def gated_flow_matching_loss_per_sample(
         model, x_base, predicted_action, t, tactile_seq, gate_weights
     )
     decoded = None
-    if aux_decode_weight != 0.0 or rank_weight != 0.0:
+    if aux_decode_weight != 0.0 or rank_weight != 0.0 or repair_weight != 0.0:
         decoded = decode_actions(
             model,
             x_base,
@@ -369,17 +393,28 @@ def gated_flow_matching_loss_per_sample(
         loss_star = loss_star + float(aux_decode_weight) * mse_gt
     weights = jax.lax.stop_gradient(gate_weights)
     loss = weights * loss_star + float(gate_lambda) * (1.0 - weights) * loss_stop
-    if rank_weight == 0.0:
+    if rank_weight == 0.0 and repair_weight == 0.0:
         return loss
     assert decoded is not None
-    rank_loss = gate_preference_ranking_loss_per_sample(
-        decoded,
-        gt_action,
-        predicted_action,
-        gate_weights,
-        margin=rank_margin,
-    )
-    return loss + float(rank_weight) * rank_loss
+    if rank_weight != 0.0:
+        rank_loss = gate_preference_ranking_loss_per_sample(
+            decoded,
+            gt_action,
+            predicted_action,
+            gate_weights,
+            margin=rank_margin,
+        )
+        loss = loss + float(rank_weight) * rank_loss
+    if repair_weight != 0.0:
+        repair_loss = high_gate_repair_loss_per_sample(
+            decoded,
+            gt_action,
+            predicted_action,
+            gate_weights,
+            margin=repair_margin,
+        )
+        loss = loss + float(repair_weight) * repair_loss
+    return loss
 
 
 @partial(
@@ -392,6 +427,8 @@ def gated_flow_matching_loss_per_sample(
         "aux_decode_solver",
         "rank_weight",
         "rank_margin",
+        "repair_weight",
+        "repair_margin",
     ),
 )
 def train_step(
@@ -411,6 +448,8 @@ def train_step(
     aux_decode_solver: FlowSolver = "euler",
     rank_weight: float = 0.0,
     rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
 ) -> Array:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
@@ -451,6 +490,8 @@ def train_step(
                     aux_decode_solver=aux_decode_solver,
                     rank_weight=rank_weight,
                     rank_margin=rank_margin,
+                    repair_weight=repair_weight,
+                    repair_margin=repair_margin,
                 )
             )
         raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")

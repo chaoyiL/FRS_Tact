@@ -44,6 +44,8 @@ HISTORY_FIELDS = (
     "val_rank_penalty_low_w",
     "val_rank_satisfied_high_frac",
     "val_rank_satisfied_low_frac",
+    "val_repair_penalty_high_w",
+    "val_repair_satisfied_high_frac",
     "val_gate_w",
     "val_gate_active_frac",
     "val_gate_w_high_mean",
@@ -147,6 +149,9 @@ def plot_training_history(
     rank_low_epochs, rank_satisfied_low = _finite_series(
         rows, "val_rank_satisfied_low_frac"
     )
+    repair_high_epochs, repair_satisfied_high = _finite_series(
+        rows, "val_repair_satisfied_high_frac"
+    )
     gate_p10_epochs, gate_p10 = _finite_series(rows, "val_gate_w_p10")
     gate_p50_epochs, gate_p50 = _finite_series(rows, "val_gate_w_p50")
     gate_p90_epochs, gate_p90 = _finite_series(rows, "val_gate_w_p90")
@@ -164,7 +169,7 @@ def plot_training_history(
     has_val_mse = has_stratified or has_overall_mse
     has_counts = bool(n_high_epochs or n_low_epochs)
     has_repair = bool(high_gain_epochs or low_gain_epochs)
-    has_rank_stats = bool(rank_high_epochs or rank_low_epochs)
+    has_rank_stats = bool(rank_high_epochs or rank_low_epochs or repair_high_epochs)
     has_gate_stats = bool(gate_p50_epochs or change_p50_epochs)
 
     destination = output_path or history_path.with_name("training_curves.png")
@@ -369,10 +374,19 @@ def plot_training_history(
                 marker="s",
                 linewidth=2.0,
             )
+        if repair_high_epochs:
+            axes[row].plot(
+                repair_high_epochs,
+                repair_satisfied_high,
+                label="absolute repair satisfied (w>0.5)",
+                color="#C44E52",
+                marker="^",
+                linewidth=2.0,
+            )
         axes[row].axhline(1.0, color="#888888", linestyle="--", linewidth=1.0)
         axes[row].set_ylim(-0.02, 1.02)
         axes[row].set_ylabel("satisfied fraction")
-        axes[row].set_title("Gate-preference ranking satisfaction", pad=8)
+        axes[row].set_title("Gate preference and absolute-repair satisfaction", pad=8)
         axes[row].grid(True, alpha=0.3)
         axes[row].legend(loc="best", fontsize=8)
         row += 1

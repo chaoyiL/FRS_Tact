@@ -22,6 +22,7 @@ from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
 from tactile_flow_steering.utils.model import gate_preference_ranking_loss_per_sample
 from tactile_flow_steering.utils.model import gated_flow_matching_loss_per_sample
 from tactile_flow_steering.utils.model import gt_supervised_loss_per_sample
+from tactile_flow_steering.utils.model import high_gate_repair_loss_per_sample
 from tactile_flow_steering.utils.model import make_optimizer
 from tactile_flow_steering.utils.model import train_step
 
@@ -108,6 +109,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             np.asarray([0.9, 0.8, 0.1, 0.2]),
             np.asarray([0.8, 0.9, 0.1, 0.2]),
             ranking_margin=0.01,
+            repair_margin=0.01,
         )
         self.assertEqual(out["n_high_w"], 2)
         self.assertEqual(out["n_low_w"], 2)
@@ -126,6 +128,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertAlmostEqual(float(out["rank_penalty_low_w"]), 0.0)
         self.assertAlmostEqual(float(out["rank_satisfied_high_frac"]), 0.0)
         self.assertAlmostEqual(float(out["rank_satisfied_low_frac"]), 1.0)
+        self.assertAlmostEqual(float(out["repair_penalty_high_w"]), 0.0)
+        self.assertAlmostEqual(float(out["repair_satisfied_high_frac"]), 1.0)
 
     def test_gate_preference_ranking_loss_selects_endpoint_by_gate(self):
         gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
@@ -150,6 +154,29 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             margin=0.01,
         )
         np.testing.assert_allclose(zero_penalty, np.zeros((2,)), atol=1e-6)
+
+    def test_high_gate_repair_loss_requires_absolute_gt_gain(self):
+        gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
+        predicted = jnp.asarray([[[1.0]], [[1.0]]], dtype=jnp.float32)
+        decoded = jnp.asarray([[[1.1]], [[2.0]]], dtype=jnp.float32)
+        gate = jnp.asarray([0.9, 0.1], dtype=jnp.float32)
+        penalty = high_gate_repair_loss_per_sample(
+            decoded,
+            gt,
+            predicted,
+            gate,
+            margin=0.01,
+        )
+        np.testing.assert_allclose(penalty, np.asarray([0.22, 0.0]), atol=1e-6)
+
+        improved = high_gate_repair_loss_per_sample(
+            jnp.asarray([[[0.8]], [[2.0]]], dtype=jnp.float32),
+            gt,
+            predicted,
+            gate,
+            margin=0.01,
+        )
+        np.testing.assert_allclose(improved, np.zeros((2,)), atol=1e-6)
 
     def test_explicit_gate_condition_changes_output(self):
         model = self.make_model(gate_conditioning=True)
@@ -302,7 +329,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         expected = 0.5 * loss_star + 2.0 * 0.5 * loss_stop
         self.assertTrue(bool(jnp.allclose(gated_half, expected, atol=1e-5)))
 
-    def test_gated_loss_adds_weighted_preference_ranking(self):
+    def test_gated_loss_adds_weighted_preference_and_repair_constraints(self):
         model = self.make_model()
         x_base = jax.random.normal(jax.random.key(40), (2, 6, 3))
         gt = x_base + 1.0
@@ -322,7 +349,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_weight=1.0,
             aux_decode_steps=3,
         )
-        ranked = gated_flow_matching_loss_per_sample(
+        constrained = gated_flow_matching_loss_per_sample(
             model,
             x_base,
             gt,
@@ -335,6 +362,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_steps=3,
             rank_weight=0.5,
             rank_margin=0.01,
+            repair_weight=0.75,
+            repair_margin=0.01,
         )
         decoded = decode_actions(model, x_base, tactile, gate, num_steps=3)
         rank_penalty = gate_preference_ranking_loss_per_sample(
@@ -344,7 +373,15 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        self.assertTrue(bool(jnp.allclose(ranked, base + 0.5 * rank_penalty, atol=1e-5)))
+        repair_penalty = high_gate_repair_loss_per_sample(
+            decoded,
+            gt,
+            predicted,
+            gate,
+            margin=0.01,
+        )
+        expected = base + 0.5 * rank_penalty + 0.75 * repair_penalty
+        self.assertTrue(bool(jnp.allclose(constrained, expected, atol=1e-5)))
 
     def test_tactile_seq_changes_output(self):
         model = self.make_model()

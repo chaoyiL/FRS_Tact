@@ -111,6 +111,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
         rank_weight=float(training.get("rank_weight", 0.0)),
         rank_margin=float(training.get("rank_margin", 0.0)),
+        repair_weight=float(training.get("repair_weight", 0.0)),
+        repair_margin=float(training.get("repair_margin", 0.0)),
         model_dim=_positive_int(training, "model_dim", 256),
         depth=_positive_int(training, "depth", 6),
         num_heads=_positive_int(training, "num_heads", 4),

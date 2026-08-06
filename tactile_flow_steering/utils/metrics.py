@@ -71,6 +71,8 @@ class EvaluationResult:
     rank_penalty_low_w: float | None = None
     rank_satisfied_high_frac: float | None = None
     rank_satisfied_low_frac: float | None = None
+    repair_penalty_high_w: float | None = None
+    repair_satisfied_high_frac: float | None = None
     gate_w_high_mean: float | None = None
     gate_w_low_mean: float | None = None
     tactile_change_high_mean: float | None = None
@@ -125,11 +127,14 @@ def gate_stratified_decode_metrics(
     *,
     high_w_threshold: float = 0.5,
     ranking_margin: float = 0.0,
+    repair_margin: float = 0.0,
 ) -> dict[str, float | int]:
     """Split decode metrics and gate-preference satisfaction by gate group."""
 
     if ranking_margin < 0:
         raise ValueError(f"ranking_margin must be non-negative, got {ranking_margin}.")
+    if repair_margin < 0:
+        raise ValueError(f"repair_margin must be non-negative, got {repair_margin}.")
 
     mse_gt = np.asarray(sample_mse_gt, dtype=np.float64)
     mse_pred = np.asarray(sample_mse_pred, dtype=np.float64)
@@ -151,6 +156,10 @@ def gate_stratified_decode_metrics(
     low_rank_penalty = np.maximum(mse_pred - mse_gt + float(ranking_margin), 0.0)
     high_rank_satisfied = mse_gt + float(ranking_margin) <= mse_pred
     low_rank_satisfied = mse_pred + float(ranking_margin) <= mse_gt
+    high_repair_penalty = np.maximum(
+        mse_gt - mse_vla_gt + float(repair_margin), 0.0
+    )
+    high_repair_satisfied = mse_gt + float(repair_margin) <= mse_vla_gt
     result: dict[str, float | int] = {
         "mse_gt_high_w": _mean_or_nan(mse_gt[high]),
         "mse_gt_low_w": _mean_or_nan(mse_gt[low]),
@@ -166,6 +175,8 @@ def gate_stratified_decode_metrics(
         "rank_penalty_low_w": _mean_or_nan(low_rank_penalty[low]),
         "rank_satisfied_high_frac": _mean_or_nan(high_rank_satisfied[high]),
         "rank_satisfied_low_frac": _mean_or_nan(low_rank_satisfied[low]),
+        "repair_penalty_high_w": _mean_or_nan(high_repair_penalty[high]),
+        "repair_satisfied_high_frac": _mean_or_nan(high_repair_satisfied[high]),
         "gate_w_high_mean": _mean_or_nan(weights[high]),
         "gate_w_low_mean": _mean_or_nan(weights[low]),
         "n_high_w": int(np.count_nonzero(high)),
@@ -201,6 +212,7 @@ def evaluate_split(
     gate_tau: float | None = None,
     gate_temperature: float | None = None,
     rank_margin: float = 0.0,
+    repair_margin: float = 0.0,
 ) -> EvaluationResult:
     from tactile_flow_steering.utils.data import gate_weights_from_change
 
@@ -312,6 +324,7 @@ def evaluate_split(
             all_gate,
             all_change,
             ranking_margin=rank_margin,
+            repair_margin=repair_margin,
         )
         gate_quantiles = _quantiles(all_gate)
         change_quantiles = _quantiles(all_change)
@@ -337,6 +350,8 @@ def evaluate_split(
             "rank_penalty_low_w": None,
             "rank_satisfied_high_frac": None,
             "rank_satisfied_low_frac": None,
+            "repair_penalty_high_w": None,
+            "repair_satisfied_high_frac": None,
             "gate_w_high_mean": None,
             "gate_w_low_mean": None,
             "tactile_change_high_mean": None,
@@ -397,6 +412,8 @@ def evaluate_split(
         rank_penalty_low_w=stratified["rank_penalty_low_w"],  # type: ignore[arg-type]
         rank_satisfied_high_frac=stratified["rank_satisfied_high_frac"],  # type: ignore[arg-type]
         rank_satisfied_low_frac=stratified["rank_satisfied_low_frac"],  # type: ignore[arg-type]
+        repair_penalty_high_w=stratified["repair_penalty_high_w"],  # type: ignore[arg-type]
+        repair_satisfied_high_frac=stratified["repair_satisfied_high_frac"],  # type: ignore[arg-type]
         gate_w_high_mean=stratified["gate_w_high_mean"],  # type: ignore[arg-type]
         gate_w_low_mean=stratified["gate_w_low_mean"],  # type: ignore[arg-type]
         tactile_change_high_mean=stratified["tactile_change_high_mean"],  # type: ignore[arg-type]

@@ -74,6 +74,8 @@ def train_decoder(
     aux_decode_steps: int,
     rank_weight: float,
     rank_margin: float,
+    repair_weight: float,
+    repair_margin: float,
     model_dim: int,
     depth: int,
     num_heads: int,
@@ -173,6 +175,8 @@ def train_decoder(
         "val_rank_penalty_low_w",
         "val_rank_satisfied_high_frac",
         "val_rank_satisfied_low_frac",
+        "val_repair_penalty_high_w",
+        "val_repair_satisfied_high_frac",
         "val_gate_w",
         "val_gate_active_frac",
         "val_gate_w_high_mean",
@@ -217,8 +221,14 @@ def train_decoder(
         raise ValueError(f"rank_weight must be non-negative, got {rank_weight}.")
     if rank_margin < 0:
         raise ValueError(f"rank_margin must be non-negative, got {rank_margin}.")
-    if loss_mode != "gated" and rank_weight != 0:
-        raise ValueError("rank_weight is only supported with loss_mode='gated'.")
+    if repair_weight < 0:
+        raise ValueError(f"repair_weight must be non-negative, got {repair_weight}.")
+    if repair_margin < 0:
+        raise ValueError(f"repair_margin must be non-negative, got {repair_margin}.")
+    if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
+        raise ValueError(
+            "rank_weight and repair_weight are only supported with loss_mode='gated'."
+        )
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
     if tactile_num_tokens <= 0:
@@ -283,11 +293,22 @@ def train_decoder(
         resume_extra = resume_metadata.get("extra_metadata") or {}
         stored_rank_weight = float(resume_extra.get("rank_weight", 0.0))
         stored_rank_margin = float(resume_extra.get("rank_margin", 0.0))
-        if stored_rank_weight != rank_weight or stored_rank_margin != rank_margin:
+        stored_repair_weight = float(resume_extra.get("repair_weight", 0.0))
+        stored_repair_margin = float(resume_extra.get("repair_margin", 0.0))
+        if (
+            stored_rank_weight != rank_weight
+            or stored_rank_margin != rank_margin
+            or stored_repair_weight != repair_weight
+            or stored_repair_margin != repair_margin
+        ):
             raise ValueError(
-                "Resume checkpoint ranking objective differs from this run: "
-                f"checkpoint=(weight={stored_rank_weight:g}, margin={stored_rank_margin:g}) "
-                f"requested=(weight={rank_weight:g}, margin={rank_margin:g}). "
+                "Resume checkpoint constraint objective differs from this run: "
+                "checkpoint="
+                f"(rank_weight={stored_rank_weight:g}, rank_margin={stored_rank_margin:g}, "
+                f"repair_weight={stored_repair_weight:g}, "
+                f"repair_margin={stored_repair_margin:g}) requested="
+                f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
+                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}). "
                 "Start a fresh run in a new frs_training.output directory."
             )
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -426,10 +447,11 @@ def train_decoder(
     else:
         print(
             f"loss_mode=gated L=w*(FM(gt)+aux*MSE(decode,gt))+lambda*(1-w)*FM(pred) "
-            "+rank_weight*preference_margin_loss "
+            "+rank_weight*preference_margin_loss+repair_weight*absolute_repair_loss "
             f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g} "
             f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
             f"rank_weight={rank_weight:g} rank_margin={rank_margin:g} "
+            f"repair_weight={repair_weight:g} repair_margin={repair_margin:g} "
             f"(primary eval=gt; also log vs predicted)"
         )
     if cosine_decay:
@@ -504,6 +526,8 @@ def train_decoder(
                         aux_decode_steps=aux_decode_steps,
                         rank_weight=rank_weight,
                         rank_margin=rank_margin,
+                        repair_weight=repair_weight,
+                        repair_margin=repair_margin,
                     )
                     losses.append(float(jax.device_get(loss)))
                     weights.append(batch_n)
@@ -534,6 +558,8 @@ def train_decoder(
                     "aux_decode_steps": aux_decode_steps,
                     "rank_weight": rank_weight,
                     "rank_margin": rank_margin,
+                    "repair_weight": repair_weight,
+                    "repair_margin": repair_margin,
                     "eval_every": eval_every,
                 }
                 if run_eval:
@@ -548,6 +574,7 @@ def train_decoder(
                         gate_tau=gate_tau if loss_mode == "gated" else None,
                         gate_temperature=gate_temperature if loss_mode == "gated" else None,
                         rank_margin=rank_margin if loss_mode == "gated" else 0.0,
+                        repair_margin=repair_margin if loss_mode == "gated" else 0.0,
                     )
                     metrics: dict[str, float | str | int] = {
                         "train_flow_loss": train_loss,
@@ -596,6 +623,12 @@ def train_decoder(
                                 ),
                                 "val_rank_satisfied_low_frac": float(
                                     validation.rank_satisfied_low_frac
+                                ),
+                                "val_repair_penalty_high_w": float(
+                                    validation.repair_penalty_high_w
+                                ),
+                                "val_repair_satisfied_high_frac": float(
+                                    validation.repair_satisfied_high_frac
                                 ),
                                 "val_gate_w": float(validation.gate_w),
                                 "val_gate_active_frac": float(validation.gate_active_frac),
@@ -655,6 +688,7 @@ def train_decoder(
                             f" rel_gt(w>0.5)={validation.relative_gt_error_high_w:.4f}"
                             f" rank_ok_hi={validation.rank_satisfied_high_frac:.3f}"
                             f" rank_ok_lo={validation.rank_satisfied_low_frac:.3f}"
+                            f" repair_ok_hi={validation.repair_satisfied_high_frac:.3f}"
                             f" w_mean_hi={validation.gate_w_high_mean:.3f}"
                             f" w_mean_lo={validation.gate_w_low_mean:.3f}"
                             f" n_high={validation.n_high_w} n_low={validation.n_low_w}"
@@ -801,6 +835,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Required MSE separation between the preferred and other endpoint.",
     )
+    parser.add_argument(
+        "--repair-weight",
+        type=float,
+        default=0.0,
+        help="Weight requiring high-gate GT error to beat the frozen VLA baseline.",
+    )
+    parser.add_argument(
+        "--repair-margin",
+        type=float,
+        default=0.0,
+        help="Required high-gate GT MSE improvement over the VLA baseline.",
+    )
 
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--depth", type=int, default=6)
@@ -895,6 +941,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         ),
         rank_weight=args.rank_weight,
         rank_margin=args.rank_margin,
+        repair_weight=args.repair_weight,
+        repair_margin=args.repair_margin,
         model_dim=args.model_dim,
         depth=args.depth,
         num_heads=args.num_heads,
