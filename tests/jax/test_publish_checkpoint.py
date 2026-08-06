@@ -16,6 +16,8 @@ from lerobot.policies.smolvla_jax.validation import CheckpointContract
 from tools.publish_smolvla_checkpoint import (
     INFERENCE_FILENAMES,
     SIDECAR_FILENAMES,
+    _default_metadata_loader,
+    _metadata_stats,
     build_inference_bundle,
     contract_from_training_yaml,
     publish_bundle,
@@ -651,6 +653,165 @@ model:
             "revision_proof": "repository head predates model weight",
         }
     ]
+
+
+def _legacy_feature_stats(offset: float, count: int) -> dict[str, object]:
+    mean = np.arange(20, dtype=np.float32) + offset
+    return {
+        "min": (mean - 1).tolist(),
+        "max": (mean + 1).tolist(),
+        "mean": mean.tolist(),
+        "std": np.full(20, 0.5, dtype=np.float32).tolist(),
+        "count": [count],
+    }
+
+
+def test_legacy_metadata_fallback_matches_v21_converter_semantics(tmp_path: Path) -> None:
+    from packaging.version import Version
+
+    from lerobot.datasets import aggregate_stats
+    from lerobot.datasets.io_utils import cast_stats_to_numpy
+    from lerobot.datasets.utils import BackwardCompatibilityError
+
+    revision = "e" * 40
+    dataset = tmp_path / "legacy-dataset"
+    (dataset / "meta").mkdir(parents=True)
+    _json(
+        dataset / "meta/info.json",
+        {
+            "codebase_version": "v2.1",
+            "total_frames": 5,
+            "features": {
+                "observation.state": {"dtype": "float32", "shape": [20]},
+                "actions": {"dtype": "float32", "shape": [20]},
+            },
+        },
+    )
+    episodes = [
+        {
+            "episode_index": 1,
+            "stats": {
+                "observation.state": _legacy_feature_stats(10, 3),
+                "actions": _legacy_feature_stats(20, 3),
+            },
+        },
+        {
+            "episode_index": 0,
+            "stats": {
+                "observation.state": _legacy_feature_stats(0, 2),
+                "actions": _legacy_feature_stats(5, 2),
+            },
+        },
+    ]
+    (dataset / "meta/episodes_stats.jsonl").write_text(
+        "".join(json.dumps(episode) + "\n" for episode in episodes),
+        encoding="utf-8",
+    )
+
+    class LegacyMetadata:
+        def __init__(self, repo_id: str, **kwargs: object) -> None:
+            raise BackwardCompatibilityError(repo_id, Version("2.1"))
+
+    downloads: list[dict[str, object]] = []
+
+    def snapshot_download(**kwargs: object) -> str:
+        downloads.append(dict(kwargs))
+        return str(dataset)
+
+    metadata = _default_metadata_loader(
+        "owner/legacy",
+        revision,
+        metadata_class=LegacyMetadata,
+        snapshot_download_fn=snapshot_download,
+    )
+    converter_expected = aggregate_stats(
+        [cast_stats_to_numpy(episode["stats"]) for episode in sorted(episodes, key=lambda x: x["episode_index"])]
+    )
+    for feature, feature_stats in converter_expected.items():
+        for stat, expected in feature_stats.items():
+            np.testing.assert_allclose(metadata.stats[feature][stat], expected)
+
+    merged, provenance = _metadata_stats(
+        [
+            {
+                "repo_id": "owner/legacy",
+                "revision": revision,
+                "revision_proof": "explicit immutable revision",
+                "action_key": "actions",
+                "rename_map": {"observation.state": "robot.state"},
+            }
+        ],
+        metadata_loader=lambda repo_id, requested: metadata,
+    )
+    assert metadata.total_frames == 5
+    assert metadata.features["observation.state"]["shape"] == [20]
+    assert merged["robot.state"]["mean"].shape == (20,)
+    assert merged["action"]["mean"].shape == (20,)
+    assert int(np.asarray(merged["robot.state"]["count"]).item()) == 5
+    assert int(np.asarray(merged["action"]["count"]).item()) == 5
+    assert provenance[0]["metadata_source"] == "legacy_v2.1_episode_stats"
+    assert provenance[0]["legacy_conversion_proof"] == (
+        "cast_stats_to_numpy(per episode) then aggregate_stats"
+    )
+    bundle = build_inference_bundle(
+        _valid_checkpoint(tmp_path / "checkpoint"),
+        tmp_path / "bundle",
+        expected=VT_CONTRACT,
+        dataset_revisions=provenance,
+    )
+    manifest = json.loads((bundle / "conversion_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["datasets"][0]["metadata_source"] == "legacy_v2.1_episode_stats"
+    assert manifest["datasets"][0]["legacy_conversion_proof"] == (
+        "cast_stats_to_numpy(per episode) then aggregate_stats"
+    )
+    assert downloads == [
+        {
+            "repo_id": "owner/legacy",
+            "repo_type": "dataset",
+            "revision": revision,
+            "allow_patterns": ["meta/info.json", "meta/episodes_stats.jsonl"],
+        }
+    ]
+
+
+def test_metadata_loader_uses_v3_without_legacy_download() -> None:
+    expected = SimpleNamespace(total_frames=1, features={}, stats={})
+    constructor_calls: list[tuple[str, dict[str, object]]] = []
+
+    class V3Metadata:
+        def __new__(cls, repo_id: str, **kwargs: object) -> object:
+            constructor_calls.append((repo_id, dict(kwargs)))
+            return expected
+
+    metadata = _default_metadata_loader(
+        "owner/v3",
+        "f" * 40,
+        metadata_class=V3Metadata,
+        snapshot_download_fn=lambda **kwargs: pytest.fail("v3 metadata must not use legacy fallback"),
+    )
+
+    assert metadata.total_frames == expected.total_frames
+    assert metadata.features == expected.features
+    assert metadata.stats == expected.stats
+    assert metadata.metadata_source == "lerobot_v3_metadata"
+    assert metadata.legacy_conversion_proof is None
+    assert constructor_calls == [
+        ("owner/v3", {"revision": "f" * 40, "force_cache_sync": True})
+    ]
+
+
+def test_metadata_loader_does_not_hide_unrelated_errors() -> None:
+    class BrokenMetadata:
+        def __init__(self, repo_id: str, **kwargs: object) -> None:
+            raise RuntimeError("network or schema failure")
+
+    with pytest.raises(RuntimeError, match="network or schema failure"):
+        _default_metadata_loader(
+            "owner/broken",
+            "1" * 40,
+            metadata_class=BrokenMetadata,
+            snapshot_download_fn=lambda **kwargs: pytest.fail("must not silently fall back"),
+        )
 
 
 def test_current_unpinned_training_yaml_fails_closed_without_weight_history(tmp_path: Path) -> None:

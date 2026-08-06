@@ -14,7 +14,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +36,18 @@ SIDECAR_FILENAMES = (
 )
 INFERENCE_FILENAMES = (MODEL_FILENAME, *SIDECAR_FILENAMES, MANIFEST_FILENAME)
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
+_LEGACY_METADATA_ALLOW_PATTERNS = ("meta/info.json", "meta/episodes_stats.jsonl")
+
+
+@dataclass(frozen=True)
+class _MetadataStats:
+    """Minimal metadata surface needed to reconstruct normalization sidecars."""
+
+    total_frames: int
+    features: Mapping[str, Any]
+    stats: Mapping[str, Mapping[str, Any]]
+    metadata_source: str
+    legacy_conversion_proof: str | None = None
 
 
 def _sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
@@ -538,13 +550,107 @@ def _default_snapshot_resolver(repo_id: str, revision: str | None) -> Path:
     )
 
 
+def _load_legacy_metadata_stats(snapshot: Path) -> _MetadataStats:
+    """Rebuild v3-style global stats from v2.1 per-episode metadata only."""
+
+    from lerobot.datasets.compute_stats import aggregate_stats
+    from lerobot.datasets.io_utils import cast_stats_to_numpy
+
+    info_path = snapshot / "meta/info.json"
+    episodes_stats_path = snapshot / "meta/episodes_stats.jsonl"
+    try:
+        info = json.loads(info_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid legacy dataset info metadata: {exc}") from exc
+    if not isinstance(info, Mapping):
+        raise ValueError("invalid legacy dataset info metadata: root must be a mapping")
+    features = info.get("features")
+    total_frames = info.get("total_frames")
+    if not isinstance(features, Mapping) or not isinstance(total_frames, int):
+        raise ValueError("legacy meta/info.json must contain features and integer total_frames")
+
+    episodes: list[tuple[int, Mapping[str, Any]]] = []
+    try:
+        with episodes_stats_path.open(encoding="utf-8") as file:
+            for line_number, line in enumerate(file, start=1):
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, Mapping):
+                    raise ValueError(f"line {line_number} root must be a mapping")
+                episode_index = record.get("episode_index")
+                episode_stats = record.get("stats")
+                if not isinstance(episode_index, int) or not isinstance(episode_stats, Mapping):
+                    raise ValueError(
+                        f"line {line_number} must contain integer episode_index and stats mapping"
+                    )
+                episodes.append((episode_index, episode_stats))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid legacy episode stats metadata: {exc}") from exc
+    if not episodes:
+        raise ValueError("legacy meta/episodes_stats.jsonl contains no episode statistics")
+    if len({index for index, _ in episodes}) != len(episodes):
+        raise ValueError("legacy meta/episodes_stats.jsonl contains duplicate episode indices")
+
+    # This is deliberately identical to the statistics portion of
+    # convert_dataset_v21_to_v30: cast every episode, sort by episode index,
+    # then aggregate the episode dictionaries.
+    per_episode = [cast_stats_to_numpy(stats) for _, stats in sorted(episodes)]
+    return _MetadataStats(
+        total_frames=total_frames,
+        features=features,
+        stats=aggregate_stats(per_episode),
+        metadata_source="legacy_v2.1_episode_stats",
+        legacy_conversion_proof="cast_stats_to_numpy(per episode) then aggregate_stats",
+    )
+
+
+def _default_metadata_loader(
+    repo_id: str,
+    revision: str,
+    *,
+    metadata_class: type[Any] | None = None,
+    snapshot_download_fn: Callable[..., str] | None = None,
+) -> Any:
+    """Load v3 metadata, falling back only for an explicit v2.1 compatibility error."""
+
+    from lerobot.datasets.utils import BackwardCompatibilityError
+
+    if metadata_class is None:
+        from lerobot.datasets import LeRobotDatasetMetadata
+
+        metadata_class = LeRobotDatasetMetadata
+    try:
+        metadata = metadata_class(repo_id, revision=revision, force_cache_sync=True)
+    except BackwardCompatibilityError:
+        if snapshot_download_fn is None:
+            from huggingface_hub import snapshot_download
+
+            snapshot_download_fn = snapshot_download
+        snapshot = Path(
+            snapshot_download_fn(
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision=revision,
+                allow_patterns=list(_LEGACY_METADATA_ALLOW_PATTERNS),
+            )
+        )
+        return _load_legacy_metadata_stats(snapshot)
+    return _MetadataStats(
+        total_frames=int(metadata.total_frames),
+        features=metadata.features,
+        stats=metadata.stats,
+        metadata_source="lerobot_v3_metadata",
+    )
+
+
 def _metadata_stats(
     datasets: Sequence[Mapping[str, Any]],
     *,
     metadata_loader: Callable[[str, str], Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     # These imports are deliberately delayed so validation/bundle/publish stay lightweight.
-    from lerobot.datasets import LeRobotDatasetMetadata, aggregate_stats
+    from lerobot.datasets import aggregate_stats
     from lerobot.policies.smolvla_jax.data import (
         canonicalize_dataset_stats,
         ensure_stats_counts,
@@ -553,9 +659,7 @@ def _metadata_stats(
     )
 
     if metadata_loader is None:
-
-        def metadata_loader(repo_id: str, revision: str) -> Any:
-            return LeRobotDatasetMetadata(repo_id, revision=revision, force_cache_sync=True)
+        metadata_loader = _default_metadata_loader
 
     stats_list: list[dict[str, dict[str, Any]]] = []
     provenance: list[dict[str, Any]] = []
@@ -570,15 +674,20 @@ def _metadata_stats(
             source.get("rename_map"),
         )
         stats_list.append(ensure_stats_counts(stats, frame_count=frame_count))
-        provenance.append(
-            {
-                "repo_id": repo_id,
-                "revision": revision,
-                "revision_proof": source["revision_proof"],
-                "frames": frame_count,
-                "action_key": action_key,
-            }
-        )
+        dataset_provenance = {
+            "repo_id": repo_id,
+            "revision": revision,
+            "revision_proof": source["revision_proof"],
+            "frames": frame_count,
+            "action_key": action_key,
+        }
+        metadata_source = _attribute(metadata, "metadata_source")
+        if metadata_source is not None:
+            dataset_provenance["metadata_source"] = str(metadata_source)
+        legacy_conversion_proof = _attribute(metadata, "legacy_conversion_proof")
+        if legacy_conversion_proof is not None:
+            dataset_provenance["legacy_conversion_proof"] = str(legacy_conversion_proof)
+        provenance.append(dataset_provenance)
     merged = aggregate_stats(stats_list) if len(stats_list) > 1 else stats_list[0]
     return merged, provenance
 
