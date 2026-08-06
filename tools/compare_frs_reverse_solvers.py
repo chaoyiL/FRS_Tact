@@ -117,6 +117,10 @@ def _prepare_one(
         max_samples=max_samples,
         drop_tail_action_chunks=int(action_cache.get("drop_tail_action_chunks", 1)),
         flush_every=int(action_cache.get("flush_every", 8)),
+        num_workers=int(action_cache.get("num_workers", 0)),
+        prefetch_factor=int(action_cache.get("prefetch_factor", 2)),
+        video_backend=action_cache.get("video_backend"),
+        worker_timeout_seconds=float(action_cache.get("worker_timeout_seconds", 300.0)),
     )
 
 

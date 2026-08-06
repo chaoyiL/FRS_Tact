@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import os
 import pathlib
 import sys
 import threading
@@ -13,6 +14,8 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
 
 ROOT = pathlib.Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -20,6 +23,7 @@ if str(ROOT) not in sys.path:
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.policies.smolvla_jax.data import action_delta_timestamps
+from lerobot.policies.smolvla_jax.data import prepare_lerobot_batch
 from lerobot.policies.smolvla_jax.data import resolve_source_visual_keys
 
 from modalities_eval.utils import EvalObservation
@@ -43,7 +47,8 @@ from utils.integration import REVERSE_INTEGRATION_VERSION
 from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
-from utils.source_model import stack_observations
+
+_DATASET_INDEX_KEY = "__frs_dataset_index__"
 
 
 @contextmanager
@@ -224,7 +229,72 @@ def _checkpoint_fingerprint(checkpoint_dir: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -> LeRobotDataset:
+class _ActionCacheRecordDataset(Dataset):
+    """Decode only fields needed by batched SmolVLA preprocessing."""
+
+    def __init__(
+        self,
+        dataset: LeRobotDataset,
+        records: Sequence[SampleRecord],
+        *,
+        action_key: str,
+    ):
+        self.dataset = dataset
+        self.dataset_indices = tuple(int(record.dataset_index) for record in records)
+        self.action_key = str(action_key)
+        self.padding_key = f"{self.action_key}_is_pad"
+
+    def __len__(self) -> int:
+        return len(self.dataset_indices)
+
+    def __getitem__(self, position: int) -> dict[str, Any]:
+        dataset_index = self.dataset_indices[position]
+        sample = self.dataset[dataset_index]
+        selected = {
+            key: value
+            for key, value in sample.items()
+            if key.startswith("observation.")
+            or key in (self.action_key, self.padding_key, "task")
+        }
+        selected[_DATASET_INDEX_KEY] = dataset_index
+        return selected
+
+
+def _start_cpu_only_workers(loader: DataLoader, num_workers: int):
+    """Start spawn workers with CUDA hidden, then restore the parent environment."""
+
+    if num_workers <= 0:
+        return iter(loader)
+
+    old_jax_platforms = os.environ.get("JAX_PLATFORMS")
+    old_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    old_skip_cuda_check = os.environ.get("JAX_SKIP_CUDA_CONSTRAINTS_CHECK")
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = "1"
+    try:
+        return iter(loader)
+    finally:
+        if old_jax_platforms is None:
+            os.environ.pop("JAX_PLATFORMS", None)
+        else:
+            os.environ["JAX_PLATFORMS"] = old_jax_platforms
+        if old_cuda_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_devices
+        if old_skip_cuda_check is None:
+            os.environ.pop("JAX_SKIP_CUDA_CONSTRAINTS_CHECK", None)
+        else:
+            os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = old_skip_cuda_check
+
+
+def _create_dataset(
+    model: SmolVLAEvalModel,
+    metadata: LeRobotDatasetMetadata,
+    *,
+    video_backend: str | None,
+) -> LeRobotDataset:
     visual_keys = resolve_source_visual_keys(
         model.config.image_keys,
         model.preprocessor.rename_map,
@@ -241,37 +311,125 @@ def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -
             metadata.fps,
         ),
         visual_keys=visual_keys,
+        video_backend=video_backend,
+        return_uint8=True,
     )
 
 
-def _load_observation_and_gt(
-    model: SmolVLAEvalModel, dataset: LeRobotDataset, dataset_index: int
-) -> tuple[EvalObservation, jax.Array]:
-    sample = dataset[dataset_index]
-    observation, gt_actions, _ = model.prepare_sample(sample)
-    return observation, jnp.asarray(gt_actions, dtype=jnp.float32)
-
-
-def _load_observation_batch(
-    model: SmolVLAEvalModel,
+def _create_batch_loader(
     dataset: LeRobotDataset,
-    batch_records: Sequence[SampleRecord],
+    records: Sequence[SampleRecord],
     *,
-    report_progress: bool = False,
-) -> tuple[EvalObservation, jax.Array]:
-    observations: list[EvalObservation] = []
-    gt_actions: list[jax.Array] = []
-    for offset, record in enumerate(batch_records, start=1):
-        if report_progress:
-            print(
-                f"first batch data load: sample {offset}/{len(batch_records)} "
-                f"dataset_index={record.dataset_index}",
-                flush=True,
+    action_key: str,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+    worker_timeout_seconds: float,
+):
+    if num_workers > 0 and batch_size % num_workers != 0:
+        raise ValueError(
+            "batch_size must be divisible by num_workers so each decode worker "
+            f"contributes equally to a GPU batch, got {batch_size=} and {num_workers=}."
+        )
+    frame_dataset = _ActionCacheRecordDataset(dataset, records, action_key=action_key)
+    worker_batch_size = batch_size if num_workers == 0 else batch_size // num_workers
+    loader_kwargs: dict[str, Any] = {
+        "dataset": frame_dataset,
+        "batch_size": worker_batch_size,
+        "shuffle": False,
+        "num_workers": num_workers,
+        "persistent_workers": num_workers > 0,
+        "drop_last": False,
+    }
+    if num_workers > 0:
+        loader_kwargs.update(
+            {
+                "prefetch_factor": prefetch_factor,
+                "multiprocessing_context": "spawn",
+                "timeout": worker_timeout_seconds,
+            }
+        )
+    loader = DataLoader(**loader_kwargs)
+    iterator = _start_cpu_only_workers(loader, num_workers)
+    if num_workers > 0:
+        iterator = _group_worker_batches(iterator, target_batch_size=batch_size)
+    return loader, iterator, worker_batch_size
+
+
+def _merge_raw_batches(parts: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    if not parts:
+        raise ValueError("cannot merge an empty raw batch list")
+    expected_keys = set(parts[0])
+    if any(set(part) != expected_keys for part in parts[1:]):
+        raise RuntimeError("decode workers returned raw batches with different keys")
+
+    merged: dict[str, Any] = {}
+    for key in parts[0]:
+        values = [part[key] for part in parts]
+        first = values[0]
+        if isinstance(first, torch.Tensor):
+            merged[key] = torch.cat(values, dim=0)
+        elif isinstance(first, np.ndarray):
+            merged[key] = np.concatenate(values, axis=0)
+        elif isinstance(first, (list, tuple)):
+            merged[key] = [item for value in values for item in value]
+        else:
+            raise TypeError(f"cannot merge worker batch field {key!r} of type {type(first)!r}")
+    return merged
+
+
+def _group_worker_batches(iterator, *, target_batch_size: int):
+    """Combine one microbatch per worker into a large GPU batch in source order."""
+
+    parts: list[dict[str, Any]] = []
+    count = 0
+    for raw_batch in iterator:
+        microbatch_size = int(_as_numpy(raw_batch[_DATASET_INDEX_KEY]).size)
+        if microbatch_size <= 0:
+            raise RuntimeError("decode worker returned an empty microbatch")
+        parts.append(raw_batch)
+        count += microbatch_size
+        if count == target_batch_size:
+            yield _merge_raw_batches(parts)
+            parts = []
+            count = 0
+        elif count > target_batch_size:
+            raise RuntimeError(
+                f"worker microbatches overfilled target batch: {count} > {target_batch_size}"
             )
-        observation, actions = _load_observation_and_gt(model, dataset, record.dataset_index)
-        observations.append(observation)
-        gt_actions.append(actions)
-    return stack_observations(observations), jnp.stack(gt_actions, axis=0)
+    if parts:
+        yield _merge_raw_batches(parts)
+
+
+def _as_numpy(value: Any) -> np.ndarray:
+    if hasattr(value, "detach"):
+        value = value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _prepare_observation_batch(
+    model: SmolVLAEvalModel,
+    raw_batch: dict[str, Any],
+) -> tuple[list[int], EvalObservation, jax.Array]:
+    dataset_indices = [
+        int(index) for index in _as_numpy(raw_batch.pop(_DATASET_INDEX_KEY)).reshape(-1)
+    ]
+    image_keys = model.image_keys_for_sample(raw_batch)
+    prepared = prepare_lerobot_batch(
+        raw_batch,
+        model.preprocessor,
+        model.config,
+        action_key=model.action_key,
+    )
+    observation = EvalObservation(
+        images=prepared["images"],
+        image_masks=prepared["image_masks"],
+        language_tokens=prepared["language_tokens"],
+        language_masks=prepared["language_masks"],
+        state=prepared["state"],
+        image_keys=image_keys,
+    )
+    return dataset_indices, observation, jnp.asarray(prepared["actions"], dtype=jnp.float32)
 
 
 def _pad_observation_batch(observation: EvalObservation, target_batch: int) -> EvalObservation:
@@ -347,6 +505,10 @@ def prepare_cache(
     max_samples: int | None,
     drop_tail_action_chunks: int = 1,
     flush_every: int = 8,
+    num_workers: int = 0,
+    prefetch_factor: int = 2,
+    video_backend: str | None = None,
+    worker_timeout_seconds: float = 300.0,
 ) -> dict[str, Any]:
     if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
         raise ValueError("model_sample_steps, reverse_steps, and batch_size must all be positive.")
@@ -357,6 +519,14 @@ def prepare_cache(
         )
     if flush_every <= 0:
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
+    if num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+    if prefetch_factor <= 0:
+        raise ValueError(f"prefetch_factor must be positive, got {prefetch_factor}.")
+    if worker_timeout_seconds <= 0:
+        raise ValueError(
+            f"worker_timeout_seconds must be positive, got {worker_timeout_seconds}."
+        )
     if drop_tail_action_chunks < 0:
         raise ValueError(f"drop_tail_action_chunks must be >= 0, got {drop_tail_action_chunks}.")
 
@@ -460,11 +630,28 @@ def prepare_cache(
         print(f"cache complete: {cache_dir}")
         return manifest
 
-    dataset = _create_dataset(model, metadata)
+    dataset = _create_dataset(model, metadata, video_backend=video_backend)
     action_shape = (action_horizon, action_dim)
     loop_started = time.perf_counter()
     batches_since_flush = 0
-    starts = list(range(completed, len(records), batch_size))
+    remaining_records = records[completed:]
+    loader, loader_iterator, worker_batch_size = _create_batch_loader(
+        dataset,
+        remaining_records,
+        action_key=model.action_key,
+        batch_size=batch_size,
+        num_workers=num_workers,
+        prefetch_factor=prefetch_factor,
+        worker_timeout_seconds=worker_timeout_seconds,
+    )
+    batch_count = (len(remaining_records) + batch_size - 1) // batch_size
+    print(
+        f"action-cache pipeline: batch_size={batch_size} workers={num_workers} "
+        f"worker_microbatch={worker_batch_size} prefetch_factor={prefetch_factor} "
+        f"queued_gpu_batches={prefetch_factor if num_workers else 0} "
+        f"video_backend={video_backend or 'auto'}",
+        flush=True,
+    )
 
     pending: dict[str, Any] | None = None
 
@@ -513,32 +700,39 @@ def prepare_cache(
         )
         pending = None
 
-    for batch_number, start in enumerate(starts):
+    for batch_number in range(batch_count):
+        start = completed + batch_number * batch_size
         stop = min(start + batch_size, len(records))
         batch_records = records[start:stop]
         valid = len(batch_records)
-        if batch_number == 0:
-            print(
-                f"first batch data load: started "
-                f"(samples={start}:{stop}, batch_size={batch_size})",
-                flush=True,
+        loader_heartbeat = (
+            _progress_heartbeat(
+                f"multiprocess loader warmup "
+                f"(workers={num_workers}, prefetch_factor={prefetch_factor})"
             )
-        observation_batch, gt_action_batch = _load_observation_batch(
-            model,
-            dataset,
-            batch_records,
-            report_progress=batch_number == 0,
+            if batch_number == 0
+            else nullcontext()
         )
-        if batch_number == 0:
-            print("first batch data load: finished", flush=True)
+        with loader_heartbeat:
+            raw_batch = next(loader_iterator)
+        dataset_indices, observation_batch, gt_action_batch = _prepare_observation_batch(
+            model,
+            raw_batch,
+        )
+        expected_indices = [record.dataset_index for record in batch_records]
+        if dataset_indices != expected_indices:
+            raise RuntimeError(
+                "action-cache loader returned samples out of order: "
+                f"expected={expected_indices[:4]}..., got={dataset_indices[:4]}..."
+            )
         if valid < batch_size:
             observation_batch = _pad_observation_batch(observation_batch, batch_size)
             gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
             pad_indices = [batch_records[-1].dataset_index] * (batch_size - valid)
         else:
             pad_indices = []
-        dataset_indices = [record.dataset_index for record in batch_records] + pad_indices
-        noise = deterministic_noise(dataset_indices, action_shape, seed=inference_seed)
+        padded_dataset_indices = dataset_indices + pad_indices
+        noise = deterministic_noise(padded_dataset_indices, action_shape, seed=inference_seed)
 
         # The first call includes XLA compilation and GPU warmup.  Keep emitting
         # liveness messages because JAX does not expose a numeric compile percentage.
@@ -573,6 +767,8 @@ def prepare_cache(
             "gt_action": gt_action_batch,
             "noise": noise,
         }
+    del loader_iterator
+    del loader
     _commit_pending(force_flush=True)
 
     manifest["status"] = "complete"
@@ -605,6 +801,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Numerical integrator for reverse action integration (default: slerpflow).",
     )
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--prefetch-factor", type=int, default=2)
+    parser.add_argument("--video-backend")
+    parser.add_argument("--worker-timeout-seconds", type=float, default=300.0)
     parser.add_argument(
         "--flush-every",
         type=int,
@@ -653,6 +853,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         max_samples=args.max_samples,
         drop_tail_action_chunks=args.drop_tail_action_chunks,
         flush_every=args.flush_every,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        video_backend=args.video_backend,
+        worker_timeout_seconds=args.worker_timeout_seconds,
     )
 
 

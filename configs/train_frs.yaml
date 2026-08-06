@@ -54,8 +54,15 @@ action_cache:
   model_sample_steps: 10
   reverse_steps: 20
   reverse_solver: slerpflow
-  batch_size: 16
-  flush_every: 8
+  # H100 aggressive cache pipeline: 8 spawn workers decode/prefetch RGB while
+  # the GPU processes a 64-sample SmolVLA + SlerpFlow batch.
+  batch_size: 64
+  num_workers: 8
+  prefetch_factor: 2
+  video_backend: torchcodec
+  worker_timeout_seconds: 300
+  # Keep the durable resume interval at 128 samples (2 * batch_size).
+  flush_every: 2
   inference_seed: 0
   split_seed: 42
   val_fraction: 0.1

@@ -95,6 +95,10 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             ),
             drop_tail_action_chunks=int(cache_config.get("drop_tail_action_chunks", 1)),
             flush_every=int(cache_config.get("flush_every", 8)),
+            num_workers=int(cache_config.get("num_workers", 0)),
+            prefetch_factor=int(cache_config.get("prefetch_factor", 2)),
+            video_backend=cache_config.get("video_backend"),
+            worker_timeout_seconds=float(cache_config.get("worker_timeout_seconds", 300.0)),
         )
         outputs.append(output)
     return outputs
