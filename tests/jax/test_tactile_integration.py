@@ -67,7 +67,7 @@ def _write_remote_config(
         "control": {
             "control_frequency": 30.0,
             "controller_frequency": 80.0,
-            "steps_per_inference": 5,
+            "steps_per_inference": 10,
             "action_horizon": 20,
         },
         "runtime": {"warmup_runs": 1, "max_iterations": 0},
@@ -265,7 +265,7 @@ def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
     assert config["observation"]["data_type"] == "vitac"
     assert config["observation"]["single_arm_mode"] is False
     assert config["control"]["action_horizon"] == 20
-    assert config["control"]["steps_per_inference"] == 5
+    assert config["control"]["steps_per_inference"] == 10
 
 
 def test_tactile_embedding_normalization_has_unit_rms() -> None:

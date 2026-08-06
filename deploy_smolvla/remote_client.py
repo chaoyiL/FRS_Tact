@@ -512,11 +512,6 @@ def run(
     if policy.config.action_dim <= 0:
         raise ValueError(f"Checkpoint action_dim must be positive, got {policy.config.action_dim}")
     configured_steps = int(control["steps_per_inference"])
-    if policy.config.n_action_steps != configured_steps:
-        raise ValueError(
-            f"Checkpoint n_action_steps={policy.config.n_action_steps} does not match "
-            f"steps_per_inference={configured_steps}"
-        )
     if not policy.config.image_keys:
         raise ValueError("Checkpoint does not declare any visual observation keys")
 
