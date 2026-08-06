@@ -299,6 +299,7 @@ def _create_dataset(
         model.config.image_keys,
         model.preprocessor.rename_map,
         metadata.camera_keys,
+        allow_missing=model.config.empty_cameras,
     )
     print(f"action-cache visual_keys={visual_keys}", flush=True)
     return LeRobotDataset(

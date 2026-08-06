@@ -366,6 +366,20 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
     )
     assert keys == ["observation.images.camera0", "observation.images.camera1"]
 
+    with pytest.raises(KeyError, match="allow_missing=0"):
+        resolve_source_visual_keys(
+            ["observation.images.camera1", "observation.images.empty_camera_0"],
+            {"observation.images.camera0": "observation.images.camera1"},
+            ["observation.images.camera0"],
+        )
+    keys_with_placeholder = resolve_source_visual_keys(
+        ["observation.images.camera1", "observation.images.empty_camera_0"],
+        {"observation.images.camera0": "observation.images.camera1"},
+        ["observation.images.camera0"],
+        allow_missing=1,
+    )
+    assert keys_with_placeholder == ["observation.images.camera0"]
+
 
 def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
     config = dataclasses.replace(

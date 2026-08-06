@@ -270,9 +270,13 @@ def resolve_source_visual_keys(
     model_image_keys: Sequence[str],
     rename_map: Mapping[str, str] | None,
     available_cameras: Sequence[str],
+    *,
+    allow_missing: int = 0,
 ) -> list[str]:
     """Map model ``image_keys`` back to dataset camera names before rename."""
 
+    if allow_missing < 0:
+        raise ValueError(f"allow_missing must be non-negative, got {allow_missing}")
     rename_map = dict(rename_map or {})
     inverse = {dst: src for src, dst in rename_map.items()}
     available = set(available_cameras)
@@ -286,10 +290,15 @@ def resolve_source_visual_keys(
             resolved.append(key)
         else:
             missing.append(key)
-    if missing:
+    if len(missing) > allow_missing:
         raise KeyError(
             f"could not resolve model image keys {missing} via rename_map={rename_map} "
-            f"against cameras={list(available_cameras)}"
+            f"against cameras={list(available_cameras)}; allow_missing={allow_missing}"
+        )
+    if not resolved:
+        raise KeyError(
+            f"none of model image keys {list(model_image_keys)} resolve via "
+            f"rename_map={rename_map} against cameras={list(available_cameras)}"
         )
     return list(dict.fromkeys(resolved))
 
@@ -539,13 +548,13 @@ class LeRobotJaxDataLoader:
                     dataset_root=metadata.root,
                 )
             visual_keys = resolve_source_visual_keys(
-                resolve_model_visual_keys(
-                    config,
-                    use_tactile_embedding_cache=tactile_embedding_cache is not None,
-                ),
+                config.image_keys,
                 source_rename,
                 metadata.camera_keys,
+                allow_missing=config.empty_cameras,
             )
+            if config.use_tactile_encoder and tactile_embedding_cache is None:
+                visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
             dataset = LeRobotDataset(
                 repo_id=source.repo_id,
                 root=metadata.root,
