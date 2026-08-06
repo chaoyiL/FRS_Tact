@@ -133,6 +133,20 @@ def test_train_step_and_exact_resume(tmp_path: Path) -> None:
     )
 
 
+def test_evaluate_reuses_compiled_function() -> None:
+    config, params, batch = tiny_setup()
+    batch = {**batch, "actions": jnp.zeros((2, 1, 1), dtype=jnp.float32)}
+    trainer = JaxSmolVLATrainer(TinyModel(config), params, seed=4, total_steps=10)
+
+    first = trainer.evaluate((batch,), rollout=False)
+    compiled = trainer._compiled_evals[(False, config.num_steps)]
+    second = trainer.evaluate((batch,), rollout=False)
+
+    assert trainer._compiled_evals[(False, config.num_steps)] is compiled
+    assert len(trainer._compiled_evals) == 1
+    np.testing.assert_allclose(first["loss"], second["loss"])
+
+
 def test_resume_restores_modality_dropout_rng(tmp_path: Path) -> None:
     config, params, batch = tiny_setup()
     dropout = {

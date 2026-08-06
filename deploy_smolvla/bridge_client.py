@@ -128,10 +128,14 @@ class RobotBridgeClient:
         token: str | None,
         add_port: bool | None = None,
         retry_interval_s: float = 1.0,
+        ping_interval_s: float = 20.0,
+        ping_timeout_s: float = 20.0,
     ) -> None:
         self.uri = build_websocket_uri(address, port, add_port)
         self.token = token
         self.retry_interval_s = retry_interval_s
+        self.ping_interval_s = ping_interval_s
+        self.ping_timeout_s = ping_timeout_s
         self._packer = _Packer()
         self._websocket = self._connect()
         hello = self._receive(timeout=10.0)
@@ -147,7 +151,8 @@ class RobotBridgeClient:
                     additional_headers=headers,
                     compression=None,
                     max_size=None,
-                    ping_interval=None,
+                    ping_interval=self.ping_interval_s,
+                    ping_timeout=self.ping_timeout_s,
                 )
                 print(f"[bridge] Connected to {self.uri}")
                 return websocket

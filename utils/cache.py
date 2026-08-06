@@ -202,11 +202,13 @@ def _atomic_save_array(path: pathlib.Path, array: np.ndarray) -> None:
 
 def truncate_cache_arrays(cache_dir: pathlib.Path, *, count: int) -> None:
     arrays = open_cache_arrays(cache_dir)
-    if arrays["x_base"].shape[0] < count:
+    lengths = {key: int(array.shape[0]) for key, array in arrays.items()}
+    too_short = {key: length for key, length in lengths.items() if length < count}
+    if too_short:
         raise ValueError(
-            f"Cannot truncate cache to {count} samples; arrays only contain {arrays['x_base'].shape[0]} rows."
+            f"Cannot truncate cache to {count} samples; arrays are too short: {too_short}."
         )
-    if arrays["x_base"].shape[0] == count:
+    if all(length == count for length in lengths.values()):
         return
     for key, filename in ARRAY_FILENAMES.items():
         _atomic_save_array(cache_dir / filename, np.asarray(arrays[key][:count]))

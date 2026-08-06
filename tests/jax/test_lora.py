@@ -110,6 +110,20 @@ def test_tactile_projection_module_is_optional_and_trainable() -> None:
     assert not is_trainable_parameter("model.tactile_encoder.params/conv1/kernel", config)
 
 
+def test_legacy_tactile_projection_is_trainable_when_enabled() -> None:
+    config = replace(
+        JaxSmolVLAConfig(),
+        use_tactile_encoder=True,
+        tactile_encoder_path="checkpoints/encoder/best",
+        tactile_keys=("t0",),
+        tactile_num_tokens=1,
+        module_modes=None,
+    )
+
+    assert is_trainable_parameter("model.tactile_proj.weight", config)
+    assert is_trainable_parameter("model.tactile_proj.bias", config)
+
+
 def test_vlm_lora_targets_can_match_vb3_qv_only() -> None:
     config = replace(
         JaxSmolVLAConfig(),

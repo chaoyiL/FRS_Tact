@@ -15,6 +15,35 @@ from typing import Any, Literal
 LossMode = Literal["gt", "predicted", "gated"]
 
 
+def _existing_run_artifacts(output_dir: pathlib.Path) -> tuple[pathlib.Path, ...]:
+    candidates = (
+        output_dir / "history.csv",
+        output_dir / "best" / "checkpoint.json",
+        output_dir / "last" / "checkpoint.json",
+    )
+    return tuple(path for path in candidates if path.exists())
+
+
+def _validate_resume_cache(
+    resume_metadata: Mapping[str, Any],
+    cache_manifest: Mapping[str, Any],
+) -> None:
+    extra = resume_metadata.get("extra_metadata")
+    if not isinstance(extra, Mapping):
+        raise ValueError("resume checkpoint is missing cache provenance metadata")
+    expected_digest = cache_manifest.get("records_sha256")
+    if extra.get("cache_records_sha256") != expected_digest:
+        raise ValueError(
+            "resume checkpoint/cache record digest mismatch: "
+            f"{extra.get('cache_records_sha256')!r} != {expected_digest!r}"
+        )
+    expected_configuration = cache_manifest.get("configuration")
+    if extra.get("cache_configuration") != expected_configuration:
+        raise ValueError(
+            "resume checkpoint was trained with a different action-cache configuration"
+        )
+
+
 def _resolve_resume_dir(
     *,
     output_dir: pathlib.Path,
@@ -74,6 +103,7 @@ def train_decoder(
     tactile_keys: Sequence[str] | None = None,
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
+    tactile_num_tokens: int = 4,
 ) -> None:
     import csv
     import json
@@ -153,8 +183,17 @@ def train_decoder(
         raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
+    if tactile_num_tokens <= 0:
+        raise ValueError(f"tactile_num_tokens must be positive, got {tactile_num_tokens}.")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
+    if resume_dir is None:
+        existing_artifacts = _existing_run_artifacts(output_dir)
+        if existing_artifacts:
+            raise FileExistsError(
+                "refusing to start a fresh run in an existing FRS output directory; "
+                f"found {list(existing_artifacts)}. Choose a new output or enable resume."
+            )
     start_epoch = 1
     resume_metadata: dict | None = None
     resumed_opt_state = None
@@ -201,6 +240,8 @@ def train_decoder(
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
         pairs = CachedPairs(cache_dir)
+    if resume_metadata is not None:
+        _validate_resume_cache(resume_metadata, pairs.manifest)
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -248,6 +289,7 @@ def train_decoder(
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
+        num_tactile_tokens=tactile_num_tokens,
     )
     if resume_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
@@ -347,9 +389,10 @@ def train_decoder(
     plot_path = output_dir / "training_curves.png"
     best_mse = float("inf")
     best_path = output_dir / "best" / CHECKPOINT_NAME
-    if best_path.exists():
+    if resume_dir is not None and best_path.exists():
         with best_path.open(encoding="utf-8") as file:
             best_meta = json.load(file)
+        _validate_resume_cache(best_meta, pairs.manifest)
         best_mse = float(best_meta.get("metrics", {}).get("val_mse", best_mse))
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0

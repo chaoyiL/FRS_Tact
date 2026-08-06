@@ -1,22 +1,15 @@
 from __future__ import annotations
 
-# The parent eval directory is inserted below for direct pytest collection.
-# ruff: noqa: E402
 import os
 import pathlib
-import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "eval_scripts-jax"
-for path in (EVAL_SCRIPTS,):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from loglike_evaluate import (
+from modalities_eval.loglike_evaluate import (
     ODE_SOLVER_EULER,
     ODE_SOLVER_FIREFLOW,
     _add_batch_dim,
@@ -27,7 +20,7 @@ from loglike_evaluate import (
     load_episode,
     predict_velocity_with_context,
 )
-from utils import load_model
+from modalities_eval.utils import load_model
 
 
 def _expand_time(t: jax.Array, x_ndim: int) -> jax.Array:

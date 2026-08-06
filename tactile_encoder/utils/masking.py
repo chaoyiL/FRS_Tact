@@ -26,23 +26,6 @@ def resolve_eval_rgb_mask(
     ratio = train_ratio if eval_ratio is None else float(eval_ratio)
     validate_patch_mask_config(patch_size=patch_size, mask_ratio=ratio)
     return patch_size, ratio
-
-
-def resolve_eval_rgb_mask(
-    *,
-    train_patch_size: int,
-    train_ratio: float,
-    eval_patch_size: int | None,
-    eval_ratio: float | None,
-) -> tuple[int, float]:
-    """Resolve eval-time RGB mask settings, falling back to train values when unset."""
-
-    patch_size = train_patch_size if eval_patch_size is None else eval_patch_size
-    ratio = train_ratio if eval_ratio is None else eval_ratio
-    validate_patch_mask_config(patch_size=patch_size, mask_ratio=ratio)
-    return patch_size, ratio
-
-
 def random_patch_zero(
     images: Array,
     key: Array,
@@ -70,4 +53,3 @@ def random_patch_zero(
     mask = jnp.repeat(jnp.repeat(keep, patch_size, axis=1), patch_size, axis=2)
     mask = jnp.broadcast_to(mask, (batch_size, height, width, channels))
     return jnp.where(mask, images, jnp.zeros_like(images))
-

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import pathlib
 from collections.abc import Sequence
 from typing import Any
@@ -23,10 +22,10 @@ from tactile_encoder.utils.checkpoint import save_checkpoint
 from tactile_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
 from tactile_encoder.utils.clip_backend import DEFAULT_CLIP_MODEL_ID
 from tactile_encoder.utils.clip_backend import ClipBackend
-from tactile_encoder.utils.data import FutureRecord
 from tactile_encoder.utils.data import batches
 from tactile_encoder.utils.data import batch_uint8_to_float32
 from tactile_encoder.utils.data import build_future_records
+from tactile_encoder.utils.data import future_records_digest
 from tactile_encoder.utils.data import history_dataset_indices
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.image_dataset import create_image_dataset
@@ -71,15 +70,6 @@ def _repo_id_for_metadata(repo_id: Any) -> Any:
     if isinstance(repo_id, tuple):
         return list(repo_id)
     return repo_id
-
-
-def _records_digest(records: Sequence[FutureRecord]) -> str:
-    digest = hashlib.sha256()
-    for record in records:
-        digest.update(
-            f"{record.dataset_index}:{record.future_dataset_index}:{record.episode_index}:{record.split}\n".encode()
-        )
-    return digest.hexdigest()
 
 
 def _resolve_resume_dir(
@@ -421,7 +411,7 @@ def train(
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
     best_recall_at_1, best_mean_rank = _load_best_metrics(output_dir)
-    records_sha256 = _records_digest(record_set.records)
+    records_sha256 = future_records_digest(record_set.records)
     data_metadata = {
         "config_name": dataset_info.config_name,
         "dataset_repo_id": _repo_id_for_metadata(dataset_info.repo_id),
@@ -647,7 +637,7 @@ def train(
                         tactile_history=tactile_history,
                         history_stride=frame_stride,
                         retrieval_pool_size=retrieval_pool_size,
-                        retrieval_pool_seed=retrieval_pool_seed + epoch,
+                        retrieval_pool_seed=retrieval_pool_seed,
                     )
                     val_recall1 = float(val_metrics["recall@1"])
                     val_recall5 = float(val_metrics["recall@5"])

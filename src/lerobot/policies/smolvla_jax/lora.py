@@ -201,6 +201,8 @@ def is_trainable_parameter(name: str, config: JaxSmolVLAConfig) -> bool:
             return config.train_state_proj
         if name.startswith(_ACTION_PREFIXES):
             return True
+        if name.startswith("model.tactile_proj."):
+            return config.use_tactile_encoder
         if config.train_expert_only:
             return False
         if config.freeze_vision_encoder and ".vision_model." in name:

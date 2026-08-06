@@ -8,12 +8,14 @@ import pytest
 
 from deploy_smolvla.remote_client import (
     _prepare_observation,
+    _remaining_action_chunk,
     _robot_image_keys,
     _robot_tactile_keys,
     _validate_observation_mode,
 )
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA, normalize_tactile_embeddings
+from lerobot.policies.smolvla_jax.policy import JaxSmolVLAPolicy
 
 
 def _tactile_policy():
@@ -106,3 +108,71 @@ def test_remote_observation_mode_must_match_checkpoint() -> None:
         _validate_observation_mode("vision", use_tactile_encoder=True)
     with pytest.raises(ValueError, match="requires observation.data_type='vision'"):
         _validate_observation_mode("vitac", use_tactile_encoder=False)
+
+
+def test_rtc_previous_chunk_is_shifted_by_executed_steps() -> None:
+    chunk = np.arange(20, dtype=np.float32).reshape(10, 2)
+    remaining = _remaining_action_chunk(chunk, 3)
+
+    np.testing.assert_array_equal(remaining, chunk[3:])
+    assert remaining.shape == (7, 2)
+    assert not np.shares_memory(remaining, chunk)
+
+
+def test_policy_inference_accepts_cached_tactile_embeddings() -> None:
+    captured = {}
+
+    class FakeModel:
+        def sample_actions(self, params, *args, **kwargs):
+            del params, args
+            captured.update(kwargs)
+            return jnp.zeros((1, 2, 1), dtype=jnp.float32)
+
+    class FakePreprocessor:
+        def prepare(self, observation, task):
+            del observation, task
+            return {
+                "images": jnp.zeros((1, 1, 2, 2, 3)),
+                "image_masks": jnp.ones((1, 1), dtype=bool),
+                "language_tokens": jnp.ones((1, 2), dtype=jnp.int32),
+                "language_masks": jnp.ones((1, 2), dtype=bool),
+                "state": jnp.zeros((1, 1)),
+                "tactile_embeddings": jnp.ones((1, 2, 3)),
+                "tactile_masks": jnp.ones((1, 2), dtype=bool),
+            }
+
+    policy = object.__new__(JaxSmolVLAPolicy)
+    policy.config = SimpleNamespace(
+        chunk_size=2,
+        max_action_dim=1,
+        num_steps=2,
+        rtc_config=None,
+        adapt_to_pi_aloha=False,
+    )
+    policy.params = {}
+    policy.model = FakeModel()
+    policy.preprocessor = FakePreprocessor()
+    policy._compiled_samples = {}
+
+    policy.predict_action_chunk({}, "task", jit=False, normalized=True)
+
+    assert captured["tactile_images"] is None
+    assert captured["tactile_embeddings"].shape == (1, 2, 3)
+
+
+def test_select_action_advances_chunk_seed() -> None:
+    policy = object.__new__(JaxSmolVLAPolicy)
+    policy.config = SimpleNamespace(n_action_steps=1)
+    seeds = []
+
+    def predict(observation, task, *, seed, jit, **kwargs):
+        del observation, task, jit, kwargs
+        seeds.append(seed)
+        return jnp.asarray([[seed]], dtype=jnp.float32)
+
+    policy.predict_action_chunk = predict
+    policy.reset()
+    policy.select_action({}, "task", seed=10, jit=False)
+    policy.select_action({}, "task", seed=10, jit=False)
+
+    assert seeds == [10, 11]

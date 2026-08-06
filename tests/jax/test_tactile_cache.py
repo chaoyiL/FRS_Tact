@@ -53,6 +53,7 @@ def test_tactile_embedding_cache_reads_frame_memmap(tmp_path: Path) -> None:
         embedding_dim=3,
         image_size=8,
         encoder_path=encoder,
+        dataset_root=tmp_path / "dataset",
     )
     np.testing.assert_array_equal(cache[3], values[3])
     assert cache[3].flags.writeable
@@ -89,4 +90,82 @@ def test_tactile_embedding_cache_rejects_incomplete_cache(tmp_path: Path) -> Non
             embedding_dim=2,
             image_size=8,
             encoder_path=encoder,
+            dataset_root=tmp_path / "dataset",
+        )
+
+
+def test_tactile_embedding_cache_rejects_different_dataset_root(tmp_path: Path) -> None:
+    encoder = _encoder(tmp_path / "encoder")
+    cache_dir = tactile_cache_dir(tmp_path / "cache", "org/data")
+    cache_dir.mkdir(parents=True)
+    np.save(cache_dir / TACTILE_EMBEDDINGS_NAME, np.zeros((1, 1, 2), dtype=np.float16))
+    metadata = create_tactile_cache_metadata(
+        repo_id="org/data",
+        revision=None,
+        dataset_root=tmp_path / "original",
+        total_frames=1,
+        tactile_keys=("touch",),
+        source_tactile_keys=("touch",),
+        embedding_dim=2,
+        image_size=8,
+        dtype="float16",
+        encoder_path=encoder,
+        completed_frames=1,
+        status="complete",
+    )
+    (cache_dir / TACTILE_METADATA_NAME).write_text(json.dumps(metadata))
+
+    with pytest.raises(ValueError, match="dataset_root"):
+        TactileEmbeddingCache(
+            cache_dir,
+            repo_id="org/data",
+            revision=None,
+            total_frames=1,
+            tactile_keys=("touch",),
+            source_tactile_keys=("touch",),
+            embedding_dim=2,
+            image_size=8,
+            encoder_path=encoder,
+            dataset_root=tmp_path / "replacement",
+        )
+
+
+def test_tactile_embedding_cache_rejects_same_root_after_data_changes(tmp_path: Path) -> None:
+    encoder = _encoder(tmp_path / "encoder")
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    source_file = dataset / "data.parquet"
+    source_file.write_bytes(b"original")
+    cache_dir = tactile_cache_dir(tmp_path / "cache", "org/data")
+    cache_dir.mkdir(parents=True)
+    np.save(cache_dir / TACTILE_EMBEDDINGS_NAME, np.zeros((1, 1, 2), dtype=np.float16))
+    metadata = create_tactile_cache_metadata(
+        repo_id="org/data",
+        revision=None,
+        dataset_root=dataset,
+        total_frames=1,
+        tactile_keys=("touch",),
+        source_tactile_keys=("touch",),
+        embedding_dim=2,
+        image_size=8,
+        dtype="float16",
+        encoder_path=encoder,
+        completed_frames=1,
+        status="complete",
+    )
+    (cache_dir / TACTILE_METADATA_NAME).write_text(json.dumps(metadata))
+    source_file.write_bytes(b"replacement-with-a-different-size")
+
+    with pytest.raises(ValueError, match="dataset_fingerprint"):
+        TactileEmbeddingCache(
+            cache_dir,
+            repo_id="org/data",
+            revision=None,
+            total_frames=1,
+            tactile_keys=("touch",),
+            source_tactile_keys=("touch",),
+            embedding_dim=2,
+            image_size=8,
+            encoder_path=encoder,
+            dataset_root=dataset,
         )

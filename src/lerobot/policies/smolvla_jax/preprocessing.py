@@ -132,10 +132,14 @@ class JaxSmolVLAPreprocessor:
         self.checkpoint = Path(checkpoint).expanduser()
         self.config = config or JaxSmolVLAConfig.from_pretrained(self.checkpoint)
         processor_config = self._load_json("policy_preprocessor.json", default={})
-        self.rename_map = dict(
-            rename_map
-            or self._find_step_config(processor_config, "rename_observations_processor").get("rename_map", {})
+        resolved_rename_map = (
+            self._find_step_config(processor_config, "rename_observations_processor").get(
+                "rename_map", {}
+            )
+            if rename_map is None
+            else rename_map
         )
+        self.rename_map = dict(resolved_rename_map)
         tokenizer_config = self._find_step_config(processor_config, "tokenizer_processor")
         tokenizer_name = tokenizer_config.get("tokenizer_name", self.config.tokenizer_name)
         os.environ.setdefault("HF_HUB_OFFLINE", "1" if local_files_only else "0")

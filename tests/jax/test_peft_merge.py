@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import torch
+import pytest
 
 from tools.merge_smolvla_peft_to_jax import merge_peft_state_dicts
+from tools.merge_smolvla_peft_to_jax import validate_supported_adapter_config
 
 
 def test_merge_peft_replaces_saved_modules_and_applies_lora() -> None:
@@ -28,3 +30,17 @@ def test_merge_peft_replaces_saved_modules_and_applies_lora() -> None:
         merged["model.block.q_proj.weight"],
         base["model.block.q_proj.weight"] + 2.0 * expected_delta,
     )
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"use_rslora": True},
+        {"use_dora": True},
+        {"rank_pattern": {"q_proj": 4}},
+        {"alpha_pattern": {"q_proj": 8}},
+    ],
+)
+def test_merge_rejects_unsupported_peft_math(config) -> None:
+    with pytest.raises(ValueError, match="unsupported PEFT"):
+        validate_supported_adapter_config(config)

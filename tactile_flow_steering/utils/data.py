@@ -512,6 +512,7 @@ class CachedTactileEmbeddingBatches:
                 embedding_dim=self.resnet_embedding_dim,
                 image_size=self.image_size,
                 encoder_path=tactile_encoder_dir,
+                dataset_root=metadata.root,
             )
             starts = np.asarray(
                 [int(metadata.episodes[index]["dataset_from_index"]) for index in range(metadata.total_episodes)],
@@ -578,7 +579,9 @@ class CachedTactileEmbeddingBatches:
                 self.resnet_embedding_dim,
             )
             output[positions] = encoded.astype(np.float32, copy=False)
-        return jnp.asarray(output)
+        # Keep cached embeddings on the host until the jitted train/eval call.
+        # Gating consumes the current tokens with NumPy before the single upload.
+        return output
 
     def build_episode_baseline_embeddings(self) -> dict[tuple[int, int], np.ndarray]:
         baselines: dict[tuple[int, int], np.ndarray] = {}

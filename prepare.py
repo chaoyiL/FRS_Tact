@@ -36,6 +36,7 @@ from utils.cache import open_cache_arrays
 from utils.cache import records_digest
 from utils.cache import split_episodes
 from utils.cache import trim_episode_tail
+from utils.integration import REVERSE_INTEGRATION_VERSION
 from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
@@ -153,6 +154,7 @@ def _configuration(
         "model_sample_steps": model_sample_steps,
         "reverse_steps": reverse_steps,
         "reverse_solver": reverse_solver,
+        "reverse_integration_version": REVERSE_INTEGRATION_VERSION,
         "inference_seed": inference_seed,
         "split_seed": split_seed,
         "val_fraction": val_fraction,
@@ -263,6 +265,21 @@ def _pad_action_batch(actions: jax.Array, target_batch: int) -> jax.Array:
     return jnp.pad(actions, ((0, pad), (0, 0), (0, 0)))
 
 
+def _require_finite_cache_batch(**values: np.ndarray) -> None:
+    """Fail before writing a cache batch containing NaN or infinity."""
+
+    for name, value in values.items():
+        array = np.asarray(value)
+        invalid = np.argwhere(~np.isfinite(array))
+        if invalid.size == 0:
+            continue
+        location = tuple(int(index) for index in invalid[0])
+        raise FloatingPointError(
+            f"non-finite value in {name} at batch index {location}: "
+            f"{array[location]!r}"
+        )
+
+
 def prepare_cache(
     *,
     checkpoint_dir: pathlib.Path,
@@ -289,8 +306,11 @@ def prepare_cache(
 ) -> dict[str, Any]:
     if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
         raise ValueError("model_sample_steps, reverse_steps, and batch_size must all be positive.")
-    if reverse_solver not in ("euler", "fireflow"):
-        raise ValueError(f"reverse_solver must be 'euler' or 'fireflow', got {reverse_solver!r}.")
+    if reverse_solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            "reverse_solver must be 'euler', 'fireflow', or 'slerpflow', "
+            f"got {reverse_solver!r}."
+        )
     if flush_every <= 0:
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
     if drop_tail_action_chunks < 0:
@@ -418,11 +438,19 @@ def prepare_cache(
         x_base = np.asarray(x_base[:valid], dtype=np.float32)
         gt_actions = np.asarray(gt_actions[:valid], dtype=np.float32)
         noise = np.asarray(jax.device_get(noise[:valid]), dtype=np.float32)
+        batch_inversion_mse = inversion_mse(x_base, noise)
+        _require_finite_cache_batch(
+            predicted_actions=predicted_actions,
+            x_base=x_base,
+            gt_actions=gt_actions,
+            noise=noise,
+            inversion_mse=batch_inversion_mse,
+        )
 
         arrays["target"][start:stop] = predicted_actions
         arrays["x_base"][start:stop] = x_base
         arrays["gt_action"][start:stop] = gt_actions
-        arrays["inversion_mse"][start:stop] = inversion_mse(x_base, noise)
+        arrays["inversion_mse"][start:stop] = batch_inversion_mse
         manifest["completed_samples"] = stop
         batches_since_flush += 1
         if force_flush or batches_since_flush >= flush_every or stop >= len(records):
@@ -504,9 +532,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse-steps", type=int, default=50)
     parser.add_argument(
         "--reverse-solver",
-        choices=("euler", "fireflow"),
-        default="fireflow",
-        help="Numerical integrator for reverse action integration (default: fireflow).",
+        choices=("euler", "fireflow", "slerpflow"),
+        default="slerpflow",
+        help="Numerical integrator for reverse action integration (default: slerpflow).",
     )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument(

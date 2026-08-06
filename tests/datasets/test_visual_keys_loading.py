@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -7,10 +8,22 @@ import pytest
 from lerobot.datasets import LeRobotDataset
 from lerobot.datasets.transforms import build_image_transforms
 
-DATASET_ROOT = Path("/root/.cache/huggingface/dataset/lerobot_v30/chaoyi/tactile_test_05")
+DATASET_ROOT = Path(
+    os.environ.get(
+        "LEROBOT_VISUAL_KEYS_TEST_DATASET",
+        "/root/.cache/huggingface/dataset/lerobot_v30/chaoyi/tactile_test_05",
+    )
+)
 
 
-@pytest.mark.skipif(not DATASET_ROOT.exists(), reason="local tactile dataset not present")
+def _dataset_is_available() -> bool:
+    try:
+        return DATASET_ROOT.is_dir()
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _dataset_is_available(), reason="local tactile dataset not present")
 def test_visual_keys_skips_unused_image_columns_and_transforms() -> None:
     visual_keys = [
         "observation.images.camera0",

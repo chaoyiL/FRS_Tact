@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from prepare import prepare_cache
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_frs.yaml"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -39,6 +39,15 @@ def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
 
 def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
     checkpoint = Path(str(config["checkpoint"])).expanduser()
+    merge_config = config.get("checkpoint_merge") or {}
+    if not isinstance(merge_config, Mapping):
+        raise ValueError("config.checkpoint_merge must be a mapping")
+    merge_output = Path(str(merge_config.get("output", checkpoint))).expanduser()
+    if checkpoint.resolve() != merge_output.resolve():
+        raise ValueError(
+            "checkpoint_merge.output must equal checkpoint: "
+            f"{merge_output.resolve()} != {checkpoint.resolve()}"
+        )
     if not checkpoint.is_dir():
         raise FileNotFoundError(
             f"merged checkpoint does not exist: {checkpoint}. Run tools/merge_smolvla_peft_to_jax.py first."
@@ -72,7 +81,7 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             allow_download=bool(config.get("allow_download", False)),
             model_sample_steps=int(cache_config.get("model_sample_steps", 10)),
             reverse_steps=int(cache_config.get("reverse_steps", 50)),
-            reverse_solver=str(cache_config.get("reverse_solver", "fireflow")),
+            reverse_solver=str(cache_config.get("reverse_solver", "slerpflow")),
             batch_size=int(cache_config.get("batch_size", 16)),
             inference_seed=int(cache_config.get("inference_seed", 0)),
             split_seed=int(cache_config.get("split_seed", 42)),

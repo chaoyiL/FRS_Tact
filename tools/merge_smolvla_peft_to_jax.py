@@ -114,6 +114,57 @@ def _load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def validate_supported_adapter_config(config: Mapping[str, Any]) -> None:
+    """Fail loudly for PEFT variants whose merge math differs from alpha/r."""
+
+    unsupported: list[str] = []
+    if bool(config.get("use_rslora", False)):
+        unsupported.append("use_rslora")
+    if bool(config.get("use_dora", False)):
+        unsupported.append("use_dora")
+    for key in ("rank_pattern", "alpha_pattern"):
+        if config.get(key):
+            unsupported.append(key)
+    if unsupported:
+        raise ValueError(
+            "unsupported PEFT adapter options for the JAX merger: "
+            f"{unsupported}. Merge this adapter with PEFT/PyTorch first."
+        )
+
+
+def _validate_existing_merge(
+    output: Path,
+    *,
+    adapter: str | Path,
+    base: str | Path,
+    adapter_revision: str | None,
+    base_revision: str | None,
+) -> None:
+    manifest_path = output / "conversion_manifest.json"
+    if not manifest_path.is_file():
+        raise FileExistsError(
+            f"merged checkpoint exists without a provenance manifest: {output}; "
+            "rerun with --overwrite"
+        )
+    manifest = _load_json(manifest_path)
+    expected = {
+        "source_adapter": str(adapter),
+        "source_base": str(base),
+        "adapter_revision": adapter_revision,
+        "base_revision": base_revision,
+    }
+    mismatches = {
+        key: (manifest.get(key), value)
+        for key, value in expected.items()
+        if manifest.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(
+            f"existing merged checkpoint has different sources: {mismatches}; "
+            "choose a new output or rerun with --overwrite"
+        )
+
+
 def _effective_state_dim(adapter_dir: Path, config: Mapping[str, Any]) -> int:
     stats_path = adapter_dir / "policy_preprocessor_step_5_normalizer_processor.safetensors"
     if stats_path.is_file():
@@ -191,14 +242,23 @@ def merge_checkpoint(
         if not path.is_file():
             raise FileNotFoundError(path)
 
+    adapter_config = _load_json(adapter_config_path)
+    validate_supported_adapter_config(adapter_config)
+
     output = output.expanduser().resolve()
     output_model = output / "model.safetensors"
     if output_model.exists() and not overwrite:
+        _validate_existing_merge(
+            output,
+            adapter=adapter,
+            base=base,
+            adapter_revision=adapter_revision,
+            base_revision=base_revision,
+        )
         print(f"merged checkpoint already exists, skip: {output}")
         return output
     output.mkdir(parents=True, exist_ok=True)
 
-    adapter_config = _load_json(adapter_config_path)
     rank = int(adapter_config.get("r", 0))
     alpha = float(adapter_config.get("lora_alpha", rank))
     print(f"loading base checkpoint: {base_model}", flush=True)
@@ -231,6 +291,8 @@ def merge_checkpoint(
         "backend": "jax",
         "source_base": str(base),
         "source_adapter": str(adapter),
+        "adapter_revision": adapter_revision,
+        "base_revision": base_revision,
         "lora_rank": rank,
         "lora_alpha": alpha,
         "tensor_count": len(merged),

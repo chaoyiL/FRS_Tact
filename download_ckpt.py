@@ -19,13 +19,17 @@ from huggingface_hub.errors import HfHubHTTPError
 
 DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_05"
 DEFAULT_OUTPUT_DIR = Path("/workspace/checkpoints/encoder_ckpt_05")
-REQUIRED_FILES = ("checkpoint.json", "params.npz")
-FULL_CHECKPOINT_FILES = (
+MINIMAL_CHECKPOINT_PATTERNS = ("checkpoint.json", "params.npz", "params-*.npz")
+FULL_CHECKPOINT_PATTERNS = (
     "checkpoint.json",
     "params.npz",
+    "params-*.npz",
     "opt_state.npz",
+    "opt_state-*.npz",
     "opt_state.treedef.pkl",
+    "opt_state-*.treedef.pkl",
     "memory_bank.npz",
+    "memory_bank-*.npz",
 )
 
 
@@ -69,7 +73,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--minimal",
         action="store_true",
-        help="只下载推理/VT-SmolVLA 所需的 checkpoint.json 和 params.npz",
+        help="只下载推理/VT-SmolVLA 所需的 checkpoint.json 和参数归档",
     )
     parser.add_argument("--force-download", action="store_true", help="强制重新下载文件")
     return parser.parse_args()
@@ -78,12 +82,15 @@ def parse_args() -> argparse.Namespace:
 def verify_checkpoint(directory: Path) -> dict:
     """检查 checkpoint 元数据和参数归档是否能够被 tactile loader 读取。"""
 
-    missing = [name for name in REQUIRED_FILES if not (directory / name).is_file()]
-    if missing:
-        raise FileNotFoundError(f"checkpoint 缺少必要文件：{missing}")
-
-    with (directory / "checkpoint.json").open(encoding="utf-8") as file:
+    checkpoint_path = directory / "checkpoint.json"
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"checkpoint 缺少必要文件：{checkpoint_path}")
+    with checkpoint_path.open(encoding="utf-8") as file:
         metadata = json.load(file)
+    params_name = str(metadata.get("params_file", "params.npz"))
+    params_path = directory / params_name
+    if not params_path.is_file():
+        raise FileNotFoundError(f"checkpoint 缺少参数归档：{params_path}")
     tactile_config = metadata.get("tactile_clip_config")
     if not isinstance(tactile_config, dict):
         raise ValueError("checkpoint.json 缺少 tactile_clip_config")
@@ -93,10 +100,10 @@ def verify_checkpoint(directory: Path) -> dict:
     if not any(str(path).startswith("tactile_resnet/") for path in parameter_paths):
         raise ValueError("checkpoint 中没有 tactile_resnet 参数")
 
-    with np.load(directory / "params.npz") as archive:
+    with np.load(params_path) as archive:
         if len(archive.files) != len(parameter_paths):
             raise ValueError(
-                "params.npz 参数数量与 checkpoint.json 不一致："
+                f"{params_name} 参数数量与 checkpoint.json 不一致："
                 f"{len(archive.files)} != {len(parameter_paths)}"
             )
     return metadata
@@ -125,7 +132,9 @@ def main() -> None:
             local_dir=output_dir,
             cache_dir=cache_dir,
             token=token,
-            allow_patterns=list(REQUIRED_FILES if args.minimal else FULL_CHECKPOINT_FILES),
+            allow_patterns=list(
+                MINIMAL_CHECKPOINT_PATTERNS if args.minimal else FULL_CHECKPOINT_PATTERNS
+            ),
             force_download=args.force_download,
         )
     except HfHubHTTPError as error:

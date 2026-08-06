@@ -326,18 +326,22 @@ def _sync_visual_input_features(
         for key, feature in input_features.items()
         if isinstance(feature, Mapping) and feature.get("type") == "VISUAL"
     }
-    for key in list(input_features):
-        feature = input_features.get(key)
-        if isinstance(feature, Mapping) and feature.get("type") == "VISUAL" and key not in image_keys:
-            del input_features[key]
-
     default_shape = [3, int(resize_height), int(resize_width)]
     template = next(iter(existing_visual.values()), {"type": "VISUAL", "shape": default_shape})
+    non_visual = {
+        key: value
+        for key, value in input_features.items()
+        if not (isinstance(value, Mapping) and value.get("type") == "VISUAL")
+    }
+    ordered_visual: dict[str, Any] = {}
     for key in image_keys:
         feature = dict(existing_visual.get(key, template))
         feature["type"] = "VISUAL"
         feature.setdefault("shape", default_shape)
-        input_features[key] = feature
+        ordered_visual[key] = feature
+    input_features.clear()
+    input_features.update(non_visual)
+    input_features.update(ordered_visual)
 
 
 def _legacy_flags_from_module_modes(module_modes: Mapping[str, Any] | None) -> dict[str, bool] | None:

@@ -4,18 +4,21 @@
 #        --adapter KaiyueChen/pick_tube_02_3w \
 #        --base lerobot/smolvla_base \
 #        --output /workspace/checkpoints/pick_tube_02_3w_jax
-#   2) uv run --no-sync python tools/precompute_tactile_embeddings.py \
-#        --config configs/train_frs_pick_tube.yaml
-#   3) uv run --no-sync python tools/prepare_frs_caches.py \
-#        --config configs/train_frs_pick_tube.yaml
-#   4) uv run --no-sync python tools/train_frs.py \
-#        --config configs/train_frs_pick_tube.yaml
+#   2) uv run --no-sync python tools/compare_frs_reverse_solvers.py \
+#        --config configs/train_frs.yaml
+#   3) uv run --no-sync python tools/precompute_tactile_embeddings.py \
+#        --config configs/train_frs.yaml
+#   4) uv run --no-sync python tools/prepare_frs_caches.py \
+#        --config configs/train_frs.yaml
+#   5) uv run --no-sync python tools/train_frs.py \
+#        --config configs/train_frs.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
 checkpoint: /workspace/checkpoints/pick_tube_02_3w_jax
 # checkpoint 本身是本地目录；true 只允许首次补齐 tokenizer 等公共资源。
 allow_download: true
 
+#自动下载冻结的smovla ckpt
 checkpoint_merge:
   adapter: KaiyueChen/pick_tube_02_3w
   base: lerobot/smolvla_base
@@ -47,10 +50,10 @@ datasets:
 
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
-  root: /workspace/frs_pick_tube/action_cache
+  root: /workspace/frs_pick_tube/action_cache_slerpflow
   model_sample_steps: 10
   reverse_steps: 50
-  reverse_solver: fireflow
+  reverse_solver: slerpflow
   batch_size: 16
   flush_every: 8
   inference_seed: 0
@@ -61,6 +64,15 @@ action_cache:
   drop_tail_action_chunks: 1
   max_episodes: null
   max_samples: null
+
+# 在生成完整 action cache 前，用相同样本和 seed 比较 FireFlow/SlerpFlow。
+reverse_solver_ab:
+  enabled: true
+  root: /workspace/frs_pick_tube/reverse_solver_ab
+  max_samples_per_dataset: 512
+  max_episodes: null
+  # SlerpFlow 全局 mean inversion MSE 不得高于 FireFlow。
+  max_mean_ratio: 1.0
 
 # 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
 tactile_embedding_cache:
@@ -88,7 +100,7 @@ model:
   tactile_image_size: 224
 
 frs_training:
-  output: /workspace/frs_pick_tube/run_gated_01
+  output: /workspace/frs_pick_tube/run_gated_slerpflow_01
   # checkpoint chunk_size=10，因此 tactile_window=10/1=10。
   tactile_window_divisor: 1
   # 10 个 token 每隔 3 帧回看一次，在 30Hz 下覆盖约 0.9 秒。
@@ -120,5 +132,6 @@ frs_training:
   eval_every: 5
   seed: 42
   write_plots: true
-  resume: false
+  # auto：last/ 存在就续训，否则冷启动；适合整条管线安全重跑。
+  resume: auto
   resume_from: null

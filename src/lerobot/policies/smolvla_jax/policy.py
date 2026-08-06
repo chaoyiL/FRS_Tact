@@ -35,7 +35,9 @@ class JaxSmolVLAPolicy:
             rename_map=rename_map,
             local_files_only=local_files_only,
         )
-        self._compiled_samples: dict[tuple[int, int | None, int | None, bool, bool], Any] = {}
+        self._compiled_samples: dict[
+            tuple[int, int | None, int | None, bool, bool, bool], Any
+        ] = {}
         self.reset()
 
     @classmethod
@@ -45,6 +47,7 @@ class JaxSmolVLAPolicy:
     def reset(self) -> None:
         self._action_queue: Array | None = None
         self._queue_index = 0
+        self._chunk_index = 0
 
     def _get_compiled_sample(
         self,
@@ -52,9 +55,17 @@ class JaxSmolVLAPolicy:
         inference_delay: int | None,
         execution_horizon: int | None,
         has_previous_chunk: bool,
-        has_tactile: bool,
+        has_tactile_images: bool,
+        has_tactile_embeddings: bool,
     ):
-        cache_key = (num_steps, inference_delay, execution_horizon, has_previous_chunk, has_tactile)
+        cache_key = (
+            num_steps,
+            inference_delay,
+            execution_horizon,
+            has_previous_chunk,
+            has_tactile_images,
+            has_tactile_embeddings,
+        )
         if cache_key not in self._compiled_samples:
             model = self.model
 
@@ -66,6 +77,7 @@ class JaxSmolVLAPolicy:
                 language_masks,
                 state,
                 tactile_images,
+                tactile_embeddings,
                 tactile_masks,
                 noise,
                 previous,
@@ -78,8 +90,15 @@ class JaxSmolVLAPolicy:
                     language_masks,
                     state,
                     jax.random.key(0),
-                    tactile_images=tactile_images if has_tactile else None,
-                    tactile_masks=tactile_masks if has_tactile else None,
+                    tactile_images=tactile_images if has_tactile_images else None,
+                    tactile_embeddings=(
+                        tactile_embeddings if has_tactile_embeddings else None
+                    ),
+                    tactile_masks=(
+                        tactile_masks
+                        if has_tactile_images or has_tactile_embeddings
+                        else None
+                    ),
                     noise=noise,
                     num_steps=num_steps,
                     previous_chunk=previous if has_previous_chunk else None,
@@ -118,15 +137,20 @@ class JaxSmolVLAPolicy:
         if previous_argument is None:
             previous_argument = jnp.zeros_like(noise)
         tactile_images = batch.get("tactile_images")
+        tactile_embeddings = batch.get("tactile_embeddings")
         tactile_masks = batch.get("tactile_masks")
-        has_tactile = tactile_images is not None and tactile_masks is not None
+        has_tactile_images = tactile_images is not None and tactile_masks is not None
+        has_tactile_embeddings = tactile_embeddings is not None and tactile_masks is not None
+        if has_tactile_images and has_tactile_embeddings:
+            raise ValueError("provide tactile images or cached embeddings, not both")
         if jit:
             actions = self._get_compiled_sample(
                 num_steps,
                 inference_delay,
                 execution_horizon,
                 previous_chunk is not None,
-                has_tactile,
+                has_tactile_images,
+                has_tactile_embeddings,
             )(
                 self.params,
                 batch["images"],
@@ -135,6 +159,7 @@ class JaxSmolVLAPolicy:
                 batch["language_masks"],
                 batch["state"],
                 tactile_images,
+                tactile_embeddings,
                 tactile_masks,
                 noise,
                 previous_argument,
@@ -149,6 +174,7 @@ class JaxSmolVLAPolicy:
                 batch["state"],
                 jax.random.key(seed),
                 tactile_images=tactile_images,
+                tactile_embeddings=tactile_embeddings,
                 tactile_masks=tactile_masks,
                 noise=noise,
                 num_steps=num_steps,
@@ -173,11 +199,12 @@ class JaxSmolVLAPolicy:
             self._action_queue = self.predict_action_chunk(
                 observation,
                 task,
-                seed=seed,
+                seed=seed + self._chunk_index,
                 jit=jit,
                 **predict_kwargs,
             )
             self._queue_index = 0
+            self._chunk_index += 1
         action = self._action_queue[:, self._queue_index]
         self._queue_index += 1
         return action

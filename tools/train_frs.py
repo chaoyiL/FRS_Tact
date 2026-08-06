@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 from tactile_flow_steering.train import train_decoder
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_frs.yaml"
 
 
 def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -42,6 +42,21 @@ def _positive_int(config: Mapping[str, Any], key: str, default: int) -> int:
     if value <= 0:
         raise ValueError(f"{key} must be positive, got {value}")
     return value
+
+
+def resolve_resume_mode(value: Any, *, output_dir: Path) -> bool:
+    """Resolve false/true/auto without treating non-empty strings as true."""
+
+    if isinstance(value, bool):
+        return value
+    mode = str(value if value is not None else "false").strip().lower()
+    if mode == "auto":
+        return (output_dir / "last" / "checkpoint.json").is_file()
+    if mode in {"true", "1", "yes", "on"}:
+        return True
+    if mode in {"false", "0", "no", "off", ""}:
+        return False
+    raise ValueError("frs_training.resume must be false, true, or auto")
 
 
 def train_from_config(config: Mapping[str, Any]) -> None:
@@ -72,10 +87,18 @@ def train_from_config(config: Mapping[str, Any]) -> None:
             f"action caches are missing: {missing}. Run tools/prepare_frs_caches.py first."
         )
 
+    output_dir = Path(str(training["output"])).expanduser()
+    tactile_keys = tuple(str(key) for key in model["tactile_keys"])
+    tactile_num_tokens = _positive_int(model, "tactile_num_tokens", len(tactile_keys))
+    if tactile_num_tokens != len(tactile_keys):
+        raise ValueError(
+            "model.tactile_num_tokens must match model.tactile_keys length: "
+            f"{tactile_num_tokens} != {len(tactile_keys)}"
+        )
     train_decoder(
         cache_dir=None,
         tactile_encoder_dir=encoder_dir,
-        output_dir=Path(str(training["output"])).expanduser(),
+        output_dir=output_dir,
         dataset_repo_id=None,
         dataset_root=None,
         tactile_window_divisor=_positive_int(training, "tactile_window_divisor", 1),
@@ -109,7 +132,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         pipeline_prefetch=1,
         image_cache_size=0,
         encode_batch_size=1,
-        resume=bool(training.get("resume", False)),
+        resume=resolve_resume_mode(training.get("resume", False), output_dir=output_dir),
         resume_from=(
             None
             if training.get("resume_from") in (None, "")
@@ -118,9 +141,10 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         cache_dirs=cache_dirs,
         dataset_sources=datasets,
         tactile_embedding_cache_root=Path(str(tactile_cache["root"])).expanduser(),
-        tactile_keys=tuple(str(key) for key in model["tactile_keys"]),
+        tactile_keys=tactile_keys,
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
+        tactile_num_tokens=tactile_num_tokens,
     )
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from lerobot.policies.smolvla_jax.data import DatasetSource
 
 SCRIPT_PATH = Path(__file__).resolve().parents[2] / "tools" / "train_smolvla_jax.py"
@@ -13,6 +15,7 @@ SPEC.loader.exec_module(TRAIN_SCRIPT)
 _sources_from_split_manifest = TRAIN_SCRIPT._sources_from_split_manifest
 _split_manifest = TRAIN_SCRIPT._split_manifest
 run_validation = TRAIN_SCRIPT.run_validation
+load_yaml_config = TRAIN_SCRIPT.load_yaml_config
 
 
 def test_persisted_split_reconstructs_episode_lists() -> None:
@@ -70,3 +73,34 @@ def test_validation_reuses_fixed_seed_at_every_training_step() -> None:
         )
 
     assert trainer.seeds == [1234, 1234]
+
+
+def test_unknown_top_level_training_key_is_rejected(tmp_path: Path) -> None:
+    config = tmp_path / "train.yaml"
+    config.write_text("checkpoint: model\nsteps: 10\neval_frqe: 2\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="eval_frqe"):
+        load_yaml_config(config)
+
+
+def test_validation_without_rollout_does_not_log_nan(capsys) -> None:
+    class FakeTrainer:
+        def evaluate(self, batches, *, seed, **kwargs):
+            del batches, seed, kwargs
+            return {"loss": 1.0, "action_mse": float("nan"), "n_samples": 8.0}
+
+    class FakeData:
+        def batches(self):
+            return iter(())
+
+    run_validation(
+        FakeTrainer(),
+        FakeData(),
+        step=10,
+        eval_count=0,
+        seed=0,
+        val_cfg={"rollout": False},
+        wandb_run=None,
+    )
+
+    assert "action_mse" not in capsys.readouterr().out

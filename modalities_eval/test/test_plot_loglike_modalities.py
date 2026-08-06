@@ -1,16 +1,10 @@
 from __future__ import annotations
 
 import pathlib
-import sys
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "modalities_eval"
-if str(EVAL_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(EVAL_SCRIPTS))
 
 import pytest
 
-import plot_loglike_modalities
+from modalities_eval import plot_loglike_modalities
 
 
 def test_default_arguments_run_requested_evaluation() -> None:

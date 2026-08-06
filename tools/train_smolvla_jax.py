@@ -36,6 +36,35 @@ from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
 DATA_SPLIT_FILENAME = "data_split.json"
 DATA_SPLIT_VERSION = 1
+ALLOWED_TOP_LEVEL_KEYS = frozenset(
+    {
+        "allow_download",
+        "allow_tokenizer_download",
+        "batch_size",
+        "checkpoint",
+        "data_parallel",
+        "datasets",
+        "eval_freq",
+        "full_vlm_checkpoint",
+        "image_transforms",
+        "log_freq",
+        "modality_dropout",
+        "model",
+        "num_workers",
+        "output",
+        "prefetch_factor",
+        "resume",
+        "return_uint8",
+        "revision",
+        "save_freq",
+        "seed",
+        "steps",
+        "tactile_embedding_cache",
+        "validation",
+        "video_backend",
+        "wandb",
+    }
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +101,9 @@ def load_yaml_config(path: Path) -> dict[str, Any]:
         data = yaml.safe_load(file) or {}
     if not isinstance(data, dict):
         raise ValueError(f"config root must be a mapping: {path}")
+    unknown = sorted(set(data) - ALLOWED_TOP_LEVEL_KEYS)
+    if unknown:
+        raise ValueError(f"unknown top-level config keys in {path}: {unknown}")
     return data
 
 
@@ -276,9 +308,9 @@ def run_validation(
         rollout_steps=None if rollout_steps in (None, 0) else int(rollout_steps),
     )
     eval_count += 1
+    mse_text = f" action_mse={metrics['action_mse']:.6f}" if rollout else ""
     print(
-        f"val step={step} loss={metrics['loss']:.6f} "
-        f"action_mse={metrics['action_mse']:.6f} "
+        f"val step={step} loss={metrics['loss']:.6f}{mse_text} "
         f"samples={int(metrics['n_samples'])} eval_count={eval_count}"
     )
     if wandb_run is not None:
@@ -370,7 +402,8 @@ def main() -> None:
     resume = cfg.get("resume")
     if resume:
         trainer.restore(Path(resume))
-    if bool(cfg.get("data_parallel", False)):
+    data_parallel = bool(cfg.get("data_parallel", False))
+    if data_parallel:
         trainer.enable_data_parallel()
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
@@ -430,9 +463,14 @@ def main() -> None:
         "prefetch_factor": int(cfg.get("prefetch_factor", 2)),
         "video_backend": cfg.get("video_backend"),
         "return_uint8": bool(cfg.get("return_uint8", True)),
-        "seed": int(cfg.get("seed", 0)),
+        "seed": trainer.seed,
         "local_files_only": not (allow_tokenizer_download or allow_download),
     }
+    if data_parallel and common_loader_kwargs["batch_size"] % jax.device_count():
+        raise ValueError(
+            f"batch_size={common_loader_kwargs['batch_size']} must be divisible by "
+            f"the {jax.device_count()} data-parallel devices"
+        )
     tactile_cache_cfg = cfg.get("tactile_embedding_cache") or {}
     if not isinstance(tactile_cache_cfg, dict):
         raise ValueError("tactile_embedding_cache must be a mapping")
@@ -467,7 +505,7 @@ def main() -> None:
         image_transforms=train_image_transforms,
         **common_loader_kwargs,
     )
-    batches = data.batches()
+    batches = data.batches(start_batch=trainer.step_count)
     for summary in data.dataset_summaries:
         print(
             f"train_dataset={summary['repo_id']} frames={summary['frames']} "

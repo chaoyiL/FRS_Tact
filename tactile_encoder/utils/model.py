@@ -500,7 +500,8 @@ def _filter_bank_logits_hard_negatives(
     base_keep = bank_valid[None, :]
     if hard_negatives_k <= 0 or queue_size == 0:
         hard_logits = jnp.full((batch_size, 0), neg_inf, dtype=logits_bank.dtype)
-        filtered = jnp.where(base_keep, logits_bank, neg_inf)
+        keep = (bank_positive_mask | (candidate_mask & (~bank_positive_mask))) & base_keep
+        filtered = jnp.where(keep, logits_bank, neg_inf)
         return filtered, hard_logits
 
     k = min(int(hard_negatives_k), int(queue_size))

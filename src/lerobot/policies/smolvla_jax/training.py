@@ -201,6 +201,7 @@ class JaxSmolVLATrainer:
             rng=jax.random.key(self.seed),
         )
         self._compiled_step = jax.jit(self._train_step, donate_argnums=(0,))
+        self._compiled_evals: dict[tuple[bool, int], Any] = {}
         self.mesh = None
 
     def enable_data_parallel(self) -> None:
@@ -334,16 +335,26 @@ class JaxSmolVLATrainer:
         if steps <= 0:
             raise ValueError(f"rollout_steps must be positive, got {steps}")
 
-        def eval_fn(params: Params, batch: Mapping[str, Array], rng: Array) -> dict[str, Array]:
-            return self._eval_batch(
-                params,
-                batch,
-                rng,
-                rollout=bool(rollout),
-                rollout_steps=steps,
-            )
+        cache_key = (bool(rollout), steps)
+        compiled = self._compiled_evals.get(cache_key)
+        if compiled is None:
+            rollout_enabled = bool(rollout)
 
-        compiled = jax.jit(eval_fn)
+            def eval_fn(
+                params: Params,
+                batch: Mapping[str, Array],
+                rng: Array,
+            ) -> dict[str, Array]:
+                return self._eval_batch(
+                    params,
+                    batch,
+                    rng,
+                    rollout=rollout_enabled,
+                    rollout_steps=steps,
+                )
+
+            compiled = jax.jit(eval_fn)
+            self._compiled_evals[cache_key] = compiled
 
         total_loss = 0.0
         total_mse = 0.0
@@ -390,6 +401,7 @@ class JaxSmolVLATrainer:
     def _resume_signature(self) -> dict[str, Any]:
         return _jsonable(
             {
+                "seed": self.seed,
                 "total_steps": self.total_steps,
                 "model": self.config.to_dict(),
                 "modality_dropout": _dropout_signature(self.modality_dropout),
@@ -424,8 +436,12 @@ class JaxSmolVLATrainer:
                 metadata = json.load(file)
             if int(metadata.get("version", -1)) != RESUME_METADATA_VERSION:
                 raise ValueError(f"unsupported resume metadata version in {metadata_path}")
+            saved_signature = metadata.get("resume_signature")
+            if isinstance(saved_signature, Mapping) and "seed" in saved_signature:
+                # The checkpoint seed is authoritative for the resumed data stream.
+                self.seed = int(saved_signature["seed"])
             differences = _mapping_differences(
-                metadata.get("resume_signature"),
+                saved_signature,
                 self._resume_signature(),
             )
             saved_parameters = metadata.get("trainable_parameters")

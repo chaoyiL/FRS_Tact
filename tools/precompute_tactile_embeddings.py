@@ -193,6 +193,10 @@ def _precompute_source(
     if metadata_path.exists():
         existing = load_tactile_cache_metadata(output_dir)
         comparable_keys = set(expected_metadata) - {"status", "completed_frames"}
+        # Version-1 caches created before dataset fingerprints remain readable;
+        # newly written caches validate same-path data replacement as well.
+        if "dataset_fingerprint" not in existing:
+            comparable_keys.discard("dataset_fingerprint")
         mismatches = {
             key: (existing.get(key), expected_metadata.get(key))
             for key in comparable_keys
@@ -320,19 +324,29 @@ def main() -> None:
     cache_config = config.get("tactile_embedding_cache") or {}
     if not isinstance(cache_config, Mapping):
         raise ValueError("tactile_embedding_cache 必须是 mapping")
-    batch_size = int(args.batch_size or cache_config.get("precompute_batch_size", 128))
+    batch_size = int(
+        cache_config.get("precompute_batch_size", 128)
+        if args.batch_size is None
+        else args.batch_size
+    )
     num_workers = int(
         args.num_workers
         if args.num_workers is not None
         else cache_config.get("precompute_num_workers", 4)
     )
     prefetch_factor = int(
-        args.prefetch_factor or cache_config.get("precompute_prefetch_factor", 2)
+        cache_config.get("precompute_prefetch_factor", 2)
+        if args.prefetch_factor is None
+        else args.prefetch_factor
     )
     video_backend = args.video_backend or cache_config.get(
         "precompute_video_backend", "torchcodec"
     )
-    flush_every = int(args.flush_every or cache_config.get("precompute_flush_every", 20))
+    flush_every = int(
+        cache_config.get("precompute_flush_every", 20)
+        if args.flush_every is None
+        else args.flush_every
+    )
     if min(batch_size, prefetch_factor, flush_every) <= 0 or num_workers < 0:
         raise ValueError("batch/prefetch/flush 必须为正数，num_workers 不能为负数")
     model_config = config.get("model") or {}

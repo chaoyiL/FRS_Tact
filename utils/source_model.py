@@ -15,6 +15,9 @@ from modalities_eval.utils import _stack_observations
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
 from utils.integration import euler_integrate_velocity
 from utils.integration import fireflow_integrate_velocity
+from utils.integration import slerpflow_integrate_velocity
+
+ReverseSolver = Literal["euler", "fireflow", "slerpflow"]
 
 
 def stack_observations(observations: Sequence[EvalObservation]) -> EvalObservation:
@@ -115,14 +118,19 @@ def _jitted_reverse_from_context(
     model: SmolVLAEvalModel,
     *,
     num_steps: int,
-    solver: Literal["euler", "fireflow"],
+    solver: ReverseSolver,
 ):
     cache_key = (id(model), num_steps, solver)
     run = _REVERSE_CACHE.get(cache_key)
     if run is not None:
         return run
 
-    integrate = euler_integrate_velocity if solver == "euler" else fireflow_integrate_velocity
+    if solver == "euler":
+        integrate = euler_integrate_velocity
+    elif solver == "fireflow":
+        integrate = fireflow_integrate_velocity
+    else:
+        integrate = slerpflow_integrate_velocity
     functional_model = model.model
     max_action_dim = int(model.config.max_action_dim)
 
@@ -159,13 +167,15 @@ def sample_and_reverse(
     *,
     sample_steps: int,
     reverse_steps: int,
-    solver: Literal["euler", "fireflow"] = "euler",
+    solver: ReverseSolver = "slerpflow",
 ) -> tuple[jax.Array, jax.Array]:
     """One shared prefix encode, then sample t:1→0 and reverse t:0→1."""
     if sample_steps <= 0 or reverse_steps <= 0:
         raise ValueError("sample_steps and reverse_steps must be positive.")
-    if solver not in ("euler", "fireflow"):
-        raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
+    if solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
+        )
 
     context = build_velocity_context(model, observation)
     padded_noise = _pad_actions_to_model(model, noise)
@@ -184,11 +194,13 @@ def reverse_integrate_actions(
     actions: jax.Array,
     *,
     num_steps: int,
-    solver: Literal["euler", "fireflow"] = "euler",
+    solver: ReverseSolver = "slerpflow",
 ) -> jax.Array:
     """Integrate model-space actions from data time t=0 to base noise time t=1."""
-    if solver not in ("euler", "fireflow"):
-        raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
+    if solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
+        )
     context = build_velocity_context(model, observation)
     return _jitted_reverse_from_context(model, num_steps=num_steps, solver=solver)(
         model.params, context, jnp.asarray(actions, dtype=jnp.float32)

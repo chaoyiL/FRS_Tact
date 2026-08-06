@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, WeightedRandomSampler, default_collate
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, default_collate
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
 
@@ -24,6 +24,72 @@ from .tactile_cache import (
 
 Array = jax.Array
 CANONICAL_ACTION_KEY = "action"
+
+
+class DeterministicEpochBatchSampler:
+    """Epoch-addressable batches so resume can jump to the exact data position."""
+
+    def __init__(
+        self,
+        dataset_size: int,
+        *,
+        batch_size: int,
+        drop_last: bool,
+        shuffle: bool,
+        seed: int,
+        sample_weights: Sequence[float] | None = None,
+    ) -> None:
+        self.dataset_size = int(dataset_size)
+        self.batch_size = int(batch_size)
+        self.drop_last = bool(drop_last)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.sample_weights = (
+            None if sample_weights is None else torch.as_tensor(sample_weights, dtype=torch.double)
+        )
+        if self.dataset_size <= 0 or self.batch_size <= 0:
+            raise ValueError("dataset_size and batch_size must be positive")
+        if self.sample_weights is not None and len(self.sample_weights) != self.dataset_size:
+            raise ValueError("sample_weights length must match dataset_size")
+        self.epoch = 0
+        self.start_batch = 0
+
+    @property
+    def batches_per_epoch(self) -> int:
+        if self.drop_last:
+            return self.dataset_size // self.batch_size
+        return (self.dataset_size + self.batch_size - 1) // self.batch_size
+
+    def set_position(self, *, epoch: int, start_batch: int = 0) -> None:
+        if epoch < 0 or not 0 <= start_batch <= self.batches_per_epoch:
+            raise ValueError(
+                f"invalid sampler position epoch={epoch} start_batch={start_batch}"
+            )
+        self.epoch = int(epoch)
+        self.start_batch = int(start_batch)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        generator = torch.Generator().manual_seed(self.seed + self.epoch)
+        if self.sample_weights is not None:
+            order = torch.multinomial(
+                self.sample_weights,
+                self.dataset_size,
+                replacement=True,
+                generator=generator,
+            )
+        elif self.shuffle:
+            order = torch.randperm(self.dataset_size, generator=generator)
+        else:
+            order = torch.arange(self.dataset_size)
+        start = self.start_batch * self.batch_size
+        for offset in range(start, self.dataset_size, self.batch_size):
+            batch = order[offset : offset + self.batch_size]
+            if len(batch) < self.batch_size and self.drop_last:
+                break
+            yield batch.tolist()
+
+    def __len__(self) -> int:
+        return self.batches_per_epoch - self.start_batch
 
 
 @dataclass(frozen=True)
@@ -470,6 +536,7 @@ class LeRobotJaxDataLoader:
                     embedding_dim=config.tactile_embedding_dim,
                     image_size=config.tactile_image_size,
                     encoder_path=config.tactile_encoder_path,
+                    dataset_root=metadata.root,
                 )
             visual_keys = resolve_source_visual_keys(
                 resolve_model_visual_keys(
@@ -570,16 +637,17 @@ class LeRobotJaxDataLoader:
 
         self.subset_indices = selected
         self.dataset = Subset(full_dataset, list(selected)) if selected else full_dataset
-        effective_batch_size = min(batch_size, len(self.dataset))
-        if effective_batch_size <= 0:
+        dataset_size = len(self.dataset)
+        if dataset_size <= 0:
             raise ValueError("dataset is empty")
         if drop_last is None:
             drop_last = bool(infinite)
-        if drop_last and len(self.dataset) < effective_batch_size:
+        if drop_last and dataset_size < batch_size:
             raise ValueError(
-                f"combined datasets contain {len(self.dataset)} frames, "
-                f"smaller than batch size {effective_batch_size}"
+                f"combined datasets contain {dataset_size} frames, "
+                f"smaller than requested batch size {batch_size}"
             )
+        effective_batch_size = min(batch_size, dataset_size)
         self.batch_size = int(effective_batch_size)
 
         if preprocessor is not None:
@@ -595,30 +663,28 @@ class LeRobotJaxDataLoader:
                 local_files_only=local_files_only,
             )
 
-        generator = torch.Generator().manual_seed(seed)
         use_weighted = (
             self.shuffle
             and len(self.sources) > 1
             and any(source.weight != 1.0 for source in self.sources)
         )
+        batch_sampler = DeterministicEpochBatchSampler(
+            len(self.dataset),
+            batch_size=self.batch_size,
+            drop_last=bool(drop_last),
+            shuffle=self.shuffle,
+            seed=seed,
+            sample_weights=sample_weights if use_weighted else None,
+        )
+        self._batch_sampler = batch_sampler
+        self._worker_generator = torch.Generator().manual_seed(seed)
         loader_kwargs: dict[str, Any] = {
-            "batch_size": self.batch_size,
-            "drop_last": bool(drop_last),
+            "batch_sampler": batch_sampler,
             "num_workers": num_workers,
             "persistent_workers": num_workers > 0 and self.infinite,
             "collate_fn": _collate_lerobot_samples,
+            "generator": self._worker_generator,
         }
-        if use_weighted:
-            sampler = WeightedRandomSampler(
-                weights=sample_weights,
-                num_samples=len(self.dataset),
-                replacement=True,
-                generator=generator,
-            )
-            loader_kwargs["sampler"] = sampler
-        else:
-            loader_kwargs["shuffle"] = self.shuffle
-            loader_kwargs["generator"] = generator
         if num_workers > 0:
             loader_kwargs["prefetch_factor"] = prefetch_factor
             # JAX owns background threads in the training process; forking that
@@ -674,8 +740,16 @@ class LeRobotJaxDataLoader:
                 f"checkpoint={sorted(config.image_keys)}"
             )
 
-    def batches(self) -> Iterator[dict[str, Array]]:
+    def batches(self, *, start_batch: int = 0) -> Iterator[dict[str, Array]]:
+        if start_batch < 0:
+            raise ValueError(f"start_batch must be non-negative, got {start_batch}")
+        batches_per_epoch = self._batch_sampler.batches_per_epoch
+        if batches_per_epoch <= 0:
+            raise ValueError("data loader produces no complete batches")
+        epoch, batch_in_epoch = divmod(int(start_batch), batches_per_epoch)
         while True:
+            self._batch_sampler.set_position(epoch=epoch, start_batch=batch_in_epoch)
+            self._worker_generator.manual_seed(self._batch_sampler.seed + epoch)
             for raw_batch in self.loader:
                 yield prepare_lerobot_batch(
                     raw_batch,
@@ -685,3 +759,5 @@ class LeRobotJaxDataLoader:
                 )
             if not self.infinite:
                 break
+            epoch += 1
+            batch_in_epoch = 0

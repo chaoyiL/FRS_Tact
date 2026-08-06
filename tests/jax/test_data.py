@@ -11,6 +11,7 @@ from safetensors.flax import load_file as load_safetensors_file
 
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.data import (
+    DeterministicEpochBatchSampler,
     DatasetSource,
     _KeyMappedLeRobotDataset,
     action_delta_timestamps,
@@ -28,6 +29,23 @@ from lerobot.policies.smolvla_jax.data import (
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor, prepare_tactile_batch
 from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 from tactile_encoder.utils.image_dataset import parse_image_to_unit
+
+
+def test_epoch_batch_sampler_can_resume_without_replaying_prefix() -> None:
+    sampler = DeterministicEpochBatchSampler(
+        10,
+        batch_size=2,
+        drop_last=True,
+        shuffle=True,
+        seed=7,
+    )
+    full_epoch = list(sampler)
+    sampler.set_position(epoch=0, start_batch=3)
+    resumed = list(sampler)
+
+    assert resumed == full_epoch[3:]
+    sampler.set_position(epoch=1)
+    assert list(sampler) != full_epoch
 
 
 def test_action_key_and_delta_timestamps() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import pathlib
 from collections.abc import Iterator, Sequence
 from typing import Any, Literal
@@ -92,6 +93,18 @@ class FutureRecordSet:
 
     def split_records(self, split: Literal["train", "val"]) -> tuple[FutureRecord, ...]:
         return tuple(record for record in self.records if record.split == split)
+
+
+def future_records_digest(records: Sequence[FutureRecord]) -> str:
+    """Stable identity for a retrieval train/validation record set."""
+
+    digest = hashlib.sha256()
+    for record in records:
+        digest.update(
+            f"{record.dataset_index}:{record.future_dataset_index}:"
+            f"{record.episode_index}:{record.split}\n".encode()
+        )
+    return digest.hexdigest()
 
 
 def resolve_data_keys(

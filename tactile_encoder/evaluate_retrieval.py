@@ -17,6 +17,7 @@ from tactile_encoder.utils.clip_backend import ClipBackend
 from tactile_encoder.utils.data import DataKeys
 from tactile_encoder.utils.data import batches
 from tactile_encoder.utils.data import build_future_records
+from tactile_encoder.utils.data import future_records_digest
 from tactile_encoder.utils.data import resolve_data_keys
 from tactile_encoder.utils.image_dataset import create_image_dataset
 from tactile_encoder.utils.masking import resolve_eval_rgb_mask
@@ -248,11 +249,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--split-seed", type=int, default=0)
-    parser.add_argument("--val-fraction", type=float, default=0.1)
-    parser.add_argument("--frame-stride", type=int, default=1)
-    parser.add_argument("--future-offset", type=int, default=1)
-    parser.add_argument("--eval-mask-seed", type=int, default=0)
+    parser.add_argument("--split-seed", type=int, default=None)
+    parser.add_argument("--val-fraction", type=float, default=None)
+    parser.add_argument("--frame-stride", type=int, default=None)
+    parser.add_argument("--future-offset", type=int, default=None)
+    parser.add_argument("--eval-mask-seed", type=int, default=None)
     parser.add_argument("--rgb-mask-patch-size", type=int, default=16)
     parser.add_argument("--rgb-mask-ratio", type=float, default=0.5)
     parser.add_argument(
@@ -299,30 +300,59 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     params, metadata = load_checkpoint(args.checkpoint_dir)
+    extra = metadata.get("extra_metadata") or {}
+    split_seed = int(extra.get("split_seed", 0) if args.split_seed is None else args.split_seed)
+    val_fraction = float(
+        extra.get("val_fraction", 0.1) if args.val_fraction is None else args.val_fraction
+    )
+    frame_stride = int(
+        extra.get("frame_stride", 1) if args.frame_stride is None else args.frame_stride
+    )
+    future_offset = int(
+        extra.get("future_offset", 1) if args.future_offset is None else args.future_offset
+    )
+    eval_mask_seed = int(
+        extra.get("eval_mask_seed", 0) if args.eval_mask_seed is None else args.eval_mask_seed
+    )
     backend = ClipBackend.from_pretrained(metadata["clip_model_id"])
     dataset_info = create_image_dataset(
         args.dataset_repo_ids,
         image_size=CLIP_IMAGE_SIZE,
-        config_name=args.config_name,
+        config_name=args.config_name if args.config_name is not None else extra.get("config_name"),
     )
     dataset = dataset_info.dataset
     record_set = build_future_records(
         dataset,
-        future_offset=args.future_offset,
-        val_fraction=args.val_fraction,
-        split_seed=args.split_seed,
-        frame_stride=args.frame_stride,
+        future_offset=future_offset,
+        val_fraction=val_fraction,
+        split_seed=split_seed,
+        frame_stride=frame_stride,
     )
-    extra = metadata.get("extra_metadata") or {}
+    expected_records_digest = extra.get("records_sha256")
+    actual_records_digest = future_records_digest(record_set.records)
+    if expected_records_digest is not None and actual_records_digest != expected_records_digest:
+        raise ValueError(
+            "evaluation records do not match the checkpoint training split: "
+            f"{actual_records_digest} != {expected_records_digest}. "
+            "Use the checkpoint dataset and split settings."
+        )
     keys = resolve_data_keys(
         masked_rgb_key=args.masked_rgb_key or extra.get("masked_rgb_key") or None,
     )
     config = tactile_clip_config_from_dict(metadata["tactile_clip_config"])
-    history_stride = int(extra.get("history_stride") or args.frame_stride)
+    history_stride = int(extra.get("history_stride") or frame_stride)
     train_rgb_mask_patch_size = int(extra.get("rgb_mask_patch_size", args.rgb_mask_patch_size))
     train_rgb_mask_ratio = float(extra.get("rgb_mask_ratio", args.rgb_mask_ratio))
-    eval_rgb_mask_patch_size = extra.get("eval_rgb_mask_patch_size", args.eval_rgb_mask_patch_size)
-    eval_rgb_mask_ratio = extra.get("eval_rgb_mask_ratio", args.eval_rgb_mask_ratio)
+    eval_rgb_mask_patch_size = (
+        args.eval_rgb_mask_patch_size
+        if args.eval_rgb_mask_patch_size is not None
+        else extra.get("eval_rgb_mask_patch_size")
+    )
+    eval_rgb_mask_ratio = (
+        args.eval_rgb_mask_ratio
+        if args.eval_rgb_mask_ratio is not None
+        else extra.get("eval_rgb_mask_ratio")
+    )
     if eval_rgb_mask_patch_size is not None:
         eval_rgb_mask_patch_size = int(eval_rgb_mask_patch_size)
     if eval_rgb_mask_ratio is not None:
@@ -341,7 +371,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         records=record_set.split_records("val"),
         keys=keys,
         batch_size=args.batch_size,
-        eval_mask_seed=args.eval_mask_seed,
+        eval_mask_seed=eval_mask_seed,
         rgb_mask_patch_size=eval_rgb_mask_patch_size,
         rgb_mask_ratio=eval_rgb_mask_ratio,
         config=config,

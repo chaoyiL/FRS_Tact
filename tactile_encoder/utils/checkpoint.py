@@ -4,6 +4,7 @@ import dataclasses
 import json
 import pathlib
 import pickle
+import uuid
 from typing import Any
 
 import jax
@@ -87,9 +88,14 @@ def _numpy_to_leaf(array: np.ndarray) -> Any:
     return jnp.asarray(array)
 
 
-def save_memory_bank(directory: pathlib.Path, memory_bank: dict[str, Any] | None) -> None:
+def save_memory_bank(
+    directory: pathlib.Path,
+    memory_bank: dict[str, Any] | None,
+    *,
+    filename: str = MEMORY_BANK_NAME,
+) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / MEMORY_BANK_NAME
+    path = directory / filename
     if memory_bank is None or int(np.asarray(memory_bank["keys"]).shape[0]) == 0:
         if path.exists():
             path.unlink()
@@ -98,9 +104,13 @@ def save_memory_bank(directory: pathlib.Path, memory_bank: dict[str, Any] | None
     _atomic_savez(path, arrays)
 
 
-def load_memory_bank(directory: str | pathlib.Path) -> dict[str, Any] | None:
+def load_memory_bank(
+    directory: str | pathlib.Path,
+    *,
+    filename: str = MEMORY_BANK_NAME,
+) -> dict[str, Any] | None:
     directory = pathlib.Path(directory)
-    path = directory / MEMORY_BANK_NAME
+    path = directory / filename
     if not path.exists():
         return None
     with np.load(path) as archive:
@@ -120,9 +130,14 @@ def save_checkpoint(
     memory_bank: dict[str, Any] | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    generation = uuid.uuid4().hex
+    params_name = f"params-{generation}.npz"
+    opt_state_name = f"opt_state-{generation}.npz"
+    opt_tree_name = f"opt_state-{generation}.treedef.pkl"
+    memory_bank_name = f"memory_bank-{generation}.npz"
     ordered = _flatten_params(params)
     arrays = {f"p{index:05d}": _leaf_to_numpy(value) for index, (_, value) in enumerate(ordered)}
-    _atomic_savez(directory / PARAMS_NAME, arrays)
+    _atomic_savez(directory / params_name, arrays)
     has_memory_bank = (
         memory_bank is not None and int(np.asarray(memory_bank["keys"]).shape[0]) > 0
     )
@@ -136,21 +151,36 @@ def save_checkpoint(
         "parameter_paths": [_path_name(path) for path, _ in ordered],
         "has_opt_state": opt_state is not None,
         "has_memory_bank": has_memory_bank,
+        "params_file": params_name,
     }
     if opt_state is not None:
         leaves, treedef = jax.tree_util.tree_flatten(opt_state)
         opt_arrays = {f"p{index:05d}": _leaf_to_numpy(leaf) for index, leaf in enumerate(leaves)}
-        _atomic_savez(directory / OPT_STATE_NAME, opt_arrays)
-        treedef_path = directory / OPT_STATE_TREEDEF_NAME
+        _atomic_savez(directory / opt_state_name, opt_arrays)
+        treedef_path = directory / opt_tree_name
         temporary = treedef_path.with_suffix(treedef_path.suffix + ".tmp")
         with temporary.open("wb") as file:
             pickle.dump(treedef, file, protocol=pickle.HIGHEST_PROTOCOL)
         temporary.replace(treedef_path)
         metadata["opt_state_leaf_count"] = len(leaves)
-    save_memory_bank(directory, memory_bank if has_memory_bank else None)
+        metadata["opt_state_file"] = opt_state_name
+        metadata["opt_state_treedef_file"] = opt_tree_name
+    if has_memory_bank:
+        save_memory_bank(directory, memory_bank, filename=memory_bank_name)
+        metadata["memory_bank_file"] = memory_bank_name
     if extra_metadata is not None:
         metadata["extra_metadata"] = extra_metadata
     atomic_write_json(directory / CHECKPOINT_NAME, metadata)
+    keep = {params_name, opt_state_name, opt_tree_name, memory_bank_name}
+    for pattern in (
+        "params-*.npz",
+        "opt_state-*.npz",
+        "opt_state-*.treedef.pkl",
+        "memory_bank-*.npz",
+    ):
+        for path in directory.glob(pattern):
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
 
 
 def load_checkpoint(directory: str | pathlib.Path) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -158,7 +188,8 @@ def load_checkpoint(directory: str | pathlib.Path) -> tuple[dict[str, Any], dict
     with (directory / CHECKPOINT_NAME).open(encoding="utf-8") as file:
         metadata = json.load(file)
     restored_flat: dict[tuple[str, ...], Any] = {}
-    with np.load(directory / PARAMS_NAME) as archive:
+    params_path = directory / str(metadata.get("params_file", PARAMS_NAME))
+    with np.load(params_path) as archive:
         for index, path_name in enumerate(metadata["parameter_paths"]):
             restored_flat[tuple(path_name.split("/"))] = _numpy_to_leaf(archive[f"p{index:05d}"])
     return traverse_util.unflatten_dict(restored_flat), metadata
@@ -172,9 +203,14 @@ def load_train_state(
     directory = pathlib.Path(directory)
     params, metadata = load_checkpoint(directory)
     opt_state = None
-    opt_state_path = directory / OPT_STATE_NAME
-    treedef_path = directory / OPT_STATE_TREEDEF_NAME
-    if metadata.get("has_opt_state") and opt_state_path.exists() and treedef_path.exists():
+    opt_state_path = directory / str(metadata.get("opt_state_file", OPT_STATE_NAME))
+    treedef_path = directory / str(
+        metadata.get("opt_state_treedef_file", OPT_STATE_TREEDEF_NAME)
+    )
+    if metadata.get("has_opt_state"):
+        missing = [path for path in (opt_state_path, treedef_path) if not path.exists()]
+        if missing:
+            raise FileNotFoundError(f"checkpoint optimizer files are missing: {missing}")
         try:
             with treedef_path.open("rb") as file:
                 treedef = pickle.load(file)
@@ -182,21 +218,16 @@ def load_train_state(
                 leaf_count = int(metadata.get("opt_state_leaf_count", len(archive.files)))
                 leaves = [_numpy_to_leaf(archive[f"p{index:05d}"]) for index in range(leaf_count)]
             opt_state = jax.tree_util.tree_unflatten(treedef, leaves)
-        except Exception as exc:  # noqa: BLE001 - fall back to params-only resume
-            print(
-                f"warning: failed to restore optimizer state from {directory}: {exc}; "
-                "reinitializing Adam state.",
-                flush=True,
-            )
-            opt_state = None
+        except Exception as exc:  # noqa: BLE001 - checkpoint corruption must be explicit
+            raise RuntimeError(f"failed to restore optimizer state from {directory}") from exc
     memory_bank = None
     if metadata.get("has_memory_bank"):
-        memory_bank = load_memory_bank(directory)
+        memory_bank_filename = str(metadata.get("memory_bank_file", MEMORY_BANK_NAME))
+        memory_bank = load_memory_bank(directory, filename=memory_bank_filename)
         if memory_bank is None:
-            print(
-                f"warning: checkpoint reports has_memory_bank but {MEMORY_BANK_NAME} is missing "
-                f"in {directory}; starting with an empty bank.",
-                flush=True,
+            raise FileNotFoundError(
+                f"checkpoint reports a memory bank but {memory_bank_filename} is missing "
+                f"in {directory}"
             )
     return params, opt_state, metadata, memory_bank
 

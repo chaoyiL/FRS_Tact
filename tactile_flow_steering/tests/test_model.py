@@ -229,6 +229,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["decoder_config"]["gru_hidden_dim"], 8)
             self.assertEqual(metadata["decoder_config"]["tactile_window"], 3)
             self.assertEqual(metadata["decoder_config"]["num_tactile_tokens"], 4)
+            self.assertTrue((checkpoint_dir / metadata["params_file"]).is_file())
 
     def test_optimizer_state_round_trip(self):
         from tactile_flow_steering.utils.checkpoint import load_optimizer_state
@@ -249,6 +250,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             )
             restored_model, metadata = load_checkpoint(checkpoint_dir)
             self.assertTrue(metadata["has_opt_state"])
+            self.assertTrue((checkpoint_dir / metadata["opt_state_file"]).is_file())
             opt_state, step = load_optimizer_state(checkpoint_dir)
             self.assertIsNotNone(opt_state)
             self.assertEqual(step, 4)

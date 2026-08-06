@@ -185,6 +185,9 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("Control frequencies must be positive")
     if float(connection["action_ack_timeout_s"]) <= 0:
         raise ValueError("action_ack_timeout_s must be positive")
+    for key in ("observation_timeout_s", "ping_interval_s", "ping_timeout_s"):
+        if key in connection and float(connection[key]) <= 0:
+            raise ValueError(f"{key} must be positive")
     if int(runtime.get("warmup_runs", 1)) < 1:
         raise ValueError("warmup_runs must be at least 1")
     if not isinstance(logging_config, dict):
@@ -364,6 +367,19 @@ def _rtc_enabled(policy: JaxSmolVLAPolicy) -> bool:
     return rtc is not None and bool(rtc.enabled)
 
 
+def _remaining_action_chunk(action_chunk: np.ndarray, executed_steps: int) -> np.ndarray:
+    """Align the unexecuted tail of a chunk with the next observation."""
+
+    chunk = np.asarray(action_chunk)
+    if chunk.ndim != 2:
+        raise ValueError(f"action chunk must be rank 2, got {chunk.shape}")
+    if not 0 <= int(executed_steps) <= chunk.shape[0]:
+        raise ValueError(
+            f"executed_steps must be in [0, {chunk.shape[0]}], got {executed_steps}"
+        )
+    return np.array(chunk[int(executed_steps) :], copy=True)
+
+
 def run(
     config_path: Path,
     max_iterations_override: int | None = None,
@@ -459,6 +475,8 @@ def run(
         token=_resolve_token(connection),
         add_port=_optional_bool(connection.get("add_port")),
         retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
+        ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
+        ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
     )
     bridge.send_config(server_config)
     observation_saver = ObservationSaver(logging_config, robot_image_keys)
@@ -474,12 +492,15 @@ def run(
     if max_iterations < 0:
         raise ValueError("max_iterations must be non-negative")
     action_ack_timeout_s = float(connection["action_ack_timeout_s"])
+    observation_timeout_s = float(connection.get("observation_timeout_s", 30.0))
     task = str(observation_config["language_prompt"])
     previous_chunk: np.ndarray | None = None
 
     try:
         print("[client] Waiting for robot warmup observation")
-        warmup_obs_seq, warmup_observation = bridge.receive_observation()
+        warmup_obs_seq, warmup_observation = bridge.receive_observation(
+            timeout=observation_timeout_s
+        )
         warmup_frame = _prepare_observation(
             warmup_observation,
             state_dim=state_dim,
@@ -511,7 +532,7 @@ def run(
         iteration = 0
         last_status_time = time.monotonic()
         while max_iterations <= 0 or iteration < max_iterations:
-            obs_seq, observation = bridge.receive_observation()
+            obs_seq, observation = bridge.receive_observation(timeout=observation_timeout_s)
             observation_saver.submit(iteration + 1, obs_seq, observation)
             frame = _prepare_observation(
                 observation,
@@ -536,7 +557,7 @@ def run(
             bridge.send_action(action, obs_seq)
             bridge.receive_action_ack(obs_seq, timeout=action_ack_timeout_s)
             if rtc_on:
-                previous_chunk = action_norm
+                previous_chunk = _remaining_action_chunk(action_norm, steps_per_inference)
             iteration += 1
 
             now = time.monotonic()

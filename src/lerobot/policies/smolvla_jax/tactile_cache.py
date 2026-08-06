@@ -24,6 +24,22 @@ def tactile_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
     return Path(cache_root).expanduser().joinpath(*parts)
 
 
+def dataset_root_fingerprint(dataset_root: str | Path) -> str | None:
+    """Fingerprint dataset file identities without reading large video payloads."""
+
+    root = Path(dataset_root).expanduser().resolve()
+    if not root.is_dir():
+        return None
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    for path in files:
+        stat = path.stat()
+        digest.update(
+            f"{path.relative_to(root)}:{stat.st_size}:{stat.st_mtime_ns}\n".encode()
+        )
+    return digest.hexdigest()
+
+
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
@@ -40,7 +56,13 @@ def tactile_encoder_fingerprint(checkpoint_dir: str | Path) -> str:
     """Hash the encoder files that determine frozen ResNet embeddings."""
 
     directory = Path(checkpoint_dir).expanduser().resolve()
-    candidates = [directory / "checkpoint.json", directory / "params.npz"]
+    checkpoint_path = directory / "checkpoint.json"
+    params_name = "params.npz"
+    if checkpoint_path.is_file():
+        with checkpoint_path.open(encoding="utf-8") as file:
+            checkpoint_metadata = json.load(file)
+        params_name = str(checkpoint_metadata.get("params_file", params_name))
+    candidates = [checkpoint_path, directory / params_name]
     missing = [path for path in candidates if not path.is_file()]
     if missing:
         raise FileNotFoundError(f"tactile encoder files are missing: {missing}")
@@ -78,6 +100,7 @@ def create_tactile_cache_metadata(
         "repo_id": str(repo_id),
         "revision": None if revision is None else str(revision),
         "dataset_root": str(Path(dataset_root).expanduser().resolve()),
+        "dataset_fingerprint": dataset_root_fingerprint(dataset_root),
         "total_frames": int(total_frames),
         "tactile_keys": list(tactile_keys),
         "source_tactile_keys": list(source_tactile_keys),
@@ -120,6 +143,7 @@ class TactileEmbeddingCache:
         embedding_dim: int,
         image_size: int,
         encoder_path: str | Path,
+        dataset_root: str | Path | None = None,
     ):
         self.cache_dir = Path(cache_dir).expanduser()
         self.metadata = load_tactile_cache_metadata(self.cache_dir)
@@ -136,6 +160,10 @@ class TactileEmbeddingCache:
             "image_size": int(image_size),
             "encoder_sha256": tactile_encoder_fingerprint(encoder_path),
         }
+        if dataset_root is not None:
+            expected["dataset_root"] = str(Path(dataset_root).expanduser().resolve())
+            if "dataset_fingerprint" in self.metadata:
+                expected["dataset_fingerprint"] = dataset_root_fingerprint(dataset_root)
         mismatches = {
             key: (self.metadata.get(key), value)
             for key, value in expected.items()

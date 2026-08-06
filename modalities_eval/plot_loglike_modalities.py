@@ -19,7 +19,7 @@ for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from loglike_evaluate import (
+from modalities_eval.loglike_evaluate import (
     DEFAULT_HUTCHINSON_SAMPLES,
     DEFAULT_HUTCHINSON_SEED,
     ODE_SOLVER_FIREFLOW,
@@ -28,7 +28,7 @@ from loglike_evaluate import (
     load_episode,
     save_contribution_curve,
 )
-from utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
+from modalities_eval.utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
 
 MODALITIES = ("vision", "tactile", "state", "language_prompt")
 DEFAULT_CHECKPOINT_DIR = pathlib.Path("/home/typhon/models/tactile_test_05_1.5w")

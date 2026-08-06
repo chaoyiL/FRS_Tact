@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import pathlib
 import pickle
+import uuid
 from typing import Any
 
 import jax
@@ -89,10 +90,14 @@ def save_checkpoint(
     optimizer: nnx.Optimizer | None = None,
 ) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    generation = uuid.uuid4().hex
+    params_name = f"params-{generation}.npz"
+    opt_state_name = f"opt_state-{generation}.npz"
+    opt_tree_name = f"opt_state-{generation}.treedef.pkl"
     _, flat = _flat_parameter_state(model)
     ordered = sorted(flat.items(), key=lambda item: _path_name(item[0]))
     arrays = {f"p{index:05d}": np.asarray(value) for index, (_, value) in enumerate(ordered)}
-    _atomic_savez(directory / PARAMS_NAME, arrays)
+    _atomic_savez(directory / params_name, arrays)
     metadata: dict[str, Any] = {
         "version": 2,
         "epoch": int(epoch),
@@ -100,21 +105,29 @@ def save_checkpoint(
         "decoder_config": dataclasses.asdict(model.config),
         "parameter_paths": [_path_name(path) for path, _ in ordered],
         "has_opt_state": optimizer is not None,
+        "params_file": params_name,
     }
     if optimizer is not None:
         leaves, treedef = jax.tree_util.tree_flatten(optimizer.opt_state)
         opt_arrays = {f"p{index:05d}": _leaf_to_numpy(leaf) for index, leaf in enumerate(leaves)}
-        _atomic_savez(directory / OPT_STATE_NAME, opt_arrays)
-        treedef_path = directory / OPT_STATE_TREEDEF_NAME
+        _atomic_savez(directory / opt_state_name, opt_arrays)
+        treedef_path = directory / opt_tree_name
         temporary = treedef_path.with_suffix(treedef_path.suffix + ".tmp")
         with temporary.open("wb") as file:
             pickle.dump(treedef, file, protocol=pickle.HIGHEST_PROTOCOL)
         temporary.replace(treedef_path)
         metadata["opt_state_leaf_count"] = len(leaves)
         metadata["optimizer_step"] = _optimizer_step_value(optimizer)
+        metadata["opt_state_file"] = opt_state_name
+        metadata["opt_state_treedef_file"] = opt_tree_name
     if extra_metadata is not None:
         metadata["extra_metadata"] = extra_metadata
     atomic_write_json(directory / CHECKPOINT_NAME, metadata)
+    keep = {params_name, opt_state_name, opt_tree_name}
+    for pattern in ("params-*.npz", "opt_state-*.npz", "opt_state-*.treedef.pkl"):
+        for path in directory.glob(pattern):
+            if path.name not in keep:
+                path.unlink(missing_ok=True)
 
 
 def load_checkpoint(directory: pathlib.Path) -> tuple[TactileConditionedFlowDecoder, dict[str, Any]]:
@@ -130,7 +143,8 @@ def load_checkpoint(directory: pathlib.Path) -> tuple[TactileConditionedFlowDeco
     if actual_names != metadata["parameter_paths"]:
         raise ValueError("Checkpoint parameter structure does not match the decoder implementation.")
 
-    with np.load(directory / PARAMS_NAME) as archive:
+    params_path = directory / str(metadata.get("params_file", PARAMS_NAME))
+    with np.load(params_path) as archive:
         restored_flat = {
             path: jnp.asarray(archive[f"p{index:05d}"])
             for index, path in enumerate(ordered_paths)
@@ -148,10 +162,15 @@ def load_optimizer_state(directory: pathlib.Path) -> tuple[Any | None, int | Non
     directory = pathlib.Path(directory)
     with (directory / CHECKPOINT_NAME).open(encoding="utf-8") as file:
         metadata = json.load(file)
-    opt_state_path = directory / OPT_STATE_NAME
-    treedef_path = directory / OPT_STATE_TREEDEF_NAME
-    if not (metadata.get("has_opt_state") and opt_state_path.exists() and treedef_path.exists()):
+    opt_state_path = directory / str(metadata.get("opt_state_file", OPT_STATE_NAME))
+    treedef_path = directory / str(
+        metadata.get("opt_state_treedef_file", OPT_STATE_TREEDEF_NAME)
+    )
+    if not metadata.get("has_opt_state"):
         return None, None
+    missing = [path for path in (opt_state_path, treedef_path) if not path.exists()]
+    if missing:
+        raise FileNotFoundError(f"checkpoint optimizer files are missing: {missing}")
     try:
         with treedef_path.open("rb") as file:
             treedef = pickle.load(file)
@@ -161,13 +180,8 @@ def load_optimizer_state(directory: pathlib.Path) -> tuple[Any | None, int | Non
         opt_state = jax.tree_util.tree_unflatten(treedef, leaves)
         step = metadata.get("optimizer_step")
         return opt_state, (int(step) if step is not None else None)
-    except Exception as exc:  # noqa: BLE001 - fall back to params-only resume
-        print(
-            f"warning: failed to restore optimizer state from {directory}: {exc}; "
-            "reinitializing Adam state.",
-            flush=True,
-        )
-        return None, None
+    except Exception as exc:  # noqa: BLE001 - checkpoint corruption must be explicit
+        raise RuntimeError(f"failed to restore optimizer state from {directory}") from exc
 
 
 def restore_optimizer_state(

@@ -33,6 +33,10 @@ connection:
   port: 26421
   add_port: true
   retry_interval_s: 1.0
+  # 心跳用于及时发现半开连接；观测超时后客户端会停止机器人并退出。
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
   action_ack_timeout_s: 30.0
   # 默认 token；若设置了 token_env 对应的环境变量，则以环境变量为准
   token: 123

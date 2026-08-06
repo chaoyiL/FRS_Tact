@@ -19,10 +19,21 @@ from utils.cache import open_cache_arrays
 from utils.cache import sample_pred_gt_mse
 from utils.cache import split_episodes
 from utils.cache import trim_episode_tail
+from utils.cache import truncate_cache_arrays
 from utils.cache import write_cache_subset
 
 
 class EpisodeSplitTest(unittest.TestCase):
+    def test_truncate_validates_every_array_length_before_early_return(self):
+        records = [SampleRecord(10, 0, "train"), SampleRecord(20, 1, "val")]
+        with tempfile.TemporaryDirectory() as directory:
+            cache_dir = pathlib.Path(directory)
+            create_cache_arrays(cache_dir, records, action_horizon=2, action_dim=1)
+            np.save(cache_dir / "predicted_actions.npy", np.zeros((1, 2, 1), dtype=np.float32))
+
+            with self.assertRaisesRegex(ValueError, "target"):
+                truncate_cache_arrays(cache_dir, count=2)
+
     def test_split_is_disjoint_deterministic_and_eighty_twenty(self):
         train_a, val_a = split_episodes(range(10), val_fraction=0.2, seed=7)
         train_b, val_b = split_episodes(range(10), val_fraction=0.2, seed=7)

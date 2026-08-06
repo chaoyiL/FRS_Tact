@@ -12,6 +12,7 @@ from tactile_encoder.utils.metrics import l2_normalize
 from tactile_encoder.utils.metrics import pooled_retrieval_metrics_by_side
 from tactile_encoder.utils.metrics import retrieval_metrics_by_side
 from tactile_encoder.utils.model import TactileClipConfig
+from tactile_encoder.utils.model import _filter_bank_logits_hard_negatives
 from tactile_encoder.utils.model import symmetric_contrastive_loss
 
 
@@ -23,6 +24,20 @@ class FakeImageDataset:
 
 
 class SideIsolationTest(unittest.TestCase):
+    def test_all_bank_negatives_still_exclude_same_episode(self):
+        logits = jnp.asarray([[3.0, 2.0, 1.0]], dtype=jnp.float32)
+        filtered, hard = _filter_bank_logits_hard_negatives(
+            logits,
+            bank_positive_mask=jnp.asarray([[False, True, False]]),
+            bank_valid=jnp.asarray([True, True, True]),
+            candidate_mask=jnp.asarray([[True, False, False]]),
+            hard_negatives_k=0,
+        )
+
+        np.testing.assert_allclose(np.asarray(filtered[0, :2]), np.asarray([3.0, 2.0]))
+        self.assertTrue(bool(jnp.isneginf(filtered[0, 2])))
+        self.assertEqual(hard.shape, (1, 0))
+
     def test_batches_equal_left_right_when_shuffled(self):
         records = tuple(
             FutureRecord(

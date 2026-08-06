@@ -169,6 +169,30 @@ def test_effective_config_persists_dimensions_and_lora_settings(tmp_path: Path) 
     assert reloaded.vlm_lora_target_modules == ("q_proj", "v_proj")
 
 
+def test_effective_config_preserves_requested_camera_order(tmp_path: Path) -> None:
+    config = replace(
+        JaxSmolVLAConfig(),
+        image_keys=("observation.images.camera2", "observation.images.camera1"),
+    )
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "input_features": {
+                    "observation.state": {"type": "STATE", "shape": [32]},
+                    "observation.images.camera1": {"type": "VISUAL"},
+                    "observation.images.camera2": {"type": "VISUAL"},
+                },
+                "output_features": {"action": {"type": "ACTION", "shape": [32]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    write_effective_config(tmp_path, config)
+
+    assert JaxSmolVLAConfig.from_pretrained(tmp_path).image_keys == config.image_keys
+
+
 def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
     config = replace(
         JaxSmolVLAConfig(),

@@ -19,7 +19,7 @@ if str(EVAL_DIR) not in sys.path:
 import jax
 import jax.numpy as jnp
 import numpy as np
-from utils import (  # noqa: E402
+from modalities_eval.utils import (  # noqa: E402
     EvalObservation,
     SmolVLAEvalModel,
     VelocityContext,

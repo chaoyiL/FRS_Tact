@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_PATH="${1:-${PROJECT_ROOT}/configs/train_frs_pick_tube.yaml}"
+CONFIG_PATH="${1:-${PROJECT_ROOT}/configs/train_frs.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube}"
 
@@ -35,6 +35,12 @@ with Path(sys.argv[1]).open(encoding="utf-8") as file:
     cfg = yaml.safe_load(file) or {}
 merge = cfg.get("checkpoint_merge") or {}
 training = cfg.get("frs_training") or {}
+checkpoint = Path(str(cfg.get("checkpoint", ""))).expanduser().resolve()
+merge_output = Path(str(merge.get("output", cfg.get("checkpoint", "")))).expanduser().resolve()
+if checkpoint != merge_output:
+    raise ValueError(
+        f"checkpoint_merge.output must equal checkpoint: {merge_output} != {checkpoint}"
+    )
 print(merge.get("adapter", ""))
 print(merge.get("base", "lerobot/smolvla_base"))
 print(merge.get("output", cfg.get("checkpoint", "")))
@@ -95,6 +101,9 @@ log "合并/检查 SmolVLA PEFT checkpoint"
     --base "${BASE_ID}" \
     --output "${MERGED_CHECKPOINT}" \
     "${download_flag}"
+
+log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
+"${UV_BIN}" run --no-sync python tools/compare_frs_reverse_solvers.py --config "${CONFIG_PATH}"
 
 log "预计算/补齐四数据集 tactile embeddings"
 "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}"
