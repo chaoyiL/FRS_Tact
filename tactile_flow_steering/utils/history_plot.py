@@ -31,6 +31,32 @@ HISTORY_FIELDS = (
     "val_mse_gt_low_w",
     "val_mse_pred_high_w",
     "val_mse_pred_low_w",
+    "val_mse_vla_gt",
+    "val_gt_gain",
+    "val_relative_gt_error",
+    "val_mse_vla_gt_high_w",
+    "val_mse_vla_gt_low_w",
+    "val_gt_gain_high_w",
+    "val_gt_gain_low_w",
+    "val_relative_gt_error_high_w",
+    "val_relative_gt_error_low_w",
+    "val_gate_w",
+    "val_gate_active_frac",
+    "val_gate_w_high_mean",
+    "val_gate_w_low_mean",
+    "val_gate_w_p10",
+    "val_gate_w_p25",
+    "val_gate_w_p50",
+    "val_gate_w_p75",
+    "val_gate_w_p90",
+    "val_tactile_change",
+    "val_tactile_change_high_mean",
+    "val_tactile_change_low_mean",
+    "val_tactile_change_p10",
+    "val_tactile_change_p25",
+    "val_tactile_change_p50",
+    "val_tactile_change_p75",
+    "val_tactile_change_p90",
     "val_n_high_w",
     "val_n_low_w",
 )
@@ -101,6 +127,22 @@ def plot_training_history(
     low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
     high_pred_epochs, mse_pred_high = _finite_series(rows, "val_mse_pred_high_w")
     low_pred_epochs, mse_pred_low = _finite_series(rows, "val_mse_pred_low_w")
+    high_vla_epochs, mse_vla_high = _finite_series(rows, "val_mse_vla_gt_high_w")
+    low_vla_epochs, mse_vla_low = _finite_series(rows, "val_mse_vla_gt_low_w")
+    high_gain_epochs, gt_gain_high = _finite_series(rows, "val_gt_gain_high_w")
+    low_gain_epochs, gt_gain_low = _finite_series(rows, "val_gt_gain_low_w")
+    high_relative_epochs, relative_high = _finite_series(
+        rows, "val_relative_gt_error_high_w"
+    )
+    low_relative_epochs, relative_low = _finite_series(
+        rows, "val_relative_gt_error_low_w"
+    )
+    gate_p10_epochs, gate_p10 = _finite_series(rows, "val_gate_w_p10")
+    gate_p50_epochs, gate_p50 = _finite_series(rows, "val_gate_w_p50")
+    gate_p90_epochs, gate_p90 = _finite_series(rows, "val_gate_w_p90")
+    change_p10_epochs, change_p10 = _finite_series(rows, "val_tactile_change_p10")
+    change_p50_epochs, change_p50 = _finite_series(rows, "val_tactile_change_p50")
+    change_p90_epochs, change_p90 = _finite_series(rows, "val_tactile_change_p90")
     # Fallback for older histories without stratified columns.
     mse_gt_epochs, val_mse_gt = _finite_series(rows, "val_mse_gt")
     mse_pred_epochs, val_mse_pred = _finite_series(rows, "val_mse_pred")
@@ -111,11 +153,13 @@ def plot_training_history(
     has_overall_mse = bool(mse_gt_epochs or mse_pred_epochs)
     has_val_mse = has_stratified or has_overall_mse
     has_counts = bool(n_high_epochs or n_low_epochs)
+    has_repair = bool(high_gain_epochs or low_gain_epochs)
+    has_gate_stats = bool(gate_p50_epochs or change_p50_epochs)
 
     destination = output_path or history_path.with_name("training_curves.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    n_rows = 1 + int(has_val_mse) + int(has_counts)
+    n_rows = 1 + int(has_val_mse) + int(has_repair) + int(has_gate_stats) + int(has_counts)
     fig, axes = plt.subplots(
         n_rows,
         1,
@@ -192,6 +236,24 @@ def plot_training_history(
                     marker="D",
                     markersize=5,
                 )
+            if high_vla_epochs:
+                axes[row].plot(
+                    high_vla_epochs,
+                    mse_vla_high,
+                    label="VLA→GT baseline (w>0.5)",
+                    linewidth=1.8,
+                    color="#8C2D2D",
+                    linestyle="--",
+                )
+            if low_vla_epochs:
+                axes[row].plot(
+                    low_vla_epochs,
+                    mse_vla_low,
+                    label="VLA→GT baseline (w≤0.5)",
+                    linewidth=1.8,
+                    color="#A65F2A",
+                    linestyle="--",
+                )
             axes[row].set_title("Validation decode MSE by gate weight", pad=8)
         else:
             if mse_gt_epochs:
@@ -218,6 +280,96 @@ def plot_training_history(
         axes[row].set_ylabel("action MSE")
         axes[row].grid(True, alpha=0.3)
         axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        row += 1
+
+    if has_repair:
+        repair_axis = axes[row]
+        if high_gain_epochs:
+            repair_axis.plot(
+                high_gain_epochs,
+                gt_gain_high,
+                label="GT gain (w>0.5)",
+                color="#55A868",
+                marker="o",
+                linewidth=2.0,
+            )
+        if low_gain_epochs:
+            repair_axis.plot(
+                low_gain_epochs,
+                gt_gain_low,
+                label="GT gain (w≤0.5)",
+                color="#C7A24B",
+                marker="^",
+                linewidth=2.0,
+            )
+        repair_axis.axhline(0.0, color="#555555", linestyle=":", linewidth=1.2)
+        repair_axis.set_ylabel("VLA MSE − FRS MSE")
+        repair_axis.set_title("FRS repair gain and normalized GT error", pad=8)
+        repair_axis.grid(True, alpha=0.3)
+        relative_axis = repair_axis.twinx()
+        if high_relative_epochs:
+            relative_axis.plot(
+                high_relative_epochs,
+                relative_high,
+                label="relative GT error (w>0.5)",
+                color="#4C72B0",
+                linestyle="--",
+                linewidth=1.8,
+            )
+        if low_relative_epochs:
+            relative_axis.plot(
+                low_relative_epochs,
+                relative_low,
+                label="relative GT error (w≤0.5)",
+                color="#8172B2",
+                linestyle="--",
+                linewidth=1.8,
+            )
+        relative_axis.axhline(1.0, color="#888888", linestyle="--", linewidth=1.0)
+        relative_axis.set_ylabel("FRS→GT / VLA→GT")
+        handles, labels = repair_axis.get_legend_handles_labels()
+        rel_handles, rel_labels = relative_axis.get_legend_handles_labels()
+        repair_axis.legend(handles + rel_handles, labels + rel_labels, loc="best", fontsize=8)
+        row += 1
+
+    if has_gate_stats:
+        gate_axis = axes[row]
+        for epochs, values, label, style in (
+            (gate_p10_epochs, gate_p10, "gate w p10", ":"),
+            (gate_p50_epochs, gate_p50, "gate w p50", "-"),
+            (gate_p90_epochs, gate_p90, "gate w p90", "--"),
+        ):
+            if epochs:
+                gate_axis.plot(epochs, values, label=label, linestyle=style, linewidth=1.8)
+        gate_axis.set_ylabel("gate w")
+        gate_axis.set_ylim(-0.02, 1.02)
+        gate_axis.set_title("Gate and tactile-change validation quantiles", pad=8)
+        gate_axis.grid(True, alpha=0.3)
+        change_axis = gate_axis.twinx()
+        for epochs, values, label, style in (
+            (change_p10_epochs, change_p10, "change p10", ":"),
+            (change_p50_epochs, change_p50, "change p50", "-"),
+            (change_p90_epochs, change_p90, "change p90", "--"),
+        ):
+            if epochs:
+                change_axis.plot(
+                    epochs,
+                    values,
+                    label=label,
+                    linestyle=style,
+                    linewidth=1.6,
+                    alpha=0.75,
+                )
+        change_axis.set_ylabel("tactile change")
+        handles, labels = gate_axis.get_legend_handles_labels()
+        change_handles, change_labels = change_axis.get_legend_handles_labels()
+        gate_axis.legend(
+            handles + change_handles,
+            labels + change_labels,
+            loc="best",
+            fontsize=8,
+            ncol=2,
+        )
         row += 1
 
     if has_counts:

@@ -107,7 +107,9 @@ model:
   tactile_image_size: 224
 
 frs_training:
-  output: /workspace/frs_pick_tube/run_gated_slerpflow_01_k20
+  # Explicit gate_w conditioning changes the decoder parameter tree; keep this
+  # experiment separate from checkpoints trained with the hidden gate label.
+  output: /workspace/frs_pick_tube/run_gated_slerpflow_gatecond_01_k20
   # checkpoint chunk_size=10，因此 tactile_window=10/1=10。
   tactile_window_divisor: 1
   # 10 个 token 每隔 3 帧回看一次，在 30Hz 下覆盖约 0.9 秒。

@@ -57,9 +57,12 @@ def evaluate_decoder(
         tactile_window_divisor = int(extra.get("tactile_window_divisor", 1))
     if history_stride is None:
         history_stride = int(extra.get("history_stride", 1))
+    loss_mode = str(extra.get("loss_mode", "gt"))
     if target is None:
-        loss_mode = str(extra.get("loss_mode", "gt"))
         target = "predicted" if loss_mode == "predicted" else "gt"
+    track_gate = loss_mode == "gated" or bool(model.config.gate_conditioning)
+    gate_tau = float(extra["gate_tau"]) if track_gate else None
+    gate_temperature = float(extra["gate_temperature"]) if track_gate else None
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -78,6 +81,7 @@ def evaluate_decoder(
         dataset_repo_id=dataset_repo_id,
         dataset_root=dataset_root,
         history_stride=history_stride,
+        build_episode_baselines=track_gate,
         num_workers=num_workers,
         prefetch_batches=prefetch_batches,
         load_threads=load_threads,
@@ -100,6 +104,8 @@ def evaluate_decoder(
             solver=solver,
             keep_predictions=save_predictions,
             target=target,
+            gate_tau=gate_tau,
+            gate_temperature=gate_temperature,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, float | int | str] = {
@@ -123,7 +129,42 @@ def evaluate_decoder(
             "mse_pred": result.mse_pred,
             "rmse_pred": result.rmse_pred,
             "mae_pred": result.mae_pred,
+            "mse_vla_gt": result.mse_vla_gt,
+            "gt_gain": result.gt_gain,
+            "relative_gt_error": result.relative_gt_error,
         }
+        if result.n_high_w is not None:
+            metrics.update(
+                {
+                    "mse_gt_high_w": float(result.mse_gt_high_w),
+                    "mse_gt_low_w": float(result.mse_gt_low_w),
+                    "mse_pred_high_w": float(result.mse_pred_high_w),
+                    "mse_pred_low_w": float(result.mse_pred_low_w),
+                    "mse_vla_gt_high_w": float(result.mse_vla_gt_high_w),
+                    "mse_vla_gt_low_w": float(result.mse_vla_gt_low_w),
+                    "gt_gain_high_w": float(result.gt_gain_high_w),
+                    "gt_gain_low_w": float(result.gt_gain_low_w),
+                    "relative_gt_error_high_w": float(result.relative_gt_error_high_w),
+                    "relative_gt_error_low_w": float(result.relative_gt_error_low_w),
+                    "gate_w_mean": float(result.gate_w),
+                    "gate_active_frac": float(result.gate_active_frac),
+                    "gate_w_high_mean": float(result.gate_w_high_mean),
+                    "gate_w_low_mean": float(result.gate_w_low_mean),
+                    "gate_w_p10": float(result.gate_w_p10),
+                    "gate_w_p25": float(result.gate_w_p25),
+                    "gate_w_p50": float(result.gate_w_p50),
+                    "gate_w_p75": float(result.gate_w_p75),
+                    "gate_w_p90": float(result.gate_w_p90),
+                    "tactile_change_mean": float(result.tactile_change),
+                    "tactile_change_p10": float(result.tactile_change_p10),
+                    "tactile_change_p25": float(result.tactile_change_p25),
+                    "tactile_change_p50": float(result.tactile_change_p50),
+                    "tactile_change_p75": float(result.tactile_change_p75),
+                    "tactile_change_p90": float(result.tactile_change_p90),
+                    "n_high_w": int(result.n_high_w),
+                    "n_low_w": int(result.n_low_w),
+                }
+            )
         atomic_write_json(output_dir / "metrics.json", metrics)
 
         arrays = pairs.arrays
@@ -142,6 +183,11 @@ def evaluate_decoder(
                     "mae_gt",
                     "mse_pred",
                     "mae_pred",
+                    "mse_vla_gt",
+                    "gt_gain",
+                    "relative_gt_error",
+                    "tactile_change",
+                    "gate_w",
                 ],
             )
             writer.writeheader()
@@ -159,6 +205,21 @@ def evaluate_decoder(
                         "mae_gt": float(result.sample_mae_gt[position]),
                         "mse_pred": float(result.sample_mse_pred[position]),
                         "mae_pred": float(result.sample_mae_pred[position]),
+                        "mse_vla_gt": float(result.sample_mse_vla_gt[position]),
+                        "gt_gain": float(result.sample_gt_gain[position]),
+                        "relative_gt_error": float(
+                            result.sample_relative_gt_error[position]
+                        ),
+                        "tactile_change": (
+                            ""
+                            if result.sample_tactile_change is None
+                            else float(result.sample_tactile_change[position])
+                        ),
+                        "gate_w": (
+                            ""
+                            if result.sample_gate_w is None
+                            else float(result.sample_gate_w[position])
+                        ),
                     }
                 )
         if result.predictions is not None:
@@ -186,7 +247,9 @@ def evaluate_decoder(
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
             f"target={result.target} flow_loss={result.flow_loss:.8f} "
-            f"mse={result.mse:.8f} mse_gt={result.mse_gt:.8f} mse_pred={result.mse_pred:.8f}"
+            f"mse={result.mse:.8f} mse_gt={result.mse_gt:.8f} "
+            f"mse_pred={result.mse_pred:.8f} mse_vla_gt={result.mse_vla_gt:.8f} "
+            f"gt_gain={result.gt_gain:.8f} relative_gt_error={result.relative_gt_error:.4f}"
         )
         print(f"evaluation={output_dir}")
         return metrics

@@ -153,11 +153,37 @@ def train_decoder(
         "val_mse_pred",
         "val_rmse_pred",
         "val_mae_pred",
+        "val_mse_vla_gt",
+        "val_gt_gain",
+        "val_relative_gt_error",
         "eval_target",
         "val_mse_gt_high_w",
         "val_mse_gt_low_w",
         "val_mse_pred_high_w",
         "val_mse_pred_low_w",
+        "val_mse_vla_gt_high_w",
+        "val_mse_vla_gt_low_w",
+        "val_gt_gain_high_w",
+        "val_gt_gain_low_w",
+        "val_relative_gt_error_high_w",
+        "val_relative_gt_error_low_w",
+        "val_gate_w",
+        "val_gate_active_frac",
+        "val_gate_w_high_mean",
+        "val_gate_w_low_mean",
+        "val_gate_w_p10",
+        "val_gate_w_p25",
+        "val_gate_w_p50",
+        "val_gate_w_p75",
+        "val_gate_w_p90",
+        "val_tactile_change",
+        "val_tactile_change_high_mean",
+        "val_tactile_change_low_mean",
+        "val_tactile_change_p10",
+        "val_tactile_change_p25",
+        "val_tactile_change_p50",
+        "val_tactile_change_p75",
+        "val_tactile_change_p90",
         "val_n_high_w",
         "val_n_low_w",
     ]
@@ -290,6 +316,7 @@ def train_decoder(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         num_tactile_tokens=tactile_num_tokens,
+        gate_conditioning=(loss_mode == "gated"),
     )
     if resume_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
@@ -302,6 +329,11 @@ def train_decoder(
                 flush=True,
             )
         # ``model`` already loaded above.
+        if loss_mode == "gated" and not model.config.gate_conditioning:
+            raise ValueError(
+                "This checkpoint predates explicit gate conditioning. Start a fresh run in a "
+                "new frs_training.output directory instead of resuming it."
+            )
     train_samples = len(pairs.indices("train"))
     steps_per_epoch = max(1, (train_samples + batch_size - 1) // batch_size)
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch
@@ -471,6 +503,7 @@ def train_decoder(
                     "gate_tau": gate_tau,
                     "gate_temperature": gate_temperature,
                     "gate_lambda": gate_lambda,
+                    "gate_conditioning": bool(model.config.gate_conditioning),
                     "aux_decode_weight": aux_decode_weight,
                     "aux_decode_steps": aux_decode_steps,
                     "eval_every": eval_every,
@@ -501,6 +534,9 @@ def train_decoder(
                         "val_mse_pred": validation.mse_pred,
                         "val_rmse_pred": validation.rmse_pred,
                         "val_mae_pred": validation.mae_pred,
+                        "val_mse_vla_gt": validation.mse_vla_gt,
+                        "val_gt_gain": validation.gt_gain,
+                        "val_relative_gt_error": validation.relative_gt_error,
                         "eval_target": validation.target,
                     }
                     if validation.n_high_w is not None:
@@ -510,6 +546,37 @@ def train_decoder(
                                 "val_mse_gt_low_w": float(validation.mse_gt_low_w),
                                 "val_mse_pred_high_w": float(validation.mse_pred_high_w),
                                 "val_mse_pred_low_w": float(validation.mse_pred_low_w),
+                                "val_mse_vla_gt_high_w": float(validation.mse_vla_gt_high_w),
+                                "val_mse_vla_gt_low_w": float(validation.mse_vla_gt_low_w),
+                                "val_gt_gain_high_w": float(validation.gt_gain_high_w),
+                                "val_gt_gain_low_w": float(validation.gt_gain_low_w),
+                                "val_relative_gt_error_high_w": float(
+                                    validation.relative_gt_error_high_w
+                                ),
+                                "val_relative_gt_error_low_w": float(
+                                    validation.relative_gt_error_low_w
+                                ),
+                                "val_gate_w": float(validation.gate_w),
+                                "val_gate_active_frac": float(validation.gate_active_frac),
+                                "val_gate_w_high_mean": float(validation.gate_w_high_mean),
+                                "val_gate_w_low_mean": float(validation.gate_w_low_mean),
+                                "val_gate_w_p10": float(validation.gate_w_p10),
+                                "val_gate_w_p25": float(validation.gate_w_p25),
+                                "val_gate_w_p50": float(validation.gate_w_p50),
+                                "val_gate_w_p75": float(validation.gate_w_p75),
+                                "val_gate_w_p90": float(validation.gate_w_p90),
+                                "val_tactile_change": float(validation.tactile_change),
+                                "val_tactile_change_high_mean": float(
+                                    validation.tactile_change_high_mean
+                                ),
+                                "val_tactile_change_low_mean": float(
+                                    validation.tactile_change_low_mean
+                                ),
+                                "val_tactile_change_p10": float(validation.tactile_change_p10),
+                                "val_tactile_change_p25": float(validation.tactile_change_p25),
+                                "val_tactile_change_p50": float(validation.tactile_change_p50),
+                                "val_tactile_change_p75": float(validation.tactile_change_p75),
+                                "val_tactile_change_p90": float(validation.tactile_change_p90),
                                 "val_n_high_w": int(validation.n_high_w),
                                 "val_n_low_w": int(validation.n_low_w),
                             }
@@ -542,13 +609,21 @@ def train_decoder(
                             f" mse_gt(w<=0.5)={validation.mse_gt_low_w:.4f}"
                             f" mse_pred(w>0.5)={validation.mse_pred_high_w:.4f}"
                             f" mse_pred(w<=0.5)={validation.mse_pred_low_w:.4f}"
+                            f" vla_gt(w>0.5)={validation.mse_vla_gt_high_w:.4f}"
+                            f" gain(w>0.5)={validation.gt_gain_high_w:.4f}"
+                            f" rel_gt(w>0.5)={validation.relative_gt_error_high_w:.4f}"
+                            f" w_mean_hi={validation.gate_w_high_mean:.3f}"
+                            f" w_mean_lo={validation.gate_w_low_mean:.3f}"
                             f" n_high={validation.n_high_w} n_low={validation.n_low_w}"
                         )
                     print(
                         f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
                         f"val_flow_loss={validation.flow_loss:.8f} "
                         f"val_mse={validation.mse:.8f} (target={validation.target}) "
-                        f"val_mse_gt={validation.mse_gt:.8f} val_mse_pred={validation.mse_pred:.8f}"
+                        f"val_mse_gt={validation.mse_gt:.8f} val_mse_pred={validation.mse_pred:.8f} "
+                        f"vla_mse_gt={validation.mse_vla_gt:.8f} "
+                        f"gt_gain={validation.gt_gain:.8f} "
+                        f"relative_gt_error={validation.relative_gt_error:.4f}"
                         f"{stratified_msg}",
                         flush=True,
                     )

@@ -6,26 +6,29 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from tactile_flow_steering.utils.checkpoint import load_checkpoint
 from tactile_flow_steering.utils.checkpoint import save_checkpoint
+from tactile_flow_steering.utils.metrics import evaluate_split
+from tactile_flow_steering.utils.metrics import gate_stratified_decode_metrics
 from tactile_flow_steering.utils.model import DecoderConfig
 from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
 from tactile_flow_steering.utils.model import decode_actions
 from tactile_flow_steering.utils.model import decode_euler
-from tactile_flow_steering.utils.metrics import gate_stratified_decode_metrics
 from tactile_flow_steering.utils.model import decode_mse_per_sample
 from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
 from tactile_flow_steering.utils.model import gated_flow_matching_loss_per_sample
 from tactile_flow_steering.utils.model import gt_supervised_loss_per_sample
 from tactile_flow_steering.utils.model import make_optimizer
 from tactile_flow_steering.utils.model import train_step
-import numpy as np
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
-    def make_model(self, *, tactile_window: int = 3) -> TactileConditionedFlowDecoder:
+    def make_model(
+        self, *, tactile_window: int = 3, gate_conditioning: bool = False
+    ) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
             DecoderConfig(
                 action_dim=3,
@@ -36,6 +39,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
                 model_dim=16,
                 depth=2,
                 num_heads=4,
+                gate_conditioning=gate_conditioning,
             ),
             rngs=nnx.Rngs(0),
         )
@@ -99,7 +103,9 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         out = gate_stratified_decode_metrics(
             np.asarray([1.0, 2.0, 3.0, 4.0]),
             np.asarray([0.1, 0.2, 0.3, 0.4]),
+            np.asarray([2.0, 4.0, 2.0, 8.0]),
             np.asarray([0.9, 0.8, 0.1, 0.2]),
+            np.asarray([0.8, 0.9, 0.1, 0.2]),
         )
         self.assertEqual(out["n_high_w"], 2)
         self.assertEqual(out["n_low_w"], 2)
@@ -107,6 +113,73 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertAlmostEqual(float(out["mse_gt_low_w"]), 3.5)
         self.assertAlmostEqual(float(out["mse_pred_high_w"]), 0.15)
         self.assertAlmostEqual(float(out["mse_pred_low_w"]), 0.35)
+        self.assertAlmostEqual(float(out["mse_vla_gt_high_w"]), 3.0)
+        self.assertAlmostEqual(float(out["mse_vla_gt_low_w"]), 5.0)
+        self.assertAlmostEqual(float(out["gt_gain_high_w"]), 1.5)
+        self.assertAlmostEqual(float(out["relative_gt_error_high_w"]), 0.5)
+        self.assertAlmostEqual(float(out["relative_gt_error_low_w"]), 0.7)
+        self.assertAlmostEqual(float(out["gate_w_high_mean"]), 0.85)
+        self.assertAlmostEqual(float(out["gate_w_low_mean"]), 0.15)
+
+    def test_explicit_gate_condition_changes_output(self):
+        model = self.make_model(gate_conditioning=True)
+        x_t = jax.random.normal(jax.random.key(30), (2, 6, 3))
+        t = jnp.asarray([0.4, 0.4], dtype=jnp.float32)
+        tactile = self._tactile_seq(jax.random.key(31), 2)
+        with self.assertRaisesRegex(ValueError, "gate_weights are required"):
+            model(x_t, t, tactile)
+        low = model(x_t, t, tactile, jnp.zeros((2,), dtype=jnp.float32))
+        high = model(x_t, t, tactile, jnp.ones((2,), dtype=jnp.float32))
+        self.assertGreater(float(jnp.max(jnp.abs(low - high))), 1e-4)
+
+        decoded = decode_euler(
+            model,
+            x_t,
+            tactile,
+            jnp.asarray([0.2, 0.8], dtype=jnp.float32),
+            num_steps=3,
+        )
+        self.assertEqual(decoded.shape, x_t.shape)
+
+    def test_gate_conditioned_evaluation_reports_vla_baseline_and_gain(self):
+        model = self.make_model(gate_conditioning=True)
+
+        class FakeConditioner:
+            episode_baselines = {0: np.zeros((4, 4), dtype=np.float32)}
+
+            def batches(self, split, *, batch_size, shuffle, seed):
+                del split, batch_size, shuffle, seed
+                yield (
+                    np.asarray([0, 1], dtype=np.int64),
+                    np.zeros((2, 6, 3), dtype=np.float32),
+                    np.zeros((2, 6, 3), dtype=np.float32),
+                    np.ones((2, 6, 3), dtype=np.float32),
+                    jnp.ones((2, 3, 4, 4), dtype=jnp.float32),
+                )
+
+            def tactile_change_for_cache_indices(self, indices, current_tokens):
+                del indices, current_tokens
+                return np.asarray([0.1, 0.9], dtype=np.float32)
+
+        result = evaluate_split(
+            model,
+            FakeConditioner(),  # type: ignore[arg-type]
+            split="val",
+            batch_size=2,
+            num_steps=2,
+            keep_predictions=True,
+            target="gt",
+            gate_tau=0.5,
+            gate_temperature=0.1,
+        )
+        self.assertAlmostEqual(result.mse_vla_gt, 1.0, places=6)
+        self.assertAlmostEqual(result.gt_gain, 1.0 - result.mse_gt, places=6)
+        self.assertAlmostEqual(result.relative_gt_error, result.mse_gt, places=6)
+        self.assertEqual(result.n_high_w, 1)
+        self.assertEqual(result.n_low_w, 1)
+        self.assertIsNotNone(result.sample_gate_w)
+        self.assertIsNotNone(result.sample_tactile_change)
+        np.testing.assert_allclose(result.sample_mse_vla_gt, np.ones((2,)), atol=1e-6)
 
     def test_gt_supervised_adds_aux_decode_mse(self):
         model = self.make_model()
@@ -230,6 +303,20 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["decoder_config"]["tactile_window"], 3)
             self.assertEqual(metadata["decoder_config"]["num_tactile_tokens"], 4)
             self.assertTrue((checkpoint_dir / metadata["params_file"]).is_file())
+
+    def test_gate_conditioned_checkpoint_round_trip(self):
+        model = self.make_model(gate_conditioning=True)
+        x = jnp.ones((2, 6, 3), dtype=jnp.float32)
+        t = jnp.asarray([0.25, 0.75], dtype=jnp.float32)
+        tactile = jnp.ones((2, 3, 4, 4), dtype=jnp.float32)
+        gate = jnp.asarray([0.1, 0.9], dtype=jnp.float32)
+        expected = model(x, t, tactile, gate)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory)
+            save_checkpoint(checkpoint_dir, model, epoch=1, metrics={"val_mse": 0.5})
+            restored, metadata = load_checkpoint(checkpoint_dir)
+            self.assertTrue(jnp.array_equal(expected, restored(x, t, tactile, gate)))
+            self.assertTrue(metadata["decoder_config"]["gate_conditioning"])
 
     def test_optimizer_state_round_trip(self):
         from tactile_flow_steering.utils.checkpoint import load_optimizer_state
