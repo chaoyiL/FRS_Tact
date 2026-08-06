@@ -380,6 +380,32 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
     )
     assert keys_with_placeholder == ["observation.images.camera0"]
 
+    # The checkpoint can contain more absent names than ``empty_cameras``.
+    # SmolVLA uses the real cameras, fills only the configured number of empty
+    # slots, and ignores the remaining missing names.
+    keys_with_multiple_missing = resolve_source_visual_keys(
+        [
+            "observation.images.camera1",
+            "observation.images.camera2",
+            "observation.images.camera3",
+            "observation.images.empty_camera_0",
+        ],
+        {
+            "observation.images.camera0": "observation.images.camera1",
+            "observation.images.camera1": "observation.images.camera2",
+        },
+        [
+            "observation.images.camera0",
+            "observation.images.camera1",
+            "observation.images.tactile_left_0",
+        ],
+        allow_missing=4,
+    )
+    assert keys_with_multiple_missing == [
+        "observation.images.camera0",
+        "observation.images.camera1",
+    ]
+
 
 def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
     config = dataclasses.replace(

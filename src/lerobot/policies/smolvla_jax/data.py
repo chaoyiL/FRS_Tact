@@ -551,7 +551,10 @@ class LeRobotJaxDataLoader:
                 config.image_keys,
                 source_rename,
                 metadata.camera_keys,
-                allow_missing=config.empty_cameras,
+                # Match JaxSmolVLAPreprocessor: at least one RGB camera must
+                # resolve, while missing model/placeholder keys are handled
+                # by its empty-camera policy.
+                allow_missing=len(config.image_keys),
             )
             if config.use_tactile_encoder and tactile_embedding_cache is None:
                 visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
@@ -729,12 +732,6 @@ class LeRobotJaxDataLoader:
             for key, feature in features.items()
             if feature.get("dtype") in ("image", "video")
         }
-        missing_images = sorted(set(config.image_keys) - dataset_cameras)
-        if missing_images:
-            raise ValueError(
-                f"dataset {repo_id!r}: missing image keys after renaming: {missing_images}; "
-                f"dataset={sorted(dataset_cameras)}"
-            )
         if config.use_tactile_encoder:
             missing_tactile = sorted(set(config.tactile_keys) - dataset_cameras)
             if missing_tactile:

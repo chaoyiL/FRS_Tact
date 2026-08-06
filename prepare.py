@@ -299,7 +299,10 @@ def _create_dataset(
         model.config.image_keys,
         model.preprocessor.rename_map,
         metadata.camera_keys,
-        allow_missing=model.config.empty_cameras,
+        # SmolVLA only requires at least one real camera.  Its preprocessor
+        # fills up to ``empty_cameras`` missing slots and ignores any
+        # additional placeholder names in ``image_keys``.
+        allow_missing=len(model.config.image_keys),
     )
     print(f"action-cache visual_keys={visual_keys}", flush=True)
     return LeRobotDataset(
