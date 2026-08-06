@@ -6,8 +6,8 @@
 # ---- 模型 ----
 # 本地 checkpoint 目录，或 Hugging Face model id
 checkpoint: KaiyueChen/vtsmolvla_01_4w
-# 修复发布后由工具替换为不可变 Hub commit SHA。
-revision: null
+# 已验证的 sidecar 修复 commit；固定 revision 防止部署时随 main 漂移。
+revision: 0b5cc8208ef118f505b1f736b0ec604b598f9424
 # true 时允许下载缺失的 Hub 资源（tokenizer / checkpoint）
 allow_download: true
 seed: 0
