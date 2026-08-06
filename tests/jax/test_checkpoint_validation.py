@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -46,6 +48,27 @@ RUNTIME_TEXT_HIDDEN_SIZE = 960
 
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def test_validation_import_does_not_load_jax_or_flax() -> None:
+    script = """
+import sys
+from lerobot.policies.smolvla_jax.validation import CheckpointContract
+
+heavy_modules = sorted(name for name in ("jax", "flax") if name in sys.modules)
+assert not heavy_modules, f"validation import loaded: {heavy_modules}"
+
+from lerobot.policies.smolvla_jax import JaxSmolVLAConfig
+assert JaxSmolVLAConfig.text_hidden_size == 960
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _target_prefix(layer: int, target: str) -> str:

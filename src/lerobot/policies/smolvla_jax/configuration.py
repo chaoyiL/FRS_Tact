@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from .architecture import SMOLVLA_TEXT_HIDDEN_SIZE
 from .rtc import JaxRTCConfig
 
 
@@ -102,7 +103,7 @@ class JaxSmolVLAConfig:
     vision_patch_size: int = 16
     vision_layer_norm_eps: float = 1e-6
     connector_scale_factor: int = 4
-    text_hidden_size: int = 960
+    text_hidden_size: int = SMOLVLA_TEXT_HIDDEN_SIZE
     text_intermediate_size: int = 2560
     text_num_heads: int = 15
     text_num_kv_heads: int = 5

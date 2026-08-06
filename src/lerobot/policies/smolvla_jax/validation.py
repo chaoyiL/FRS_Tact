@@ -10,7 +10,7 @@ from typing import Any
 
 from safetensors import SafetensorError, safe_open
 
-from .configuration import JaxSmolVLAConfig
+from .architecture import SMOLVLA_TEXT_HIDDEN_SIZE
 
 _PREPROCESSOR_FILE = "policy_preprocessor.json"
 _POSTPROCESSOR_FILE = "policy_postprocessor.json"
@@ -33,7 +33,6 @@ _VLM_LAYER_RE = re.compile(r"^model\.vlm_with_expert\.vlm\.model\.text_model\.la
 _VLM_TEXT_PREFIX = "model.vlm_with_expert.vlm.model.text_model"
 _VLM_EMBED_TOKENS = f"{_VLM_TEXT_PREFIX}.embed_tokens.weight"
 _TACTILE_ENCODER_PARAMS_PREFIX = "model.tactile_encoder.params/"
-_RUNTIME_TEXT_HIDDEN_SIZE = int(JaxSmolVLAConfig.text_hidden_size)
 
 
 @dataclass(frozen=True)
@@ -531,7 +530,7 @@ def _validate_model(
             needs_vlm_structure = bool(
                 contract.tactile_keys or contract.tactile_num_tokens or contract.vlm_lora_target_modules
             )
-            hidden_size = _RUNTIME_TEXT_HIDDEN_SIZE
+            hidden_size = SMOLVLA_TEXT_HIDDEN_SIZE
             if needs_vlm_structure:
                 if _VLM_EMBED_TOKENS not in keys:
                     issues.append(f"{path.name}: missing tensor {_VLM_EMBED_TOKENS!r}")
