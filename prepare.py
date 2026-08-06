@@ -4,8 +4,10 @@ import argparse
 import hashlib
 import pathlib
 import sys
+import threading
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 import jax
@@ -41,6 +43,32 @@ from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
 from utils.source_model import stack_observations
+
+
+@contextmanager
+def _progress_heartbeat(label: str, *, interval_seconds: float = 10.0):
+    """Report liveness while a blocking JAX compile/warmup is in progress."""
+
+    if interval_seconds <= 0:
+        raise ValueError(f"interval_seconds must be positive, got {interval_seconds}.")
+    started = time.perf_counter()
+    stopped = threading.Event()
+
+    def report() -> None:
+        while not stopped.wait(interval_seconds):
+            elapsed = time.perf_counter() - started
+            print(f"{label}: still running (elapsed {elapsed:.0f}s)", flush=True)
+
+    thread = threading.Thread(target=report, name="prepare-progress-heartbeat", daemon=True)
+    print(f"{label}: started", flush=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+        elapsed = time.perf_counter() - started
+        print(f"{label}: finished in {elapsed:.1f}s", flush=True)
 
 
 def _as_scalar(value: Any) -> Any:
@@ -464,7 +492,8 @@ def prepare_cache(
         eta = remaining / rate if rate > 0 else float("inf")
         print(
             f"prepared {stop}/{len(records)} samples "
-            f"({rate:.2f} samples/s, eta {eta / 60.0:.1f} min)"
+            f"({rate:.2f} samples/s, eta {eta / 60.0:.1f} min)",
+            flush=True,
         )
         pending = None
 
@@ -472,7 +501,15 @@ def prepare_cache(
         stop = min(start + batch_size, len(records))
         batch_records = records[start:stop]
         valid = len(batch_records)
+        if batch_number == 0:
+            print(
+                f"first batch data load: started "
+                f"(samples={start}:{stop}, batch_size={batch_size})",
+                flush=True,
+            )
         observation_batch, gt_action_batch = _load_observation_batch(model, dataset, batch_records)
+        if batch_number == 0:
+            print("first batch data load: finished", flush=True)
         if valid < batch_size:
             observation_batch = _pad_observation_batch(observation_batch, batch_size)
             gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
@@ -482,15 +519,29 @@ def prepare_cache(
         dataset_indices = [record.dataset_index for record in batch_records] + pad_indices
         noise = deterministic_noise(dataset_indices, action_shape, seed=inference_seed)
 
-        # Overlap: while this batch runs on device, commit the previous batch to host/disk.
-        predicted_actions, x_base = sample_and_reverse(
-            model,
-            observation_batch,
-            noise,
-            sample_steps=model_sample_steps,
-            reverse_steps=reverse_steps,
-            solver=reverse_solver,
+        # The first call includes XLA compilation and GPU warmup.  Keep emitting
+        # liveness messages because JAX does not expose a numeric compile percentage.
+        heartbeat = (
+            _progress_heartbeat(
+                f"first batch XLA compile/warmup "
+                f"(solver={reverse_solver}, reverse_steps={reverse_steps}, batch_size={batch_size})"
+            )
+            if batch_number == 0
+            else nullcontext()
         )
+        with heartbeat:
+            # Overlap: while this batch runs on device, commit the previous batch to host/disk.
+            predicted_actions, x_base = sample_and_reverse(
+                model,
+                observation_batch,
+                noise,
+                sample_steps=model_sample_steps,
+                reverse_steps=reverse_steps,
+                solver=reverse_solver,
+            )
+            if batch_number == 0:
+                # Force first-batch compile/sync so ETA is meaningful after warmup.
+                jax.block_until_ready((predicted_actions, x_base))
         _commit_pending(force_flush=False)
         pending = {
             "start": start,
@@ -501,10 +552,6 @@ def prepare_cache(
             "gt_action": gt_action_batch,
             "noise": noise,
         }
-        if batch_number == 0:
-            # Force first-batch compile/sync so ETA is meaningful after warmup.
-            jax.block_until_ready((predicted_actions, x_base))
-
     _commit_pending(force_flush=True)
 
     manifest["status"] = "complete"

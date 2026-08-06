@@ -16,6 +16,14 @@ if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
 fi
+# Progress is piped through tee below.  Disable Python's block buffering so
+# long JAX stages and per-batch cache progress remain visible in real time.
+export PYTHONUNBUFFERED=1
+# Multiprocessing and XLA compiler scratch files must live on a local filesystem.
+# The workspace volume can reject pymp cleanup with EBUSY and severely delay JIT.
+RUNTIME_TMPDIR="${FRS_RUNTIME_TMPDIR:-/tmp/frs_tact-${UID}}"
+mkdir -p "${RUNTIME_TMPDIR}"
+export TMPDIR="${RUNTIME_TMPDIR}"
 if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
 elif [[ -x "${HOME}/.local/bin/uv" ]]; then
@@ -78,7 +86,9 @@ if [[ "${FRS_FOREGROUND:-0}" != "1" && -z "${TMUX:-}" ]] && command -v tmux >/de
 fi
 
 cd "${PROJECT_ROOT}"
-mkdir -p "${OUTPUT_DIR}"
+JAX_CACHE_DIR="${FRS_JAX_COMPILATION_CACHE_DIR:-${OUTPUT_DIR}/jax_compilation_cache}"
+mkdir -p "${OUTPUT_DIR}" "${JAX_CACHE_DIR}"
+export JAX_COMPILATION_CACHE_DIR="${JAX_CACHE_DIR}"
 timestamp="$(date +%Y%m%d_%H%M%S)"
 pipeline_log="${OUTPUT_DIR}/pipeline_${timestamp}.log"
 exec > >(tee -a "${pipeline_log}") 2>&1
@@ -109,7 +119,13 @@ log "预计算/补齐四数据集 tactile embeddings"
 "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}"
 
 log "生成/补齐四数据集 SmolVLA action caches"
-"${UV_BIN}" run --no-sync python tools/prepare_frs_caches.py --config "${CONFIG_PATH}"
+# JAX/XLA 0.8.3's generic Triton GEMM emitter cannot tile one SmolVLA prefix
+# projection on H100.  Use the cuBLAS GEMM path for cache preparation only.
+# Training starts as a separate command below with its normal XLA configuration.
+PREPARE_XLA_FLAGS="${FRS_PREPARE_XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
+log "action-cache XLA_FLAGS=${PREPARE_XLA_FLAGS}"
+XLA_FLAGS="${PREPARE_XLA_FLAGS}" \
+    "${UV_BIN}" run --no-sync python tools/prepare_frs_caches.py --config "${CONFIG_PATH}"
 
 log "开始 multi-dataset tactile FRS 训练"
 "${UV_BIN}" run --no-sync python tools/train_frs.py --config "${CONFIG_PATH}"
