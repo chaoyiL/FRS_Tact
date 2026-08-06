@@ -52,8 +52,8 @@ connection:
   ping_timeout_s: 20.0
   observation_timeout_s: 30.0
   action_ack_timeout_s: 30.0
-  # 默认 token；若设置了 token_env 对应的环境变量，则以环境变量为准
-  token: 123
+  # 真机认证不在仓库内保存默认值；启动前必须设置 VB_ROBOT_TOKEN。
+  token: null
   token_env: VB_ROBOT_TOKEN
   require_token: true
 

@@ -238,6 +238,9 @@ def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
     assert config["checkpoint"] == "KaiyueChen/vtsmolvla_01_4w"
     assert config["revision"] == "0b5cc8208ef118f505b1f736b0ec604b598f9424"
     assert config["allow_download"] is True
+    assert config["connection"]["token"] is None
+    assert config["connection"]["token_env"] == "VB_ROBOT_TOKEN"
+    assert config["connection"]["require_token"] is True
     assert contract.state_dim == 20
     assert contract.action_dim == 20
     assert contract.chunk_size == 20
