@@ -38,9 +38,7 @@ def test_persisted_split_reconstructs_episode_lists() -> None:
         sample_seed=9,
     )
 
-    restored_train, restored_val = _sources_from_split_manifest(
-        sources, manifest, val_fraction=0.25
-    )
+    restored_train, restored_val = _sources_from_split_manifest(sources, manifest, val_fraction=0.25)
 
     assert [source.episodes for source in restored_train] == [[0, 2], [1, 3]]
     assert [source.episodes for source in restored_val] == [[1], [0]]
@@ -104,3 +102,63 @@ def test_validation_without_rollout_does_not_log_nan(capsys) -> None:
     )
 
     assert "action_mse" not in capsys.readouterr().out
+
+
+def test_training_checkpoint_writes_all_assets_before_shared_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    final = tmp_path / "checkpoint-00000020"
+    source = tmp_path / "source"
+    source.mkdir()
+    split_path = tmp_path / TRAIN_SCRIPT.DATA_SPLIT_FILENAME
+    split_path.write_text('{"version": 1}\n', encoding="utf-8")
+    events: list[str] = []
+
+    class FakeTrainer:
+        def save(self, destination: Path, *, source_dir: Path) -> None:
+            events.append("trainer.save")
+            assert source_dir == source
+            assert destination.name.endswith(".incomplete")
+            assert not final.exists()
+            (destination / "model-marker").write_text("weights", encoding="utf-8")
+
+    class FakePreprocessor:
+        def save_normalization_assets(self, destination: Path) -> None:
+            events.append("save_normalization_assets")
+            assert (destination / "model-marker").is_file()
+            assert not final.exists()
+            (destination / "normalization-marker").write_text("stats", encoding="utf-8")
+
+    class PassingReport:
+        def require_valid(self) -> None:
+            events.append("require_valid")
+
+    def validate_checkpoint(staging: Path) -> PassingReport:
+        events.append("validate_checkpoint")
+        assert not final.exists()
+        assert (staging / "model-marker").is_file()
+        assert (staging / "normalization-marker").is_file()
+        assert (staging / TRAIN_SCRIPT.DATA_SPLIT_FILENAME).read_text(encoding="utf-8") == (
+            split_path.read_text(encoding="utf-8")
+        )
+        return PassingReport()
+
+    monkeypatch.setattr(TRAIN_SCRIPT, "validate_checkpoint", validate_checkpoint)
+
+    result = TRAIN_SCRIPT._save_training_checkpoint_atomically(
+        final,
+        trainer=FakeTrainer(),
+        preprocessor=FakePreprocessor(),
+        source_dir=source,
+        data_split_path=split_path,
+    )
+
+    assert result == final
+    assert events == [
+        "trainer.save",
+        "save_normalization_assets",
+        "validate_checkpoint",
+        "require_valid",
+    ]
+    assert (final / TRAIN_SCRIPT.DATA_SPLIT_FILENAME).is_file()

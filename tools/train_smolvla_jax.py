@@ -14,7 +14,9 @@ from typing import Any
 import jax
 import yaml
 
+from lerobot.datasets.transforms import build_image_transforms
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
+from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically
 from lerobot.policies.smolvla_jax.checkpoint import (
     count_expert_layers,
     count_vlm_layers,
@@ -23,7 +25,6 @@ from lerobot.policies.smolvla_jax.checkpoint import (
     load_params,
     resolve_checkpoint,
 )
-from lerobot.datasets.transforms import build_image_transforms
 from lerobot.policies.smolvla_jax.data import (
     DatasetSource,
     LeRobotJaxDataLoader,
@@ -32,6 +33,7 @@ from lerobot.policies.smolvla_jax.data import (
 )
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
+from lerobot.policies.smolvla_jax.validation import validate_checkpoint
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
 DATA_SPLIT_FILENAME = "data_split.json"
@@ -150,6 +152,26 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
         json.dump(payload, file, indent=2, sort_keys=True)
         file.write("\n")
     temporary.replace(path)
+
+
+def _save_training_checkpoint_atomically(
+    final_path: str | Path,
+    *,
+    trainer: JaxSmolVLATrainer,
+    preprocessor: Any,
+    source_dir: str | Path,
+    data_split_path: str | Path | None,
+) -> Path:
+    def writer(staging: Path) -> None:
+        trainer.save(staging, source_dir=source_dir)
+        preprocessor.save_normalization_assets(staging)
+        if data_split_path is not None:
+            shutil.copy2(data_split_path, staging / DATA_SPLIT_FILENAME)
+
+    def validator(staging: Path) -> None:
+        validate_checkpoint(staging).require_valid()
+
+    return assemble_checkpoint_atomically(final_path, writer, validator)
 
 
 def _split_manifest(
@@ -477,9 +499,7 @@ def main() -> None:
     tactile_cache_enabled = bool(tactile_cache_cfg.get("enabled", False))
     tactile_cache_root = tactile_cache_cfg.get("root") if tactile_cache_enabled else None
     if tactile_cache_enabled and not tactile_cache_root:
-        raise ValueError(
-            "tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root"
-        )
+        raise ValueError("tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root")
     common_loader_kwargs["tactile_embedding_cache_root"] = tactile_cache_root
     train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
     print(
@@ -533,9 +553,7 @@ def main() -> None:
             )
         split_manifest["validation_protocol"] = validation_protocol
         fixed_subset_size = (
-            None
-            if max_batches in (None, 0)
-            else int(max_batches) * int(common_loader_kwargs["batch_size"])
+            None if max_batches in (None, 0) else int(max_batches) * int(common_loader_kwargs["batch_size"])
         )
         persisted_indices = tuple(split_manifest.get("validation_sample_indices", []))
         # Validation must stay unaugmented for stable metrics.
@@ -554,14 +572,10 @@ def main() -> None:
             **common_loader_kwargs,
         )
         validation_dataset_frames = {
-            summary["repo_id"]: int(summary["frames"])
-            for summary in val_data.dataset_summaries
+            summary["repo_id"]: int(summary["frames"]) for summary in val_data.dataset_summaries
         }
         saved_dataset_frames = split_manifest.get("validation_dataset_frames")
-        if (
-            saved_dataset_frames is not None
-            and saved_dataset_frames != validation_dataset_frames
-        ):
+        if saved_dataset_frames is not None and saved_dataset_frames != validation_dataset_frames:
             raise ValueError(
                 "validation dataset frame counts changed since data_split.json was created: "
                 f"{saved_dataset_frames} != {validation_dataset_frames}"
@@ -658,10 +672,13 @@ def main() -> None:
                 )
             if step % save_freq == 0 or step == steps:
                 path = output / f"checkpoint-{step:08d}"
-                trainer.save(path, source_dir=checkpoint)
-                data.preprocessor.save_normalization_assets(path)
-                if split_manifest is not None:
-                    shutil.copy2(split_path, path / DATA_SPLIT_FILENAME)
+                _save_training_checkpoint_atomically(
+                    path,
+                    trainer=trainer,
+                    preprocessor=data.preprocessor,
+                    source_dir=checkpoint,
+                    data_split_path=split_path if split_manifest is not None else None,
+                )
                 print(f"saved checkpoint: {path}")
                 if wandb_run is not None:
                     import wandb
