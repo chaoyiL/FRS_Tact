@@ -268,6 +268,20 @@ def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
     assert config["control"]["steps_per_inference"] == 10
 
 
+@pytest.mark.parametrize("steps_per_inference", [True, 10.5, "10"])
+def test_load_config_rejects_non_integer_steps_per_inference(
+    tmp_path: Path,
+    steps_per_inference: object,
+) -> None:
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", "owner/vt-model")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["control"]["steps_per_inference"] = steps_per_inference
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="steps_per_inference must be an integer"):
+        remote_client.load_config(config_path)
+
+
 def test_tactile_embedding_normalization_has_unit_rms() -> None:
     embeddings = jnp.asarray([[[1.0, 2.0, 3.0], [2.0, 4.0, 8.0]]])
     normalized = normalize_tactile_embeddings(embeddings)

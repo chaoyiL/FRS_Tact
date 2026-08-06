@@ -181,6 +181,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("The current checkpoint contract requires bimanual state mode")
     if int(control["action_horizon"]) <= 0:
         raise ValueError("action_horizon must be positive")
+    if isinstance(control["steps_per_inference"], bool) or not isinstance(
+        control["steps_per_inference"], int
+    ):
+        raise ValueError("steps_per_inference must be an integer")
     if not 1 <= int(control["steps_per_inference"]) <= int(control["action_horizon"]):
         raise ValueError("steps_per_inference must be between 1 and action_horizon")
     if float(control["control_frequency"]) <= 0 or float(control["controller_frequency"]) <= 0:
