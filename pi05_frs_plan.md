@@ -194,6 +194,43 @@ pi0.5 部署/训练。核对了一下发现两件事：
    `liuchaoyi/...` 数据，不是 pick_tube）——真要走 VT-pi0.5 这条路，得先在训练服务器上
    实际跑一次微调，不是接个现成 checkpoint。
 
+## 管线完整性盘点（2026-08-08）：还缺什么
+
+把整条链路四步都对着 pi0.5 配置核了一遍：
+
+| 步骤 | 工具 | 状态 |
+| --- | --- | --- |
+| 一键编排 | `scripts/start_frs_pi05_train.sh` | **本次新增**（原来只有 SmolVLA 版，而且会直接失败） |
+| 1. 触觉 embedding | `tools/precompute_tactile_embeddings.py` | 现有工具直接可用，**已验证**不用改 |
+| 2. action_cache | `tools/prepare_frs_pi05_cache.py` | 本次新增 |
+| 3. FRS 训练 | `tools/train_frs.py` | 现有工具直接可用，**已验证**不用改 |
+| 4. FRS 评估 | `tactile_flow_steering/evaluate.py` | 现有工具直接可用（完全不依赖 base 模型） |
+
+第 1、3 步能直接复用是核对过的：它们读的每个配置键 pi0.5 配置里都有，而且它们从
+`smolvla_jax` 只 import 了跟 base 模型无关的工具函数（`parse_dataset_sources` /
+`resolve_source_visual_keys` / `TactileEmbeddingCache`），那条 import 链的第三方依赖只有
+`transformers.AutoTokenizer`（老稳定 API，在 `transformers==4.53.2` 下也在）。
+第 4 步 `evaluate.py` 根本不 import 任何 base 模型代码，只读 cache。
+
+原来的 `scripts/start_frs_train.sh` 对 pi0.5 配置会**在第 55 行直接退出**（它要求
+`checkpoint_merge.adapter` 非空，pi0.5 没有这个概念），即使绕过也会去跑
+`merge_smolvla_peft_to_jax.py` 和 SmolVLA 版的 `prepare_frs_caches.py`。新脚本去掉了
+PEFT 合并这一步（pi0.5 直接用官方 checkpoint），并且在跑那两个很慢的阶段之前先做一次
+`load_pi0()` 冒烟检查——这是 `pi05_jax/README.md` 验证清单的第 2 项，早失败比晚失败好。
+
+**所以现在真正还缺的只有两类：**
+
+1. **一行代码都没在真机上跑过**（最主要的缺口）。必须上有 GPU 的 Linux 训练服务器，按
+   `src/lerobot/policies/pi05_jax/README.md` 的清单验证；新脚本已经把其中第 2 项
+   （checkpoint 能否加载）内建成了前置检查。清单第 3 项（`denoise_step` 和 upstream
+   `sample_actions` 数值是否一致）仍然需要手动做一次——那是这次唯一新写的模型级逻辑。
+2. **没有移植的周边**（都不影响 FRS 训练本身，按需再做）：
+   - `deploy_smolvla/` 真机部署是 SmolVLA 专用的，pi0.5 没有对应物。
+   - `modalities_eval/` 下的分析脚本（`loglike_evaluate.py` / `action_error_evaluate.py` /
+     `action_reverse_tsne.py`）只支持 SmolVLA；`modalities_eval/pi05_utils.py` 提供的
+     `Pi05EvalModel` 已经够它们改造时复用了。
+   - `doc.md` / `train_for_agent.md` 描述的还是 SmolVLA/VT-SmolVLA 的流程。
+
 ## 明确不做的事
 
 - 不 `pip install openpi`、不给它开单独环境——包名冲突的解法是 vendor 代码，不是隔离环境
