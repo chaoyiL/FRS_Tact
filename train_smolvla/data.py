@@ -16,11 +16,6 @@ from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_s
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
-from .tactile_cache import (
-    TACTILE_EMBEDDING_OBSERVATION_KEY,
-    TactileEmbeddingCache,
-    tactile_cache_dir,
-)
 
 Array = jax.Array
 CANONICAL_ACTION_KEY = "action"
@@ -214,7 +209,7 @@ def prepare_lerobot_batch(
 
 
 class _KeyMappedLeRobotDataset(Dataset):
-    """Normalize keys and apply RGB-only augmentation before concatenation."""
+    """Normalize keys and apply image augmentation before concatenation."""
 
     def __init__(
         self,
@@ -224,14 +219,12 @@ class _KeyMappedLeRobotDataset(Dataset):
         rename_map: Mapping[str, str] | None,
         image_transforms: Callable | None = None,
         image_transform_keys: Sequence[str] = (),
-        tactile_embedding_cache: TactileEmbeddingCache | None = None,
     ):
         self.dataset = dataset
         self.action_key = action_key
         self.rename_map = dict(rename_map or {})
         self.image_transforms = image_transforms
         self.image_transform_keys = frozenset(image_transform_keys)
-        self.tactile_embedding_cache = tactile_embedding_cache
         self.padding_key = f"{action_key}_is_pad"
 
     def __len__(self) -> int:
@@ -253,14 +246,6 @@ class _KeyMappedLeRobotDataset(Dataset):
             for key in self.image_transform_keys:
                 if key in mapped:
                     mapped[key] = self.image_transforms(mapped[key])
-        if self.tactile_embedding_cache is not None:
-            episode_index = int(_to_numpy(sample["episode_index"]).reshape(()).item())
-            frame_index = int(_to_numpy(sample["frame_index"]).reshape(()).item())
-            episode = self.dataset.meta.episodes[episode_index]
-            absolute_index = int(episode["dataset_from_index"]) + frame_index
-            mapped[TACTILE_EMBEDDING_OBSERVATION_KEY] = self.tactile_embedding_cache[
-                absolute_index
-            ]
         if CANONICAL_ACTION_KEY not in mapped:
             raise KeyError(f"sample is missing action feature {self.action_key!r}")
         return mapped
@@ -303,17 +288,10 @@ def resolve_source_visual_keys(
     return list(dict.fromkeys(resolved))
 
 
-def resolve_model_visual_keys(
-    config: JaxSmolVLAConfig,
-    *,
-    use_tactile_embedding_cache: bool = False,
-) -> tuple[str, ...]:
+def resolve_model_visual_keys(config: JaxSmolVLAConfig) -> tuple[str, ...]:
     """All dataset image/video columns needed by the configured model."""
 
-    keys = list(config.image_keys)
-    if config.use_tactile_encoder and not use_tactile_embedding_cache:
-        keys.extend(config.tactile_keys)
-    return tuple(dict.fromkeys(keys))
+    return tuple(dict.fromkeys(config.image_keys))
 
 
 def parse_dataset_sources(cfg: Mapping[str, Any]) -> list[DatasetSource]:
@@ -476,7 +454,6 @@ class LeRobotJaxDataLoader:
         drop_last: bool | None = None,
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
-        tactile_embedding_cache_root: str | Path | None = None,
         fixed_subset_size: int | None = None,
         fixed_subset_seed: int = 0,
         subset_indices: Sequence[int] | None = None,
@@ -494,13 +471,6 @@ class LeRobotJaxDataLoader:
         self.infinite = bool(infinite)
         self.shuffle = bool(shuffle)
         self.image_transforms = image_transforms
-        self.tactile_embedding_cache_root = (
-            None
-            if tactile_embedding_cache_root is None
-            else Path(tactile_embedding_cache_root).expanduser()
-        )
-        if self.tactile_embedding_cache_root is not None and not config.use_tactile_encoder:
-            raise ValueError("tactile embedding cache requires use_tactile_encoder=True")
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -520,33 +490,6 @@ class LeRobotJaxDataLoader:
                 metadata.fps,
             )
             source_rename = dict(source.rename_map or {})
-            source_tactile_keys: tuple[str, ...] = ()
-            tactile_embedding_cache = None
-            if config.use_tactile_encoder:
-                source_tactile_keys = tuple(
-                    resolve_source_visual_keys(
-                        config.tactile_keys,
-                        source_rename,
-                        metadata.camera_keys,
-                    )
-                )
-            if self.tactile_embedding_cache_root is not None:
-                cache_dir = tactile_cache_dir(
-                    self.tactile_embedding_cache_root,
-                    source.repo_id,
-                )
-                tactile_embedding_cache = TactileEmbeddingCache(
-                    cache_dir,
-                    repo_id=source.repo_id,
-                    revision=metadata.revision,
-                    total_frames=metadata.total_frames,
-                    tactile_keys=config.tactile_keys,
-                    source_tactile_keys=source_tactile_keys,
-                    embedding_dim=config.tactile_embedding_dim,
-                    image_size=config.tactile_image_size,
-                    encoder_path=config.tactile_encoder_path,
-                    dataset_root=metadata.root,
-                )
             visual_keys = resolve_source_visual_keys(
                 config.image_keys,
                 source_rename,
@@ -556,19 +499,15 @@ class LeRobotJaxDataLoader:
                 # by its empty-camera policy.
                 allow_missing=len(config.image_keys),
             )
-            if config.use_tactile_encoder and tactile_embedding_cache is None:
-                visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
             dataset = LeRobotDataset(
                 repo_id=source.repo_id,
                 root=metadata.root,
                 revision=metadata.revision,
                 episodes=list(source.episodes) if source.episodes is not None else None,
                 delta_timestamps=delta_timestamps,
-                # Apply transforms after key mapping so tactile images can stay untouched.
                 image_transforms=None,
                 video_backend=video_backend,
-                # Keep decoded frames compact across worker boundaries. The RGB and
-                # tactile preprocessors perform the same uint8 -> float conversion.
+                # Keep decoded frames compact across worker boundaries.
                 return_uint8=return_uint8,
                 download_videos=True,
                 visual_keys=visual_keys,
@@ -589,7 +528,6 @@ class LeRobotJaxDataLoader:
                 rename_map=source_rename,
                 image_transforms=image_transforms,
                 image_transform_keys=config.image_keys,
-                tactile_embedding_cache=tactile_embedding_cache,
             )
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
@@ -608,11 +546,6 @@ class LeRobotJaxDataLoader:
                     "action_key": resolved_action_key,
                     "weight": source.weight,
                     "visual_keys": list(visual_keys),
-                    "tactile_embedding_cache": (
-                        None
-                        if tactile_embedding_cache is None
-                        else str(tactile_embedding_cache.cache_dir)
-                    ),
                 }
             )
 
@@ -732,13 +665,6 @@ class LeRobotJaxDataLoader:
             for key, feature in features.items()
             if feature.get("dtype") in ("image", "video")
         }
-        if config.use_tactile_encoder:
-            missing_tactile = sorted(set(config.tactile_keys) - dataset_cameras)
-            if missing_tactile:
-                raise ValueError(
-                    f"dataset {repo_id!r}: missing tactile keys after renaming: {missing_tactile}; "
-                    f"dataset={sorted(dataset_cameras)}"
-                )
         if not dataset_cameras.intersection(config.image_keys):
             raise ValueError(
                 f"dataset {repo_id!r}: none of the cameras match checkpoint image features "

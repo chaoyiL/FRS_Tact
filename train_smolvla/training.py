@@ -13,12 +13,7 @@ import numpy as np
 import optax
 from flax import struct
 
-from .checkpoint import (
-    initialize_tactile_fusion_params,
-    load_params,
-    save_portable_params,
-    write_effective_config,
-)
+from .checkpoint import load_params, save_portable_params, write_effective_config
 from .configuration import JaxSmolVLAConfig
 from .lora import initialize_lora_params, is_trainable_parameter
 from .modeling import JaxSmolVLA
@@ -220,15 +215,23 @@ class JaxSmolVLATrainer:
         next_rng, loss_rng = jax.random.split(state.rng)
         loss_rng = jax.random.fold_in(loss_rng, state.step)
 
-        def loss_fn(trainable_params: Mapping[str, Array]) -> Array:
+        def loss_fn(
+            trainable_params: Mapping[str, Array],
+        ) -> tuple[Array, Mapping[str, Array]]:
             compute_params = cast_trainable_params_for_compute(trainable_params)
             params = merge_params(compute_params, frozen_params)
-            return self.model.loss(params, batch, loss_rng)
+            loss, metrics = self.model.compute_training_loss(
+                params,
+                batch=batch,
+                rng=loss_rng,
+            )
+            return loss, metrics
 
-        loss, gradients = jax.value_and_grad(loss_fn)(state.params)
+        (loss, model_metrics), gradients = jax.value_and_grad(loss_fn, has_aux=True)(state.params)
         updates, opt_state = self.optimizer.update(gradients, state.opt_state, state.params)
         params = optax.apply_updates(state.params, updates)
         metrics = {
+            **model_metrics,
             "loss": loss,
             "grad_norm": optax.tree.norm(gradients),
             "learning_rate": self.learning_rate(state.step),
@@ -285,8 +288,13 @@ class JaxSmolVLATrainer:
         rollout_steps: int,
     ) -> dict[str, Array]:
         loss_rng, sample_rng = jax.random.split(rng)
-        loss = self.model.loss(params, batch, loss_rng)
+        loss, model_metrics = self.model.compute_training_loss(
+            params,
+            batch=batch,
+            rng=loss_rng,
+        )
         metrics: dict[str, Array] = {
+            **model_metrics,
             "loss": loss,
             "n_samples": jnp.asarray(batch["actions"].shape[0], dtype=jnp.float32),
         }
@@ -302,9 +310,6 @@ class JaxSmolVLATrainer:
             batch["language_masks"],
             batch["state"],
             sample_rng,
-            tactile_images=batch.get("tactile_images"),
-            tactile_embeddings=batch.get("tactile_embeddings"),
-            tactile_masks=batch.get("tactile_masks"),
             num_steps=rollout_steps,
         )
         target = batch["actions"][..., : self.config.action_dim]
@@ -513,9 +518,7 @@ class JaxSmolVLATrainer:
 
     def restore(self, checkpoint: str | Path) -> None:
         checkpoint = Path(checkpoint)
-        params = initialize_tactile_fusion_params(
-            load_params(checkpoint), self.config, seed=self.seed
-        )
+        params = load_params(checkpoint)
         params = initialize_lora_params(params, self.config, seed=self.seed)
         params = promote_trainable_params_to_fp32(params, self.config)
         trainable, frozen = partition_params(params, self.config)

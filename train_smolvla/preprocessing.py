@@ -10,9 +10,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from safetensors.flax import load_file as load_safetensors_file, save_file as save_safetensors_file
-from tactile_encoder.utils.image_dataset import parse_image_to_unit
-
-from .tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 from transformers import AutoTokenizer
 
 from .configuration import JaxSmolVLAConfig
@@ -101,20 +98,6 @@ def _as_bchw(image: Any) -> np.ndarray:
         if image.size and float(np.max(image)) > 1.0:
             image = image / 255.0
     return image
-
-
-def prepare_tactile_batch(image: Any, image_size: int) -> np.ndarray:
-    """Apply the tactile encoder's exact per-frame preprocessing to a batch."""
-
-    image = np.asarray(image)
-    if image.ndim == 3:
-        image = image[None, ...]
-    if image.ndim != 4:
-        raise ValueError(f"expected a tactile image or batch, got {image.shape}")
-    return np.stack(
-        [parse_image_to_unit(frame, image_size=image_size) for frame in image],
-        axis=0,
-    ).astype(np.float32, copy=False)
 
 
 class JaxSmolVLAPreprocessor:
@@ -355,42 +338,6 @@ class JaxSmolVLAPreprocessor:
         for _ in missing_keys[: self.config.empty_cameras]:
             images.append(-jnp.ones_like(images[-1]))
             masks.append(jnp.zeros_like(masks[-1]))
-        tactile_images: list[Array] = []
-        tactile_masks: list[Array] = []
-        tactile_embeddings: Array | None = None
-        if self.config.use_tactile_encoder:
-            cached = renamed.get(TACTILE_EMBEDDING_OBSERVATION_KEY)
-            if cached is not None:
-                tactile_embeddings = jnp.asarray(cached)
-                if tactile_embeddings.ndim == 2:
-                    tactile_embeddings = tactile_embeddings[None, ...]
-                expected_tail = (
-                    self.config.tactile_num_tokens,
-                    self.config.tactile_embedding_dim,
-                )
-                if tactile_embeddings.ndim != 3 or tactile_embeddings.shape[1:] != expected_tail:
-                    raise ValueError(
-                        "cached tactile embeddings must have shape "
-                        f"[B,{expected_tail[0]},{expected_tail[1]}], got "
-                        f"{tactile_embeddings.shape}"
-                    )
-                tactile_masks.append(
-                    jnp.ones(tactile_embeddings.shape[:2], dtype=jnp.bool_)
-                )
-            else:
-                missing_tactile = [key for key in self.config.tactile_keys if key not in renamed]
-                if missing_tactile:
-                    raise KeyError(f"missing tactile image keys: {missing_tactile}")
-                for key in self.config.tactile_keys:
-                    tactile = jnp.asarray(
-                        prepare_tactile_batch(
-                            renamed[key],
-                            self.config.tactile_image_size,
-                        ),
-                        dtype=jnp.float32,
-                    )
-                    tactile_images.append(tactile)
-                    tactile_masks.append(jnp.ones((tactile.shape[0],), dtype=jnp.bool_))
         tokens, language_masks = self.tokenize(task)
         if tokens.shape[0] == 1 and state.shape[0] != 1:
             tokens = jnp.broadcast_to(tokens, (state.shape[0], tokens.shape[1]))
@@ -404,11 +351,4 @@ class JaxSmolVLAPreprocessor:
             "language_masks": language_masks,
             "state": state,
         }
-        if self.config.use_tactile_encoder:
-            if tactile_embeddings is not None:
-                prepared["tactile_embeddings"] = tactile_embeddings
-                prepared["tactile_masks"] = tactile_masks[0]
-            else:
-                prepared["tactile_images"] = jnp.stack(tactile_images, axis=1)
-                prepared["tactile_masks"] = jnp.stack(tactile_masks, axis=1)
         return prepared
