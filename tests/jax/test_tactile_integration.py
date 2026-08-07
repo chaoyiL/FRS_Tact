@@ -269,6 +269,7 @@ def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
     )
     assert contract.tactile_embedding_dim == 512
     assert contract.tactile_num_tokens == 4
+    assert contract.tactile_token_repeat_factor == 1
     assert contract.lora_rank == 16
     assert contract.vlm_lora_target_modules == ("q_proj", "v_proj")
     assert config["rename_map"] == {
@@ -279,6 +280,52 @@ def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
     assert config["observation"]["single_arm_mode"] is False
     assert config["control"]["action_horizon"] == 20
     assert config["control"]["steps_per_inference"] == 10
+
+
+def test_legacy_deployment_contract_without_repeat_factor_defaults_to_one(tmp_path: Path) -> None:
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", "owner/vt-model")
+    config = remote_client.load_config(config_path)
+
+    contract = remote_client._checkpoint_contract(config, config["control"])
+
+    assert contract.tactile_token_repeat_factor == 1
+
+
+def test_default_deployment_contract_explicitly_pins_repeat_factor_one() -> None:
+    config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
+
+    assert config["checkpoint_contract"]["tactile_token_repeat_factor"] == 1
+    assert remote_client._checkpoint_contract(
+        config,
+        config["control"],
+    ).tactile_token_repeat_factor == 1
+
+
+def test_deployment_contract_preserves_explicit_repeat_factor(tmp_path: Path) -> None:
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", "owner/vt-model")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["checkpoint_contract"]["tactile_token_repeat_factor"] = 21
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    loaded = remote_client.load_config(config_path)
+    contract = remote_client._checkpoint_contract(loaded, loaded["control"])
+
+    assert contract.tactile_token_repeat_factor == 21
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "8"])
+def test_deployment_contract_rejects_invalid_repeat_factor(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    config_path = _write_remote_config(tmp_path / "deploy.yaml", "owner/vt-model")
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["checkpoint_contract"]["tactile_token_repeat_factor"] = invalid
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    loaded = remote_client.load_config(config_path)
+
+    with pytest.raises(ValueError, match="tactile_token_repeat_factor must be a positive integer"):
+        remote_client._checkpoint_contract(loaded, loaded["control"])
 
 
 @pytest.mark.parametrize("steps_per_inference", [True, 10.5, "10"])

@@ -84,3 +84,23 @@
 - 沙箱外 RTX 4090 checkpoint-backed GPU smoke（每个 K 为全新 Python 进程，episode 48 frame 249，`num_steps=1`）均 exit 0、sample actions 全 finite：K=1 prefix 181，`19.527281855 s`，peak `1,904,225,280` bytes；K=8 prefix 209，`19.807580470 s`，peak `1,903,243,776` bytes；K=21 prefix 261，`20.760682782 s`，peak `1,903,823,872` bytes。它们只证明兼容性/性能 smoke，不是论文训练或结果。
 - K=1/8/21 YAML 解析后去除 K、`output`、W&B `name/tags` 即完全相等；输出分别为 `/workspace/vtsmolvla_tactile_01`、`/workspace/vtsmolvla_tactile_repeat16`、`/workspace/vtsmolvla_tactile_repeat32`。正式 paper runs 仍必须从相同 base initialization、split、seed、训练协议开始，且不同 K 禁止 strict optimizer resume，只能 weight warm-start 新 run。
 - 本次没有启动训练，也没有生成 paper result。独立 final review 曾发现 1 个 Important：metadata-absent legacy checkpoint 隐含 K=1 却可被 K=8/21 strict restore 接受；现已在 fallback 中把 saved 缺失 K 规范为 1 并与 current K 精确比较，新增 K1->K1 pass 和隐含 K1->K8/21 reject 测试。post-fix 独立复审为 Critical 0、Important 0、`Ready to integrate: Yes`。GPU smoke 未重复运行，因为修复只触及 `training.py` legacy restore 与测试，之前 smoke 使用的 `modeling.py`/configuration/checkpoint/config 均未再变。剩余限制：GPU smoke 仅一个 checkpoint/episode/frame/一步采样；exact output/name/tag 字符串没有独立测试锁定；worktree 的 evaluator 与 token baseline 仍是同一份未提交累计 diff。
+
+### Rebase 后测试 package-boundary 修复（2026-08-08）
+
+- `Lee` rebase 后，repeat-factor 测试被自动合入纯视觉 `tests/jax/test_checkpoint.py` 与 `tests/jax/test_training.py`，导致 VT feature 测试跨越 package boundary。
+- 修复范围仅为测试重分包：repeat-factor config/checkpoint 测试迁到 `tests/jax/test_tactile_checkpoint.py`，resume helper/tests 迁到 `tests/jax/test_tactile_training.py`；新文件显式使用 `lerobot.policies.smolvla_jax` legacy VT config/checkpoint/trainer，TinyModel 使用该 trainer 的 `loss(params, batch, rng)` API。
+- origin/eric 原有 `test_effective_config_persists_tactile_fusion_settings` 保留在 `tests/jax/test_checkpoint.py`；未改生产代码、contract 文件或纯视觉 baseline bug。
+- 修改前 RED：正确测试解释器执行聚焦集合 exit 2，`tests/jax/test_training.py` collection 因 `train_smolvla.training` 导入缺失的 `initialize_tactile_fusion_params` 失败。迁移后两个新 VT 文件 fresh 为 `19 passed in 1.00s`；加上保留的 origin/eric tactile-fusion test 为 `20 passed in 1.01s`。四文件 focused 仍只在纯视觉 `test_training.py` 的同一 upstream import 处 collection exit 2；未越界修复。
+- 静态与范围验证：四个测试文件 `py_compile` exit 0，`git diff --check` exit 0；两个旧测试文件相对 `origin/eric` 完全一致（`git diff --exit-code` 为 0），确认只迁移 feature 新增测试且保留原测试；未提交。
+
+### Rebase 后 repeat-factor contract 兼容（2026-08-08）
+
+- 当前待发布分支为 `Lee`。最新 `origin/eric` 新增 checkpoint/publish/deploy contract 后，原实现尚未把 `tactile_token_repeat_factor` 纳入该边界，导致 K=1/8/21 可被误判为同一部署合约。
+- `CheckpointContract` 现显式保存 `tactile_token_repeat_factor`；训练 effective config、checkpoint `config.json`、发布 training YAML/manifest 与部署 YAML 都保留显式 K，并在合约比较中 fail closed。`tactile_num_tokens` 仍表示源 tactile 数量，不乘 K，也不改变 cache `[F,4,512]`。
+- 兼容规则固定为：旧 checkpoint config、旧 conversion manifest、旧 deploy YAML 缺字段时回落 K=1；显式值必须是严格正整数，拒绝 0、负数、bool、float 与数字字符串。默认部署 YAML 已显式写入 K=1。
+- TDD RED：首轮聚焦为 `16 failed, 2 passed, 7 errors`，均来自 contract 字段缺失/未贯穿；补充 manifest 严格类型边界后为 `5 failed`。最小实现后，排除已知默认部署身份漂移测试的三文件回归为 `106 passed, 1 deselected in 5.03s`。
+- 完整三文件回归为 `106 passed, 1 failed in 5.01s`；唯一失败仍是 rebase 基线中 `test_default_deployment_config_pins_the_bimanual_vt_contract` 期待 `KaiyueChen/vtsmolvla_01_4w`，而仓库默认 YAML 指向 `/home/typhon/models/pick_tube_02_3w_jax`。这不是 repeat-factor 回归，未越界改写 checkpoint/机器人部署身份。
+- contract 相关 6 个 Python 文件 `py_compile` exit 0，`git diff --check` exit 0；未提交、未 push。
+- 同轮 package 对齐还把通用 `state_mask` forwarding 同步到 `train_smolvla/modeling.py`；`tests/train_smolvla/test_package_boundary.py` 通过实际 capture `build_prefix_context` kwargs 验证透传。该项 TDD 为 RED `1 failed`、GREEN `1 passed`。
+- 父任务在全部 rebase 兼容改动后独立复跑：相关聚焦集合 `160 passed, 1 skipped, 1 deselected in 7.09s`，仅显式 deselect 上述已知默认部署身份漂移；完整 `tests/jax + modalities_eval + package-boundary` 在 collection 阶段仍被 `origin/eric` 现有 `train_smolvla.tactile_cache` 缺失与 `initialize_tactile_fusion_params` 缺失阻断（3 errors）。checkpoint schema 探针 exit 0，`tactile_proj.weight=(960,512)`，K=1/8/21 的源 token 数仍为 4、effective 分别 4/32/84。
+- rebase 后又在宿主 RTX 4090 使用真实 VT checkpoint、v3 episode 48 frame 249、`num_steps=1` fresh 跑 K=1：prefix 181、actions finite、`21.491298085 s`、peak `1,902,840,832` bytes，exit 0。该 smoke 只验证 active legacy VT 导入与 K=1 推理兼容，不是论文结果。

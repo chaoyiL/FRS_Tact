@@ -16,6 +16,7 @@ from lerobot.policies.smolvla_jax.validation import CheckpointContract
 from tools.publish_smolvla_checkpoint import (
     INFERENCE_FILENAMES,
     SIDECAR_FILENAMES,
+    _contract_from_dict,
     _default_metadata_loader,
     _metadata_stats,
     build_inference_bundle,
@@ -174,6 +175,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         "tactile_keys": list(VT_CONTRACT.tactile_keys),
         "tactile_embedding_dim": 512,
         "tactile_num_tokens": 4,
+        "tactile_token_repeat_factor": 1,
         "lora_rank": 16,
         "vlm_lora_target_modules": ["q_proj", "v_proj"],
     }
@@ -565,6 +567,7 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
   tactile_keys: [t0, t1, t2, t3]
   tactile_embedding_dim: 512
   tactile_num_tokens: 4
+  tactile_token_repeat_factor: 8
   lora_rank: 16
   vlm_lora_target_modules: [q_proj, v_proj]
 """,
@@ -575,6 +578,62 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
     assert contract.action_dim == 20
     assert contract.chunk_size == 20
     assert contract.tactile_num_tokens == 4
+    assert contract.tactile_token_repeat_factor == 8
+
+
+def test_legacy_manifest_contract_without_repeat_factor_defaults_to_one() -> None:
+    legacy = {
+        "state_dim": 20,
+        "action_dim": 20,
+        "chunk_size": 20,
+        "image_keys": list(VT_CONTRACT.image_keys),
+        "tactile_keys": list(VT_CONTRACT.tactile_keys),
+        "tactile_embedding_dim": 512,
+        "tactile_num_tokens": 4,
+        "lora_rank": 16,
+        "vlm_lora_target_modules": ["q_proj", "v_proj"],
+    }
+
+    assert _contract_from_dict(legacy).tactile_token_repeat_factor == 1
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "8"])
+def test_manifest_contract_rejects_invalid_tactile_repeat_factor(invalid: object) -> None:
+    manifest_contract = {
+        "state_dim": 20,
+        "action_dim": 20,
+        "chunk_size": 20,
+        "image_keys": list(VT_CONTRACT.image_keys),
+        "tactile_keys": list(VT_CONTRACT.tactile_keys),
+        "tactile_embedding_dim": 512,
+        "tactile_num_tokens": 4,
+        "tactile_token_repeat_factor": invalid,
+        "lora_rank": 16,
+        "vlm_lora_target_modules": ["q_proj", "v_proj"],
+    }
+
+    with pytest.raises(ValueError, match="manifest tactile_token_repeat_factor must be a positive integer"):
+        _contract_from_dict(manifest_contract)
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "8"])
+def test_training_yaml_rejects_invalid_tactile_repeat_factor(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    yaml_path = tmp_path / "train.yaml"
+    yaml_path.write_text(
+        "model:\n"
+        "  state_dim: 20\n"
+        "  action_dim: 20\n"
+        "  chunk_size: 20\n"
+        "  image_keys: [camera1, camera2]\n"
+        f"  tactile_token_repeat_factor: {json.dumps(invalid)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="tactile_token_repeat_factor must be a positive integer"):
+        contract_from_training_yaml(yaml_path)
 
 
 def test_repair_uses_metadata_only_stats_and_records_immutable_provenance(tmp_path: Path) -> None:

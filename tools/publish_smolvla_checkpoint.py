@@ -71,6 +71,14 @@ def _contract_dict(contract: CheckpointContract) -> dict[str, Any]:
 
 def _contract_from_dict(value: Mapping[str, Any]) -> CheckpointContract:
     fields = dict(value)
+    fields.setdefault("tactile_token_repeat_factor", 1)
+    tactile_repeat = fields["tactile_token_repeat_factor"]
+    if (
+        isinstance(tactile_repeat, bool)
+        or not isinstance(tactile_repeat, int)
+        or tactile_repeat <= 0
+    ):
+        raise ValueError("manifest tactile_token_repeat_factor must be a positive integer")
     for key in ("image_keys", "tactile_keys", "vlm_lora_target_modules"):
         fields[key] = tuple(fields.get(key) or ())
     return CheckpointContract(**fields)
@@ -109,6 +117,13 @@ def contract_from_training_yaml(path: str | Path) -> CheckpointContract:
     use_tactile = bool(model.get("use_tactile_encoder", False))
     tactile_keys = tuple(model.get("tactile_keys") or ()) if use_tactile else ()
     tactile_tokens = int(model.get("tactile_num_tokens", 0)) if use_tactile else 0
+    tactile_repeat = model.get("tactile_token_repeat_factor", 1)
+    if (
+        isinstance(tactile_repeat, bool)
+        or not isinstance(tactile_repeat, int)
+        or tactile_repeat <= 0
+    ):
+        raise ValueError("training tactile_token_repeat_factor must be a positive integer")
     if use_tactile and len(tactile_keys) != tactile_tokens:
         raise ValueError("training tactile_keys length must equal tactile_num_tokens")
     image_keys = tuple(model["image_keys"])
@@ -123,6 +138,7 @@ def contract_from_training_yaml(path: str | Path) -> CheckpointContract:
         tactile_keys=tactile_keys,
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_num_tokens=tactile_tokens,
+        tactile_token_repeat_factor=tactile_repeat,
         lora_rank=int(model.get("lora_rank", 0)),
         vlm_lora_target_modules=tuple(model.get("vlm_lora_target_modules") or ()),
     )

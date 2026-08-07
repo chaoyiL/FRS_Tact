@@ -65,6 +65,24 @@ def test_contract_from_config_preserves_effective_vt_contract() -> None:
     assert contract_from_config(config) == VT_CONTRACT
 
 
+def test_contract_from_config_preserves_explicit_tactile_repeat_factor() -> None:
+    config = SimpleNamespace(
+        state_dim=20,
+        action_dim=20,
+        chunk_size=20,
+        image_keys=VT_CONTRACT.image_keys,
+        use_tactile_encoder=True,
+        tactile_keys=VT_CONTRACT.tactile_keys,
+        tactile_embedding_dim=512,
+        tactile_num_tokens=4,
+        tactile_token_repeat_factor=8,
+        lora_rank=16,
+        vlm_lora_target_modules=("q_proj", "v_proj"),
+    )
+
+    assert contract_from_config(config).tactile_token_repeat_factor == 8
+
+
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
@@ -160,6 +178,7 @@ def _write_bundle(path: Path, contract: CheckpointContract, *, include_weight: b
             "tactile_keys": list(contract.tactile_keys),
             "tactile_embedding_dim": contract.tactile_embedding_dim,
             "tactile_num_tokens": contract.tactile_num_tokens,
+            "tactile_token_repeat_factor": contract.tactile_token_repeat_factor,
             "lora_rank": contract.lora_rank,
             "vlm_lora_target_modules": list(contract.vlm_lora_target_modules),
             "module_modes": {
@@ -610,6 +629,47 @@ def test_diagnostics_are_aggregated_and_require_valid_raises(vt_bundle: Path) ->
     assert "normalizer_processor.safetensors" in message
     assert "tactile encoder tensors" in message
     assert "q_proj LoRA tensors" in message
+
+
+def test_legacy_config_without_tactile_repeat_factor_defaults_to_one(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config.pop("tactile_token_repeat_factor")
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert report.ok, report.format_errors()
+
+
+def test_tactile_repeat_factor_mismatch_is_rejected(vt_bundle: Path) -> None:
+    expected = replace(VT_CONTRACT, tactile_token_repeat_factor=8)
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["tactile_token_repeat_factor"] = 21
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=expected)
+
+    assert any(
+        "tactile_token_repeat_factor expected 8, got 21" in issue
+        for issue in report.issues
+    )
+
+
+@pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "8"])
+def test_config_rejects_non_positive_or_non_integer_tactile_repeat_factor(
+    vt_bundle: Path,
+    invalid: object,
+) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["tactile_token_repeat_factor"] = invalid
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert any("tactile_token_repeat_factor must be a positive integer" in issue for issue in report.issues)
 
 
 def test_model_weight_requirement_can_be_disabled(tmp_path: Path) -> None:

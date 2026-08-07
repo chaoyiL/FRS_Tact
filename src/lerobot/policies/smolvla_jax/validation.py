@@ -44,6 +44,7 @@ class CheckpointContract:
     tactile_keys: tuple[str, ...] = ()
     tactile_embedding_dim: int = 512
     tactile_num_tokens: int = 0
+    tactile_token_repeat_factor: int = 1
     lora_rank: int = 0
     vlm_lora_target_modules: tuple[str, ...] = ()
 
@@ -60,6 +61,7 @@ def contract_from_config(config: Any) -> CheckpointContract:
         tactile_keys=tuple(config.tactile_keys) if use_tactile_encoder else (),
         tactile_embedding_dim=int(config.tactile_embedding_dim),
         tactile_num_tokens=int(config.tactile_num_tokens) if use_tactile_encoder else 0,
+        tactile_token_repeat_factor=int(getattr(config, "tactile_token_repeat_factor", 1)),
         lora_rank=int(config.lora_rank),
         vlm_lora_target_modules=tuple(config.vlm_lora_target_modules),
     )
@@ -95,6 +97,7 @@ class _ConfigView:
     tactile_keys: tuple[str, ...]
     tactile_embedding_dim: int | None
     tactile_num_tokens: int | None
+    tactile_token_repeat_factor: int | None
     lora_rank: int | None
     vlm_lora_target_modules: tuple[str, ...]
     num_vlm_layers: int | None
@@ -106,6 +109,7 @@ class _ConfigView:
             self.chunk_size,
             self.tactile_embedding_dim,
             self.tactile_num_tokens,
+            self.tactile_token_repeat_factor,
             self.lora_rank,
         )
         if any(value is None for value in required):
@@ -118,6 +122,7 @@ class _ConfigView:
             tactile_keys=self.tactile_keys,
             tactile_embedding_dim=int(self.tactile_embedding_dim),
             tactile_num_tokens=int(self.tactile_num_tokens),
+            tactile_token_repeat_factor=int(self.tactile_token_repeat_factor),
             lora_rank=int(self.lora_rank),
             vlm_lora_target_modules=self.vlm_lora_target_modules,
         )
@@ -148,6 +153,21 @@ def _integer(value: Any, field: str, issues: list[str], *, default: int | None =
     except (TypeError, ValueError):
         issues.append(f"config {field} must be an integer, got {value!r}")
         return None
+
+
+def _positive_integer(
+    value: Any,
+    field: str,
+    issues: list[str],
+    *,
+    default: int,
+) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        issues.append(f"config {field} must be a positive integer, got {value!r}")
+        return None
+    return value
 
 
 def _feature_dim(
@@ -226,6 +246,12 @@ def _parse_config(raw: Mapping[str, Any], issues: list[str]) -> _ConfigView:
             default=512,
         ),
         tactile_num_tokens=tactile_num_tokens,
+        tactile_token_repeat_factor=_positive_integer(
+            raw.get("tactile_token_repeat_factor"),
+            "tactile_token_repeat_factor",
+            issues,
+            default=1,
+        ),
         lora_rank=_integer(raw.get("lora_rank"), "lora_rank", issues, default=0),
         vlm_lora_target_modules=lora_targets,
         num_vlm_layers=_integer(raw.get("num_vlm_layers"), "num_vlm_layers", issues),
@@ -241,6 +267,7 @@ def _compare_contract(config: _ConfigView, expected: CheckpointContract, issues:
         "tactile_keys": config.tactile_keys,
         "tactile_embedding_dim": config.tactile_embedding_dim,
         "tactile_num_tokens": config.tactile_num_tokens,
+        "tactile_token_repeat_factor": config.tactile_token_repeat_factor,
         "lora_rank": config.lora_rank,
         "vlm_lora_target_modules": config.vlm_lora_target_modules,
     }
