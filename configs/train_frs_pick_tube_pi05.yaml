@@ -4,13 +4,15 @@
 # 原样保留，因为 tactile_flow_steering 训练本身完全不 import base 模型代码，只读
 # action_cache + tactile_embedding_cache（见 ../pi05_frs_plan.md）。
 #
-# 完整管线（第 1 步的推理/反向积分工具还没写，见 pi05_frs_plan.md 的 TODO 列表）：
+# 完整管线：
 #   1) uv run --no-sync python tools/prepare_frs_pi05_cache.py \
-#        --config configs/train_frs_pick_tube_pi05.yaml   # TODO: 这个工具还不存在
+#        --config configs/train_frs_pick_tube_pi05.yaml
 #   2) uv run --no-sync python tools/precompute_tactile_embeddings.py \
 #        --config configs/train_frs_pick_tube_pi05.yaml
 #   3) uv run --no-sync python tools/train_frs.py \
 #        --config configs/train_frs_pick_tube_pi05.yaml
+# 第 1 步（prepare_pi05.py / Pi05EvalModel / pi05_jax 全家桶）完全没跑过、norm_stats 来源也还没
+# 定下来，见下面 model.camera_map / norm_stats 的 TODO 注释，以及 ../pi05_frs_plan.md。
 
 # 官方 pi0.5 base checkpoint（通过 src/lerobot/policies/pi05_jax/download.py 下载/缓存，
 # 和 openpi 自己用的下载器逻辑一致，缓存目录也兼容）。传 checkpoint 根目录（不要带 /params），
@@ -83,6 +85,35 @@ model:
   tactile_embedding_dim: 512
   tactile_num_tokens: 4
   tactile_image_size: 224
+
+  # ---- pi0.5 专用（tools/prepare_frs_pi05_cache.py 读这些）----
+  # pi0.5 固定要 3 路图：base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb；这几个数据集
+  # rename_map 之后只有 camera1/camera2 两路 RGB（不算 tactile）。
+  # TODO: 下面这个映射（哪个物理相机对应 base_0_rgb / 哪个对应 left_wrist_0_rgb）是本次改造
+  # 时随手定的占位，没有对照过实际相机摆位，找了解 pick_tube 拍摄设置的人确认一下；
+  # 缺的那一路（right_wrist_0_rgb）会自动补成全黑 + mask=False，等价于 SmolVLA 版
+  # empty_cameras 的处理方式。
+  camera_map:
+    base_0_rgb: observation.images.camera1
+    left_wrist_0_rgb: observation.images.camera2
+  # pi0.5 的动作维度固定用 32（pi05_droid_finetune 等官方配置的惯例，见 pi05_frs_plan.md），
+  # 不是这几个数据集自己的 20 维——真实维度会在 normalize/pad 时截断/补零。
+  action_dim: 32
+  # TODO: 官方 pi05_base checkpoint 实际的 action_horizon 需要确认（不同 finetune 配置从
+  # 10 到 50 都有），这里先按 pi0.5 默认值占位。
+  action_horizon: 50
+
+# pi0.5 的归一化统计量。TODO（还没定，见 ../pi05_frs_plan.md "3. 归一化没做"）：
+# pi05_base 官方 checkpoint 的 assets/ 目录里只有它预训练用过的数据集的 norm stats
+# （按 asset_id，比如 "droid"），没有 pick_tube 这种全新数据集的统计量。要么先借用一个
+# 已有 asset_id 的统计量凑合跑通，要么用 pick_tube 自己的数据算一份新的（可以参考
+# openpi 的 scripts/compute_norm_stats.py，本仓库没有 vendor 这个脚本）。
+# 在这两个都填正确之前，tools/prepare_frs_pi05_cache.py 会直接报错（不会用错误的默认值
+# 悄悄跑下去）。
+norm_stats:
+  dir: /workspace/checkpoints/pi05_base/assets  # TODO: 确认这是不是实际下载下来的路径
+  asset_id: REPLACE_ME  # TODO: 上面两段注释里的两个选项，选一个填这里
+  use_quantile_norm: true
 
 frs_training:
   output: /workspace/frs_pick_tube_pi05/run_gated_01

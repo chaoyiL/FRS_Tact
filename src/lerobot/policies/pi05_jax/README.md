@@ -82,23 +82,18 @@ Before trusting this on the training server:
    code here (as opposed to a vendored copy), so it's the one most worth independently verifying
    before relying on it for FRS's reverse integration.
 
-## What's still missing before this can drive FRS
+## What's built on top of this (and still needs verifying)
 
-Everything below needs the pieces above to work first, and needs product decisions this file
-shouldn't guess at (see [pi05_frs_plan.md](../../../../pi05_frs_plan.md) for the full list):
+The observation-building, normalization, reverse-integration glue, and action_cache tool are all
+written now -- see [pi05_frs_plan.md](../../../../pi05_frs_plan.md) at the repo root for the
+full, current list of what's done vs. what's still an open question (in particular: which norm
+stats to use, since `pi05_base`'s shipped assets don't include one for a brand-new dataset like
+pick_tube). Pointers, so this file doesn't drift out of sync with that one:
 
-- Mapping a pick_tube dataset sample -> pi0.5's `Observation` (which camera goes to `base_0_rgb`
-  vs. `left_wrist_0_rgb`/`right_wrist_0_rgb`, what prompt text to tokenize -- and for pi0.5
-  specifically, remembering that `state` must be baked into the tokenized prompt via
-  `PaligemmaTokenizer.tokenize(prompt, state=state)`, not passed as a continuous input; see the
-  comment at the top of `tokenizer.py`).
-- Normalization: openpi's `Policy` wraps `Normalize`/`Unnormalize` transforms using norm stats
-  loaded from the checkpoint's `assets/` directory (`openpi.training.checkpoints.load_norm_stats`,
-  not vendored here). FRS needs the equivalent for whatever `state`/`actions` normalization the
-  `pi05_base` checkpoint assumes.
-- Wiring `build_prefix_cache`/`denoise_step` into `utils/integration.py`'s euler/fireflow solvers
-  to actually produce an action_cache (mirrors `utils/source_model.py`'s
-  `sample_and_reverse`/`reverse_integrate_actions` for SmolVLA).
-- A `configs/train_frs_pick_tube_pi05.yaml`-driven tool analogous to `prepare.py`/
-  `tools/prepare_frs_caches.py`, producing the cache in the format `utils/cache.py` defines (so
-  `tools/train_frs.py` can consume it unmodified).
+- `modalities_eval/pi05_utils.py` (`Pi05EvalModel`) -- dataset sample -> `Observation`.
+- `utils/pi05_source_model.py` -- `build_prefix_cache`/`denoise_step` wired into
+  `utils/integration.py`'s euler/fireflow solvers.
+- `prepare_pi05.py` + `tools/prepare_frs_pi05_cache.py` -- the actual action_cache tool.
+
+None of it has been run (this dev machine has no jax/flax/GPU) -- see "Status: UNTESTED" above
+for the verification checklist before trusting any of this on real data.

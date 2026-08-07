@@ -13,6 +13,12 @@ import torch
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, WeightedRandomSampler, default_collate
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
+from lerobot.datasets.sample_utils import (
+    action_delta_timestamps,
+    lerobot_sample_to_observation,
+    resolve_action_key,
+)
+from lerobot.datasets.sample_utils import to_numpy as _to_numpy
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
@@ -37,27 +43,6 @@ class DatasetSource:
     action_key: str | None = None
     rename_map: Mapping[str, str] | None = None
     weight: float = 1.0
-
-
-def resolve_action_key(features: Mapping[str, Any], action_key: str | None = None) -> str:
-    """Resolve both current ``action`` and legacy/custom ``actions`` feature names."""
-
-    if action_key is not None:
-        if action_key not in features:
-            raise KeyError(f"action feature {action_key!r} is absent from the dataset")
-        return action_key
-    matches = [key for key in ("action", "actions") if key in features]
-    if len(matches) != 1:
-        raise ValueError(
-            "could not unambiguously find the dataset action feature; pass action_key explicitly"
-        )
-    return matches[0]
-
-
-def action_delta_timestamps(action_key: str, chunk_size: int, fps: int) -> dict[str, list[float]]:
-    if fps <= 0:
-        raise ValueError(f"dataset FPS must be positive, got {fps}")
-    return {action_key: [index / fps for index in range(chunk_size)]}
 
 
 def canonicalize_dataset_stats(
@@ -113,16 +98,6 @@ def _collate_lerobot_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
         if key.startswith("observation.") or key in (CANONICAL_ACTION_KEY, "action_is_pad", "task")
     }
     return default_collate([{key: sample[key] for key in keep} for sample in samples])
-
-
-def _to_numpy(value: Any) -> np.ndarray:
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
-
-
-def lerobot_sample_to_observation(sample: Mapping[str, Any]) -> dict[str, np.ndarray]:
-    return {key: _to_numpy(value) for key, value in sample.items() if key.startswith("observation.")}
 
 
 def prepare_lerobot_batch(

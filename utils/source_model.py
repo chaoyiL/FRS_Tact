@@ -6,13 +6,13 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from modalities_eval.utils import EvalObservation
 from modalities_eval.utils import SmolVLAEvalModel
 from modalities_eval.utils import VelocityContext
 from modalities_eval.utils import _stack_observations
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
+from utils.flow_matching import deterministic_noise, inversion_mse
 from utils.integration import euler_integrate_velocity
 from utils.integration import fireflow_integrate_velocity
 
@@ -194,17 +194,3 @@ def reverse_integrate_actions(
         model.params, context, jnp.asarray(actions, dtype=jnp.float32)
     )
 
-
-def deterministic_noise(indices: Sequence[int], shape: tuple[int, int], *, seed: int) -> jax.Array:
-    base_key = jax.random.key(seed)
-    index_arr = jnp.asarray(list(indices), dtype=jnp.int32)
-
-    def one(index: jax.Array) -> jax.Array:
-        return jax.random.normal(jax.random.fold_in(base_key, index), shape, dtype=jnp.float32)
-
-    return jax.vmap(one)(index_arr)
-
-
-def inversion_mse(x_base: jax.Array, initial_noise: jax.Array) -> np.ndarray:
-    axes = tuple(range(1, x_base.ndim))
-    return np.asarray(jax.device_get(jnp.mean(jnp.square(x_base - initial_noise), axis=axes)), dtype=np.float32)
