@@ -134,6 +134,29 @@ pick up the green tube, and then use the right hand to pick up the blue tube."�
   `Pi0Config(...).load(params)`——照抄自 openpi 自己的
   `policies.policy_config.create_trained_policy`。
 
+## 交叉核对：和 ~/VLA/VB-VLA（同一个团队的另一个项目）的架构差异
+
+`~/VLA/VB-VLA` 是你们团队自己 fork 过的 openpi（`policy/src/openpi`），跑的是双臂机器人的
+pi0.5 部署/训练。核对了一下发现两件事：
+
+1. **camera0 = 左手，确认无误**：`policy/src/openpi/policies/vb_policy_vitac.py` 里写死
+   `left_image = data["observation.images.camera0"]`，和上面确认的一致，不用改。
+2. **触觉接入方式不一样，但已经确认按现状不改**：VB-VLA 的 `vb_policy_vitac.py`/
+   `pi05_chaoyi_vitac` 这套是把 4 路触觉图像**直接当额外相机喂进 pi0.5 本身**
+   （`image_keys = (left_image, right_image, tactile_left_0, tactile_right_0,
+   tactile_left_1, tactile_right_1)`，六路图都过 pi0.5 自己的 SigLIP），配套给
+   `Pi0Config` 加了 `image_keys`/`state_dim` 两个 vanilla openpi 没有的字段。
+   这和这个分支现在的设计（触觉完全不进 pi0.5，只喂给下游 FRS 网络，pi0.5 只处理
+   `left_wrist_0_rgb`/`right_wrist_0_rgb` 两路 RGB）是两条不同的路子。**已经确认维持现状，
+   不跟进这个"触觉直喂 pi0.5"的模式**——如果以后要改成那样，`pi05_jax/pi0_config.py`/
+   `pi0.py`/`model.py` 需要照 VB-VLA 的 fork 加 `image_keys`/`state_dim` 字段并在
+   `inputs_spec`/`preprocess_observation` 调用处传下去，`modalities_eval/pi05_utils.py`
+   的 `camera_map`/`IMAGE_KEYS` 假设也要跟着改（不再是固定 3 路 ALOHA 命名）。
+   另外搜了一圈 VB-VLA 本地和部署脚本里的 checkpoint 路径，没有找到任何 pick_tube 专用的
+   已训练 pi0.5 checkpoint（`pi05_chaoyi_vitac` 里的 "chaoyi" 只是人名，对应的是
+   `liuchaoyi/...` 数据，不是 pick_tube）——真要走 VT-pi0.5 这条路，得先在训练服务器上
+   实际跑一次微调，不是接个现成 checkpoint。
+
 ## 明确不做的事
 
 - 不 `pip install openpi`、不给它开单独环境——包名冲突的解法是 vendor 代码，不是隔离环境
