@@ -32,6 +32,7 @@ from modalities_eval.utils import (  # noqa: E402
     load_episode,
     load_model_from_args,
     predict_velocity_with_context,
+    require_unpadded_action_chunks,
 )
 
 DEFAULT_HUTCHINSON_SAMPLES = 1
@@ -587,7 +588,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
     parser.add_argument("--max-frames", type=int, default=1000)
-    parser.add_argument("--sample-interval", type=int)
+    frame_selection = parser.add_mutually_exclusive_group()
+    frame_selection.add_argument("--sample-interval", type=int)
+    frame_selection.add_argument("--frames", nargs="+", type=int)
     parser.add_argument("--num-steps", "-k", type=int, default=120)
     parser.add_argument(
         "--ode-solver",
@@ -625,7 +628,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise ValueError(f"--eval-batch-size must be positive, got {args.eval_batch_size}.")
 
     model = load_model_from_args(args)
-    if args.sample_interval is None:
+    if args.frames is not None:
+        episode = load_episode(
+            model,
+            args.episode_index,
+            max_frames=args.max_frames,
+            frame_indices=tuple(args.frames),
+        )
+    elif args.sample_interval is None:
         episode = load_episode(
             model,
             args.episode_index,
@@ -640,6 +650,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             sample_interval=args.sample_interval,
             max_frames=args.max_frames,
         )
+    require_unpadded_action_chunks(
+        episode.action_is_pad,
+        operation="likelihood evaluation",
+    )
 
     print(
         f"loaded episode={args.episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}"

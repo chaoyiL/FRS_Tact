@@ -399,6 +399,7 @@ def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) ->
             "tactile_keys": list(config.tactile_keys),
             "tactile_embedding_dim": config.tactile_embedding_dim,
             "tactile_num_tokens": config.tactile_num_tokens,
+            "tactile_token_repeat_factor": config.tactile_token_repeat_factor,
             "tactile_image_size": config.tactile_image_size,
             "optimizer_lr": config.optimizer_lr,
             "optimizer_betas": [config.optimizer_beta1, config.optimizer_beta2],

@@ -127,6 +127,21 @@ def _mapping_differences(saved: Any, current: Any, prefix: str = "") -> list[str
     return []
 
 
+def _canonicalize_resume_signature(signature: Any) -> Any:
+    if not isinstance(signature, Mapping):
+        return signature
+    normalized = dict(signature)
+    model = normalized.get("model")
+    if isinstance(model, Mapping):
+        normalized["model"] = {
+            **model,
+            "tactile_token_repeat_factor": model.get(
+                "tactile_token_repeat_factor", 1
+            ),
+        }
+    return normalized
+
+
 def cosine_warmup_schedule(config: JaxSmolVLAConfig, total_steps: int | None = None):
     warmup_steps = config.scheduler_warmup_steps
     decay_steps = config.scheduler_decay_steps
@@ -437,6 +452,7 @@ class JaxSmolVLATrainer:
             if int(metadata.get("version", -1)) != RESUME_METADATA_VERSION:
                 raise ValueError(f"unsupported resume metadata version in {metadata_path}")
             saved_signature = metadata.get("resume_signature")
+            saved_signature = _canonicalize_resume_signature(saved_signature)
             if isinstance(saved_signature, Mapping) and "seed" in saved_signature:
                 # The checkpoint seed is authoritative for the resumed data stream.
                 self.seed = int(saved_signature["seed"])
@@ -466,12 +482,16 @@ class JaxSmolVLATrainer:
                 "lora_rank": saved_config.get("lora_rank"),
                 "lora_alpha": saved_config.get("lora_alpha"),
                 "vlm_lora_target_modules": saved_config.get("vlm_lora_target_modules", []),
+                "tactile_token_repeat_factor": saved_config.get(
+                    "tactile_token_repeat_factor", 1
+                ),
             }
             legacy_current = {
                 "module_modes": self.config.module_modes,
                 "lora_rank": self.config.lora_rank,
                 "lora_alpha": self.config.lora_alpha,
                 "vlm_lora_target_modules": list(self.config.vlm_lora_target_modules),
+                "tactile_token_repeat_factor": self.config.tactile_token_repeat_factor,
             }
             differences = _mapping_differences(legacy_saved, _jsonable(legacy_current))
             if differences:

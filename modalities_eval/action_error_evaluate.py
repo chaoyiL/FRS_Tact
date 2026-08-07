@@ -6,7 +6,7 @@ import os
 import pathlib
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import jax
 import jax.numpy as jnp
@@ -34,15 +34,35 @@ class ActionErrorResult:
     mse: jax.Array
     rmse: jax.Array
     mae: jax.Array
+    physical_actions: jax.Array | None = None
+    physical_mse: jax.Array | None = None
+    physical_rmse: jax.Array | None = None
+    physical_mae: jax.Array | None = None
 
 
-def _prediction_error(predicted_actions: jax.Array, reference_actions: jax.Array) -> ActionErrorResult:
+def _prediction_error(
+    predicted_actions: jax.Array,
+    reference_actions: jax.Array,
+    *,
+    action_is_pad: jax.Array | None = None,
+) -> ActionErrorResult:
     predicted_actions = jnp.asarray(predicted_actions, dtype=jnp.float32)
     reference_actions = jnp.asarray(reference_actions, dtype=jnp.float32)
     difference = predicted_actions - reference_actions
     event_axes = tuple(range(1, difference.ndim))
-    mse = jnp.mean(jnp.square(difference), axis=event_axes)
-    mae = jnp.mean(jnp.abs(difference), axis=event_axes)
+    if action_is_pad is None:
+        mse = jnp.mean(jnp.square(difference), axis=event_axes)
+        mae = jnp.mean(jnp.abs(difference), axis=event_axes)
+    else:
+        padding = jnp.asarray(action_is_pad, dtype=jnp.bool_)
+        if padding.shape != difference.shape[:-1]:
+            raise ValueError(
+                f"action_is_pad must have shape {difference.shape[:-1]}, got {padding.shape}"
+            )
+        valid = jnp.broadcast_to((~padding)[..., None], difference.shape).astype(difference.dtype)
+        denominator = jnp.maximum(jnp.sum(valid, axis=event_axes), 1.0)
+        mse = jnp.sum(jnp.square(difference) * valid, axis=event_axes) / denominator
+        mae = jnp.sum(jnp.abs(difference) * valid, axis=event_axes) / denominator
     return ActionErrorResult(
         actions=predicted_actions,
         mse=mse,
@@ -56,6 +76,8 @@ def evaluate_modality_error_change(
     observation: EvalObservation,
     reference_actions: jax.Array,
     *,
+    action_is_pad: jax.Array | None = None,
+    evaluation_horizon: int | None = None,
     modality: str,
     num_steps: int,
     rng: jax.Array,
@@ -63,6 +85,17 @@ def evaluate_modality_error_change(
     original = _batch_observation(observation)
     ablated = _batch_observation(ablate_modality_observation(observation, modality=modality))
     reference_actions = _batch_actions(reference_actions).astype(jnp.float32)
+    horizon = model.config.chunk_size if evaluation_horizon is None else int(evaluation_horizon)
+    if horizon <= 0 or horizon > model.config.chunk_size or horizon > reference_actions.shape[1]:
+        raise ValueError(
+            f"evaluation_horizon must be in [1, {min(model.config.chunk_size, reference_actions.shape[1])}], "
+            f"got {horizon}"
+        )
+    padding = None
+    if action_is_pad is not None:
+        padding = jnp.asarray(action_is_pad, dtype=jnp.bool_)
+        if padding.ndim == 1:
+            padding = padding[None, :]
     noise = jax.random.normal(
         rng,
         (1, model.config.chunk_size, model.config.max_action_dim),
@@ -80,8 +113,36 @@ def evaluate_modality_error_change(
         num_steps=num_steps,
         noise=noise,
     )
-    original_error = _prediction_error(original_actions, reference_actions)
-    ablated_error = _prediction_error(ablated_actions, reference_actions)
+    original_actions = original_actions[:, :horizon]
+    ablated_actions = ablated_actions[:, :horizon]
+    reference_actions = reference_actions[:, :horizon]
+    if padding is not None:
+        padding = padding[:, :horizon]
+    original_error = _prediction_error(
+        original_actions, reference_actions, action_is_pad=padding
+    )
+    ablated_error = _prediction_error(
+        ablated_actions, reference_actions, action_is_pad=padding
+    )
+    physical_reference = model.preprocessor.unnormalize_actions(reference_actions)
+    enriched_errors = []
+    for result, actions in ((original_error, original_actions), (ablated_error, ablated_actions)):
+        physical_actions = model.preprocessor.unnormalize_actions(actions)
+        physical_error = _prediction_error(
+            physical_actions,
+            physical_reference,
+            action_is_pad=padding,
+        )
+        enriched_errors.append(
+            replace(
+                result,
+                physical_actions=physical_actions,
+                physical_mse=physical_error.mse,
+                physical_rmse=physical_error.rmse,
+                physical_mae=physical_error.mae,
+            )
+        )
+    original_error, ablated_error = enriched_errors
     return original_error, ablated_error, ablated_error.mse - original_error.mse
 
 
@@ -107,6 +168,14 @@ def save_error_curve(
         "ablated_rmse",
         "original_mae",
         "ablated_mae",
+        "original_physical_mse",
+        "ablated_physical_mse",
+        "delta_physical_mse",
+        "relative_delta_physical_mse",
+        "original_physical_rmse",
+        "ablated_physical_rmse",
+        "original_physical_mae",
+        "ablated_physical_mae",
     )
     with csv_path.open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fields)
@@ -146,8 +215,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     add_eval_data_arguments(parser)
     parser.add_argument("--episode-index", type=int, default=0)
     parser.add_argument("--frame", type=int, default=0)
-    parser.add_argument("--sample-interval", type=int)
+    frame_selection = parser.add_mutually_exclusive_group()
+    frame_selection.add_argument("--sample-interval", type=int)
+    frame_selection.add_argument("--frames", nargs="+", type=int)
     parser.add_argument("--num-steps", "-k", type=int, default=10)
+    parser.add_argument("--evaluation-horizon", type=int)
     parser.add_argument(
         "--remove-modality",
         choices=("vision", "tactile", "state", "language_prompt"),
@@ -159,25 +231,40 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     model = load_model_from_args(args)
-    episode = load_episode(
-        model,
-        args.episode_index,
-        start_frame=args.frame,
-        sample_interval=args.sample_interval,
-        max_frames=args.max_frames,
-        frame_indices=(args.frame,) if args.sample_interval is None else None,
-    )
+    if args.frames is not None:
+        episode = load_episode(
+            model,
+            args.episode_index,
+            max_frames=args.max_frames,
+            frame_indices=tuple(args.frames),
+        )
+    elif args.sample_interval is None:
+        episode = load_episode(
+            model,
+            args.episode_index,
+            max_frames=args.max_frames,
+            frame_indices=(args.frame,),
+        )
+    else:
+        episode = load_episode(
+            model,
+            args.episode_index,
+            start_frame=args.frame,
+            sample_interval=args.sample_interval,
+            max_frames=args.max_frames,
+        )
     print(f"loaded episode={args.episode_index} frames={len(episode.frames)} indices={episode.indices[:5]}")
     print(f"prompt={episode.prompts[0]!r}")
     print(f"ablated_modality={args.remove_modality} num_steps={args.num_steps}")
 
     rows = []
     base_rng = jax.random.key(args.seed)
-    for frame, dataset_index, observation, reference_actions in zip(
+    for frame, dataset_index, observation, reference_actions, action_is_pad in zip(
         episode.frames,
         episode.indices,
         episode.observations,
         episode.actions,
+        episode.action_is_pad,
         strict=True,
     ):
         rng = jax.random.fold_in(base_rng, dataset_index)
@@ -185,12 +272,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             model,
             observation,
             reference_actions,
+            action_is_pad=action_is_pad,
+            evaluation_horizon=args.evaluation_horizon,
             modality=args.remove_modality,
             num_steps=args.num_steps,
             rng=rng,
         )
         original_mse = _scalar(original.mse)
         delta_mse = _scalar(delta)
+        original_physical_mse = _scalar(original.physical_mse)
+        delta_physical_mse = _scalar(ablated.physical_mse - original.physical_mse)
         row = {
             "frame": frame,
             "dataset_index": dataset_index,
@@ -202,6 +293,18 @@ def main(argv: Sequence[str] | None = None) -> None:
             "ablated_rmse": _scalar(ablated.rmse),
             "original_mae": _scalar(original.mae),
             "ablated_mae": _scalar(ablated.mae),
+            "original_physical_mse": original_physical_mse,
+            "ablated_physical_mse": _scalar(ablated.physical_mse),
+            "delta_physical_mse": delta_physical_mse,
+            "relative_delta_physical_mse": (
+                delta_physical_mse / original_physical_mse
+                if original_physical_mse
+                else float("nan")
+            ),
+            "original_physical_rmse": _scalar(original.physical_rmse),
+            "ablated_physical_rmse": _scalar(ablated.physical_rmse),
+            "original_physical_mae": _scalar(original.physical_mae),
+            "ablated_physical_mae": _scalar(ablated.physical_mae),
         }
         rows.append(row)
         print(

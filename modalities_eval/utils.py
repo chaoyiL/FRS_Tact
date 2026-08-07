@@ -35,6 +35,11 @@ class EvalObservation:
     language_masks: Array
     state: Array
     image_keys: tuple[str, ...] = struct.field(pytree_node=False)
+    state_mask: Array | None = None
+    tactile_images: Array | None = None
+    tactile_embeddings: Array | None = None
+    tactile_masks: Array | None = None
+    tactile_keys: tuple[str, ...] = struct.field(pytree_node=False, default=())
 
 
 @struct.dataclass
@@ -52,6 +57,7 @@ class EpisodeData:
     raw_samples: tuple[dict[str, Any], ...]
     observations: tuple[EvalObservation, ...]
     actions: tuple[Array, ...]
+    action_is_pad: tuple[Array, ...]
     prompts: tuple[str, ...]
 
 
@@ -126,7 +132,7 @@ class SmolVLAEvalModel:
         selected = present + missing[: self.config.empty_cameras]
         return tuple(source_by_target.get(key, key) for key in selected)
 
-    def prepare_sample(self, sample: Mapping[str, Any]) -> tuple[EvalObservation, Array, str]:
+    def prepare_sample(self, sample: Mapping[str, Any]) -> tuple[EvalObservation, Array, Array, str]:
         prompt = str(sample.get("task", ""))
         prepared = self.preprocessor.prepare(lerobot_sample_to_observation(sample), prompt)
         observation = EvalObservation(
@@ -136,11 +142,30 @@ class SmolVLAEvalModel:
             language_masks=prepared["language_masks"][0],
             state=prepared["state"][0],
             image_keys=self.image_keys_for_sample(sample),
+            state_mask=jnp.asarray(True, dtype=jnp.bool_),
+            tactile_images=(
+                None if prepared.get("tactile_images") is None else prepared["tactile_images"][0]
+            ),
+            tactile_embeddings=(
+                None
+                if prepared.get("tactile_embeddings") is None
+                else prepared["tactile_embeddings"][0]
+            ),
+            tactile_masks=(
+                None if prepared.get("tactile_masks") is None else prepared["tactile_masks"][0]
+            ),
+            tactile_keys=tuple(self.config.tactile_keys or ()),
         )
         actions = self.preprocessor.normalize_actions(
             jnp.asarray(np.asarray(sample[self.action_key]), dtype=jnp.float32)
         )
-        return observation, actions, prompt
+        padding_key = "action_is_pad" if self.action_key == "action" else f"{self.action_key}_is_pad"
+        action_is_pad = sample.get(padding_key)
+        if action_is_pad is None:
+            action_is_pad = jnp.zeros(actions.shape[0], dtype=jnp.bool_)
+        else:
+            action_is_pad = jnp.asarray(np.asarray(action_is_pad), dtype=jnp.bool_)
+        return observation, actions, action_is_pad, prompt
 
     def sample_actions(
         self,
@@ -162,6 +187,10 @@ class SmolVLAEvalModel:
                     obs.language_masks,
                     obs.state,
                     key,
+                    state_mask=obs.state_mask,
+                    tactile_images=obs.tactile_images,
+                    tactile_embeddings=obs.tactile_embeddings,
+                    tactile_masks=obs.tactile_masks,
                     noise=initial_noise,
                     num_steps=num_steps,
                 )
@@ -214,6 +243,21 @@ def _stack_observations(*observations: EvalObservation) -> EvalObservation:
         lambda *values: jnp.stack([jnp.asarray(value) for value in values], axis=0),
         *observations,
     )
+
+
+def require_unpadded_action_chunks(action_is_pad: Sequence[Array], *, operation: str) -> None:
+    """Reject selected frames whose fixed-size action chunks contain dataset padding."""
+
+    padded_offsets = tuple(
+        offset
+        for offset, padding in enumerate(action_is_pad)
+        if bool(np.any(np.asarray(jax.device_get(padding), dtype=np.bool_)))
+    )
+    if padded_offsets:
+        raise ValueError(
+            f"{operation} requires complete action chunks without padding; selected frame offsets "
+            f"{padded_offsets} contain action_is_pad=True. Choose H_safe complete frames."
+        )
 
 
 def load_model(
@@ -276,6 +320,7 @@ def load_episode(
     raw_samples = []
     observations = []
     actions = []
+    action_is_pad = []
     prompts = []
     indices = []
     frames = []
@@ -286,10 +331,11 @@ def load_episode(
                 f"available frames are 0..{len(dataset) - 1}"
             )
         sample = dataset[frame]
-        observation, action, prompt = model.prepare_sample(sample)
+        observation, action, padding, prompt = model.prepare_sample(sample)
         raw_samples.append(sample)
         observations.append(observation)
         actions.append(action)
+        action_is_pad.append(padding)
         prompts.append(prompt)
         indices.append(int(_as_scalar(sample["index"])))
         frames.append(int(frame))
@@ -301,6 +347,7 @@ def load_episode(
         raw_samples=tuple(raw_samples),
         observations=tuple(observations),
         actions=tuple(actions),
+        action_is_pad=tuple(action_is_pad),
         prompts=tuple(prompts),
     )
 
@@ -311,17 +358,18 @@ def ablate_modality_observation(
     modality: str,
     **_: Any,
 ) -> EvalObservation:
-    if modality in ("vision", "tactile"):
-        tactile = np.asarray(["tactile" in key.lower() for key in observation.image_keys])
-        selected = tactile if modality == "tactile" else ~tactile
-        if not np.any(selected):
-            raise ValueError(
-                f"checkpoint observation has no {modality} image slots: {observation.image_keys}"
-            )
-        masks = jnp.where(jnp.asarray(selected), False, observation.image_masks)
-        return observation.replace(image_masks=masks)
+    if modality == "vision":
+        if not observation.image_keys:
+            raise ValueError("checkpoint observation has no vision image slots")
+        return observation.replace(image_masks=jnp.zeros_like(observation.image_masks))
+    if modality == "tactile":
+        if observation.tactile_masks is None or not observation.tactile_keys:
+            raise ValueError("checkpoint does not use tactile inputs; tactile ablation is not applicable")
+        return observation.replace(tactile_masks=jnp.zeros_like(observation.tactile_masks))
     if modality == "state":
-        return observation.replace(state=jnp.zeros_like(observation.state))
+        return observation.replace(
+            state_mask=jnp.zeros(observation.state.shape[:-1], dtype=jnp.bool_)
+        )
     if modality in ("language", "language_prompt"):
         return observation.replace(language_masks=jnp.zeros_like(observation.language_masks))
     raise ValueError(
@@ -340,6 +388,10 @@ def create_velocity_context(
         observation.language_tokens,
         observation.language_masks,
         observation.state,
+        state_mask=observation.state_mask,
+        tactile_images=observation.tactile_images,
+        tactile_embeddings=observation.tactile_embeddings,
+        tactile_masks=observation.tactile_masks,
     )
     return VelocityContext(pad_mask=prefix.pad_mask, cache=prefix.cache)
 

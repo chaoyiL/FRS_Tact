@@ -28,7 +28,12 @@ from modalities_eval.loglike_evaluate import (
     load_episode,
     save_contribution_curve,
 )
-from modalities_eval.utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
+from modalities_eval.utils import (
+    SmolVLAEvalModel,
+    add_eval_data_arguments,
+    load_model_from_args,
+    require_unpadded_action_chunks,
+)
 
 MODALITIES = ("vision", "tactile", "state", "language_prompt")
 DEFAULT_CHECKPOINT_DIR = pathlib.Path("/home/typhon/models/tactile_test_05_1.5w")
@@ -122,6 +127,10 @@ def evaluate_modalities(
             sample_interval=sample_interval,
             max_frames=max_frames,
         )
+    require_unpadded_action_chunks(
+        episode.action_is_pad,
+        operation="likelihood evaluation",
+    )
     print(
         f"loaded episode={episode_index} frames={len(episode.indices)} dataset_indices={episode.indices[:5]}"
     )

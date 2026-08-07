@@ -70,6 +70,17 @@ def _validate_vt_config(path: Path) -> None:
             f"!= {model['tactile_num_tokens']})"
         )
 
+    repeat_factor = model.get("tactile_token_repeat_factor", 1)
+    if (
+        isinstance(repeat_factor, bool)
+        or not isinstance(repeat_factor, int)
+        or repeat_factor < 1
+    ):
+        raise ValueError(
+            "model.tactile_token_repeat_factor 必须是正整数，"
+            f"当前值：{repeat_factor!r}"
+        )
+
     image_keys = model.get("image_keys") or []
     overlap = sorted(set(image_keys) & set(tactile_keys))
     if overlap:

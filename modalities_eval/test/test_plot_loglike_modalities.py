@@ -1,10 +1,62 @@
 from __future__ import annotations
 
 import pathlib
+from types import SimpleNamespace
 
+import jax.numpy as jnp
 import pytest
 
 from modalities_eval import plot_loglike_modalities
+
+
+def test_evaluate_modalities_rejects_padded_actions_before_compute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    computed = False
+    episode = SimpleNamespace(
+        indices=(0,),
+        frames=(0,),
+        observations=(object(),),
+        actions=(jnp.zeros((2, 2)),),
+        action_is_pad=(jnp.asarray([False, True]),),
+        prompts=("task",),
+    )
+    model = SimpleNamespace(params={"weight": jnp.ones(())})
+    monkeypatch.setattr(plot_loglike_modalities, "load_episode", lambda *args, **kwargs: episode)
+
+    def fake_compute(*args, **kwargs):
+        nonlocal computed
+        computed = True
+        return []
+
+    monkeypatch.setattr(
+        plot_loglike_modalities,
+        "compute_episode_modality_contributions",
+        fake_compute,
+    )
+    monkeypatch.setattr(
+        plot_loglike_modalities,
+        "save_contribution_curve",
+        lambda *args, **kwargs: (pathlib.Path("curve.csv"), None),
+    )
+
+    with pytest.raises(ValueError, match="H_safe"):
+        plot_loglike_modalities.evaluate_modalities(
+            model=model,
+            episode_index=0,
+            frame=0,
+            max_frames=10,
+            sample_interval=None,
+            num_steps=1,
+            ode_solver="euler",
+            eval_batch_size=1,
+            hutchinson_samples=1,
+            hutchinson_seed=0,
+            modalities=("vision",),
+            output_dir=pathlib.Path("out"),
+        )
+
+    assert not computed
 
 
 def test_default_arguments_run_requested_evaluation() -> None:

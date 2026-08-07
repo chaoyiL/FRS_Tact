@@ -17,7 +17,11 @@ from deploy_smolvla.remote_client import (
     _validate_observation_mode,
 )
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA, normalize_tactile_embeddings
+from lerobot.policies.smolvla_jax.modeling import (
+    JaxSmolVLA,
+    _repeat_tactile_tokens_and_masks,
+    normalize_tactile_embeddings,
+)
 from lerobot.policies.smolvla_jax.policy import JaxSmolVLAPolicy
 from lerobot.policies.smolvla_jax.validation import CheckpointValidationReport
 
@@ -313,6 +317,99 @@ def test_tactile_embedding_normalization_has_unit_rms() -> None:
     normalized = normalize_tactile_embeddings(embeddings)
     rms = jnp.sqrt(jnp.mean(jnp.square(normalized), axis=-1))
     np.testing.assert_allclose(rms, np.ones((1, 2)), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("factor,expected_tokens", [(1, 4), (8, 32), (21, 84)])
+def test_repeat_tactile_tokens_and_masks_is_key_major(
+    factor: int, expected_tokens: int
+) -> None:
+    tokens = jnp.arange(4, dtype=jnp.float32).reshape(1, 4, 1)
+    masks = jnp.asarray([[True, False, True, False]])
+
+    expanded, expanded_masks = _repeat_tactile_tokens_and_masks(tokens, masks, factor)
+
+    assert expanded.shape == (1, expected_tokens, 1)
+    assert expanded_masks.shape == (1, expected_tokens)
+    np.testing.assert_array_equal(
+        expanded[0, :, 0], np.repeat(np.arange(4), factor)
+    )
+    np.testing.assert_array_equal(
+        expanded_masks[0], np.repeat([True, False, True, False], factor)
+    )
+
+
+def test_repeat_factor_one_is_value_preserving() -> None:
+    tokens = jnp.arange(24, dtype=jnp.float32).reshape(2, 4, 3)
+    masks = jnp.asarray([[True] * 4, [True, False, True, False]])
+    expanded, expanded_masks = _repeat_tactile_tokens_and_masks(tokens, masks, 1)
+    np.testing.assert_array_equal(expanded, tokens)
+    np.testing.assert_array_equal(expanded_masks, masks)
+
+
+def test_embed_prefix_repeats_tactile_tokens_and_ablation_mask() -> None:
+    hidden_size = 3
+
+    class StubPrefixModel(JaxSmolVLA):
+        def embed_image(self, params, image):
+            del params
+            return jnp.ones((image.shape[0], 2, hidden_size), dtype=jnp.float32)
+
+        def embed_language(self, params, tokens):
+            del params
+            return jnp.full(
+                (tokens.shape[0], tokens.shape[1], hidden_size),
+                7.0,
+                dtype=jnp.float32,
+            )
+
+        def embed_tactile(self, params, tactile_images=None, *, tactile_embeddings=None):
+            del params, tactile_images
+            return jnp.asarray(tactile_embeddings, dtype=jnp.float32)
+
+        def _linear(self, params, name, value, *, bias=False, **kwargs):
+            del params, bias, kwargs
+            assert name == "model.state_proj"
+            return jnp.zeros((value.shape[0], hidden_size), dtype=jnp.float32)
+
+    config = JaxSmolVLAConfig(
+        use_tactile_encoder=True,
+        tactile_encoder_path="unused",
+        tactile_keys=("t0", "t1", "t2", "t3"),
+        tactile_num_tokens=4,
+        tactile_token_repeat_factor=8,
+        text_hidden_size=hidden_size,
+        max_state_dim=2,
+    )
+    model = StubPrefixModel(config)
+    tactile = jnp.arange(12, dtype=jnp.float32).reshape(1, 4, hidden_size)
+    common = dict(
+        params={},
+        images=jnp.zeros((1, 2, 3, 2, 2), dtype=jnp.float32),
+        image_masks=jnp.ones((1, 2), dtype=jnp.bool_),
+        language_tokens=jnp.ones((1, 3), dtype=jnp.int32),
+        language_masks=jnp.ones((1, 3), dtype=jnp.bool_),
+        state=jnp.zeros((1, 2), dtype=jnp.float32),
+        tactile_embeddings=tactile,
+    )
+
+    prefix, pad_mask, _ = model.embed_prefix(
+        **common,
+        tactile_masks=jnp.ones((1, 4), dtype=jnp.bool_),
+    )
+    _, ablated_pad_mask, _ = model.embed_prefix(
+        **common,
+        tactile_masks=jnp.zeros((1, 4), dtype=jnp.bool_),
+    )
+
+    tactile_start = 4  # two image slots x two stub tokens
+    tactile_stop = tactile_start + 32
+    assert prefix.shape == (1, 4 + 32 + 3 + 1, hidden_size)
+    np.testing.assert_array_equal(
+        prefix[:, tactile_start:tactile_stop],
+        jnp.repeat(tactile, 8, axis=1),
+    )
+    assert bool(jnp.all(pad_mask[:, tactile_start:tactile_stop]))
+    assert bool(jnp.all(~ablated_pad_mask[:, tactile_start:tactile_stop]))
 
 
 def test_cached_tactile_embeddings_keep_trainable_projection() -> None:

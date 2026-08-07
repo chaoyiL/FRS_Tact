@@ -64,7 +64,7 @@ tactile_embedding_cache:
   precompute_flush_every: 20
 
 # ---- 输出与训练超参 ----
-output: /workspace/vtsmolvla_tactile_01
+output: /workspace/vtsmolvla_tactile_repeat32
 steps: 40000
 batch_size: 64
 # 8 核 RunPod：每个 worker 内还会并行解码六路视频，避免开过多进程。
@@ -144,13 +144,9 @@ wandb:
   enabled: true
   project: smolvla-jax
   entity: null
-  name: vtsmolvla_tactile_encoder_01
+  name: vtsmolvla_tactile_repeat32
   mode: online
-  tags:
-    - smolvla
-    - tactile
-    - tactile-encoder
-    - vtsmolvla
+  tags: [smolvla, tactile, tactile-encoder, vtsmolvla, naive-repeat, tactile32]
   log_checkpoints: false
 
 # ---- 模型配置覆盖 ----
@@ -199,7 +195,7 @@ model:
   tactile_embedding_dim: 512
   tactile_num_tokens: 4
   # 每路 projected tactile token 的无参数复制数；1 为原始四-token baseline。
-  tactile_token_repeat_factor: 1
+  tactile_token_repeat_factor: 21
   tactile_image_size: 224
 
   chunk_size: 20

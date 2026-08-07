@@ -29,6 +29,7 @@ from utils import (
     load_episode,
     load_model_from_args,
     predict_velocity_with_context,
+    require_unpadded_action_chunks,
 )
 
 from lerobot.datasets import LeRobotDataset
@@ -435,6 +436,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         num_frames=args.num_frames,
         seed=args.seed,
         max_frames=args.max_frames,
+    )
+    require_unpadded_action_chunks(
+        episode.action_is_pad,
+        operation="action reverse integration",
     )
     action_truth = np.stack(episode.actions, axis=0).astype(np.float32)
 

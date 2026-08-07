@@ -1,0 +1,86 @@
+# FRS_Tact 工作记忆
+
+## modalities_eval 触觉模态分析（2026-08-08）
+
+- 当前实现分支：`codex/modalities-eval-tactile`，隔离 worktree 为 `/home/yunjing/FRS/.worktrees/FRS_Tact-modalities-eval`。
+- 原始 `eric` 工作区存在用户未提交的环境改动，当前任务不得覆盖或清理。
+- 独立六路 v3 数据目标：`/home/yunjing/FRS/eval_data/KaiyueChen/pick_tube_02`；原始 v2.1 HF 缓存只读保留。
+- VT checkpoint：`/home/yunjing/FRS/KaiyueChen/vtsmolvla_01_3w`，chunk 20，四路独立 tactile tensor。
+- 视觉 checkpoint：`/home/yunjing/FRS/FRS_Tact/checkpoints/pick_tube_02_3w_jax`，chunk 10，无 tactile 分支。
+- 两者不是只改变 tactile 的受控 A/B：expert/action/state 权重、normalizer、chunk 和训练协议均不同。因此 VT 内部 full/no-tactile 是主要触觉证据；跨模型只能称系统级比较。
+- 两模型输入必须显式使用相同 RGB rename：`camera0 -> camera1`、`camera1 -> camera2`。
+- 运行顺序固定为：VT 单帧 tactile action-error -> 两模型多帧 action-error -> likelihood/Hutchinson -> 辅助 t-SNE。
+- 分别拟合的 t-SNE 坐标不可直接比较；跨模型可视化若需要比较，必须联合拟合。
+
+后续每次代码、数据或实验产物发生变化，都在本文件追加命令、结果和限制。
+
+### 当前执行记录
+
+- 已创建实现方案：`docs/plans/2026-08-08-modalities-eval-tactile.md`。
+- 已将 SmolVLM tokenizer 的 5 个必要文件下载到 `/home/yunjing/FRS/eval_cache/huggingface/hub`；设置 `HF_HUB_CACHE` 后，`AutoTokenizer(..., local_files_only=True)` 验证成功，类型为 `GPT2TokenizerFast`、词表大小 49152。
+- 数据源 v2.1 大小约 4.3 GiB；已复制到工作区目标，源缓存未改。副本原始全局 index 不唯一（61,811 帧仅 52,802 个唯一 index），转换前需在副本修复为 `0..61810`。
+- 当前受控命令中 `nvidia-smi` 可见空闲 RTX 4090，但 JAX 0.8.3 和 PyTorch 2.11.0 都检测不到 CUDA，正式模型评估暂不能在此进程中启动；不得把 likelihood/Hutchinson 误跑到 CPU。
+- 六路 v3 数据已生成在 `/home/yunjing/FRS/eval_data/KaiyueChen/pick_tube_02`：`codebase_version=v3.0`，150 episodes、61,811 frames、50 个 parquet；两路 RGB 与四路 tactile 均可解码为 `[3,224,224]`，state/action 均为 20 维，action 字段仍名为 `actions`。
+- 转换后的全局 index 为 `0..61810` 且 61,811 个全部唯一；episode 内 frame index 连续。当前 loader 已抽样读取首/中/尾帧及 episode 0 的 delta action chunk。
+- 源 cache 的 inventory SHA256 复核仍为 `1b8419298fb5c7d819f0f19e795ad97302bc873dac1a330bcefd4dead0120719`，源未改。
+- 转换过程的两个失败中间目录被移动并保留：`pick_tube_02_v30.failed-20260808T013055`、`pick_tube_02_v30.failed-20260808T013249-cachelock`；它们不是最终数据，不应用于评估。
+- TDD 红灯证据：新增 6 个聚焦测试后，旧 evaluator 为 `6 failed in 3.22s`，失败覆盖 tactile/action padding 丢失、state mask 缺失、padding/horizon/physical metrics 接口缺失。
+
+### 最终代码状态与验证
+
+- `EvalObservation` 已独立保存 `tactile_images`、`tactile_embeddings`、`tactile_masks`、`tactile_keys` 与 `state_mask`；sampling 和 velocity/likelihood context 全量透传。
+- tactile 消融现在只把 `tactile_masks` 置 False；纯视觉 checkpoint 的 tactile 消融明确报不适用。state 消融使用 `state_mask=False`。
+- `EpisodeData` 保留 `action_is_pad`；action-error 按有效 step 聚合，并支持 `--evaluation-horizon` 与 checkpoint 反归一化后的 physical MSE/RMSE/MAE。
+- action-error 和 likelihood 支持显式 `--frames ...`；`--frames` 与 `--sample-interval` 互斥。
+- likelihood、plot wrapper 和 reverse t-SNE 对任何 padded action chunk 都在计算前 fail-fast，提示选择 H_safe 完整帧。
+- `JaxSmolVLA.sample_actions` 只新增向后兼容的可选 `state_mask=None` 参数，默认模型行为不变。
+- TDD 红灯还覆盖：`tactile_keys=None`、raw tactile images、`--frames` CLI、likelihood/plot padding 旁路。
+- 最终 fresh 回归：`103 passed, 1 skipped in 9.08s`；`py_compile` 与 `git diff --check` exit 0。只读代码审查最终 verdict：无 Critical/Important，Ready。
+
+### 实际运行与产物
+
+- 沙箱外 GPU 复验：JAX backend `gpu`、device `CudaDevice(id=0)`；PyTorch CUDA 可用。
+- 固定 episode 48，frames `0,50,100,150,200,249,300,350`，所有 H=20 chunk 无 padding；action-error 使用共同 H=10、k=10、seed=0。
+- VT tactile action-error：normalized delta MSE mean `0.057198`，5/8 为正；physical delta MSE mean `1.1261e-6`。
+- VT action-error 的 vision/state/language normalized delta mean 分别为 `0.460663 / 0.567575 / 0.429842`。
+- Visual action-error 的 vision/state/language normalized delta mean 分别为 `0.510826 / 0.585254 / 0.431766`；tactile 为 N/A。
+- likelihood 使用 Euler k=20、Hutchinson samples=1/seed=0。VT tactile contribution mean `45.121`、median `5.712`、5/8 为正，范围 `-38.382..227.433`，阶段依赖明显。
+- likelihood contribution mean：VT vision/state/language `421.074 / 136.951 / 146.786`；Visual vision/state/language `360.088 / 383.639 / -2.079`。
+- 全部结果位于 `/home/yunjing/FRS/eval_outputs/modalities_eval_20260808`；汇总为该目录 `RESULTS_SUMMARY.md`。
+- 输出 fresh 检查：15 个主 metric CSV 共 113 rows 全 finite；另有单帧 action-error smoke CSV；18 个 PNG；VT/Visual t-SNE NPZ shape 分别为 `[8,20,20]`、`[8,10,20]`，坐标 finite。
+- 两个 t-SNE 分别拟合，仅作为各模型内部辅助图，禁止跨图比较坐标。
+- 结果仅来自一个 episode 的 8 帧且无共同 holdout 证明；两个 checkpoint 也不是 tactile-only A/B，不得作强因果或泛化结论。
+
+## Naive tactile token ratio baseline 设计（2026-08-08）
+
+- 用户批准按 conditioning prefix 计算 tactile token 占比，不包含 action/time suffix。
+- 方法固定为投影后无参数 `repeat_interleave`，继续直接 concat：`RGB -> tactile repeats -> language -> state`。
+- 新配置字段定为 `tactile_token_repeat_factor`，默认 1；旧 `tactile_num_tokens=4` 继续表示四路 tactile keys/cache streams，不改变 cache `[F,4,512]`。
+- K=8：32 tactile tokens，最大 prefix 209，占 15.31%，论文记作约16%。
+- K=21：84 tactile tokens，最大 prefix 261，占 32.18%，论文记作约32%。
+- 不新增参数、modality/type/copy-slot embedding 或位置编码；沿用连续 RoPE。
+- 旧 config/checkpoint 缺字段时按 K=1；不同 K 禁止 strict optimizer resume，只能作权重 warm-start的新 run。
+- 正式实验 K=1/8/21 必须从相同 base initialization、数据 split、seed 和训练协议开始。
+- 书面 spec：`docs/designs/2026-08-08-naive-tactile-token-ratio-design.md`。
+- 实施计划：`docs/plans/2026-08-08-naive-tactile-token-ratio.md`；已覆盖 config/checkpoint 持久化、launcher fail-closed 校验、投影后 token/mask 同序复制、旧 resume metadata K=1 迁移、K=1/8/21 YAML 科学变量一致性及 CPU/GPU 验证。
+- spec 和 plan 已按后文“最终实现与整体验证”落地；token baseline 生产代码已实施且通过 CPU/GPU smoke，但尚未启动新训练。
+
+### Naive tactile token ratio 实施进度：Task 3
+
+- `modeling.py` 新增纯函数 `_repeat_tactile_tokens_and_masks`：共享 `model.tactile_proj` 投影后，沿 token 轴做无参数 key-major `jnp.repeat`，mask 同序复制。
+- `embed_tactile` 仍输出基础 `[B,S,H]`；`embed_prefix` 先校验基础 `[B,S]` mask，再按 `tactile_token_repeat_factor` 扩展并拼接。cache shape、参数、位置编码与 suffix 均未改变。
+- TDD 证据：helper 缺失时 import RED；真实 prefix RED 为实际 `(1,12,3)` 对期望 `(1,40,3)`；实现后聚焦 CPU 测试 `12 passed in 3.54s`。
+- K=1/8/21 分别验证 4/32/84 tokens，且 key-major value 顺序、mask parity、K=1 value-preserving 全部覆盖。
+
+### Naive tactile token ratio 最终实现与整体验证（2026-08-08）
+
+- 实现仍位于分支 `codex/modalities-eval-tactile`、worktree `/home/yunjing/FRS/.worktrees/FRS_Tact-modalities-eval`，保持未暂存、未提交；既有 `modalities_eval` 工作没有被 token-baseline tasks 覆盖或清理。
+- 最终生产/config 范围：`configuration.py` 新增严格正整数 `tactile_token_repeat_factor`（legacy default K=1）和 `effective_tactile_num_tokens`；`checkpoint.py` 保存该字段；`modeling.py` 在共享 `tactile_proj` 之后按 key-major 顺序无参数复制 token 和 mask；`training.py` 只把旧 resume metadata 缺失字段迁移为 K=1；VT launcher 在 checkpoint/data 访问前 fail-closed 校验；三份 YAML 为 K=1/8/21 独立完整配置。
+- 参数/cache 契约不变：`tactile_num_tokens=4` 仍表示四路源 tactile streams，cache 输入仍为 `[F,4,512]`，`model.tactile_proj.weight` 的现有 checkpoint shape 实测仍为 `(960, 512)`；未新增 parameter key、projection、cache schema、modality/type/copy-slot embedding 或位置编码逻辑。
+- prefix 口径固定为 `128 RGB + 4K tactile + 48 language + 1 state`（不含 action/time suffix）：K=1 为 4/181=`2.21%`，K=8 为 32/209=`15.31%`（论文约 16%），K=21 为 84/261=`32.18%`（论文约 32%）。prefix 顺序仍为 `RGB -> repeated tactile -> language -> state`。
+- 分任务 RED/GREEN：Task 1 config RED `3 failed, 8 passed`，review-fix direct/replace RED `10 failed, 12 passed`，最终 `22 passed`；Task 2 launcher RED `5 failed, 1 passed`，GREEN `6 passed`；Task 3 helper RED 为 collection `ImportError`，prefix RED `1 failed, 11 passed`，GREEN `12 passed`；Task 4 初版 legacy resume RED 为缺少 `model.tactile_token_repeat_factor`、GREEN `10 passed`，final review 暴露 metadata 整体缺失的 cross-K 漏洞后补测并修复，最终 fresh `13 passed in 3.61s`；Task 5 YAML RED 为 tactile16 文件缺失，GREEN `7 passed`。命令均为 `JAX_PLATFORMS=cpu PYTHONPATH=src:. ... python -m pytest -p no:cacheprovider <focused test> -q`，精确输出保存在 `.git/worktrees/FRS_Tact-modalities-eval/sdd/task-{1..5}-report.md`。
+- 2026-08-08 post-fix fresh full CPU regression：`env JAX_PLATFORMS=cpu PYTHONPATH=src:. PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/matplotlib XDG_CACHE_HOME=/tmp HF_DATASETS_CACHE=/tmp/frs_tactile_ratio_hf_cache .../python -m pytest -p no:cacheprovider modalities_eval/test tests/jax -q` -> exit 0，`134 passed, 1 skipped in 9.56s`；首次 review 前为 `131 passed, 1 skipped in 9.25s`，新增 3 个 metadata-absent resume cases 后为最终计数。skip 仍是需要显式 opt-in 的真实 checkpoint reconstruction test。
+- fresh 静态/schema 验证：brief 指定的 9 文件 `py_compile` exit 0、无输出；`git diff --check` exit 0、无输出；现有 VT checkpoint schema smoke exit 0 并输出 `parameter_schema_unchanged (960, 512)`，同时验证 K=1/8/21 effective tokens 为 4/32/84。
+- 沙箱外 RTX 4090 checkpoint-backed GPU smoke（每个 K 为全新 Python 进程，episode 48 frame 249，`num_steps=1`）均 exit 0、sample actions 全 finite：K=1 prefix 181，`19.527281855 s`，peak `1,904,225,280` bytes；K=8 prefix 209，`19.807580470 s`，peak `1,903,243,776` bytes；K=21 prefix 261，`20.760682782 s`，peak `1,903,823,872` bytes。它们只证明兼容性/性能 smoke，不是论文训练或结果。
+- K=1/8/21 YAML 解析后去除 K、`output`、W&B `name/tags` 即完全相等；输出分别为 `/workspace/vtsmolvla_tactile_01`、`/workspace/vtsmolvla_tactile_repeat16`、`/workspace/vtsmolvla_tactile_repeat32`。正式 paper runs 仍必须从相同 base initialization、split、seed、训练协议开始，且不同 K 禁止 strict optimizer resume，只能 weight warm-start 新 run。
+- 本次没有启动训练，也没有生成 paper result。独立 final review 曾发现 1 个 Important：metadata-absent legacy checkpoint 隐含 K=1 却可被 K=8/21 strict restore 接受；现已在 fallback 中把 saved 缺失 K 规范为 1 并与 current K 精确比较，新增 K1->K1 pass 和隐含 K1->K8/21 reject 测试。post-fix 独立复审为 Critical 0、Important 0、`Ready to integrate: Yes`。GPU smoke 未重复运行，因为修复只触及 `training.py` legacy restore 与测试，之前 smoke 使用的 `modeling.py`/configuration/checkpoint/config 均未再变。剩余限制：GPU smoke 仅一个 checkpoint/episode/frame/一步采样；exact output/name/tag 字符串没有独立测试锁定；worktree 的 evaluator 与 token baseline 仍是同一份未提交累计 diff。

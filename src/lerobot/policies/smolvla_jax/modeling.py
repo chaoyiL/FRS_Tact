@@ -38,6 +38,27 @@ def normalize_tactile_embeddings(embeddings: Array, eps: float = 1e-6) -> Array:
     return embeddings * inverse_rms
 
 
+def _repeat_tactile_tokens_and_masks(
+    tokens: Array,
+    masks: Array,
+    factor: int,
+) -> tuple[Array, Array]:
+    tokens = jnp.asarray(tokens)
+    masks = jnp.asarray(masks, dtype=jnp.bool_)
+    if tokens.ndim != 3:
+        raise ValueError(f"tactile tokens must be [B,S,H], got {tokens.shape}")
+    if masks.shape != tokens.shape[:2]:
+        raise ValueError(
+            f"tactile masks must have shape {tokens.shape[:2]}, got {masks.shape}"
+        )
+    if factor < 1:
+        raise ValueError(f"tactile repeat factor must be positive, got {factor}")
+    return (
+        jnp.repeat(tokens, factor, axis=1),
+        jnp.repeat(masks, factor, axis=1),
+    )
+
+
 @dataclass(frozen=True)
 class PrefixContext:
     pad_mask: Array
@@ -303,6 +324,11 @@ class JaxSmolVLA:
                     f"tactile_masks must have shape {tactile_embedding.shape[:2]}, "
                     f"got {tactile_masks.shape}"
                 )
+            tactile_embedding, tactile_masks = _repeat_tactile_tokens_and_masks(
+                tactile_embedding,
+                tactile_masks,
+                self.config.tactile_token_repeat_factor,
+            )
             embeddings.append(tactile_embedding)
             pad_masks.append(tactile_masks)
             attention_segments.append(jnp.zeros(tactile_embedding.shape[1], dtype=jnp.bool_))
@@ -767,6 +793,7 @@ class JaxSmolVLA:
         state: Array,
         rng: Array,
         *,
+        state_mask: Array | None = None,
         tactile_images: Array | None = None,
         tactile_embeddings: Array | None = None,
         tactile_masks: Array | None = None,
@@ -790,6 +817,7 @@ class JaxSmolVLA:
             language_tokens,
             language_masks,
             state,
+            state_mask=state_mask,
             tactile_images=tactile_images,
             tactile_embeddings=tactile_embeddings,
             tactile_masks=tactile_masks,

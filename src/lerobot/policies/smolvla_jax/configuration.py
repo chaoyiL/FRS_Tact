@@ -41,6 +41,12 @@ def _coerce_override_value(value: Any, annotation: Any) -> Any:
     return value
 
 
+def _require_positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class JaxSmolVLAConfig:
     """Static model settings required by the JAX implementation."""
@@ -82,6 +88,7 @@ class JaxSmolVLAConfig:
     tactile_keys: tuple[str, ...] = ()
     tactile_embedding_dim: int = 512
     tactile_num_tokens: int = 4
+    tactile_token_repeat_factor: int = 1
     tactile_image_size: int = 224
     adapt_to_pi_aloha: bool = False
     optimizer_lr: float = 1e-4
@@ -114,6 +121,13 @@ class JaxSmolVLAConfig:
     global_image_token_id: int = 49152
     expert_hidden_size: int = 720
     expert_intermediate_size: int = 2048
+
+    def __post_init__(self) -> None:
+        _require_positive_int(self.tactile_token_repeat_factor, "tactile_token_repeat_factor")
+
+    @property
+    def effective_tactile_num_tokens(self) -> int:
+        return int(self.tactile_num_tokens) * int(self.tactile_token_repeat_factor)
 
     @classmethod
     def from_pretrained(cls, path: str | Path) -> JaxSmolVLAConfig:
@@ -185,6 +199,10 @@ class JaxSmolVLAConfig:
             tactile_keys=tuple(raw.get("tactile_keys") or ()),
             tactile_embedding_dim=int(raw.get("tactile_embedding_dim", 512)),
             tactile_num_tokens=int(raw.get("tactile_num_tokens", 4)),
+            tactile_token_repeat_factor=_require_positive_int(
+                raw.get("tactile_token_repeat_factor", 1),
+                "tactile_token_repeat_factor",
+            ),
             tactile_image_size=int(raw.get("tactile_image_size", 224)),
             adapt_to_pi_aloha=bool(raw.get("adapt_to_pi_aloha", False)),
             optimizer_lr=float(raw.get("optimizer_lr", 1e-4)),
@@ -218,6 +236,9 @@ class JaxSmolVLAConfig:
 
         cleaned: dict[str, Any] = {}
         for key, value in overrides.items():
+            if key == "tactile_token_repeat_factor":
+                cleaned[key] = _require_positive_int(value, key)
+                continue
             if key in {"image_keys", "tactile_keys", "vlm_lora_target_modules"} and value is not None:
                 cleaned[key] = tuple(value)
             else:
@@ -227,6 +248,8 @@ class JaxSmolVLAConfig:
                 cleaned[key] = _coerce_override_value(value, field_types[key])
 
         updated = replace(self, **cleaned)
+        if updated.tactile_token_repeat_factor < 1:
+            raise ValueError("tactile_token_repeat_factor must be a positive integer")
 
         num_vlm_layers = int(updated.num_vlm_layers)
         num_expert_layers = int(updated.num_expert_layers)
