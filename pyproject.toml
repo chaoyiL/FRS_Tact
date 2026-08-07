@@ -130,7 +130,10 @@ torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["lerobot*", "deploy*", "tactile_encoder*", "utils*"]
+include = ["lerobot*", "deploy*", "tactile_encoder*", "utils*", "train_smolvla*", "train_vtsmolvla*"]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
 
 [tool.ruff]
 target-version = "py312"
