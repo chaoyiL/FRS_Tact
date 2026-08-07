@@ -38,14 +38,27 @@ Array = jax.Array
 
 
 def _prepare_image(frame: Any) -> np.ndarray:
-    """Dataset frame (HWC, uint8 0..255 or float 0..1) -> HWC float32 in [-1, 1].
+    """Dataset frame -> HWC float32 in [-1, 1], as pi0.5's vision tower expects.
 
-    LeRobotDataset frames are HWC (see lerobot.policies.smolvla_jax.preprocessing._as_bchw's own
-    comment/logic, which transposes *from* HWC) -- unlike SmolVLA's SigLIP (via transformers,
-    channel-first), pi0.5's own siglip.py is flax.linen and expects channel-last, so no transpose
-    here, only the value-range remap (matches SmolVLA's `image * 2.0 - 1.0` after a 0..1 rescale).
+    Layout: LeRobotDataset hands back **CHW** float32 in [0, 1] for image features -- see
+    `lerobot/datasets/io_utils.py`'s `hf_transform_to_torch`/`pil_to_chw_tensor` (PIL -> ToTensor).
+    pi0.5's `siglip.py` is flax.linen and expects channel-**last** (its `nn.Conv` patch-extracts
+    over `image[..., h, w, c]`), so CHW must be transposed to HWC here. (SmolVLA needs the
+    opposite and converts the other way in `smolvla_jax/preprocessing.py:_as_bchw`.)
+
+    Both layouts are accepted defensively, keyed off which axis looks like channels, since
+    `precompute_tactile_embeddings.py` and other callers can pass already-HWC numpy frames.
+
+    Range: [0, 1] -> [-1, 1] (matches SmolVLA's `image * 2.0 - 1.0`). uint8 0..255 input is
+    rescaled first.
     """
     image = np.asarray(frame, dtype=np.float32)
+    if image.ndim != 3:
+        raise ValueError(f"expected a single 3-D image frame, got shape {image.shape}")
+    if image.shape[0] in (1, 3) and image.shape[-1] not in (1, 3):
+        image = np.transpose(image, (1, 2, 0))  # CHW -> HWC
+    elif image.shape[-1] not in (1, 3):
+        raise ValueError(f"cannot identify the channel axis of an image with shape {image.shape}")
     if image.max(initial=0.0) > 1.0:
         image = image / 255.0
     return image * 2.0 - 1.0
