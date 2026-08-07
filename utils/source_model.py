@@ -12,7 +12,10 @@ from modalities_eval.utils import SmolVLAEvalModel
 from modalities_eval.utils import VelocityContext
 from modalities_eval.utils import _stack_observations
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
-from utils.flow_matching import deterministic_noise, inversion_mse
+# Re-exported, not used here: these moved to utils/flow_matching.py so the pi0.5 side can reuse
+# them without importing SmolVLA's modeling code, but prepare.py still imports them from this
+# module. noqa keeps ruff's F401 from flagging the deliberate re-export.
+from utils.flow_matching import deterministic_noise, inversion_mse  # noqa: F401
 from utils.integration import euler_integrate_velocity
 from utils.integration import fireflow_integrate_velocity
 

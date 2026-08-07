@@ -9,8 +9,8 @@ only the base-model-agnostic pieces: `utils/integration.py`'s euler/fireflow sol
 `utils/flow_matching.py`'s deterministic_noise/inversion_mse.
 
 UNTESTED, like the rest of pi05_jax (see its README.md): the caching/jit pattern below follows
-`lerobot.policies.pi05_jax.nnx_utils.module_jit`'s documented technique (split state once outside
-jit, merge once inside), but has not been run.
+`lerobot.policies.pi05_jax.nnx_utils.module_jit`'s documented technique (split state outside jit,
+merge inside), but has not been run.
 """
 
 from __future__ import annotations
@@ -25,81 +25,95 @@ from lerobot.policies.pi05_jax import Observation, Pi0
 from lerobot.policies.pi05_jax.pi0 import Pi0PrefixCache
 from utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 
-_PREFIX_CACHE: dict[int, Any] = {}
-_SAMPLE_CACHE: dict[tuple[int, int], Any] = {}
-_REVERSE_CACHE: dict[tuple[int, int, str], Any] = {}
+# Keyed by `_cache_key`; values are jitted functions taking `state` as their first argument.
+# Deliberately hold no reference to any `Pi0` (nor to its weights) -- see `_cache_key`.
+_PREFIX_CACHE: dict[tuple, Any] = {}
+_SAMPLE_CACHE: dict[tuple, Any] = {}
+_REVERSE_CACHE: dict[tuple, Any] = {}
 
 
-def build_prefix_cache(model: Pi0, observation: Observation) -> Pi0PrefixCache:
-    """JIT-compiled `Pi0.build_prefix_cache`, frozen to `model`'s current params.
+def _cache_key(model: Pi0, *extra: Any) -> tuple:
+    """Cache key for the jitted wrappers below.
 
-    Follows `nnx_utils.module_jit`'s pattern manually (rather than calling it directly) so the
-    cache key can be `id(model)` alone, matching `utils/source_model.py`'s
-    `_jitted_prefix_builder` convention.
+    `id(model)` alone would NOT be safe. `tools/prepare_frs_pi05_cache.py` calls
+    `prepare_pi05.prepare_cache()` once per dataset, and each call builds its own `Pi0` and drops
+    it on return -- so CPython can hand the next model the freed one's address, making `id()`
+    collide across distinct models. (`utils/source_model.py` gets away with a bare `id()` because
+    its jitted functions take `params` as a runtime argument, so a collision only reuses a
+    compiled trace, never stale weights.)
+
+    Two things together make collisions harmless here:
+      * the architecture fields below, so two *differently shaped* models can't share an entry;
+      * `state` staying a runtime argument (never closed over), so the weights always come from
+        the caller. A collision between identically shaped models then just reuses an
+        interchangeable `graphdef` plus an already-compiled trace.
+
+    Cache values must therefore never capture `model` or its weights -- that would both resurrect
+    the staleness hazard and pin every dataset's model in (GPU) memory for the whole run.
     """
-    cache_key = id(model)
-    run = _PREFIX_CACHE.get(cache_key)
-    if run is None:
-        graphdef, state = nnx.split(model)
+    return (id(model), model.action_dim, model.action_horizon, model.max_token_len, model.pi05, *extra)
+
+
+def _jitted_prefix(model: Pi0):
+    cache_key = _cache_key(model)
+    jitted = _PREFIX_CACHE.get(cache_key)
+    if jitted is None:
+        graphdef, _ = nnx.split(model)
 
         @jax.jit
         def jitted(state: nnx.State, observation: Observation) -> Pi0PrefixCache:
             return nnx.merge(graphdef, state).build_prefix_cache(observation)
 
-        run = (jitted, state)
-        _PREFIX_CACHE[cache_key] = run
-    jitted, state = run
-    return jitted(state, observation)
+        _PREFIX_CACHE[cache_key] = jitted
+    return jitted
 
 
-def _jitted_sample_from_cache(model: Pi0, *, num_steps: int):
-    cache_key = (id(model), num_steps)
-    run = _SAMPLE_CACHE.get(cache_key)
-    if run is not None:
-        return run
-    graphdef, state = nnx.split(model)
+def _jitted_sample(model: Pi0, *, num_steps: int):
+    cache_key = _cache_key(model, num_steps)
+    jitted = _SAMPLE_CACHE.get(cache_key)
+    if jitted is None:
+        graphdef, _ = nnx.split(model)
 
-    @jax.jit
-    def jitted(state: nnx.State, cache: Pi0PrefixCache, noise: jax.Array) -> jax.Array:
-        merged = nnx.merge(graphdef, state)
-        dt = -1.0 / num_steps
-        batch = noise.shape[0]
+        @jax.jit
+        def jitted(state: nnx.State, cache: Pi0PrefixCache, noise: jax.Array) -> jax.Array:
+            merged = nnx.merge(graphdef, state)
+            dt = -1.0 / num_steps
+            batch = noise.shape[0]
 
-        def body(step: jax.Array, x_t: jax.Array) -> jax.Array:
-            t = jnp.full((batch,), 1.0 + step.astype(jnp.float32) * dt, dtype=jnp.float32)
-            return x_t + dt * merged.denoise_step(cache, x_t, t)
+            def body(step: jax.Array, x_t: jax.Array) -> jax.Array:
+                t = jnp.full((batch,), 1.0 + step.astype(jnp.float32) * dt, dtype=jnp.float32)
+                return x_t + dt * merged.denoise_step(cache, x_t, t)
 
-        return jax.lax.fori_loop(0, num_steps, body, noise)
+            return jax.lax.fori_loop(0, num_steps, body, noise)
 
-    def run(cache: Pi0PrefixCache, noise: jax.Array) -> jax.Array:
-        return jitted(state, cache, noise)
-
-    _SAMPLE_CACHE[cache_key] = run
-    return run
+        _SAMPLE_CACHE[cache_key] = jitted
+    return jitted
 
 
-def _jitted_reverse_from_cache(model: Pi0, *, num_steps: int, solver: Literal["euler", "fireflow"]):
-    cache_key = (id(model), num_steps, solver)
-    run = _REVERSE_CACHE.get(cache_key)
-    if run is not None:
-        return run
-    integrate = euler_integrate_velocity if solver == "euler" else fireflow_integrate_velocity
-    graphdef, state = nnx.split(model)
+def _jitted_reverse(model: Pi0, *, num_steps: int, solver: Literal["euler", "fireflow"]):
+    cache_key = _cache_key(model, num_steps, solver)
+    jitted = _REVERSE_CACHE.get(cache_key)
+    if jitted is None:
+        integrate = euler_integrate_velocity if solver == "euler" else fireflow_integrate_velocity
+        graphdef, _ = nnx.split(model)
 
-    @jax.jit
-    def jitted(state: nnx.State, cache: Pi0PrefixCache, actions: jax.Array) -> jax.Array:
-        merged = nnx.merge(graphdef, state)
+        @jax.jit
+        def jitted(state: nnx.State, cache: Pi0PrefixCache, actions: jax.Array) -> jax.Array:
+            merged = nnx.merge(graphdef, state)
 
-        def velocity_fn(x: jax.Array, t: jax.Array) -> jax.Array:
-            return merged.denoise_step(cache, x, t)
+            def velocity_fn(x: jax.Array, t: jax.Array) -> jax.Array:
+                return merged.denoise_step(cache, x, t)
 
-        return integrate(velocity_fn, jnp.asarray(actions, dtype=jnp.float32), num_steps=num_steps)
+            return integrate(velocity_fn, jnp.asarray(actions, dtype=jnp.float32), num_steps=num_steps)
 
-    def run(cache: Pi0PrefixCache, actions: jax.Array) -> jax.Array:
-        return jitted(state, cache, actions)
+        _REVERSE_CACHE[cache_key] = jitted
+    return jitted
 
-    _REVERSE_CACHE[cache_key] = run
-    return run
+
+def build_prefix_cache(model: Pi0, observation: Observation) -> Pi0PrefixCache:
+    """JIT-compiled `Pi0.build_prefix_cache` (one image/language encode per observation batch)."""
+    _, state = nnx.split(model)
+    return _jitted_prefix(model)(state, observation)
 
 
 def sample_and_reverse(
@@ -118,9 +132,12 @@ def sample_and_reverse(
     if solver not in ("euler", "fireflow"):
         raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
 
-    cache = build_prefix_cache(model, observation)
-    predicted = _jitted_sample_from_cache(model, num_steps=sample_steps)(cache, noise)
-    x_base = _jitted_reverse_from_cache(model, num_steps=reverse_steps, solver=solver)(cache, predicted)
+    # Split once and reuse for all three calls -- `nnx.split` walks the whole module graph, so
+    # doing it per call would repeat that work three times per batch for no benefit.
+    _, state = nnx.split(model)
+    cache = _jitted_prefix(model)(state, observation)
+    predicted = _jitted_sample(model, num_steps=sample_steps)(state, cache, noise)
+    x_base = _jitted_reverse(model, num_steps=reverse_steps, solver=solver)(state, cache, predicted)
     return predicted, x_base
 
 
@@ -135,7 +152,8 @@ def reverse_integrate_actions(
     """Integrate model-space actions from data time t=0 to base noise time t=1."""
     if solver not in ("euler", "fireflow"):
         raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
-    cache = build_prefix_cache(model, observation)
-    return _jitted_reverse_from_cache(model, num_steps=num_steps, solver=solver)(
-        cache, jnp.asarray(actions, dtype=jnp.float32)
+    _, state = nnx.split(model)
+    cache = _jitted_prefix(model)(state, observation)
+    return _jitted_reverse(model, num_steps=num_steps, solver=solver)(
+        state, cache, jnp.asarray(actions, dtype=jnp.float32)
     )
