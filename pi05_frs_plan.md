@@ -1,108 +1,105 @@
-# FRS base model 切换：SmolVLA → pi0.5（JAX / openpi）
+# FRS base model 切换：SmolVLA → pi0.5（JAX，vendored from openpi）
 
 分支：`pi05-frs-jax`（从 `eric` 切出）。目标：FRS（`tactile_flow_steering`）不再使用 SmolVLA，
-改用 Physical Intelligence 的 **pi0.5**（openpi 的原生 JAX 实现）作为 base model。这个文件记录
-已确认的架构决策、关键发现和还没做完的事，避免跨 session 丢上下文。
+全部按 pi0.5（Physical Intelligence 的 openpi，JAX 原生实现）的要求来——包括主环境的
+jax/flax/transformers/orbax 版本，不用兼顾 SmolVLA 还能不能跑。这个文件记录已确认的架构决策、
+关键发现和还没做完的事，避免跨 session 丢上下文。
 
-## 架构决策：pi0.5 跑在独立环境里，不进主依赖
+## 架构决策：把 pi0.5 模型代码搬进本仓库，不装 openpi 这个包
 
-`openpi`（pi0.5 的官方仓库）自己的 `pyproject.toml` 会拉：
+openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 commit），和本仓库自己的
+`lerobot` 包（`src/lerobot/`，本仓库就是这个包）**撞名**——同一个环境里 `lerobot` 这个 import
+路径只能指向一份代码，装官方的就会顶掉本仓库自己的代码，反过来也一样。这和版本号无关，纯粹是
+两边都想叫 `lerobot`。
 
-- `lerobot`（pin 死 HuggingFace 官方仓库某个 commit）—— **和本仓库自己的包名撞了**：
-  本仓库的 `pyproject.toml` 里 `name = "lerobot"`（精简过的 SmolVLA-only 版本）。
-- `jax[cuda12]==0.5.3` / `flax==0.10.2` / `transformers==4.53.2` / `orbax-checkpoint==0.11.13`，
-  都是精确 pin，和本仓库现在的 `jax>=0.6.2,<0.9.0`、`flax>=0.11.0,<0.13.0` 等范围对不上。
+解决办法：不 `pip install openpi`，而是把 pi0.5 **模型代码本身**（网络结构 + checkpoint 加载，
+不要 openpi 的训练/数据/policy 那套基础设施）直接搬进本仓库，放在
+[src/lerobot/policies/pi05_jax/](src/lerobot/policies/pi05_jax/)，和 `smolvla_jax/`
+（手写的 JAX 版 SmolVLA）并列。这样主环境里只有本仓库自己的 `lerobot` 包，没有名字冲突。
 
-结论：**不把 openpi 加进主 `pyproject.toml`**。改为在 [openpi_bridge/](openpi_bridge/) 建一个完全独立的
-uv 子项目/venv，只用来跑"pi0.5 推理 → 产出 action_cache"这一步；主环境（这个仓库的 jax/flax 版本锁定、
-`train_smolvla_jax.yaml` / `train_vtsmolvla_jax.yaml` 等）完全不受影响。
+代价：既然要用 pi0.5 的代码，主 `pyproject.toml` 的 jax/flax/transformers/orbax-checkpoint
+就按 openpi 的精确 pin 版本改了（`jax==0.5.3` / `flax==0.10.2` / `transformers==4.53.2` /
+`orbax-checkpoint==0.11.13` / `ml-dtypes==0.4.1`），不再是之前 SmolVLA 用的版本范围。
+`smolvla_jax/` 的代码大概率会因此跑不起来——按你的要求，这个分支不需要管。
 
-这个决策能成立，是因为现有 FRS 链路本来就在这一步天然解耦：
+**一处故意没跟 openpi 保持一致**：openpi pin 的是 `numpy>=1.22.4,<2.0.0`，但本仓库的
+`opencv-python-headless`/`pyarrow`/`datasets` 已经要求 `numpy>=2.0.0`，两边范围不相交。
+如果强行降到 numpy<2，大概率把这些包也一起弄坏。所以 `pyproject.toml` 里 numpy 保持
+`>=2.0.0,<2.3.0` 不变——这是已知的、还没验证的风险点：`jax==0.5.3`/`flax==0.10.2`
+到底能不能在 numpy>=2 下正常跑，要在训练服务器上 `uv sync` 才能确认。
 
-```
-[openpi_bridge，独立 venv]                    [本仓库主环境]
-pi0.5 checkpoint + pick_tube 数据集                tactile_encoder（冻结）
-        │ 推理 + 反向 ODE 积分                            │ 逐帧编码
-        ▼                                                ▼
-   action_cache/<repo_id>/                    tactile_embeddings/<repo_id>/
-   (target/x_base/gt_action/inversion_mse     (每帧 4 路 frozen ResNet embedding)
-    + manifest.json，格式见 utils/cache.py)
-        └──────────────────┬─────────────────────────────┘
-                            ▼
-              tools/train_frs.py → tactile_flow_steering/train.py
-              （只读两份 cache，完全不 import 任何 base 模型代码）
-```
+## 现状：模型代码已经搬进来了，checkpoint 加载/推理链路完全没跑过
 
-`tactile_flow_steering/train.py` 不 import `lerobot.policies.smolvla_jax` 或任何 base 模型代码，
-只消费 `action_cache` 目录（`utils/cache.py` 定义的 memmap + manifest 格式）。所以只要 pi0.5 一侧
-产出同样格式的 cache，`tools/train_frs.py` 和 `configs/train_frs_pick_tube_pi05.yaml`
-（见下文）**不需要改一行代码**。
+已经做的（都在 [src/lerobot/policies/pi05_jax/](src/lerobot/policies/pi05_jax/)，
+细节和取舍见该目录的 [README.md](src/lerobot/policies/pi05_jax/README.md)）：
 
-## 现状：只搭了骨架，核心推理逻辑还没写
+- 从 openpi vendor 了 pi0.5 需要的模型代码：`model.py`（去掉了 PyTorch checkpoint 加载分支）、
+  `pi0.py`、`pi0_config.py`、`gemma.py`、`siglip.py`、`lora.py`、`tokenizer.py`（只留
+  `PaligemmaTokenizer`）、`array_typing.py`、`nnx_utils.py`、`image_tools.py`、`download.py`。
+- 新写了 `sharding.py`（单机推理用的 no-op 版 `openpi.training.sharding`，不是 vendor 来的）
+  和 `checkpoint.py`（`load_pi0()`，加载原生 JAX/orbax pi0.5 checkpoint）。
+- 在 `pi0.py` 里新增了 `Pi0PrefixCache` / `Pi0.build_prefix_cache` / `Pi0.denoise_step`——
+  这是 upstream 没有的：FRS 需要在任意 `(x, t)` 上算 flow-matching 速度场来做反向 ODE 积分
+  （`utils/integration.py` 的 euler/fireflow，SmolVLA 那边对应 `utils/source_model.py` 的
+  `sample_and_reverse`），而 upstream 的 `sample_actions` 只有一个写死方向的 t:1→0 前向循环，
+  单步逻辑内联在闭包里拿不出来。这三个新增是把那段闭包逻辑原样拆出来，`sample_actions`
+  本身一个字节没动。
+- 主 `pyproject.toml` 依赖版本按 pi0.5 的要求改了（见上面"架构决策"）。
+- 删掉了之前"独立环境（openpi_bridge/）"那版方案的所有文件——想清楚包名冲突之后，
+  vendor 代码进来是更合适的路线，独立环境那套不再需要。
 
-已经做的：
+**完全没做、且没法在这台机器上验证的（`src/lerobot/policies/pi05_jax/README.md` 里也写了）：**
 
-- [utils/cache.py](utils/cache.py) 里的 `build_records` 现在只依赖鸭子类型的 `metadata`
-  （`total_episodes` + `episodes[i]["dataset_from_index"/"dataset_to_index"]`），不 import 任何
-  jax/lerobot 代码 —— 本仓库和 openpi 环境里各自的 `LeRobotDatasetMetadata` 都满足这个接口，
-  所以两边可以复用同一份记录选择/train-val 切分逻辑，不会出现两套实现漂移的问题。
-  （原来这段代码在 `prepare.py` 里，是 SmolVLA 专用的，现在挪出来给两边共用。）
-- [openpi_bridge/](openpi_bridge/) 子项目骨架（`pyproject.toml` + `prepare_pi05_cache.py` 骨架）。
-- [configs/train_frs_pick_tube_pi05.yaml](configs/train_frs_pick_tube_pi05.yaml)：
-  在 `train_frs_pick_tube.yaml` 基础上把 checkpoint 相关字段换成 pi0.5，其余（数据集、
-  tactile encoder、frs_training 超参）先原样保留。
+1. **一行代码都没跑过。** 这台开发机是 macOS、没装 jax/flax/GPU（`jax[cuda12-local]`
+   只能在 Linux+NVIDIA 上装），vendor 过程中只做了 `python -m py_compile`（纯语法检查），
+   没有导入过、更没有拿真实 checkpoint 跑过。上训练服务器后必须先验证：
+   - `uv sync` 能不能正常解析出一套依赖（尤其是上面提到的 numpy 版本风险）；
+   - `load_pi0("gs://openpi-assets/checkpoints/pi05_base")` 加载出来的参数形状能不能对上
+     `Pi0Config(pi05=True)`（对不上 `BaseModelConfig.load` 会直接报错，容易发现）；
+   - 新增的 `build_prefix_cache`/`denoise_step` 拆分对不对——用同一份输入分别跑 upstream
+     原版 `sample_actions`（t:1→0）和"手动逐步调 denoise_step"，两边应该给出完全一样的结果。
+     这是这次唯一真正新写的逻辑（其余都是原样 vendor），所以是最值得单独验证的一处。
+2. **pick_tube 数据集样本 → pi0.5 `Observation` 的映射还没写。** 包括：哪个相机对应
+   `base_0_rgb`/`left_wrist_0_rgb`/`right_wrist_0_rgb`、prompt 文本用什么；尤其要注意
+   pi0.5（`pi05=True`）和 pi0 不一样——**state 不是连续输入，而是离散化后拼进 tokenized
+   prompt**（`PaligemmaTokenizer.tokenize(prompt, state=state)`，见 `tokenizer.py` 顶部注释和
+   `pi0.py:embed_suffix` 里 `if not self.pi05: state_token = ...`），漏掉这一步会让 state
+   完全不起作用。
+3. **归一化没做。** openpi 官方 `Policy` 会从 checkpoint 的 `assets/` 目录加载 norm stats
+   （`openpi.training.checkpoints.load_norm_stats`，没有 vendor 进来）做
+   `Normalize`/`Unnormalize`。FRS 这边需要等价的东西，否则 state/action 的数值范围对不上
+   `pi05_base` 训练时的假设。
+4. **反向积分的胶水代码没写。** 需要把 `build_prefix_cache`/`denoise_step` 接到
+   `utils/integration.py` 的 euler/fireflow 求解器上，产出 action_cache——对应 SmolVLA 那边
+   `utils/source_model.py` 的 `sample_and_reverse`/`reverse_integrate_actions`。
+5. **没有对应 `prepare.py`/`tools/prepare_frs_caches.py` 的 pi0.5 版工具**，把上面几步串起来、
+   按 `utils/cache.py` 定义的格式落盘（这样 `tools/train_frs.py` 就能直接读，不用改）。
 
-**没做的（核心工作，都在 `openpi_bridge/prepare_pi05_cache.py` 里标了 TODO）：**
+## 关键 openpi API / 事实参考（省得以后重新翻源码）
 
-1. **DataConfig / observation 映射** —— 把 pick_tube 数据集的相机 key（`observation.images.camera1/2`）、
-   state、language 映射成 pi0.5 期望的 observation 字典（`base_0_rgb` / `left_wrist_0_rgb` /
-   `right_wrist_0_rgb` + `state` + `tokenized_prompt`，参考 openpi `src/openpi/policies/*_policy.py`
-   的写法）。这是接自定义机器人数据集时必须要写的部分，官方仓库里没有现成的。
-2. **暴露 velocity_fn 用于反向积分** —— `openpi.models.pi0.Pi0.sample_actions` 只在内部一个
-   `jax.lax` 循环里做 t:1→0 的采样，没有像本仓库 SmolVLA 那样把单步 `denoise_step(params, prefix_ctx, x_t, t)`
-   独立暴露出来。FRS 需要的"反向积分"（t:0→1，见 [utils/source_model.py](utils/source_model.py) 的
-   `sample_and_reverse`/`reverse_integrate_actions`，用 `utils/integration.py` 的
-   euler/fireflow）要求能在任意 `(x, t)` 上调用 velocity field。需要参考 `Pi0.sample_actions`
-   内部的 `embed_prefix` / `embed_suffix` / `action_out_proj` 自己拼一个可复用的单步函数。
-   好消息：pi0.5 用的也是同一套 flow-matching 约定（t=1 是噪声，t=0 是数据，`dt = -1/num_steps`），
-   和 SmolVLA 完全一致，`utils/integration.py` 里的 euler/fireflow 求解器可以直接复用，
-   只需要换 `velocity_fn`。
-3. **checkpoint 来源** —— 官方 pi0.5 base checkpoint 在
-   `gs://openpi-assets/checkpoints/pi05_base/{params,assets}`（通过
-   `openpi.shared.download.maybe_download` 下载，需要能访问 GCS）。openpi 仓库里没有现成的
-   "zero-shot 跑 pi05_base" `TrainConfig`，只有一堆以它作初始权重的 finetune 配置
-   （`pi05_aloha` / `pi05_droid` / `pi05_libero` 等，见 `src/openpi/training/config.py`）。
-   需要照着这些例子给 pick_tube 数据集写一个新的 `TrainConfig`（模型用
-   `openpi.models.pi0_config.Pi0Config(pi05=True)`，`weight_loader` 指向
-   `gs://openpi-assets/checkpoints/pi05_base/params`）。
-4. 跑通后依次执行：`openpi_bridge` 产出 4 个 pick_tube 数据集的 action_cache
-   → 现有 `tools/precompute_tactile_embeddings.py`（不用改，和 base 模型无关）
-   → 现有 `tools/train_frs.py --config configs/train_frs_pick_tube_pi05.yaml`。
+（vendor 自 openpi `main` 分支 commit `15a9616a00943ada6c20a0f158e3adb39df2ccac`，2026-06-16）
 
-## 关键 openpi API 参考（写下来免得以后重新翻源码）
-
-（版本：openpi `main` 分支，2026-08 抓取）
-
-- `openpi.policies.policy_config.create_trained_policy(train_config, checkpoint_dir) -> Policy`
-  （`src/openpi/policies/policy_config.py`）：给定 `TrainConfig` + checkpoint 目录，
-  自动识别 JAX/PyTorch 权重格式并构建好 `Policy`（含 normalize/unnormalize transform）。
-- `Policy.infer(obs: dict, *, noise: np.ndarray | None = None) -> dict`（`.../policy.py`）：
-  单帧/单 batch 推理，返回 `{"actions": ...}`；支持传入外部 `noise` 做确定性推理（对齐
-  `utils/source_model.py` 里 `deterministic_noise` 的用法）。
-- `openpi.models.pi0.Pi0.sample_actions(rng, observation, *, num_steps=10, noise=None)`：
-  和 `Pi0.compute_loss` 用的是同一套 flow-matching 约定；内部用 `embed_prefix`（一次性构建
-  prefix KV cache）+ 循环里的 `embed_suffix`/`action_out_proj`。
-- `openpi.shared.download.maybe_download(url)`：支持 `gs://` / 本地路径，下载到
-  `~/.cache/openpi`（可用 `OPENPI_DATA_HOME` 环境变量改路径）。
-- pi0.5 base checkpoint：`gs://openpi-assets/checkpoints/pi05_base/params`
-  （+ `.../assets` 存 norm stats）。
-- `openpi.models.pi0_config.Pi0Config(pi05=True, action_horizon=..., ...)`。
+- 官方 pi0.5 base checkpoint：`gs://openpi-assets/checkpoints/pi05_base`
+  （`params/` 是 orbax PyTree checkpoint，`assets/` 存 norm stats）。openpi 仓库里没有现成的
+  "直接对 pi05_base 做 zero-shot 推理"配置，只有一堆以它作初始权重的 finetune 配置
+  （`pi05_aloha`/`pi05_droid`/`pi05_libero`，见 openpi `src/openpi/training/config.py`）。
+- Flow-matching 约定和 SmolVLA 一致：t=1 是噪声，t=0 是数据，`dt = -1/num_steps`
+  （`pi0.py:Pi0.sample_actions`）。
+- pi0.5 vs pi0 的两个模型级差异（`pi0_config.py:Pi0Config.pi05` 文档字符串）：
+  state 走离散语言 token 而不是连续输入；action expert 用 adaRMSNorm 注入 flow-matching
+  timestep 而不是把 timestep 和 action 拼一起过 MLP。
+- `Pi0.embed_prefix`/`embed_suffix` + `PaliGemma.llm`（gemma.py 里的双专家 transformer，
+  PaliGemma 语言/视觉专家 + action expert）是核心计算图；`siglip.py` 是视觉塔（`variant="So400m/14"`），
+  不经过 `vit.py`（openpi 里那是另一套没被 pi0.5 用到的 ViT 实现）。
+- checkpoint 加载模式：`model.restore_params(checkpoint_dir/"params", dtype=jnp.bfloat16)` +
+  `Pi0Config(...).load(params)`——照抄自 openpi 自己的
+  `policies.policy_config.create_trained_policy`。
 
 ## 明确不做的事
 
-- 不改 `pyproject.toml`（主环境）、不装 openpi 到主 venv。
-- 不改 `lerobot/policies/smolvla_jax/*`、`configs/train_smolvla_jax.yaml`、
-  `configs/train_vtsmolvla_jax.yaml`——这些保持给 SmolVLA 用，这个分支的目标是"FRS 换 base"，
-  不是同时维护两条线。
-- 不在这台本地 macOS 机器上跑 `uv sync` / 下载 checkpoint —— `jax[cuda12]` 只在 Linux+NVIDIA
-  上能装，这些都要在训练服务器上跑（参考 [train_for_agent.md](train_for_agent.md) 的环境搭建流程）。
+- 不 `pip install openpi`、不给它开单独环境——包名冲突的解法是 vendor 代码，不是隔离环境
+  （之前 `openpi_bridge/` 那版方案已经废弃删除）。
+- 不管 `smolvla_jax/` 能不能跑、不管 `configs/train_smolvla_jax.yaml` /
+  `configs/train_vtsmolvla_jax.yaml` 还有没有用——这个分支的目标就是换 base，不是两条线都要维护。
+- 不在这台本地 macOS 机器上装 jax/flax/跑推理、不下载 pi0.5 checkpoint——这些必须在训练服务器
+  （Linux + NVIDIA）上做，参考 [train_for_agent.md](train_for_agent.md) 的环境搭建流程。

@@ -1,23 +1,21 @@
 # 四个 pick_tube 数据集上的触觉 Flow Steering 训练配置 —— pi0.5 base 版本。
-# 和 train_frs_pick_tube.yaml（SmolVLA base）的区别只在最上面的 checkpoint / checkpoint_merge
-# 换成了 pi0.5；datasets / tactile encoder / frs_training 原样保留，因为 tactile_flow_steering
-# 训练本身完全不 import base 模型代码，只读 action_cache + tactile_embedding_cache（见
-# ../pi05_frs_plan.md）。
+# pi0.5 模型代码（vendor 自 openpi）在 src/lerobot/policies/pi05_jax/，和主环境同一个
+# venv、同一份依赖，不需要单独环境。datasets / tactile encoder / frs_training 和 SmolVLA 版
+# 原样保留，因为 tactile_flow_steering 训练本身完全不 import base 模型代码，只读
+# action_cache + tactile_embedding_cache（见 ../pi05_frs_plan.md）。
 #
-# 完整管线（pi0.5 推理这一步在独立的 openpi_bridge/ venv 里跑，其余步骤和 SmolVLA 版一样）：
-#   1) cd openpi_bridge && uv sync   # 独立环境，装 openpi；见 openpi_bridge/README.md
-#      uv run python prepare_pi05_cache.py --config ../configs/train_frs_pick_tube_pi05.yaml
-#      # 目前是骨架，核心 pi0.5 推理逻辑还没写，见 pi05_frs_plan.md 的 TODO 列表
+# 完整管线（第 1 步的推理/反向积分工具还没写，见 pi05_frs_plan.md 的 TODO 列表）：
+#   1) uv run --no-sync python tools/prepare_frs_pi05_cache.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml   # TODO: 这个工具还不存在
 #   2) uv run --no-sync python tools/precompute_tactile_embeddings.py \
 #        --config configs/train_frs_pick_tube_pi05.yaml
 #   3) uv run --no-sync python tools/train_frs.py \
 #        --config configs/train_frs_pick_tube_pi05.yaml
 
-# 官方 pi0.5 base checkpoint（通过 openpi.shared.download.maybe_download 下载/缓存）。
-# TODO: 目前 openpi 仓库里没有现成的"直接跑 pi05_base 做 zero-shot 推理"配置，需要照着
-# pi05_aloha / pi05_droid / pi05_libero 的写法给 pick_tube 数据集写一个 TrainConfig，
-# 详见 pi05_frs_plan.md。
-checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
+# 官方 pi0.5 base checkpoint（通过 src/lerobot/policies/pi05_jax/download.py 下载/缓存，
+# 和 openpi 自己用的下载器逻辑一致，缓存目录也兼容）。传 checkpoint 根目录（不要带 /params），
+# src/lerobot/policies/pi05_jax/checkpoint.py:load_pi0 会自己拼 "params" 子目录。
+checkpoint: gs://openpi-assets/checkpoints/pi05_base
 allow_download: true
 
 datasets:
