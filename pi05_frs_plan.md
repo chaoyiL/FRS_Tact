@@ -89,10 +89,26 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
 - 用 pick_tube 自己的数据现算一份新的（openpi 有 `scripts/compute_norm_stats.py`，本仓库
   没有 vendor 这个脚本，需要的话可以照着搬）。
 
-**没做、也没打算做的（相机映射是本次改造随手定的占位）：**
-`configs/train_frs_pick_tube_pi05.yaml` 里 `model.camera_map` 把 `camera1`→`base_0_rgb`、
-`camera2`→`left_wrist_0_rgb` 是我随手定的，没有对照过 pick_tube 实际的相机摆位——找了解拍摄
-设置的人确认一下这个映射对不对。
+**相机映射：已经查过真实数据集，不再是瞎猜，但还有一处小的不确定性。**
+查了 [KaiyueChen/pick_tube_01](https://huggingface.co/datasets/KaiyueChen/pick_tube_01) 的
+`meta/info.json`/`meta/tasks.jsonl`（四个 pick_tube_0X 结构一致）：`robot_type: "bimanual"`，
+只有 `camera0`/`camera1` 两路 RGB（没有第三路/外部机位），task 原文是"Use the left hand to
+pick up the green tube, and then use the right hand to pick up the blue tube."（双臂操作），
+触觉 key 是 `tactile_left_0/right_0`（一个夹爪两个指垫）+ `tactile_left_1/right_1`
+（另一个夹爪两个指垫）——"0"/"1" 和 `camera0`/`camera1` 编号对得上，说明这两路相机大概率是
+两条手臂各自的腕部相机，不是"主视角 + 单个腕部"的组合。所以
+`configs/train_frs_pick_tube_pi05.yaml` 现在把两路都填进 `left_wrist_0_rgb`/
+`right_wrist_0_rgb`，`base_0_rgb` 留空（自动补黑图 + mask=False）。
+**还剩的不确定性**：`camera0`/`camera1` 具体哪个是左手哪个是右手，`info.json` 里看不出物理
+位置，配置里是按数字顺序对应猜的——猜反了只是左右手视角对调，不是缺相机那种量级的问题，
+建议之后拿 `tools/inspect_dataset.py` 翻一帧图确认，或者找了解拍摄设置的人问一下。
+
+顺带确认了其他几个事实：`fps=30`、`observation.state`/`actions` 都是 20 维（和
+`train_smolvla_jax.yaml` 里 `state_dim`/`action_dim: 20` 对得上）、`total_tasks: 1`（单任务，
+上面那句 prompt 就是唯一的语言指令）、这几个数据集在 HF hub 上是 LeRobot `v2.1` 格式
+（`codebase_version`），但 `configs/train_frs_pick_tube_pi05.yaml` 里 dataset root 写的是
+`/workspace/lerobot_v30/...`——说明现有 SmolVLA 管线在使用前已经把它们转成了 v3.0，pi0.5
+这边直接复用同一份转换好的本地数据，不需要另外处理版本转换。
 
 ## 关键 openpi API / 事实参考（省得以后重新翻源码）
 

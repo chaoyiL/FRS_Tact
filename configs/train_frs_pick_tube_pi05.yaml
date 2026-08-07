@@ -87,15 +87,25 @@ model:
   tactile_image_size: 224
 
   # ---- pi0.5 专用（tools/prepare_frs_pi05_cache.py 读这些）----
-  # pi0.5 固定要 3 路图：base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb；这几个数据集
-  # rename_map 之后只有 camera1/camera2 两路 RGB（不算 tactile）。
-  # TODO: 下面这个映射（哪个物理相机对应 base_0_rgb / 哪个对应 left_wrist_0_rgb）是本次改造
-  # 时随手定的占位，没有对照过实际相机摆位，找了解 pick_tube 拍摄设置的人确认一下；
-  # 缺的那一路（right_wrist_0_rgb）会自动补成全黑 + mask=False，等价于 SmolVLA 版
-  # empty_cameras 的处理方式。
+  # pi0.5 固定要 3 路图：base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb。
+  # 查了 https://huggingface.co/datasets/KaiyueChen/pick_tube_01 的 meta/info.json 和
+  # meta/tasks.jsonl（四个 pick_tube_0X 数据集结构一致）：
+  #   - robot_type: "bimanual"，只有 camera0/camera1 两路 RGB，没有第三路/外部机位；
+  #   - task 原文是 "Use the left hand to pick up the green tube, and then use the right
+  #     hand to pick up the blue tube."——双臂操作；
+  #   - 触觉 key 是 tactile_left_0/right_0（一个夹爪的两个指垫）+
+  #     tactile_left_1/right_1（另一个夹爪的两个指垫），"0"/"1" 和 camera0/camera1 的编号
+  #     对得上，说明 camera0/camera1 大概率是两条手臂各自的腕部相机，不是"一个主视角 + 一个
+  #     腕部"的 base+wrist 组合。
+  # 所以这里没有 base_0_rgb 对应的相机，两路都填腕部；空出来的 base_0_rgb 会自动补成
+  # 全黑 + mask=False（等价于 SmolVLA 版 empty_cameras 的处理方式）。
+  # TODO：camera0/camera1 具体哪个是"左手"哪个是"右手"（也就是该填 left_wrist_0_rgb 还是
+  # right_wrist_0_rgb）没有进一步证据（info.json 不记录物理位置），下面是按数字顺序对应
+  # 猜的；猜反了只是左右手视角对调，不是缺相机那种量级的问题，但建议找了解拍摄设置的人确认，
+  # 或者直接翻一帧图看一下（比如用 tools/inspect_dataset.py）。
   camera_map:
-    base_0_rgb: observation.images.camera1
-    left_wrist_0_rgb: observation.images.camera2
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
   # pi0.5 的动作维度固定用 32（pi05_droid_finetune 等官方配置的惯例，见 pi05_frs_plan.md），
   # 不是这几个数据集自己的 20 维——真实维度会在 normalize/pad 时截断/补零。
   action_dim: 32
