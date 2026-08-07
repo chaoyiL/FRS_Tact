@@ -58,6 +58,40 @@ def _resize(image: np.ndarray) -> np.ndarray:
     return np.asarray(resized[0])
 
 
+def _match_norm_stats_dim(stats: NormStats, dim: int, *, label: str) -> NormStats:
+    """Reconcile borrowed norm stats (e.g. an official asset_id for a different robot) with this
+    dataset's actual feature width.
+
+    See pi05_frs_plan.md: pi05_base's shipped assets (droid/franka/trossen/ur5e_dual/...) don't
+    include one for a new dataset like pick_tube. If told to reuse one anyway and it's narrower
+    than this dataset's state/action dim, the extra dims are padded to an identity transform
+    (mean=0/std=1, or q01=-1/q99=1 under quantile norm -- both reduce `apply()`'s formula to
+    `x` unchanged). This is a real approximation, not just unit padding: those extra dims pass
+    through *unnormalized*, which for pi0.5 also means they won't be meaningfully discretized
+    into the tokenized prompt (see tokenizer.py) since they aren't guaranteed to be in [-1, 1].
+    Loud on purpose (prints, doesn't just silently do this) -- narrower-than-needed stats mean
+    someone chose to reuse a mismatched asset_id rather than compute real ones.
+    """
+    current = stats.mean.shape[-1]
+    if current == dim:
+        return stats
+    if current > dim:
+        raise ValueError(f"{label} norm stats have {current} dims, wider than this dataset's {dim}")
+    pad = dim - current
+    print(
+        f"WARNING: {label} norm stats only cover {current}/{dim} dims (borrowed asset_id is for "
+        f"a different robot) -- padding the extra {pad} dims to an identity transform. "
+        "See _match_norm_stats_dim's docstring / pi05_frs_plan.md.",
+        flush=True,
+    )
+    return NormStats(
+        mean=np.pad(stats.mean, (0, pad), constant_values=0.0),
+        std=np.pad(stats.std, (0, pad), constant_values=1.0),
+        q01=None if stats.q01 is None else np.pad(stats.q01, (0, pad), constant_values=-1.0),
+        q99=None if stats.q99 is None else np.pad(stats.q99, (0, pad), constant_values=1.0),
+    )
+
+
 class Pi05EvalModel:
     """Checkpoint, normalization and observation-building bundled for FRS action-cache scripts."""
 
@@ -113,8 +147,13 @@ class Pi05EvalModel:
 
         self.rename_map = dict(rename_map or {})
         self.camera_map = dict(camera_map)
-        self.state_stats = state_stats
-        self.action_stats = action_stats
+        # Norm stats must match *this dataset's* raw feature width (e.g. pick_tube's 20-dim
+        # state/actions), not the model's action_dim=32 -- normalization happens before the
+        # separate pad-to-action_dim step in prepare_sample() below.
+        state_dim = int(metadata.features["observation.state"]["shape"][0])
+        action_feature_dim = int(metadata.features[self.action_key]["shape"][0])
+        self.state_stats = _match_norm_stats_dim(state_stats, state_dim, label="state")
+        self.action_stats = _match_norm_stats_dim(action_stats, action_feature_dim, label="action")
         self.use_quantile_norm = use_quantile_norm
 
     @property

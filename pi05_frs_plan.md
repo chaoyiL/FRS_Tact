@@ -79,29 +79,33 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
    `nnx.split`/`nnx.merge` + `jax.jit`（`utils/pi05_source_model.py`）下能不能正常跑通一次
    完整的 `sample_and_reverse`，shape 对不对。
 
-**唯一一个不是"没测试"而是真的还没决定的事：norm stats 从哪来。** 见
+**norm stats 从哪来：已经定了，按你的要求直接用官方的。**
 [configs/train_frs_pick_tube_pi05.yaml](configs/train_frs_pick_tube_pi05.yaml) 里
-`norm_stats` 那段注释——`pi05_base` 官方 checkpoint 的 `assets/` 目录只有它预训练用过的数据集
-（按 asset_id，比如 "droid"）的统计量，pick_tube 是全新数据集，没有对应的 asset_id。
-`tools/prepare_frs_pi05_cache.py`/`prepare_pi05.py:load_norm_stats_or_raise` 在这个没填对之前
-会直接报错退出，不会用错的默认值悄悄跑下去，但**具体填什么需要你来定**：
-- 借用 pi05_base 自带的某个 asset_id（比如 droid）的统计量凑合跑，还是
-- 用 pick_tube 自己的数据现算一份新的（openpi 有 `scripts/compute_norm_stats.py`，本仓库
-  没有 vendor 这个脚本，需要的话可以照着搬）。
+`norm_stats.asset_id: trossen`——pi05_base 的 `assets/` 目录列出来是 arx/arx_mobile/droid/
+fibocom_mobile/franka/trossen/trossen_mobile/ur5e_dual，选 trossen 是因为它和 arx/ur5e_dual
+一样是双臂平台，且是 Physical Intelligence 自己最常用的双臂平台（ALOHA 用的就是 Trossen
+机械臂），跟 pick_tube 的"左手/右手"任务设定更接近；droid/franka 是单臂，先排除。
+**维度不完全匹配**：trossen 的 state/actions 统计量是 14 维，pick_tube 实际是 20 维——毕竟不是
+pick_tube 自己机器人的统计量。`modalities_eval/pi05_utils.py:_match_norm_stats_dim` 会自动把
+多出来的 6 维补成"不做归一化"（mean=0/std=1，运行时会打印 WARNING），先把链路跑通；这几维
+的数值不会被正确归一化，pi0.5 拿 state 编码进 prompt 时如果这几维超出 `[-1,1]` 会被直接截断到
+边界（不会崩溃，但不严谨）。真要认真训练的话应该换成用 pick_tube 自己的数据算一份统计量
+（参考 openpi 的 `scripts/compute_norm_stats.py`，本仓库没 vendor 这个脚本）。
 
-**相机映射：已经查过真实数据集，不再是瞎猜，但还有一处小的不确定性。**
+**相机映射：已经查过真实数据集 + 你确认了左右手对应关系，不再有不确定性了。**
 查了 [KaiyueChen/pick_tube_01](https://huggingface.co/datasets/KaiyueChen/pick_tube_01) 的
 `meta/info.json`/`meta/tasks.jsonl`（四个 pick_tube_0X 结构一致）：`robot_type: "bimanual"`，
 只有 `camera0`/`camera1` 两路 RGB（没有第三路/外部机位），task 原文是"Use the left hand to
 pick up the green tube, and then use the right hand to pick up the blue tube."（双臂操作），
 触觉 key 是 `tactile_left_0/right_0`（一个夹爪两个指垫）+ `tactile_left_1/right_1`
-（另一个夹爪两个指垫）——"0"/"1" 和 `camera0`/`camera1` 编号对得上，说明这两路相机大概率是
+（另一个夹爪两个指垫）——"0"/"1" 和 `camera0`/`camera1` 编号对得上，说明这两路相机是
 两条手臂各自的腕部相机，不是"主视角 + 单个腕部"的组合。所以
-`configs/train_frs_pick_tube_pi05.yaml` 现在把两路都填进 `left_wrist_0_rgb`/
-`right_wrist_0_rgb`，`base_0_rgb` 留空（自动补黑图 + mask=False）。
-**还剩的不确定性**：`camera0`/`camera1` 具体哪个是左手哪个是右手，`info.json` 里看不出物理
-位置，配置里是按数字顺序对应猜的——猜反了只是左右手视角对调，不是缺相机那种量级的问题，
-建议之后拿 `tools/inspect_dataset.py` 翻一帧图确认，或者找了解拍摄设置的人问一下。
+`configs/train_frs_pick_tube_pi05.yaml` 把两路都填进 `left_wrist_0_rgb`/`right_wrist_0_rgb`，
+`base_0_rgb` 留空（自动补黑图 + mask=False）。左右手对应关系你已经确认：**camera0 = 左手**。
+数据集自带的 `rename_map` 把编号整体加一（`camera0`→`camera1`、`camera1`→`camera2`），所以
+`camera_map` 里写的是 rename 之后的名字：`observation.images.camera1`（= 原始 camera0）
+对应 `left_wrist_0_rgb`，`observation.images.camera2`（= 原始 camera1）对应
+`right_wrist_0_rgb`。
 
 顺带确认了其他几个事实：`fps=30`、`observation.state`/`actions` 都是 20 维（和
 `train_smolvla_jax.yaml` 里 `state_dim`/`action_dim: 20` 对得上）、`total_tasks: 1`（单任务，

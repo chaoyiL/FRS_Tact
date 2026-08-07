@@ -29,6 +29,8 @@ from pathlib import Path
 
 import numpy as np
 
+from . import download
+
 
 @dataclasses.dataclass(frozen=True)
 class NormStats:
@@ -61,8 +63,17 @@ def _to_json_stats(stats: NormStats) -> dict:
 
 
 def load_norm_stats(assets_dir: str | Path, asset_id: str) -> dict[str, NormStats]:
-    """Load `<assets_dir>/<asset_id>/norm_stats.json`, as written by openpi training/tooling."""
-    path = Path(assets_dir) / asset_id / "norm_stats.json"
+    """Load `<assets_dir>/<asset_id>/norm_stats.json`, as written by openpi training/tooling.
+
+    `assets_dir` may be a local path or a URL `download.maybe_download` understands (e.g.
+    `gs://openpi-assets/checkpoints/pi05_base/assets`, to reuse an official checkpoint's stats --
+    see pi05_frs_plan.md). The join happens on plain strings, not `pathlib.Path`, before handing
+    off to `download.maybe_download`: `Path("gs://x") / "y"` corrupts the URL the same way
+    `checkpoint.py`/`prepare_pi05.py`'s `_is_local_path` docstring describes for checkpoint dirs.
+    """
+    joined = f"{str(assets_dir).rstrip('/')}/{asset_id}"
+    local_dir = download.maybe_download(joined)
+    path = Path(local_dir) / "norm_stats.json"
     if not path.is_file():
         raise FileNotFoundError(f"norm stats file not found: {path}")
     payload = json.loads(path.read_text())
@@ -70,6 +81,8 @@ def load_norm_stats(assets_dir: str | Path, asset_id: str) -> dict[str, NormStat
 
 
 def save_norm_stats(assets_dir: str | Path, asset_id: str, stats: dict[str, NormStats]) -> None:
+    """Local-path only (unlike `load_norm_stats`) -- writing to a `gs://` URL isn't supported by
+    `download.py`'s helpers, which are download/cache-only."""
     path = Path(assets_dir) / asset_id / "norm_stats.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"norm_stats": {key: _to_json_stats(value) for key, value in stats.items()}}
