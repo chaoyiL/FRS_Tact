@@ -137,10 +137,18 @@ norm_stats:
 
 frs_training:
   output: /workspace/frs_pick_tube_pi05/run_gated_01
-  # pi0.5 base 的 action_horizon 需要在 action_cache 生成后确认（默认配置多是 10~15，
-  # 见 pi05_frs_plan.md 里 openpi TrainConfig 参考）；tactile_window_divisor 要按实际
-  # chunk_size 调整，这里先沿用 SmolVLA 版的值占位。
-  tactile_window_divisor: 1
+  # tactile_window = action_horizon // tactile_window_divisor（必须整除，见
+  # tactile_flow_steering/utils/data.py:resolve_tactile_window），action_horizon 取自
+  # action_cache manifest，也就是上面 model.action_horizon = 50。
+  #
+  # 注意这里和 SmolVLA 版不是同一个量级：SmolVLA 那个 checkpoint 的 chunk_size=10，
+  # divisor=1 → tactile_window=10，配 history_stride=3 在 30Hz 下回看约 1 秒。
+  # pi0.5 的 action_horizon 是 50，如果照抄 divisor=1 就变成 tactile_window=50 →
+  # 回看 50*3/30 = 5 秒，而且 FRS transformer 的 token 数从 10 涨到 50（不会报错，
+  # 但历史长度和计算量都是 5 倍，对"实时反应式转向"来说 5 秒的历史太长了）。
+  # 所以这里用 divisor=5：50/5 = 10 个 token，和 SmolVLA 版的 1 秒历史对齐。
+  # 想改回长历史或换 action_horizon 时，记得这两个值要一起算。
+  tactile_window_divisor: 5
   history_stride: 3
 
   loss_mode: gated

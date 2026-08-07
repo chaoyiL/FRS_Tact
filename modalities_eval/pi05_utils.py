@@ -78,8 +78,9 @@ def _match_norm_stats_dim(stats: NormStats, dim: int, *, label: str) -> NormStat
     See pi05_frs_plan.md: pi05_base's shipped assets (droid/franka/trossen/ur5e_dual/...) don't
     include one for a new dataset like pick_tube. If told to reuse one anyway and it's narrower
     than this dataset's state/action dim, the extra dims are padded to an identity transform
-    (mean=0/std=1, or q01=-1/q99=1 under quantile norm -- both reduce `apply()`'s formula to
-    `x` unchanged). This is a real approximation, not just unit padding: those extra dims pass
+    (mean=0/std=1, or q01=-1/q99=1 under quantile norm -- both reduce `apply()`'s formula to `x`,
+    up to the `1e-6` epsilon it adds to the denominator, i.e. ~1e-6 relative; verified against the
+    real trossen stats). This is a real approximation, not just unit padding: those extra dims pass
     through *unnormalized*, which for pi0.5 also means they won't be meaningfully discretized
     into the tokenized prompt (see tokenizer.py) since they aren't guaranteed to be in [-1, 1].
     Loud on purpose (prints, doesn't just silently do this) -- narrower-than-needed stats mean
