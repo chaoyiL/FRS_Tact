@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CHECKPOINTS_DIR="${ROOT}/checkpoints"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${CHECKPOINTS_DIR}/model}"
+mkdir -p "${HF_HUB_CACHE}" "${CHECKPOINTS_DIR}/encoder"
 if [[ -n "${FRS_PYTHON:-}" ]]; then
     PYTHON_BIN="${FRS_PYTHON}"
 elif [[ -n "${VB3_PYTHON:-}" ]]; then

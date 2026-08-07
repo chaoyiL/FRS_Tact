@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("jax")
 
-from lerobot.policies.smolvla_jax.checkpoint import (  # noqa: E402
+from train_smolvla.checkpoint import (  # noqa: E402
     count_expert_layers,
     count_vlm_layers,
     extend_vlm_layers,
@@ -18,7 +18,7 @@ from lerobot.policies.smolvla_jax.checkpoint import (  # noqa: E402
     save_portable_params,
     write_effective_config,
 )
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig  # noqa: E402
+from train_smolvla.configuration import JaxSmolVLAConfig  # noqa: E402
 
 
 def test_extend_vlm_layers_from_full_checkpoint(tmp_path: Path) -> None:
@@ -194,8 +194,11 @@ def test_effective_config_preserves_requested_camera_order(tmp_path: Path) -> No
 
 
 def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
+    from lerobot.policies.smolvla_jax.checkpoint import write_effective_config as write_vt_config
+    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
+
     config = replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         image_keys=("observation.images.camera1", "observation.images.camera2"),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder_ckpt_05/best",
@@ -210,7 +213,7 @@ def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> No
         tactile_num_tokens=4,
         tactile_image_size=224,
     )
-    write_effective_config(tmp_path, config)
+    write_vt_config(tmp_path, config)
     raw = json.loads((tmp_path / "config.json").read_text())
     assert raw["use_tactile_encoder"] is True
     assert raw["tactile_encoder_path"] == "checkpoints/encoder_ckpt_05/best"
@@ -220,7 +223,7 @@ def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> No
     assert raw["tactile_num_tokens"] == 4
     assert raw["tactile_image_size"] == 224
 
-    reloaded = JaxSmolVLAConfig.from_pretrained(tmp_path)
+    reloaded = JaxVTSmolVLAConfig.from_pretrained(tmp_path)
     assert reloaded.use_tactile_encoder is True
     assert reloaded.tactile_keys == config.tactile_keys
 
@@ -228,7 +231,7 @@ def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> No
 def test_processor_configs_sync_rename_map_and_feature_shapes(tmp_path: Path) -> None:
     from safetensors.flax import save_file as save_safetensors_file
 
-    from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
+    from train_smolvla.preprocessing import JaxSmolVLAPreprocessor
 
     source = tmp_path / "source"
     destination = tmp_path / "destination"

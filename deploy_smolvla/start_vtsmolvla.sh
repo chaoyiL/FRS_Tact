@@ -2,7 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG="${FRS_DEPLOY_CONFIG:-${ROOT}/configs/deploy_smolvla_jax.yaml}"
+CHECKPOINTS_DIR="${ROOT}/checkpoints"
+export HF_HUB_CACHE="${HF_HUB_CACHE:-${CHECKPOINTS_DIR}/model}"
+mkdir -p "${HF_HUB_CACHE}" "${CHECKPOINTS_DIR}/encoder"
+CONFIG="${FRS_DEPLOY_CONFIG:-${ROOT}/deploy_smolvla/configs/deploy_smolvla_jax.yaml}"
 TOKEN_FILE="${VB3_TOKEN_FILE:-/home/typhon/vb3_robot_server/token_list.txt}"
 CHECK_ONLY=false
 
@@ -14,6 +17,7 @@ Environment overrides:
   VB_ROBOT_TOKEN    Robot authentication token (preferred when already set)
   VB3_TOKEN_FILE    Token file used when VB_ROBOT_TOKEN is unset
   FRS_DEPLOY_CONFIG Deployment YAML path
+  HF_HUB_CACHE      Hugging Face Hub cache (default: <project>/checkpoints/model)
 EOF
 }
 
@@ -72,8 +76,9 @@ fi
 if [[ "${CHECK_ONLY}" == true ]]; then
     echo "config=${CONFIG}"
     echo "token_source=${token_source}"
-    echo "launcher=${ROOT}/deploy_smolvla/run_client.sh"
+    echo "model_cache=${HF_HUB_CACHE}"
+    echo "launcher=${ROOT}/deploy_smolvla/scripts/run_client.sh"
     exit 0
 fi
 
-exec "${ROOT}/deploy_smolvla/run_client.sh" "${CONFIG}"
+exec "${ROOT}/deploy_smolvla/scripts/run_client.sh" "${CONFIG}"

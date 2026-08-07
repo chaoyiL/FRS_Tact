@@ -8,7 +8,7 @@ import pytest
 jax = pytest.importorskip("jax")
 jnp = pytest.importorskip("jax.numpy")
 
-from lerobot.policies.smolvla_jax.functional import (  # noqa: E402
+from train_smolvla.functional import (  # noqa: E402
     apply_rope,
     eager_attention,
     layer_norm,
@@ -17,13 +17,13 @@ from lerobot.policies.smolvla_jax.functional import (  # noqa: E402
     rms_norm,
     sinusoidal_time_embedding,
 )
-from lerobot.policies.smolvla_jax.preprocessing import (  # noqa: E402
+from train_smolvla.preprocessing import (  # noqa: E402
     aloha_decode_state,
     aloha_encode_actions,
     aloha_encode_actions_inverse,
     resize_with_pad,
 )
-from lerobot.policies.smolvla_jax.rtc import JaxRTCConfig, prefix_weights, rtc_guided_velocity  # noqa: E402
+from train_smolvla.rtc import JaxRTCConfig, prefix_weights, rtc_guided_velocity  # noqa: E402
 
 
 def _numpy_linear(x: np.ndarray, weight: np.ndarray, bias: np.ndarray) -> np.ndarray:

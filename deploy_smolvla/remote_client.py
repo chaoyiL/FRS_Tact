@@ -24,7 +24,7 @@ from lerobot.policies.smolvla_jax.validation import CheckpointContract, validate
 
 from .bridge_client import RobotBridgeClient
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "deploy_smolvla_jax.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
 
 

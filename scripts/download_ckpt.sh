@@ -56,7 +56,7 @@ for argument in "$@"; do
 done
 
 command=(
-    "${UV_BIN}" run --no-sync python "${PROJECT_ROOT}/download_ckpt.py"
+    "${UV_BIN}" run --no-sync python "${PROJECT_ROOT}/deploy_smolvla/src/download_ckpt.py"
 )
 if ((minimal)); then
     command+=(--minimal)
@@ -64,6 +64,6 @@ fi
 command+=("${forwarded[@]}")
 
 log "下载 tactile encoder checkpoint"
-log "默认仓库：liuchaoyi/encoder_ckpt_05"
-log "默认目录：/workspace/checkpoints/encoder_ckpt_05"
+log "默认仓库：liuchaoyi/encoder_ckpt_06"
+log "默认目录：${PROJECT_ROOT}/checkpoints/encoder/encoder_ckpt_06"
 "${command[@]}"

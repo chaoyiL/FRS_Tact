@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import jax.numpy as jnp
 
-from lerobot.policies.smolvla_jax.modality_dropout import (
+from train_smolvla.modality_dropout import (
     ModalityDropoutConfig,
     apply_modality_dropout,
 )

@@ -7,10 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.functional import linear
-from lerobot.policies.smolvla_jax.sharding import create_data_parallel_mesh, shard_batch
-from lerobot.policies.smolvla_jax.training import (
+from train_smolvla.configuration import JaxSmolVLAConfig
+from train_smolvla.functional import linear
+from train_smolvla.sharding import create_data_parallel_mesh, shard_batch
+from train_smolvla.training import (
     JaxSmolVLATrainer,
     cast_trainable_params_for_compute,
     cosine_warmup_schedule,
@@ -24,10 +24,11 @@ class TinyModel:
     def __init__(self, config: JaxSmolVLAConfig):
         self.config = config
 
-    def loss(self, params, batch, rng):
+    def compute_training_loss(self, params, *, batch, rng):
         del rng
         prediction = linear(batch["x"], params["model.action_in_proj.weight"])
-        return jnp.mean(jnp.square(prediction - batch["target"]))
+        loss = jnp.mean(jnp.square(prediction - batch["target"]))
+        return loss, {"loss": loss}
 
 
 def tiny_setup():
@@ -185,7 +186,6 @@ def test_resume_rejects_changed_lora_rank(tmp_path: Path) -> None:
         "expert": "frozen",
         "action": "full",
         "state_proj": "frozen",
-        "tactile_proj": "frozen",
     }
     config = dataclasses.replace(config, module_modes=modes, lora_rank=2, lora_alpha=2.0)
     params = {

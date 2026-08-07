@@ -5,14 +5,14 @@ from dataclasses import replace
 import jax.numpy as jnp
 import numpy as np
 
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.lora import (
+from train_smolvla.configuration import JaxSmolVLAConfig
+from train_smolvla.lora import (
     initialize_lora_params,
     is_trainable_parameter,
     resolve_module_modes,
 )
-from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA
-from lerobot.policies.smolvla_jax.training import partition_params
+from train_smolvla.modeling import JaxSmolVLA
+from train_smolvla.training import partition_params
 
 
 def all_modes(**overrides: str) -> dict[str, str]:
@@ -95,24 +95,33 @@ def test_every_module_accepts_each_train_mode() -> None:
 
 
 def test_tactile_projection_module_is_optional_and_trainable() -> None:
+    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
+    from lerobot.policies.smolvla_jax.lora import (
+        is_trainable_parameter as is_vt_trainable_parameter,
+        resolve_module_modes as resolve_vt_module_modes,
+    )
+
     base_modes = all_modes()
     config = replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder/best",
         tactile_keys=("t0", "t1"),
         tactile_num_tokens=2,
         module_modes=base_modes,
     )
-    assert resolve_module_modes(config)["tactile_proj"] == "full"
-    assert is_trainable_parameter("model.tactile_proj.weight", config)
-    assert is_trainable_parameter("model.tactile_proj.bias", config)
-    assert not is_trainable_parameter("model.tactile_encoder.params/conv1/kernel", config)
+    assert resolve_vt_module_modes(config)["tactile_proj"] == "full"
+    assert is_vt_trainable_parameter("model.tactile_proj.weight", config)
+    assert is_vt_trainable_parameter("model.tactile_proj.bias", config)
+    assert not is_vt_trainable_parameter("model.tactile_encoder.params/conv1/kernel", config)
 
 
 def test_legacy_tactile_projection_is_trainable_when_enabled() -> None:
+    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
+    from lerobot.policies.smolvla_jax.lora import is_trainable_parameter as is_vt_trainable_parameter
+
     config = replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder/best",
         tactile_keys=("t0",),
@@ -120,8 +129,8 @@ def test_legacy_tactile_projection_is_trainable_when_enabled() -> None:
         module_modes=None,
     )
 
-    assert is_trainable_parameter("model.tactile_proj.weight", config)
-    assert is_trainable_parameter("model.tactile_proj.bias", config)
+    assert is_vt_trainable_parameter("model.tactile_proj.weight", config)
+    assert is_vt_trainable_parameter("model.tactile_proj.bias", config)
 
 
 def test_vlm_lora_targets_can_match_vb3_qv_only() -> None:

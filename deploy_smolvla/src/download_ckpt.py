@@ -7,6 +7,7 @@ uv run --frozen python download_ckpt.py
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 import json
 import os
 from pathlib import Path
@@ -18,7 +19,8 @@ from huggingface_hub.errors import HfHubHTTPError
 
 
 DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_06"
-DEFAULT_OUTPUT_DIR = Path("/workspace/checkpoints/encoder_ckpt_06")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "checkpoints" / "encoder" / "encoder_ckpt_06"
 MINIMAL_CHECKPOINT_PATTERNS = ("checkpoint.json", "params.npz", "params-*.npz")
 FULL_CHECKPOINT_PATTERNS = (
     "checkpoint.json",
@@ -50,7 +52,7 @@ def normalize_repo_id(value: str) -> str:
     return value
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--repo-id",
@@ -76,7 +78,7 @@ def parse_args() -> argparse.Namespace:
         help="只下载推理/VT-SmolVLA 所需的 checkpoint.json 和参数归档",
     )
     parser.add_argument("--force-download", action="store_true", help="强制重新下载文件")
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
 def verify_checkpoint(directory: Path) -> dict:
