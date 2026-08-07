@@ -30,6 +30,7 @@ MANIFEST
 venv/
 ENV/
 env/
+.worktrees/
 
 # Unit test / coverage
 .pytest_cache/
