@@ -32,21 +32,20 @@
 - Create: train_vtsmolvla/__init__.py
 
 **Interfaces:**
-- Visual exports: JaxSmolVLA, JaxSmolVLAConfig, JaxSmolVLAPolicy, JaxSmolVLATrainer.
-- VT exports: VTJaxSmolVLA, VTSmolVLAConfig, VTJaxSmolVLAPolicy, VTJaxSmolVLATrainer.
+- Produces importable top-level namespace packages before concrete implementations move in Tasks 2 and 3.
+- Produces setuptools discovery rules for both package trees.
 
 - [ ] **Step 1: Write failing import tests**
 
 ~~~python
-def test_visual_package_exports_core_types():
-    import train_smolvla
-    assert train_smolvla.JaxSmolVLAConfig.__module__.startswith("train_smolvla")
+def test_visual_package_is_discoverable():
+    import importlib.util
+    assert importlib.util.find_spec("train_smolvla") is not None
 
 
-def test_vt_model_extends_visual_model():
-    import train_vtsmolvla
-    from train_smolvla import JaxSmolVLA
-    assert issubclass(train_vtsmolvla.VTJaxSmolVLA, JaxSmolVLA)
+def test_vt_package_is_discoverable():
+    import importlib.util
+    assert importlib.util.find_spec("train_vtsmolvla") is not None
 ~~~
 
 - [ ] **Step 2: Verify RED**
@@ -55,9 +54,9 @@ Run: .venv/bin/python -m pytest -q tests/train_smolvla/test_package_boundary.py 
 
 Expected: ModuleNotFoundError for the new package names.
 
-- [ ] **Step 3: Add package discovery and lazy exports**
+- [ ] **Step 3: Add package discovery and empty namespaces**
 
-Add train_smolvla* and train_vtsmolvla* to setuptools discovery. Lazy imports must not load tactile dependencies.
+Add train_smolvla* and train_vtsmolvla* to setuptools discovery. Create documented empty namespaces; concrete lazy exports are added with their implementations in Tasks 2 and 3.
 
 - [ ] **Step 4: Commit**
 
