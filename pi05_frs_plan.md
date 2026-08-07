@@ -77,7 +77,44 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
    `sample_actions`（t:1→0）和"手动逐步调 denoise_step"，两边应该给出完全一样的结果。
 4. `Pi05EvalModel.prepare_sample` 拼出来的 `Observation`/`Pi0PrefixCache` 在
    `nnx.split`/`nnx.merge` + `jax.jit`（`utils/pi05_source_model.py`）下能不能正常跑通一次
-   完整的 `sample_and_reverse`，shape 对不对。
+   完整的 `sample_and_reverse`，shape 对不对。特别是 `prepare_pi05.py:_pad_observation_batch`
+   用 `jax.tree.map` 给 `Observation`（flax `struct.dataclass` + jaxtyping 装饰）补批次维度
+   这一步——只做过代码审查（`array_typing.py` 里那个 patch 会在 tree unflatten 时跳过类型
+   检查，所以理论上没问题），没有实际跑过。
+
+## 全盘代码审查（2026-08-08）
+
+做了一遍完整审查，**查出 4 个真问题，都已修**：
+
+1. **图像通道顺序错了**（commit `3aa4611`，最严重）：`LeRobotDataset` 返回 CHW
+   （`lerobot/datasets/io_utils.py` 的 `pil_to_chw_tensor` → `ToTensor()`），pi0.5 的
+   `siglip.py` 要 HWC，原来没转置。不会崩溃，但视觉特征全是垃圾——典型的静默错误。
+2. **jit 缓存会串用别的模型的权重**（commit `dd46f41`）：缓存 key 用 `id(model)` 且把权重
+   焊进闭包，而 `tools/prepare_frs_pi05_cache.py` 每个数据集新建并释放一个 `Pi0`，CPython
+   会复用释放掉的地址。同一个闭包还会把 4 个模型全钉在显存里。已改成"缓存只放编译好的函数、
+   权重每次从调用方传入"（和 `utils/source_model.py` 久经验证的形式一致）。
+3. **触觉历史窗口长了 5 倍**（commit `584770d`）：`tactile_window_divisor: 1` 是从 SmolVLA
+   配置抄过来的占位值，但 SmolVLA 的 `chunk_size=10`、pi0.5 的 `action_horizon=50`，
+   同一个 divisor 会让窗口从 10 个 token（约 1 秒）变成 50 个（5 秒）。能整除所以不报错。
+   已改成 `divisor: 5`，数值上和 SmolVLA 版完全对齐。
+4. **ruff F401**（commit `dd46f41`）：为向后兼容做的重新导出会被 lint 判成未使用 import。
+
+**已确认没问题的**：vendor 的每个文件都逐一 diff 过 upstream（`pi0.py` 到 `sample_actions`
+结尾与原版完全一致，新增的三个方法单独在文件末尾）；`siglip.py` 唯一的差异经查证是**原版的
+bug**（`MAPHead` 的 `dtype_mm` 被误写成 `dtype=`）且在 pi0.5 配置下是死代码；
+`prepare_pi05.py` 的批处理/断点续跑/manifest 逻辑与 `prepare.py` 逐行一致；被我动过的
+SmolVLA 侧重构，所有既有调用方都还能正确解析。
+
+**离线验证过的**（本机没有 jax/torch/pytest，以下都是纯 numpy/stdlib 能跑的部分）：
+`utils/cache.py` 自带的 6 个测试全过；`build_records` 的鸭子类型元数据（纯 int 和
+numpy array 两种）、样本数、train/val 不重叠、确定性、错误路径、超短 episode 容错；
+`normalize.py` 对着**真实下载的 trossen norm_stats.json** 验证解析、14→20 补维、
+quantile/z-score 往返精度（~5e-7）、二维广播、更宽数组的 unapply、过宽统计量被拒绝；
+`_is_local_path` 对 7 种路径形态判断正确、`gs://` URL 在字符串拼接下不被破坏；
+以及**整个 YAML 配置对着真实 pick_tube_01 元数据的交叉校验**（rename_map 源键存在、
+camera_map 槽位合法且目标 rename 后存在、触觉键存在且没被喂给 pi0.5、维度都在
+action_dim 内、窗口能整除、丢尾巴后最短 episode 还够用、4 个数据集共用同一 rename_map、
+没有残留的 REPLACE_ME）——全部通过。
 
 **norm stats 从哪来：已经定了，按你的要求直接用官方的。**
 [configs/train_frs_pick_tube_pi05.yaml](configs/train_frs_pick_tube_pi05.yaml) 里
