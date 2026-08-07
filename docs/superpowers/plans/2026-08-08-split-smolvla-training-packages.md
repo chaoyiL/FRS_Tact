@@ -68,7 +68,7 @@ git commit -m "refactor: establish SmolVLA package boundaries"
 ### Task 2: Move the visual core and remove tactile knowledge
 
 **Files:**
-- Move/modify: src/lerobot/policies/smolvla_jax core modules to train_smolvla/
+- Create/modify from: src/lerobot/policies/smolvla_jax core modules into train_smolvla/
 - Modify: visual tests under tests/jax/
 - Modify: tests/train_smolvla/test_package_boundary.py
 
@@ -96,9 +96,9 @@ def test_visual_config_has_no_tactile_fields():
 
 Run: .venv/bin/python -m pytest -q tests/train_smolvla/test_package_boundary.py
 
-- [ ] **Step 3: Move modules and strip tactile branches**
+- [ ] **Step 3: Create the new modules and strip tactile branches**
 
-Remove tactile fields, encoder/cache imports, fusion initialization, tactile LoRA names, preprocessing, batch kwargs, and validation. Refactor the trainer call to:
+Create the new visual modules from the current implementation, but retain the old package unchanged as a temporary migration source until Task 7. Remove tactile fields, encoder/cache imports, fusion initialization, tactile LoRA names, preprocessing, batch kwargs, and validation from the new package. Refactor the trainer call to:
 
 ~~~python
 loss, metrics = self.model.compute_training_loss(params, batch=batch, rng=loss_rng)
