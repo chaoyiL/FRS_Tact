@@ -93,6 +93,92 @@ def split_episodes(
     return train, val
 
 
+def _as_scalar(value: Any) -> Any:
+    array = np.asarray(value)
+    if array.shape == ():
+        return array.item()
+    if array.size == 1:
+        return array.reshape(()).item()
+    return array
+
+
+def _episode_bounds(metadata: Any, episode_index: int) -> tuple[int, int]:
+    if episode_index < 0 or episode_index >= metadata.total_episodes:
+        raise ValueError(
+            f"Episode {episode_index} is out of range for this dataset. "
+            f"Available episode indices are 0..{metadata.total_episodes - 1}."
+        )
+    episode = metadata.episodes[episode_index]
+    start = int(_as_scalar(episode["dataset_from_index"]))
+    end = int(_as_scalar(episode["dataset_to_index"]))
+    if end <= start:
+        raise ValueError(f"Episode {episode_index} has an empty frame range [{start}, {end}).")
+    return start, end
+
+
+def _indices_for_episode(metadata: Any, episode_index: int) -> tuple[int, ...]:
+    start, end = _episode_bounds(metadata, episode_index)
+    return tuple(range(start, end))
+
+
+def build_records(
+    metadata: Any,
+    *,
+    val_fraction: float,
+    split_seed: int,
+    frame_stride: int,
+    max_episodes: int | None,
+    max_samples: int | None,
+    action_horizon: int,
+    drop_tail_action_chunks: int = 1,
+) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
+    """Select an episode-disjoint train/val sample set from any LeRobot-metadata-like object.
+
+    ``metadata`` only needs ``total_episodes`` and ``episodes[i]["dataset_from_index"/"dataset_to_index"]``,
+    so this works with this repo's ``LeRobotDatasetMetadata`` as well as an independently installed
+    upstream ``lerobot`` package's metadata class (e.g. from an openpi environment), keeping every
+    action-cache producer (regardless of base model / Python environment) on identical record selection.
+    """
+    if frame_stride <= 0:
+        raise ValueError(f"frame_stride must be positive, got {frame_stride}.")
+    episode_count = int(metadata.total_episodes)
+    if episode_count < 2:
+        raise ValueError("At least two episodes are required for an episode-disjoint train/validation split.")
+    episodes = list(range(episode_count))
+    if max_episodes is not None:
+        if max_episodes < 2:
+            raise ValueError("max_episodes must be at least 2 for an episode-disjoint split.")
+        episodes = episodes[:max_episodes]
+    train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
+    val_set = set(val_episodes)
+
+    records: list[SampleRecord] = []
+    for episode_index in episodes:
+        split = "val" if episode_index in val_set else "train"
+        trimmed = trim_episode_tail(
+            _indices_for_episode(metadata, episode_index),
+            drop_tail_action_chunks=drop_tail_action_chunks,
+            action_horizon=action_horizon,
+        )
+        dataset_indices = trimmed[::frame_stride]
+        records.extend(SampleRecord(int(index), episode_index, split) for index in dataset_indices)
+    records = limit_records(records, max_samples=max_samples, seed=split_seed)
+    if not records:
+        raise ValueError(
+            "Dataset selection produced no samples. "
+            "Try lowering --drop-tail-action-chunks or using longer episodes."
+        )
+    present = {record.episode_index for record in records}
+    train_episodes = tuple(episode for episode in train_episodes if episode in present)
+    val_episodes = tuple(episode for episode in val_episodes if episode in present)
+    if not train_episodes or not val_episodes:
+        raise ValueError(
+            "After dropping episode tails, train or val split is empty. "
+            "Try lowering --drop-tail-action-chunks."
+        )
+    return records, train_episodes, val_episodes
+
+
 def limit_records(
     records: Sequence[SampleRecord], *, max_samples: int | None, seed: int
 ) -> list[SampleRecord]:

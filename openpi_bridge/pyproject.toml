@@ -1,0 +1,30 @@
+[project]
+name = "frs-openpi-bridge"
+version = "0.1.0"
+description = """
+Standalone environment that runs pi0.5 (openpi) inference to produce FRS action caches.
+Deliberately kept out of the main repo's pyproject.toml: openpi pins jax[cuda12]==0.5.3 /
+flax==0.10.2 / transformers==4.53.2 / orbax-checkpoint==0.11.13 and depends on a pinned
+upstream `lerobot` package, which collides by name with this repo's own `lerobot` package
+(see ../pi05_frs_plan.md). This subproject only needs to write action-cache files in the
+format defined by ../utils/cache.py; it never imports the main repo's package.
+"""
+requires-python = ">=3.11,<3.13"
+
+dependencies = [
+    "openpi",
+    # ../utils/cache.py has no other third-party dependency; numpy is enough to reuse it here.
+    "numpy>=1.22.4,<2.0.0",
+]
+
+[tool.uv.sources]
+# TODO: pin to a specific commit once the pi0.5 integration is actually implemented, instead
+# of floating on `main`. `uv sync` here has not been exercised yet (openpi is a uv workspace
+# with its own `packages/*` members, e.g. openpi-client; consuming it as a plain git dependency
+# from outside that workspace may need adjustment, e.g. a `subdirectory=` or vendoring
+# `packages/openpi-client` too -- verify on the training server, not on this Mac).
+openpi = { git = "https://github.com/Physical-Intelligence/openpi", rev = "main" }
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"

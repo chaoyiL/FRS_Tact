@@ -1,0 +1,123 @@
+# 四个 pick_tube 数据集上的触觉 Flow Steering 训练配置 —— pi0.5 base 版本。
+# 和 train_frs_pick_tube.yaml（SmolVLA base）的区别只在最上面的 checkpoint / checkpoint_merge
+# 换成了 pi0.5；datasets / tactile encoder / frs_training 原样保留，因为 tactile_flow_steering
+# 训练本身完全不 import base 模型代码，只读 action_cache + tactile_embedding_cache（见
+# ../pi05_frs_plan.md）。
+#
+# 完整管线（pi0.5 推理这一步在独立的 openpi_bridge/ venv 里跑，其余步骤和 SmolVLA 版一样）：
+#   1) cd openpi_bridge && uv sync   # 独立环境，装 openpi；见 openpi_bridge/README.md
+#      uv run python prepare_pi05_cache.py --config ../configs/train_frs_pick_tube_pi05.yaml
+#      # 目前是骨架，核心 pi0.5 推理逻辑还没写，见 pi05_frs_plan.md 的 TODO 列表
+#   2) uv run --no-sync python tools/precompute_tactile_embeddings.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml
+#   3) uv run --no-sync python tools/train_frs.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml
+
+# 官方 pi0.5 base checkpoint（通过 openpi.shared.download.maybe_download 下载/缓存）。
+# TODO: 目前 openpi 仓库里没有现成的"直接跑 pi05_base 做 zero-shot 推理"配置，需要照着
+# pi05_aloha / pi05_droid / pi05_libero 的写法给 pick_tube 数据集写一个 TrainConfig，
+# 详见 pi05_frs_plan.md。
+checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_01
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_01
+    action_key: actions
+    rename_map: &camera_rename
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+  - repo_id: KaiyueChen/pick_tube_02
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_02
+    action_key: actions
+    rename_map: *camera_rename
+
+  - repo_id: KaiyueChen/pick_tube_03
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_03
+    action_key: actions
+    rename_map: *camera_rename
+
+  - repo_id: KaiyueChen/pick_tube_04
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_04
+    action_key: actions
+    rename_map: *camera_rename
+
+# pi0.5 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
+# 落盘格式和 SmolVLA 版完全一样（见 utils/cache.py），tools/train_frs.py 不用改。
+action_cache:
+  root: /workspace/frs_pick_tube_pi05/action_cache
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: fireflow
+  batch_size: 16
+  flush_every: 8
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+# 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
+# 和 base 模型无关，原样复用 SmolVLA 版本的配置。
+tactile_embedding_cache:
+  enabled: true
+  root: /workspace/tactile_embeddings
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+# 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_05
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+
+frs_training:
+  output: /workspace/frs_pick_tube_pi05/run_gated_01
+  # pi0.5 base 的 action_horizon 需要在 action_cache 生成后确认（默认配置多是 10~15，
+  # 见 pi05_frs_plan.md 里 openpi TrainConfig 参考）；tactile_window_divisor 要按实际
+  # chunk_size 调整，这里先沿用 SmolVLA 版的值占位。
+  tactile_window_divisor: 1
+  history_stride: 3
+
+  loss_mode: gated
+  gate_tau: 0.5
+  gate_temperature: 0.1
+  gate_lambda: 1.0
+  aux_decode_weight: 1.0
+  aux_decode_steps: 10
+
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+
+  batch_size: 128
+  epochs: 100
+  validation_steps: 10
+  eval_every: 5
+  seed: 42
+  write_plots: true
+  resume: false
+  resume_from: null
