@@ -176,6 +176,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         "tactile_embedding_dim": 512,
         "tactile_num_tokens": 4,
         "tactile_token_repeat_factor": 1,
+        "trainable_compute_dtype": "bfloat16",
         "lora_rank": 16,
         "vlm_lora_target_modules": ["q_proj", "v_proj"],
     }
@@ -568,6 +569,7 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
   tactile_embedding_dim: 512
   tactile_num_tokens: 4
   tactile_token_repeat_factor: 8
+  trainable_compute_dtype: bfloat16
   lora_rank: 16
   vlm_lora_target_modules: [q_proj, v_proj]
 """,
@@ -579,6 +581,7 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
     assert contract.chunk_size == 20
     assert contract.tactile_num_tokens == 4
     assert contract.tactile_token_repeat_factor == 8
+    assert contract.trainable_compute_dtype == "bfloat16"
 
 
 def test_legacy_manifest_contract_without_repeat_factor_defaults_to_one() -> None:
@@ -595,6 +598,63 @@ def test_legacy_manifest_contract_without_repeat_factor_defaults_to_one() -> Non
     }
 
     assert _contract_from_dict(legacy).tactile_token_repeat_factor == 1
+
+
+def test_legacy_publish_contract_without_compute_dtype_defaults_bfloat16() -> None:
+    legacy = {
+        "state_dim": 20,
+        "action_dim": 20,
+        "chunk_size": 20,
+        "image_keys": list(VT_CONTRACT.image_keys),
+        "tactile_keys": list(VT_CONTRACT.tactile_keys),
+        "tactile_embedding_dim": 512,
+        "tactile_num_tokens": 4,
+        "tactile_token_repeat_factor": 1,
+        "lora_rank": 16,
+        "vlm_lora_target_modules": ["q_proj", "v_proj"],
+    }
+
+    assert _contract_from_dict(legacy).trainable_compute_dtype == "bfloat16"
+
+
+@pytest.mark.parametrize("invalid", ["float32", "float16", "BF16", "", 16, None])
+def test_manifest_contract_rejects_invalid_compute_dtype(invalid: object) -> None:
+    manifest_contract = {
+        "state_dim": 20,
+        "action_dim": 20,
+        "chunk_size": 20,
+        "image_keys": list(VT_CONTRACT.image_keys),
+        "tactile_keys": list(VT_CONTRACT.tactile_keys),
+        "tactile_embedding_dim": 512,
+        "tactile_num_tokens": 4,
+        "tactile_token_repeat_factor": 1,
+        "trainable_compute_dtype": invalid,
+        "lora_rank": 16,
+        "vlm_lora_target_modules": ["q_proj", "v_proj"],
+    }
+
+    with pytest.raises(ValueError, match="manifest trainable_compute_dtype"):
+        _contract_from_dict(manifest_contract)
+
+
+@pytest.mark.parametrize("invalid", ["float32", "float16", "BF16", "", 16, None])
+def test_training_yaml_rejects_invalid_compute_dtype(
+    tmp_path: Path,
+    invalid: object,
+) -> None:
+    yaml_path = tmp_path / "train.yaml"
+    yaml_path.write_text(
+        "model:\n"
+        "  state_dim: 20\n"
+        "  action_dim: 20\n"
+        "  chunk_size: 20\n"
+        "  image_keys: [camera1, camera2]\n"
+        f"  trainable_compute_dtype: {json.dumps(invalid)}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="training trainable_compute_dtype"):
+        contract_from_training_yaml(yaml_path)
 
 
 @pytest.mark.parametrize("invalid", [0, -1, True, 1.5, "8"])

@@ -67,3 +67,34 @@ def test_replace_rejects_invalid_tactile_repeat_factor(invalid: object) -> None:
 def test_from_pretrained_defaults_missing_tactile_repeat_factor_to_one(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text(json.dumps({}))
     assert JaxSmolVLAConfig.from_pretrained(tmp_path).tactile_token_repeat_factor == 1
+
+
+def test_trainable_compute_dtype_defaults_validates_and_persists(tmp_path: Path) -> None:
+    legacy = JaxSmolVLAConfig()
+    assert legacy.trainable_compute_dtype == "bfloat16"
+
+    write_effective_config(tmp_path, legacy)
+    raw = json.loads((tmp_path / "config.json").read_text())
+    assert raw["trainable_compute_dtype"] == "bfloat16"
+    assert JaxSmolVLAConfig.from_pretrained(tmp_path).trainable_compute_dtype == "bfloat16"
+
+
+@pytest.mark.parametrize("invalid", ("float32", "float16", "BF16", "", None, 16))
+def test_trainable_compute_dtype_rejects_invalid_explicit_values(invalid: object) -> None:
+    with pytest.raises(ValueError, match="trainable_compute_dtype"):
+        JaxSmolVLAConfig(trainable_compute_dtype=invalid)  # type: ignore[arg-type]
+
+
+def test_from_pretrained_legacy_missing_trainable_compute_dtype_defaults_bfloat16(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config.json").write_text(json.dumps({}))
+    assert JaxSmolVLAConfig.from_pretrained(tmp_path).trainable_compute_dtype == "bfloat16"
+
+
+def test_from_pretrained_rejects_invalid_trainable_compute_dtype(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps({"trainable_compute_dtype": "float32"})
+    )
+    with pytest.raises(ValueError, match="trainable_compute_dtype"):
+        JaxSmolVLAConfig.from_pretrained(tmp_path)

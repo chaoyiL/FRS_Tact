@@ -45,8 +45,16 @@ class CheckpointContract:
     tactile_embedding_dim: int = 512
     tactile_num_tokens: int = 0
     tactile_token_repeat_factor: int = 1
+    trainable_compute_dtype: str = "bfloat16"
     lora_rank: int = 0
     vlm_lora_target_modules: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.trainable_compute_dtype != "bfloat16":
+            raise ValueError(
+                "trainable_compute_dtype must be 'bfloat16', "
+                f"got {self.trainable_compute_dtype!r}"
+            )
 
 
 def contract_from_config(config: Any) -> CheckpointContract:
@@ -62,6 +70,7 @@ def contract_from_config(config: Any) -> CheckpointContract:
         tactile_embedding_dim=int(config.tactile_embedding_dim),
         tactile_num_tokens=int(config.tactile_num_tokens) if use_tactile_encoder else 0,
         tactile_token_repeat_factor=int(getattr(config, "tactile_token_repeat_factor", 1)),
+        trainable_compute_dtype=str(getattr(config, "trainable_compute_dtype", "bfloat16")),
         lora_rank=int(config.lora_rank),
         vlm_lora_target_modules=tuple(config.vlm_lora_target_modules),
     )
@@ -98,6 +107,7 @@ class _ConfigView:
     tactile_embedding_dim: int | None
     tactile_num_tokens: int | None
     tactile_token_repeat_factor: int | None
+    trainable_compute_dtype: str | None
     lora_rank: int | None
     vlm_lora_target_modules: tuple[str, ...]
     num_vlm_layers: int | None
@@ -110,6 +120,7 @@ class _ConfigView:
             self.tactile_embedding_dim,
             self.tactile_num_tokens,
             self.tactile_token_repeat_factor,
+            self.trainable_compute_dtype,
             self.lora_rank,
         )
         if any(value is None for value in required):
@@ -123,6 +134,7 @@ class _ConfigView:
             tactile_embedding_dim=int(self.tactile_embedding_dim),
             tactile_num_tokens=int(self.tactile_num_tokens),
             tactile_token_repeat_factor=int(self.tactile_token_repeat_factor),
+            trainable_compute_dtype=str(self.trainable_compute_dtype),
             lora_rank=int(self.lora_rank),
             vlm_lora_target_modules=self.vlm_lora_target_modules,
         )
@@ -166,6 +178,16 @@ def _positive_integer(
         return default
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         issues.append(f"config {field} must be a positive integer, got {value!r}")
+        return None
+    return value
+
+
+def _trainable_compute_dtype(value: Any, issues: list[str]) -> str | None:
+    if value != "bfloat16":
+        issues.append(
+            "config trainable_compute_dtype must be 'bfloat16', "
+            f"got {value!r}"
+        )
         return None
     return value
 
@@ -252,6 +274,10 @@ def _parse_config(raw: Mapping[str, Any], issues: list[str]) -> _ConfigView:
             issues,
             default=1,
         ),
+        trainable_compute_dtype=_trainable_compute_dtype(
+            raw.get("trainable_compute_dtype", "bfloat16"),
+            issues,
+        ),
         lora_rank=_integer(raw.get("lora_rank"), "lora_rank", issues, default=0),
         vlm_lora_target_modules=lora_targets,
         num_vlm_layers=_integer(raw.get("num_vlm_layers"), "num_vlm_layers", issues),
@@ -268,6 +294,7 @@ def _compare_contract(config: _ConfigView, expected: CheckpointContract, issues:
         "tactile_embedding_dim": config.tactile_embedding_dim,
         "tactile_num_tokens": config.tactile_num_tokens,
         "tactile_token_repeat_factor": config.tactile_token_repeat_factor,
+        "trainable_compute_dtype": config.trainable_compute_dtype,
         "lora_rank": config.lora_rank,
         "vlm_lora_target_modules": config.vlm_lora_target_modules,
     }

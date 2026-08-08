@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from modalities_eval import utils as eval_utils
 from modalities_eval.action_error_evaluate import (
     _prediction_error,
     evaluate_modality_error_change,
@@ -36,6 +37,56 @@ def _observation(*, tactile: bool = True) -> EvalObservation:
         image_keys=("camera1", "camera2"),
         tactile_keys=("touch_left", "touch_right") if tactile else (),
     )
+
+
+def test_evaluator_prepares_loaded_master_params_for_compute(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace()
+    master_params = {"model.action_in_proj.weight": jnp.ones((1, 1), dtype=jnp.float32)}
+    prepared_params = {"prepared": jnp.ones((1,), dtype=jnp.bfloat16)}
+    calls: list[tuple[object, object]] = []
+
+    monkeypatch.setattr(eval_utils, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAConfig",
+        SimpleNamespace(from_pretrained=lambda checkpoint: config),
+    )
+    monkeypatch.setattr(eval_utils, "load_params", lambda checkpoint: master_params)
+    monkeypatch.setattr(eval_utils, "JaxSmolVLA", lambda cfg: SimpleNamespace(config=cfg))
+    monkeypatch.setattr(
+        eval_utils,
+        "LeRobotDatasetMetadata",
+        lambda *args, **kwargs: SimpleNamespace(
+            root=tmp_path,
+            revision="revision",
+            features={"action": {}},
+            stats={},
+        ),
+    )
+    monkeypatch.setattr(eval_utils, "resolve_action_key", lambda *args, **kwargs: "action")
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAPreprocessor",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+
+    def record_prepare(params: object, cfg: object) -> object:
+        calls.append((params, cfg))
+        return prepared_params
+
+    monkeypatch.setattr(eval_utils, "prepare_params_for_compute", record_prepare)
+
+    evaluator = SmolVLAEvalModel(
+        tmp_path,
+        dataset_repo_id="owner/data",
+        normalization_source="checkpoint",
+    )
+
+    assert calls == [(master_params, config)]
+    assert evaluator.params is prepared_params
 
 
 def test_prepare_sample_preserves_independent_tactile_and_action_padding() -> None:

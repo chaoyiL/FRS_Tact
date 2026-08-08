@@ -83,6 +83,30 @@ def test_contract_from_config_preserves_explicit_tactile_repeat_factor() -> None
     assert contract_from_config(config).tactile_token_repeat_factor == 8
 
 
+def test_contract_from_config_preserves_trainable_compute_dtype() -> None:
+    config = SimpleNamespace(
+        state_dim=20,
+        action_dim=20,
+        chunk_size=20,
+        image_keys=VT_CONTRACT.image_keys,
+        use_tactile_encoder=True,
+        tactile_keys=VT_CONTRACT.tactile_keys,
+        tactile_embedding_dim=512,
+        tactile_num_tokens=4,
+        tactile_token_repeat_factor=1,
+        trainable_compute_dtype="bfloat16",
+        lora_rank=16,
+        vlm_lora_target_modules=("q_proj", "v_proj"),
+    )
+
+    assert contract_from_config(config).trainable_compute_dtype == "bfloat16"
+
+
+def test_checkpoint_contract_rejects_invalid_compute_dtype_directly() -> None:
+    with pytest.raises(ValueError, match="trainable_compute_dtype"):
+        replace(VT_CONTRACT, trainable_compute_dtype="float32")
+
+
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
@@ -272,6 +296,31 @@ def test_valid_vt_bundle_passes(vt_bundle: Path) -> None:
 
     assert report.ok, report.format_errors()
     report.require_valid()
+
+
+def test_validation_legacy_missing_compute_dtype_defaults_bfloat16(vt_bundle: Path) -> None:
+    raw = json.loads((vt_bundle / "config.json").read_text())
+    assert "trainable_compute_dtype" not in raw
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert report.ok, report.format_errors()
+
+
+@pytest.mark.parametrize("invalid", ("float32", "float16", "BF16", "", 16, None))
+def test_validation_rejects_invalid_explicit_compute_dtype(
+    vt_bundle: Path,
+    invalid: object,
+) -> None:
+    config_path = vt_bundle / "config.json"
+    raw = json.loads(config_path.read_text())
+    raw["trainable_compute_dtype"] = invalid
+    _write_json(config_path, raw)
+
+    report = validate_checkpoint(vt_bundle, expected=VT_CONTRACT)
+
+    assert not report.ok
+    assert "trainable_compute_dtype" in report.format_errors()
 
 
 def test_mixed_base_sidecars_are_rejected(vt_bundle: Path, base_sidecars: Path) -> None:

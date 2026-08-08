@@ -65,12 +65,20 @@ def promote_trainable_params_to_fp32(
     return promoted
 
 
-def cast_trainable_params_for_compute(params: Mapping[str, Array]) -> Params:
-    """Use BF16 trainable weights for forward/backward while retaining FP32 masters."""
+def prepare_params_for_compute(
+    params: Mapping[str, Array],
+    config: JaxSmolVLAConfig,
+) -> Params:
+    """Cast only trainable floating leaves for compute, leaving master params untouched."""
 
+    if config.trainable_compute_dtype != "bfloat16":
+        raise ValueError(
+            "trainable_compute_dtype must be 'bfloat16', "
+            f"got {config.trainable_compute_dtype!r}"
+        )
     return {
         name: value.astype(jnp.bfloat16)
-        if jnp.issubdtype(value.dtype, jnp.inexact)
+        if is_trainable_parameter(name, config) and jnp.issubdtype(value.dtype, jnp.inexact)
         else value
         for name, value in params.items()
     }
@@ -137,6 +145,9 @@ def _canonicalize_resume_signature(signature: Any) -> Any:
             **model,
             "tactile_token_repeat_factor": model.get(
                 "tactile_token_repeat_factor", 1
+            ),
+            "trainable_compute_dtype": model.get(
+                "trainable_compute_dtype", "bfloat16"
             ),
         }
     return normalized
@@ -236,7 +247,7 @@ class JaxSmolVLATrainer:
         loss_rng = jax.random.fold_in(loss_rng, state.step)
 
         def loss_fn(trainable_params: Mapping[str, Array]) -> Array:
-            compute_params = cast_trainable_params_for_compute(trainable_params)
+            compute_params = prepare_params_for_compute(trainable_params, self.config)
             params = merge_params(compute_params, frozen_params)
             return self.model.loss(params, batch, loss_rng)
 
@@ -408,10 +419,7 @@ class JaxSmolVLATrainer:
 
     @property
     def compute_params(self) -> Params:
-        return merge_params(
-            cast_trainable_params_for_compute(self.state.params),
-            self.frozen_params,
-        )
+        return prepare_params_for_compute(self.full_params, self.config)
 
     def _resume_signature(self) -> dict[str, Any]:
         return _jsonable(
@@ -485,6 +493,9 @@ class JaxSmolVLATrainer:
                 "tactile_token_repeat_factor": saved_config.get(
                     "tactile_token_repeat_factor", 1
                 ),
+                "trainable_compute_dtype": saved_config.get(
+                    "trainable_compute_dtype", "bfloat16"
+                ),
             }
             legacy_current = {
                 "module_modes": self.config.module_modes,
@@ -492,6 +503,7 @@ class JaxSmolVLATrainer:
                 "lora_alpha": self.config.lora_alpha,
                 "vlm_lora_target_modules": list(self.config.vlm_lora_target_modules),
                 "tactile_token_repeat_factor": self.config.tactile_token_repeat_factor,
+                "trainable_compute_dtype": self.config.trainable_compute_dtype,
             }
             differences = _mapping_differences(legacy_saved, _jsonable(legacy_current))
             if differences:

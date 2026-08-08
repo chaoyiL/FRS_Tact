@@ -104,3 +104,10 @@
 - 同轮 package 对齐还把通用 `state_mask` forwarding 同步到 `train_smolvla/modeling.py`；`tests/train_smolvla/test_package_boundary.py` 通过实际 capture `build_prefix_context` kwargs 验证透传。该项 TDD 为 RED `1 failed`、GREEN `1 passed`。
 - 父任务在全部 rebase 兼容改动后独立复跑：相关聚焦集合 `160 passed, 1 skipped, 1 deselected in 7.09s`，仅显式 deselect 上述已知默认部署身份漂移；完整 `tests/jax + modalities_eval + package-boundary` 在 collection 阶段仍被 `origin/eric` 现有 `train_smolvla.tactile_cache` 缺失与 `initialize_tactile_fusion_params` 缺失阻断（3 errors）。checkpoint schema 探针 exit 0，`tactile_proj.weight=(960,512)`，K=1/8/21 的源 token 数仍为 4、effective 分别 4/32/84。
 - rebase 后又在宿主 RTX 4090 使用真实 VT checkpoint、v3 episode 48 frame 249、`num_steps=1` fresh 跑 K=1：prefix 181、actions finite、`21.491298085 s`、peak `1,902,840,832` bytes，exit 0。该 smoke 只验证 active legacy VT 导入与 K=1 推理兼容，不是论文结果。
+
+### Unified BF16 compute parameter contract（2026-08-08）
+
+- `JaxSmolVLAConfig.trainable_compute_dtype` 现在只接受并显式序列化 `"bfloat16"`；旧 config、resume metadata、publish manifest、training YAML 和 deploy contract 缺字段时统一迁移为 BF16，显式非法值 fail closed。
+- 唯一计算转换入口为 `src/lerobot/policies/smolvla_jax/training.py::prepare_params_for_compute(params, config)`：仅按现有 `is_trainable_parameter` 将 trainable floating leaves 转为 BF16，frozen 与 integer leaves 保持原 dtype；trainer train/eval、`JaxSmolVLAPolicy` 和 `modalities_eval.SmolVLAEvalModel` 共用该入口。
+- trainer state 和 `model.safetensors` 继续保存 FP32 trainable master parameters；固定 batch/rng/noise 的 save-load-prepare 数值测试逐元素一致。未修改 tactile cache、schema 或 repeat-factor 语义。
+- Task 2 聚焦 RED 为 `43 failed, 105 passed`，direct-contract 补充 RED 为 `1 failed`；最终聚焦 GREEN 为 `151 passed`。可运行回归为 `267 passed, 1 skipped, 2 deselected`；完整集合仍被已知 `train_smolvla` package-boundary collection 缺失和默认部署身份漂移阻断。

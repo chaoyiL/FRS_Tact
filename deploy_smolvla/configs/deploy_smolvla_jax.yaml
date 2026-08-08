@@ -27,6 +27,7 @@ checkpoint_contract:
   tactile_embedding_dim: 512
   tactile_num_tokens: 0
   tactile_token_repeat_factor: 1
+  trainable_compute_dtype: bfloat16
   lora_rank: 0
   vlm_lora_target_modules: []
 # 机器人观测 key -> checkpoint 期望的特征名；不需要可留空 {}

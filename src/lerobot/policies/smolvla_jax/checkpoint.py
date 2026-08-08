@@ -412,6 +412,7 @@ def write_effective_config(destination: str | Path, config: JaxSmolVLAConfig) ->
             "freeze_vision_encoder": config.freeze_vision_encoder,
             "train_expert_only": config.train_expert_only,
             "train_state_proj": config.train_state_proj,
+            "trainable_compute_dtype": config.trainable_compute_dtype,
         }
     )
     legacy = _legacy_flags_from_module_modes(config.module_modes)

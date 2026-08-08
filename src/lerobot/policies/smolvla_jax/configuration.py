@@ -78,6 +78,7 @@ class JaxSmolVLAConfig:
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
     train_state_proj: bool = True
+    trainable_compute_dtype: str = "bfloat16"
     module_modes: dict[str, str] | None = None
     lora_rank: int = 8
     lora_alpha: float = 16.0
@@ -124,6 +125,11 @@ class JaxSmolVLAConfig:
 
     def __post_init__(self) -> None:
         _require_positive_int(self.tactile_token_repeat_factor, "tactile_token_repeat_factor")
+        if self.trainable_compute_dtype != "bfloat16":
+            raise ValueError(
+                "trainable_compute_dtype must be 'bfloat16', "
+                f"got {self.trainable_compute_dtype!r}"
+            )
 
     @property
     def effective_tactile_num_tokens(self) -> int:
@@ -189,6 +195,7 @@ class JaxSmolVLAConfig:
             freeze_vision_encoder=bool(raw.get("freeze_vision_encoder", True)),
             train_expert_only=bool(raw.get("train_expert_only", True)),
             train_state_proj=bool(raw.get("train_state_proj", True)),
+            trainable_compute_dtype=raw.get("trainable_compute_dtype", "bfloat16"),
             module_modes=raw.get("module_modes"),
             lora_rank=int(raw.get("lora_rank", 8)),
             lora_alpha=float(raw.get("lora_alpha", 16.0)),

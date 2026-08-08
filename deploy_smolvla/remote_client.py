@@ -246,6 +246,12 @@ def _checkpoint_contract(
             raise ValueError(f"checkpoint_contract.{key} must be a positive integer")
         return value
 
+    trainable_compute_dtype = raw.get("trainable_compute_dtype", "bfloat16")
+    if trainable_compute_dtype != "bfloat16":
+        raise ValueError(
+            "checkpoint_contract.trainable_compute_dtype must be 'bfloat16'"
+        )
+
     contract = CheckpointContract(
         state_dim=integer("state_dim"),
         action_dim=integer("action_dim"),
@@ -258,6 +264,7 @@ def _checkpoint_contract(
             "tactile_token_repeat_factor",
             default=1,
         ),
+        trainable_compute_dtype=trainable_compute_dtype,
         lora_rank=integer("lora_rank", allow_zero=True),
         vlm_lora_target_modules=string_tuple("vlm_lora_target_modules", allow_empty=True),
     )

@@ -10,6 +10,7 @@ import jax.numpy as jnp
 from .checkpoint import load_config, load_params, resolve_checkpoint
 from .modeling import JaxSmolVLA
 from .preprocessing import JaxSmolVLAPreprocessor, aloha_encode_actions
+from .training import prepare_params_for_compute
 
 Array = jax.Array
 
@@ -27,7 +28,7 @@ class JaxSmolVLAPolicy:
     ):
         self.checkpoint = resolve_checkpoint(checkpoint, revision=revision, local_files_only=local_files_only)
         self.config = load_config(self.checkpoint)
-        self.params = load_params(self.checkpoint)
+        self.params = prepare_params_for_compute(load_params(self.checkpoint), self.config)
         self.model = JaxSmolVLA(self.config)
         self.preprocessor = JaxSmolVLAPreprocessor(
             self.checkpoint,

@@ -23,6 +23,7 @@ from lerobot.policies.smolvla_jax.data import (
 )
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
+from lerobot.policies.smolvla_jax.training import prepare_params_for_compute
 
 Array = jax.Array
 
@@ -78,7 +79,7 @@ class SmolVLAEvalModel:
     ):
         self.checkpoint = resolve_checkpoint(checkpoint, local_files_only=local_files_only)
         self.config = JaxSmolVLAConfig.from_pretrained(self.checkpoint)
-        self.params = load_params(self.checkpoint)
+        self.params = prepare_params_for_compute(load_params(self.checkpoint), self.config)
         self.model = JaxSmolVLA(self.config)
         self.dataset_repo_id = dataset_repo_id
         self.dataset_root = pathlib.Path(dataset_root).expanduser() if dataset_root is not None else None
