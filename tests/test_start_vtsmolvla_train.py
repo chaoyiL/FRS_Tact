@@ -33,7 +33,24 @@ def _prepare_launcher_project(tmp_path: Path) -> tuple[Path, Path, Path]:
     configs.mkdir()
     fake_bin.mkdir()
     shutil.copy2(ROOT / "scripts" / "start_vtsmolvla_train.sh", scripts)
-    (project / ".env.frs").write_text("UV_PROJECT_ENVIRONMENT=/tmp/test-venv\n")
+    storage = project / ".cache"
+    (project / ".env.frs").write_text(
+        "\n".join(
+            [
+                f"export FRS_STORAGE_ROOT={storage}",
+                "export FRS_VENV_DIR=/tmp/test-venv",
+                "export UV_PROJECT_ENVIRONMENT=/tmp/test-venv",
+                f"export UV_CACHE_DIR={storage / '.cache' / 'uv'}",
+                f"export HF_HOME={storage / 'huggingface'}",
+                f"export HF_HUB_CACHE={storage / 'huggingface' / 'hub'}",
+                f"export HF_DATASETS_CACHE={storage / 'huggingface' / 'datasets_arrow'}",
+                f"export HF_LEROBOT_HOME={storage / 'huggingface' / 'lerobot'}",
+                f"export TMPDIR={storage / 'tmp'}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
     (configs / "train_vtsmolvla_jax.yaml").write_text("output: /tmp/unused\n")
     return project, fake_bin, fake_bin / "uv-calls.log"
 

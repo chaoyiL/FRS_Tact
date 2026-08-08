@@ -7,16 +7,10 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_VERSION="3.12"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
-if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
-    DEFAULT_VENV_DIR="/opt/venvs/frs_tact"
-    DEFAULT_STORAGE_ROOT="/workspace"
-else
-    DEFAULT_VENV_DIR="${PROJECT_ROOT}/.venv"
-    DEFAULT_STORAGE_ROOT="${PROJECT_ROOT}/.cache"
-fi
-VENV_DIR="${FRS_VENV_DIR:-${DEFAULT_VENV_DIR}}"
-UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
-STORAGE_ROOT="${FRS_STORAGE_ROOT:-${DEFAULT_STORAGE_ROOT}}"
+STORAGE_ROOT="${FRS_STORAGE_ROOT:-/workspace}"
+VENV_DIR="${FRS_VENV_DIR:-${STORAGE_ROOT}/.venvs/frs_tact}"
+UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
+UV_CACHE_DIR_VALUE="${FRS_UV_CACHE_DIR:-${STORAGE_ROOT}/.cache/uv}"
 HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
 HF_HUB_CACHE_VALUE="${HF_HOME_VALUE}/hub"
 HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
@@ -88,22 +82,11 @@ install_uv() {
     log "uv 已安装：$(${UV_BIN} --version) (${UV_BIN})"
 }
 
-persist_uv_path() {
-    local marker="# FRS_Tact uv PATH"
-    local line="export PATH=\"\${HOME}/.local/bin:\${HOME}/.cargo/bin:\${PATH}\""
-    if [[ -w "${HOME}" ]] && ! grep -Fq "${marker}" "${HOME}/.bashrc" 2>/dev/null; then
-        printf '\n%s\n%s\n' "${marker}" "${line}" >>"${HOME}/.bashrc"
-        log "已把 uv PATH 写入 ${HOME}/.bashrc"
-    fi
-}
-
-check_existing_uv_processes() {
-    local running
-    running="$(ps -eo pid=,etime=,cmd= | awk '/[u]v sync|[u]v run/ {print}')"
-    if [[ -n "${running}" && "${FRS_IGNORE_UV_PROCESSES:-0}" != "1" ]]; then
-        echo "${running}" >&2
-        fail "检测到其他 uv sync/run 进程。请等待其结束，或确认后设置 FRS_IGNORE_UV_PROCESSES=1。"
-    fi
+acquire_project_lock() {
+    command -v flock >/dev/null 2>&1 || fail "找不到 flock（util-linux）"
+    mkdir -p "${STORAGE_ROOT}/.locks"
+    exec 9>"${STORAGE_ROOT}/.locks/frs-setup.lock"
+    flock -n 9 || fail "另一个 FRS 环境安装正在运行"
 }
 
 configure_uv_storage() {
@@ -134,9 +117,13 @@ configure_runtime_storage() {
 }
 
 write_environment_file() {
+    local env_tmp
+    env_tmp="$(mktemp --tmpdir="${PROJECT_ROOT}" .env.frs.XXXXXX)"
     {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
+        printf 'export FRS_STORAGE_ROOT=%q\n' "${STORAGE_ROOT}"
+        printf 'export FRS_VENV_DIR=%q\n' "${VENV_DIR}"
         printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "${UV_PROJECT_ENVIRONMENT}"
         printf 'export UV_CACHE_DIR=%q\n' "${UV_CACHE_DIR}"
         printf 'export HF_HOME=%q\n' "${HF_HOME}"
@@ -147,20 +134,19 @@ write_environment_file() {
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
         fi
-    } >"${ENV_FILE}"
-    chmod 600 "${ENV_FILE}"
+    } >"${env_tmp}"
+    chmod 600 "${env_tmp}"
+    mv "${env_tmp}" "${ENV_FILE}"
 }
 
 sync_environment() {
     cd "${PROJECT_ROOT}"
-    check_existing_uv_processes
     log "安装 Python ${PYTHON_VERSION}"
     "${UV_BIN}" python install "${PYTHON_VERSION}"
     log "环境目录：${UV_PROJECT_ENVIRONMENT}"
     log "uv cache：${UV_CACHE_DIR}"
     log "按照 uv.lock 同步依赖；大型 PyTorch/CUDA wheel 第一次需要数分钟"
     "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}"
-    write_environment_file
 }
 
 verify_python_environment() {
@@ -194,40 +180,106 @@ PY
 
 check_gpu() {
     cd "${PROJECT_ROOT}"
-    log "检查 NVIDIA、PyTorch 和 JAX 设备"
-    local expect_gpu=0
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        expect_gpu=1
-        nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
-    else
-        warn "没有找到 nvidia-smi；本机只能做 CPU 开发，不能用于正式训练"
-    fi
-    FRS_EXPECT_GPU="${expect_gpu}" "${UV_BIN}" run --no-sync python - <<'PY'
-import os
+    log "检查双 H100、CUDA 运行库、PyTorch 和 JAX 设备"
+    command -v nvidia-smi >/dev/null 2>&1 || fail "找不到 nvidia-smi，无法验证双 H100 环境"
+    local -a gpu_rows
+    mapfile -t gpu_rows < <(
+        nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits
+    )
+    ((${#gpu_rows[@]} == 2)) || fail "需要恰好两张 H100，nvidia-smi 报告 ${#gpu_rows[@]} 张 GPU"
+    local row name driver oldest
+    for row in "${gpu_rows[@]}"; do
+        name="${row%,*}"
+        driver="${row##*,}"
+        name="${name#"${name%%[![:space:]]*}"}"
+        name="${name%"${name##*[![:space:]]}"}"
+        driver="${driver#"${driver%%[![:space:]]*}"}"
+        driver="${driver%"${driver##*[![:space:]]}"}"
+        [[ "${name}" == *H100* ]] || fail "GPU 不是 H100：${name}"
+        [[ "${driver}" =~ ^[0-9]+([.][0-9]+)*$ ]] || fail "无法解析 NVIDIA driver 版本：${driver}"
+        oldest="$(printf '%s\n' "570.86" "${driver}" | sort -V | head -n 1)"
+        [[ "${oldest}" == "570.86" ]] || fail "NVIDIA driver ${driver} 低于最低要求 570.86"
+        log "GPU=${name} driver=${driver}"
+    done
+
+    "${UV_BIN}" run --no-sync python - <<'PY'
+import ctypes
+from pathlib import Path
 
 import jax
+import jax.numpy as jnp
+import numpy as np
 import torch
+from jax._src.lib import cuda_versions
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 
-devices = jax.devices()
-print(f"JAX devices: {devices}")
-print(f"PyTorch CUDA available: {torch.cuda.is_available()}")
-if os.environ.get("FRS_EXPECT_GPU") == "1":
-    if not torch.cuda.is_available():
-        raise RuntimeError("nvidia-smi 可用，但 PyTorch 没有识别到 CUDA")
-    if not any(device.platform == "gpu" for device in devices):
-        raise RuntimeError("nvidia-smi 可用，但 JAX 没有识别到 GPU")
+
+def find_nvidia_library(package_name: str, library_name: str) -> Path:
+    module = __import__(package_name, fromlist=["__path__"])
+    for package_path in module.__path__:
+        candidate = Path(package_path) / "lib" / library_name
+        if candidate.is_file():
+            return candidate
+    raise RuntimeError(f"找不到 {library_name}（包 {package_name}）")
+
+
+cuda_version = cuda_versions.cuda_runtime_get_version()
+cudnn_version = cuda_versions.cudnn_get_version()
+if cuda_version < 12010:
+    raise RuntimeError(f"CUDA runtime 需要 >=12.1，当前编码版本为 {cuda_version}")
+if cudnn_version < 90800:
+    raise RuntimeError(f"cuDNN 需要 >=9.8，当前编码版本为 {cudnn_version}")
+
+nccl_path = find_nvidia_library("nvidia.nccl", "libnccl.so.2")
+nccl = ctypes.CDLL(str(nccl_path))
+nccl_version_value = ctypes.c_int()
+if nccl.ncclGetVersion(ctypes.byref(nccl_version_value)) != 0:
+    raise RuntimeError("ncclGetVersion 调用失败")
+if nccl_version_value.value < 21800:
+    raise RuntimeError(f"NCCL 需要 >=2.18，当前编码版本为 {nccl_version_value.value}")
+
+cuda_nvcc = __import__("nvidia.cuda_nvcc", fromlist=["__path__"])
+libdevice_paths = [
+    Path(package_path) / "nvvm" / "libdevice" / "libdevice.10.bc"
+    for package_path in cuda_nvcc.__path__
+]
+if not any(path.is_file() for path in libdevice_paths):
+    raise RuntimeError("JAX local-CUDA 环境找不到 libdevice.10.bc")
+
+if not torch.cuda.is_available():
+    raise RuntimeError("PyTorch 没有识别到 CUDA")
+if torch.cuda.device_count() != 2:
+    raise RuntimeError(f"PyTorch 必须识别两张 GPU，当前为 {torch.cuda.device_count()}")
+
+gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
+print(f"JAX devices: {gpu_devices}")
+if len(gpu_devices) != 2:
+    raise RuntimeError(f"JAX 必须识别两张 GPU，当前为 {len(gpu_devices)}")
+
+host = np.arange(8, dtype=np.float32).reshape(2, 4)
+mesh = Mesh(np.asarray(gpu_devices), ("data",))
+sharding = NamedSharding(mesh, PartitionSpec("data", None))
+sharded = jax.device_put(host, sharding)
+actual = np.asarray(jax.device_get(jnp.sum(sharded, axis=0)))
+np.testing.assert_allclose(actual, host.sum(axis=0))
+print(
+    f"CUDA={cuda_version} cuDNN={cudnn_version} NCCL={nccl_version_value.value} "
+    f"libdevice={next(path for path in libdevice_paths if path.is_file())}"
+)
+print(f"two-device sharded sum={actual.tolist()}")
 PY
 }
 
 main() {
+    acquire_project_lock
     install_system_dependencies
     install_uv
-    persist_uv_path
     configure_uv_storage
     configure_runtime_storage
     sync_environment
     verify_python_environment
     check_gpu
+    write_environment_file
 
     log "环境安装完成"
     echo
