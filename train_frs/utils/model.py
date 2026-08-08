@@ -12,7 +12,7 @@ import jax.numpy as jnp
 import optax
 from flax import nnx
 
-from tactile_flow_steering.utils.integration import fireflow_integrate_velocity
+from train_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]

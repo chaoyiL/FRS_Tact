@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tactile_flow_steering.train import train_decoder
+from train_frs.train import train_decoder
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_frs.yaml"
 
 
 def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -84,7 +84,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
     missing = [path for path in cache_dirs if not (path / "manifest.json").is_file()]
     if missing:
         raise FileNotFoundError(
-            f"action caches are missing: {missing}. Run tools/prepare_frs_caches.py first."
+            f"action caches are missing: {missing}. Run python -m train_frs.prepare_frs_caches first."
         )
 
     output_dir = Path(str(training["output"])).expanduser()

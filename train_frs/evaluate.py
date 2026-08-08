@@ -7,13 +7,13 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from tactile_flow_steering.utils.checkpoint import load_checkpoint
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.data import resolve_tactile_window
-from tactile_flow_steering.utils.metrics import EvalTarget
-from tactile_flow_steering.utils.metrics import evaluate_split
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.visualize import write_evaluation_plots
+from train_frs.utils.checkpoint import load_checkpoint
+from train_frs.utils.data import TactileConditionedBatches
+from train_frs.utils.data import resolve_tactile_window
+from train_frs.utils.metrics import EvalTarget
+from train_frs.utils.metrics import evaluate_split
+from train_frs.utils.model import FlowSolver
+from train_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs
 from utils.cache import atomic_write_json
 

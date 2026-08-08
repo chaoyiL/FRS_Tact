@@ -117,22 +117,22 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
-    from tactile_flow_steering.utils.checkpoint import (
+    from train_frs.utils.checkpoint import (
         CHECKPOINT_NAME,
         load_checkpoint,
         load_optimizer_state,
         restore_optimizer_state,
         save_checkpoint,
     )
-    from tactile_flow_steering.utils.data import (
+    from train_frs.utils.data import (
         CachedTactileEmbeddingBatches,
         TactileConditionedBatches,
         gate_weights_from_change,
         resolve_tactile_window,
     )
-    from tactile_flow_steering.utils.history_plot import plot_training_history
-    from tactile_flow_steering.utils.metrics import evaluate_split
-    from tactile_flow_steering.utils.model import (
+    from train_frs.utils.history_plot import plot_training_history
+    from train_frs.utils.metrics import evaluate_split
+    from train_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
         TactileConditionedFlowDecoder,

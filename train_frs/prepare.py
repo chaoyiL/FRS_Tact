@@ -17,14 +17,14 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-ROOT = pathlib.Path(__file__).resolve().parent
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.policies.smolvla_jax.data import action_delta_timestamps
-from lerobot.policies.smolvla_jax.data import prepare_lerobot_batch
-from lerobot.policies.smolvla_jax.data import resolve_source_visual_keys
+from train_smolvla.data import action_delta_timestamps
+from train_smolvla.data import prepare_lerobot_batch
+from train_smolvla.data import resolve_source_visual_keys
 
 from modalities_eval.utils import EvalObservation
 from modalities_eval.utils import SmolVLAEvalModel

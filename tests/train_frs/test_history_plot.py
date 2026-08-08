@@ -5,8 +5,8 @@ import pathlib
 import tempfile
 import unittest
 
-from tactile_flow_steering.utils.history_plot import HISTORY_FIELDS
-from tactile_flow_steering.utils.history_plot import plot_training_history
+from train_frs.utils.history_plot import HISTORY_FIELDS
+from train_frs.utils.history_plot import plot_training_history
 
 
 class HistoryPlotTest(unittest.TestCase):

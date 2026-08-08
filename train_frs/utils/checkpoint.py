@@ -13,8 +13,8 @@ from flax import nnx
 from flax import traverse_util
 
 from utils.cache import atomic_write_json
-from tactile_flow_steering.utils.model import DecoderConfig
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
+from train_frs.utils.model import DecoderConfig
+from train_frs.utils.model import TactileConditionedFlowDecoder
 
 PARAMS_NAME = "params.npz"
 OPT_STATE_NAME = "opt_state.npz"

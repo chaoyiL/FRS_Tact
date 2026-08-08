@@ -9,22 +9,22 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from tactile_flow_steering.utils.checkpoint import load_checkpoint
-from tactile_flow_steering.utils.checkpoint import save_checkpoint
-from tactile_flow_steering.utils.metrics import evaluate_split
-from tactile_flow_steering.utils.metrics import gate_stratified_decode_metrics
-from tactile_flow_steering.utils.model import DecoderConfig
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
-from tactile_flow_steering.utils.model import decode_euler
-from tactile_flow_steering.utils.model import decode_mse_per_sample
-from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
-from tactile_flow_steering.utils.model import gate_preference_ranking_loss_per_sample
-from tactile_flow_steering.utils.model import gated_flow_matching_loss_per_sample
-from tactile_flow_steering.utils.model import gt_supervised_loss_per_sample
-from tactile_flow_steering.utils.model import high_gate_repair_loss_per_sample
-from tactile_flow_steering.utils.model import make_optimizer
-from tactile_flow_steering.utils.model import train_step
+from train_frs.utils.checkpoint import load_checkpoint
+from train_frs.utils.checkpoint import save_checkpoint
+from train_frs.utils.metrics import evaluate_split
+from train_frs.utils.metrics import gate_stratified_decode_metrics
+from train_frs.utils.model import DecoderConfig
+from train_frs.utils.model import TactileConditionedFlowDecoder
+from train_frs.utils.model import decode_actions
+from train_frs.utils.model import decode_euler
+from train_frs.utils.model import decode_mse_per_sample
+from train_frs.utils.model import flow_matching_loss_per_sample
+from train_frs.utils.model import gate_preference_ranking_loss_per_sample
+from train_frs.utils.model import gated_flow_matching_loss_per_sample
+from train_frs.utils.model import gt_supervised_loss_per_sample
+from train_frs.utils.model import high_gate_repair_loss_per_sample
+from train_frs.utils.model import make_optimizer
+from train_frs.utils.model import train_step
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
@@ -430,9 +430,9 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertTrue(metadata["decoder_config"]["gate_conditioning"])
 
     def test_optimizer_state_round_trip(self):
-        from tactile_flow_steering.utils.checkpoint import load_optimizer_state
-        from tactile_flow_steering.utils.checkpoint import restore_optimizer_state
-        from tactile_flow_steering.utils.model import make_optimizer
+        from train_frs.utils.checkpoint import load_optimizer_state
+        from train_frs.utils.checkpoint import restore_optimizer_state
+        from train_frs.utils.model import make_optimizer
 
         model = self.make_model()
         optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0, total_steps=10)

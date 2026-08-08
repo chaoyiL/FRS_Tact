@@ -15,7 +15,7 @@ from safetensors.numpy import save_file as save_safetensors_file
 
 pytest.importorskip("jax")
 
-from lerobot.policies.smolvla_jax.validation import (  # noqa: E402
+from train_vtsmolvla.validation import (  # noqa: E402
     CheckpointContract,
     contract_from_config,
     validate_checkpoint,
@@ -72,13 +72,13 @@ def _write_json(path: Path, value: object) -> None:
 def test_validation_import_does_not_load_jax_or_flax() -> None:
     script = """
 import sys
-from lerobot.policies.smolvla_jax.validation import CheckpointContract
+from train_vtsmolvla.validation import CheckpointContract
 
 heavy_modules = sorted(name for name in ("jax", "flax") if name in sys.modules)
 assert not heavy_modules, f"validation import loaded: {heavy_modules}"
 
-from lerobot.policies.smolvla_jax import JaxSmolVLAConfig
-assert JaxSmolVLAConfig.text_hidden_size == 960
+from train_vtsmolvla import VTSmolVLAConfig
+assert VTSmolVLAConfig.text_hidden_size == 960
 """
     result = subprocess.run(
         [sys.executable, "-c", script],

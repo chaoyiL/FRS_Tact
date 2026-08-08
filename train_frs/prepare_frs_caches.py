@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from prepare import prepare_cache
+from train_frs.prepare import prepare_cache
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_frs.yaml"
 
 
 def load_config(path: Path) -> dict[str, Any]:

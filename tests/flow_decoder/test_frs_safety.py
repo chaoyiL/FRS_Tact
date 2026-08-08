@@ -8,16 +8,16 @@ import numpy as np
 import pytest
 import torch
 
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from prepare import _ActionCacheRecordDataset
-from prepare import _create_batch_loader
-from prepare import _prepare_observation_batch
-from prepare import _require_finite_cache_batch
-from tactile_flow_steering.train import _existing_run_artifacts
-from tactile_flow_steering.train import _validate_resume_cache
-from tools.compare_frs_reverse_solvers import mean_ratio
-from tools.compare_frs_reverse_solvers import summarize_inversion_mse
-from tools.train_frs import resolve_resume_mode
+from train_smolvla.configuration import JaxSmolVLAConfig
+from train_frs.compare_frs_reverse_solvers import mean_ratio, summarize_inversion_mse
+from train_frs.prepare import (
+    _ActionCacheRecordDataset,
+    _create_batch_loader,
+    _prepare_observation_batch,
+    _require_finite_cache_batch,
+)
+from train_frs.train import _existing_run_artifacts, _validate_resume_cache
+from train_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
 
 

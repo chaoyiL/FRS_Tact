@@ -129,8 +129,8 @@ def test_key_mapped_dataset_augments_only_selected_visual_keys() -> None:
 
 
 def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
-    from lerobot.policies.smolvla_jax.data import _KeyMappedLeRobotDataset as VtKeyMappedDataset
-    from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
+    from train_vtsmolvla.data import _VTKeyMappedLeRobotDataset as VtKeyMappedDataset
+    from train_vtsmolvla.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 
     class FakeCache:
         def __getitem__(self, index):
@@ -185,11 +185,9 @@ def test_training_stats_are_saved_for_future_inference(tmp_path: Path) -> None:
 
 
 def test_preprocessor_prepares_tactile_images_separately() -> None:
-    from lerobot.policies.smolvla_jax.configuration import (
-        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
-    )
-    from lerobot.policies.smolvla_jax.preprocessing import (
-        JaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.preprocessing import (
+        VTJaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
     )
 
     processor = object.__new__(JaxVTSmolVLAPreprocessor)
@@ -224,13 +222,11 @@ def test_preprocessor_prepares_tactile_images_separately() -> None:
 
 
 def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
-    from lerobot.policies.smolvla_jax.configuration import (
-        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.preprocessing import (
+        VTJaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
     )
-    from lerobot.policies.smolvla_jax.preprocessing import (
-        JaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
-    )
-    from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
+    from train_vtsmolvla.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 
     processor = object.__new__(JaxVTSmolVLAPreprocessor)
     processor.config = dataclasses.replace(
@@ -265,7 +261,7 @@ def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
 
 
 def test_tactile_preprocessing_matches_encoder_for_non_square_bchw() -> None:
-    from lerobot.policies.smolvla_jax.preprocessing import prepare_tactile_batch
+    from train_vtsmolvla.preprocessing import prepare_tactile_batch
     from tactile_encoder.utils.image_dataset import parse_image_to_unit
 
     image = np.arange(3 * 5 * 9, dtype=np.uint8).reshape(3, 5, 9)
@@ -426,10 +422,8 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
 
 
 def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
-    from lerobot.policies.smolvla_jax.configuration import (
-        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
-    )
-    from lerobot.policies.smolvla_jax.data import resolve_model_visual_keys as resolve_vt_visual_keys
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.data import resolve_model_visual_keys as resolve_vt_visual_keys
 
     config = dataclasses.replace(
         JaxVTSmolVLAConfig(),

@@ -32,7 +32,7 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     try:
         from tactile_encoder.utils.image_dataset import create_image_dataset
 
-        window_io = importlib.import_module("tactile_flow_steering.utils.window_io")
+        window_io = importlib.import_module("train_frs.utils.window_io")
         TACTILE_KEYS = window_io.TACTILE_KEYS
         load_tactile_windows = window_io.load_tactile_windows
 

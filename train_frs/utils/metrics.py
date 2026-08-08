@@ -7,11 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
-from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
+from train_frs.utils.data import TactileConditionedBatches
+from train_frs.utils.model import FlowSolver
+from train_frs.utils.model import TactileConditionedFlowDecoder
+from train_frs.utils.model import decode_actions
+from train_frs.utils.model import flow_matching_loss_per_sample
 
 EvalTarget = Literal["gt", "predicted"]
 
@@ -214,7 +214,7 @@ def evaluate_split(
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
 ) -> EvaluationResult:
-    from tactile_flow_steering.utils.data import gate_weights_from_change
+    from train_frs.utils.data import gate_weights_from_change
 
     if target not in ("gt", "predicted"):
         raise ValueError(f"target must be 'gt' or 'predicted', got {target!r}.")

@@ -19,6 +19,9 @@
 - Launchers never install, log in, or download datasets/checkpoints.
 - Preserve checkpoint tensor names and old visual/VT checkpoint readability.
 - Preserve unrelated user changes, especially the current deploy_smolvla restructuring and deleted files.
+- Keep FRS-owned config and launcher assets in `train_frs/`; its launcher uses
+  `python -m train_frs.<module>` for FRS stages while retaining shared SmolVLA merge and tactile
+  embedding precomputation under `tools/`.
 
 ---
 
@@ -256,7 +259,7 @@ git commit -m "feat: add one-command SmolVLA launchers"
 
 **Files:**
 - Modify: src/lerobot/policies/__init__.py
-- Modify: prepare.py, utils/source_model.py, tactile_flow_steering/utils/data.py, modalities_eval/utils.py
+- Modify: train_frs/prepare.py, utils/source_model.py, train_frs/utils/data.py, modalities_eval/utils.py
 - Modify: affected tools/*.py
 - Modify carefully: deploy_smolvla/remote_client.py and only old references in the user's current deploy_smolvla layout
 - Modify: affected JAX, FRS, publish, deploy tests
@@ -292,7 +295,7 @@ Do not modify a pre-existing failure caused by the user's uncommitted deploy con
 - [ ] **Step 5: Commit**
 
 ~~~bash
-git add src/lerobot/policies/__init__.py prepare.py utils tactile_flow_steering modalities_eval tools deploy_smolvla tests
+git add src/lerobot/policies/__init__.py train_frs/prepare.py utils train_frs modalities_eval tools deploy_smolvla tests
 git commit -m "refactor: migrate SmolVLA consumers"
 ~~~
 

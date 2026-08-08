@@ -4,14 +4,14 @@
 #        --adapter KaiyueChen/pick_tube_02_3w \
 #        --base lerobot/smolvla_base \
 #        --output /workspace/checkpoints/pick_tube_02_3w_jax
-#   2) uv run --no-sync python tools/compare_frs_reverse_solvers.py \
-#        --config configs/train_frs.yaml
+#   2) uv run --no-sync python -m train_frs.compare_frs_reverse_solvers \
+#        --config train_frs/configs/train_frs.yaml
 #   3) uv run --no-sync python tools/precompute_tactile_embeddings.py \
-#        --config configs/train_frs.yaml
-#   4) uv run --no-sync python tools/prepare_frs_caches.py \
-#        --config configs/train_frs.yaml
-#   5) uv run --no-sync python tools/train_frs.py \
-#        --config configs/train_frs.yaml
+#        --config train_frs/configs/train_frs.yaml
+#   4) uv run --no-sync python -m train_frs.prepare_frs_caches \
+#        --config train_frs/configs/train_frs.yaml
+#   5) uv run --no-sync python -m train_frs.train_frs \
+#        --config train_frs/configs/train_frs.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
 checkpoint: /workspace/checkpoints/pick_tube_02_3w_jax

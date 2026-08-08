@@ -95,8 +95,8 @@ def test_every_module_accepts_each_train_mode() -> None:
 
 
 def test_tactile_projection_module_is_optional_and_trainable() -> None:
-    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
-    from lerobot.policies.smolvla_jax.lora import (
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.lora import (
         is_trainable_parameter as is_vt_trainable_parameter,
         resolve_module_modes as resolve_vt_module_modes,
     )
@@ -117,8 +117,8 @@ def test_tactile_projection_module_is_optional_and_trainable() -> None:
 
 
 def test_legacy_tactile_projection_is_trainable_when_enabled() -> None:
-    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
-    from lerobot.policies.smolvla_jax.lora import is_trainable_parameter as is_vt_trainable_parameter
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.lora import is_trainable_parameter as is_vt_trainable_parameter
 
     config = replace(
         JaxVTSmolVLAConfig(),

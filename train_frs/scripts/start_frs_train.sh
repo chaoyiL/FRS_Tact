@@ -3,8 +3,8 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_PATH="${1:-${PROJECT_ROOT}/configs/train_frs.yaml}"
+PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
+CONFIG_PATH="${1:-${PROJECT_ROOT}/train_frs/configs/train_frs.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube}"
 
@@ -113,7 +113,7 @@ log "合并/检查 SmolVLA PEFT checkpoint"
     "${download_flag}"
 
 log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
-"${UV_BIN}" run --no-sync python tools/compare_frs_reverse_solvers.py --config "${CONFIG_PATH}"
+"${UV_BIN}" run --no-sync python -m train_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
 
 log "预计算/补齐四数据集 tactile embeddings"
 "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}"
@@ -125,7 +125,7 @@ log "生成/补齐四数据集 SmolVLA action caches"
 PREPARE_XLA_FLAGS="${FRS_PREPARE_XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
 log "action-cache XLA_FLAGS=${PREPARE_XLA_FLAGS}"
 XLA_FLAGS="${PREPARE_XLA_FLAGS}" \
-    "${UV_BIN}" run --no-sync python tools/prepare_frs_caches.py --config "${CONFIG_PATH}"
+    "${UV_BIN}" run --no-sync python -m train_frs.prepare_frs_caches --config "${CONFIG_PATH}"
 
 log "开始 multi-dataset tactile FRS 训练"
-"${UV_BIN}" run --no-sync python tools/train_frs.py --config "${CONFIG_PATH}"
+"${UV_BIN}" run --no-sync python -m train_frs.train_frs --config "${CONFIG_PATH}"

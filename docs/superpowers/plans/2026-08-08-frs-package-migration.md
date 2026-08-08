@@ -23,7 +23,6 @@
 ### Task 1: Move the core tactile FRS package
 
 **Files:**
-- Create: `tests/train_frs/__init__.py`
 - Create: `tests/train_frs/test_package_layout.py`
 - Move: `tactile_flow_steering/__init__.py` → `train_frs/__init__.py`
 - Move: `tactile_flow_steering/train.py` → `train_frs/train.py`
@@ -76,8 +75,6 @@ def test_new_core_modules_import_and_old_package_is_gone() -> None:
     assert importlib.util.find_spec("train_frs.utils.model") is not None
     assert importlib.util.find_spec("tactile_flow_steering") is None
 ```
-
-Add an empty `tests/train_frs/__init__.py`.
 
 - [ ] **Step 2: Run the test and verify RED**
 
@@ -410,9 +407,14 @@ git commit -m "refactor: move FRS config and launcher"
 Run:
 
 ```bash
-rg -n "tactile_flow_steering|tools/(train_frs|prepare_frs_caches|compare_frs_reverse_solvers)\.py|tools\.(train_frs|prepare_frs_caches|compare_frs_reverse_solvers)|configs/train_frs\.yaml|scripts/start_frs_train\.sh|from prepare import|import_module\(\"tactile_flow_steering" \
+rg --pcre2 -n "tactile_flow_steering|tools/(train_frs|prepare_frs_caches|compare_frs_reverse_solvers)\.py|tools\.(train_frs|prepare_frs_caches|compare_frs_reverse_solvers)|(?<!train_frs/)configs/train_frs\.yaml|(?<!train_frs/)scripts/start_frs_train\.sh|from prepare import|import_module\(\"tactile_flow_steering" \
   --glob '!docs/superpowers/specs/2026-08-08-frs-package-migration-design.md' \
   --glob '!docs/superpowers/plans/2026-08-08-frs-package-migration.md' \
+  --glob '!tests/train_frs/test_package_layout.py' \
+  --glob '!.superpowers/**' \
+  --glob '!.pytest_cache/**' \
+  --glob '!.ruff_cache/**' \
+  --glob '!**/__pycache__/**' \
   --glob '!.git/**' .
 ```
 

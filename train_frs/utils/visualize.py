@@ -10,11 +10,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.metrics import EvaluationResult
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
+from train_frs.utils.data import TactileConditionedBatches
+from train_frs.utils.metrics import EvaluationResult
+from train_frs.utils.model import FlowSolver
+from train_frs.utils.model import TactileConditionedFlowDecoder
+from train_frs.utils.model import decode_actions
 from utils.cache import CachedPairs
 
 
@@ -431,4 +431,4 @@ def _plot_episode_action_strips(
 
 
 # Re-export for train.py callers.
-from tactile_flow_steering.utils.history_plot import plot_training_history as plot_training_history
+from train_frs.utils.history_plot import plot_training_history as plot_training_history

@@ -8,16 +8,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_flow_steering.utils.data import NUM_TACTILE_STREAMS
-from tactile_flow_steering.utils.data import TACTILE_KEYS
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.data import gate_weights_from_change
-from tactile_flow_steering.utils.data import resolve_dataset_repo_id
-from tactile_flow_steering.utils.data import resolve_tactile_window
-from tactile_flow_steering.utils.data import resnet_embedding_dim_from_encoder
-from tactile_flow_steering.utils.data import tactile_change_from_tokens
-from tactile_flow_steering.utils.window_io import load_tactile_windows
-from tactile_flow_steering.utils.window_io import window_frame_indices
+from train_frs.utils.data import NUM_TACTILE_STREAMS
+from train_frs.utils.data import TACTILE_KEYS
+from train_frs.utils.data import TactileConditionedBatches
+from train_frs.utils.data import gate_weights_from_change
+from train_frs.utils.data import resolve_dataset_repo_id
+from train_frs.utils.data import resolve_tactile_window
+from train_frs.utils.data import resnet_embedding_dim_from_encoder
+from train_frs.utils.data import tactile_change_from_tokens
+from train_frs.utils.window_io import load_tactile_windows
+from train_frs.utils.window_io import window_frame_indices
 
 
 class FakePairs:

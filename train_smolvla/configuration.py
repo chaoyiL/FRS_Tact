@@ -109,17 +109,37 @@ class JaxSmolVLAConfig:
     expert_intermediate_size: int = 2048
 
     @classmethod
-    def from_pretrained(cls, path: str | Path) -> JaxSmolVLAConfig:
-        path = Path(path)
-        config_path = path / "config.json" if path.is_dir() else path
-        with config_path.open() as config_file:
-            raw: dict[str, Any] = json.load(config_file)
+    def _validate_pretrained_metadata(cls, raw: dict[str, Any]) -> None:
+        """Reject checkpoint metadata owned by an input-modality extension."""
 
         if raw.get("use_tactile_encoder", False) or raw.get("tactile_keys"):
             raise ValueError(
                 "train_smolvla only loads visual SmolVLA checkpoints; "
                 "use train_vtsmolvla for checkpoints with tactile inputs"
             )
+
+    @classmethod
+    def _pretrained_extension_fields(cls, raw: dict[str, Any]) -> dict[str, Any]:
+        """Return constructor fields supplied by a visual-core extension."""
+
+        del raw
+        return {}
+
+    @classmethod
+    def _tuple_override_fields(cls) -> frozenset[str]:
+        return frozenset({"image_keys", "vlm_lora_target_modules"})
+
+    def _validate_extension_overrides(self) -> None:
+        """Hook for extension-specific cross-field validation."""
+
+    @classmethod
+    def from_pretrained(cls, path: str | Path) -> JaxSmolVLAConfig:
+        path = Path(path)
+        config_path = path / "config.json" if path.is_dir() else path
+        with config_path.open() as config_file:
+            raw: dict[str, Any] = json.load(config_file)
+
+        cls._validate_pretrained_metadata(raw)
 
         output_features = raw.get("output_features", {})
         input_features = raw.get("input_features", {})
@@ -191,6 +211,7 @@ class JaxSmolVLAConfig:
             rtc_config=rtc_config,
             expert_hidden_size=expert_hidden_size,
             expert_intermediate_size=expert_intermediate_size,
+            **cls._pretrained_extension_fields(raw),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -203,14 +224,14 @@ class JaxSmolVLAConfig:
             return self
         if not isinstance(overrides, dict):
             raise ValueError("model overrides must be a mapping")
-        field_types = {field.name: field.type for field in fields(JaxSmolVLAConfig)}
+        field_types = {field.name: field.type for field in fields(type(self))}
         unknown = sorted(set(overrides) - set(field_types))
         if unknown:
             raise ValueError(f"unknown model override fields: {unknown}")
 
         cleaned: dict[str, Any] = {}
         for key, value in overrides.items():
-            if key in {"image_keys", "vlm_lora_target_modules"} and value is not None:
+            if key in self._tuple_override_fields() and value is not None:
                 cleaned[key] = tuple(value)
             else:
                 # PyYAML 1.2 treats bare scientific notation like ``1e-4`` as a
@@ -274,4 +295,6 @@ class JaxSmolVLAConfig:
             if "expert_intermediate_size" not in cleaned:
                 derived["expert_intermediate_size"] = expert_intermediate_size
 
-        return replace(updated, **derived)
+        updated = replace(updated, **derived)
+        updated._validate_extension_overrides()
+        return updated

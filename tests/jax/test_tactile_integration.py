@@ -16,10 +16,10 @@ from deploy_smolvla.remote_client import (
     _robot_tactile_keys,
     _validate_observation_mode,
 )
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.modeling import JaxSmolVLA, normalize_tactile_embeddings
-from lerobot.policies.smolvla_jax.policy import JaxSmolVLAPolicy
-from lerobot.policies.smolvla_jax.validation import CheckpointValidationReport
+from train_vtsmolvla.configuration import VTSmolVLAConfig
+from train_vtsmolvla.modeling import VTJaxSmolVLA, normalize_tactile_embeddings
+from train_vtsmolvla.policy import VTJaxSmolVLAPolicy
+from train_vtsmolvla.validation import CheckpointValidationReport
 
 
 def _write_remote_config(
@@ -316,7 +316,7 @@ def test_tactile_embedding_normalization_has_unit_rms() -> None:
 
 
 def test_cached_tactile_embeddings_keep_trainable_projection() -> None:
-    config = JaxSmolVLAConfig(
+    config = VTSmolVLAConfig(
         use_tactile_encoder=True,
         tactile_encoder_path="unused-for-cached-input",
         tactile_keys=("left", "right"),
@@ -324,7 +324,7 @@ def test_cached_tactile_embeddings_keep_trainable_projection() -> None:
         tactile_embedding_dim=3,
         text_hidden_size=4,
     )
-    model = JaxSmolVLA(config)
+    model = VTJaxSmolVLA(config)
     params = {
         "model.tactile_proj.weight": jnp.arange(12, dtype=jnp.float32).reshape(4, 3) / 10,
         "model.tactile_proj.bias": jnp.arange(4, dtype=jnp.float32),
@@ -419,7 +419,7 @@ def test_policy_inference_accepts_cached_tactile_embeddings() -> None:
                 "tactile_masks": jnp.ones((1, 2), dtype=bool),
             }
 
-    policy = object.__new__(JaxSmolVLAPolicy)
+    policy = object.__new__(VTJaxSmolVLAPolicy)
     policy.config = SimpleNamespace(
         chunk_size=2,
         max_action_dim=1,
@@ -439,7 +439,7 @@ def test_policy_inference_accepts_cached_tactile_embeddings() -> None:
 
 
 def test_select_action_advances_chunk_seed() -> None:
-    policy = object.__new__(JaxSmolVLAPolicy)
+    policy = object.__new__(VTJaxSmolVLAPolicy)
     policy.config = SimpleNamespace(n_action_steps=1)
     seeds = []
 

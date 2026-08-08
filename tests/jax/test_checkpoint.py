@@ -228,8 +228,8 @@ def test_visual_config_rejects_tactile_checkpoints(
 
 
 def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
-    from lerobot.policies.smolvla_jax.checkpoint import write_effective_config as write_vt_config
-    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
+    from train_vtsmolvla.checkpoint import write_effective_config as write_vt_config
+    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
 
     config = replace(
         JaxVTSmolVLAConfig(),

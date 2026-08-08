@@ -144,6 +144,9 @@ VT launcher 在训练前按 YAML 设置决定是否补齐 tactile embedding cach
 - 纯视觉调用方改为导入 `train_smolvla`。
 - VT 调用方改为导入 `train_vtsmolvla`；需要通用视觉数据函数时可以显式导入 `train_smolvla.data`。
 - FRS 根据实际职责导入纯视觉核心或 VT 扩展。FRS 不通过旧包名间接获得任何类型。
+- FRS 的训练配置和一键启动脚本位于 `train_frs/configs/train_frs.yaml` 与
+  `train_frs/scripts/start_frs_train.sh`；FRS 自有阶段通过 `python -m train_frs.<module>`
+  运行，SmolVLA merge 和 tactile embedding 预计算仍使用 `tools/` 中的共享工具。
 - 部署入口依据 YAML 的模型类型显式选择 `JaxSmolVLAPolicy` 或 `VTJaxSmolVLAPolicy`。
 - conversion、merge、publish、inference、evaluation 和 cache 工具切换到新包路径；工具本身不因本次训练目录重构而无关搬家。
 - `pyproject.toml` 显式包含 `train_smolvla*` 和 `train_vtsmolvla*`，并确保 YAML、Shell 和 README 作为需要的包数据或仓库资产保留。
