@@ -9,8 +9,8 @@ import pytest
 import torch
 from safetensors.flax import load_file as load_safetensors_file
 
-from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.data import (
+from train_smolvla.configuration import JaxSmolVLAConfig
+from train_smolvla.data import (
     DeterministicEpochBatchSampler,
     DatasetSource,
     _KeyMappedLeRobotDataset,
@@ -22,13 +22,10 @@ from lerobot.policies.smolvla_jax.data import (
     prepare_lerobot_batch,
     rename_dataset_stats,
     resolve_action_key,
-    resolve_model_visual_keys,
     resolve_source_visual_keys,
     split_sources_train_val,
 )
-from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor, prepare_tactile_batch
-from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
-from tactile_encoder.utils.image_dataset import parse_image_to_unit
+from train_smolvla.preprocessing import JaxSmolVLAPreprocessor
 
 
 def test_epoch_batch_sampler_can_resume_without_replaying_prefix() -> None:
@@ -105,7 +102,7 @@ def test_prepare_lerobot_batch_converts_torch_and_padding() -> None:
     )
 
 
-def test_key_mapped_dataset_augments_rgb_but_not_tactile() -> None:
+def test_key_mapped_dataset_augments_only_selected_visual_keys() -> None:
     class FakeDataset:
         def __len__(self):
             return 1
@@ -115,7 +112,7 @@ def test_key_mapped_dataset_augments_rgb_but_not_tactile() -> None:
             return {
                 "actions": torch.zeros(2, 3),
                 "observation.images.cam0": torch.zeros(3, 4, 4),
-                "observation.images.tactile": torch.ones(3, 4, 4),
+                "observation.images.auxiliary": torch.ones(3, 4, 4),
                 "task": "pick cube",
             }
 
@@ -128,10 +125,13 @@ def test_key_mapped_dataset_augments_rgb_but_not_tactile() -> None:
     )
     sample = dataset[0]
     np.testing.assert_array_equal(sample["observation.images.camera1"], np.full((3, 4, 4), 2.0))
-    np.testing.assert_array_equal(sample["observation.images.tactile"], np.ones((3, 4, 4)))
+    np.testing.assert_array_equal(sample["observation.images.auxiliary"], np.ones((3, 4, 4)))
 
 
 def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
+    from lerobot.policies.smolvla_jax.data import _KeyMappedLeRobotDataset as VtKeyMappedDataset
+    from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
+
     class FakeCache:
         def __getitem__(self, index):
             assert index == 105
@@ -153,7 +153,7 @@ def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
                 "task": "pick cube",
             }
 
-    dataset = _KeyMappedLeRobotDataset(
+    dataset = VtKeyMappedDataset(
         FakeDataset(),
         action_key="actions",
         rename_map={},
@@ -185,9 +185,16 @@ def test_training_stats_are_saved_for_future_inference(tmp_path: Path) -> None:
 
 
 def test_preprocessor_prepares_tactile_images_separately() -> None:
-    processor = object.__new__(JaxSmolVLAPreprocessor)
+    from lerobot.policies.smolvla_jax.configuration import (
+        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
+    )
+    from lerobot.policies.smolvla_jax.preprocessing import (
+        JaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
+    )
+
+    processor = object.__new__(JaxVTSmolVLAPreprocessor)
     processor.config = dataclasses.replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         image_keys=("observation.images.camera1",),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder/best",
@@ -217,9 +224,17 @@ def test_preprocessor_prepares_tactile_images_separately() -> None:
 
 
 def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
-    processor = object.__new__(JaxSmolVLAPreprocessor)
+    from lerobot.policies.smolvla_jax.configuration import (
+        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
+    )
+    from lerobot.policies.smolvla_jax.preprocessing import (
+        JaxSmolVLAPreprocessor as JaxVTSmolVLAPreprocessor,
+    )
+    from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
+
+    processor = object.__new__(JaxVTSmolVLAPreprocessor)
     processor.config = dataclasses.replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         image_keys=("observation.images.camera1",),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder/best",
@@ -250,6 +265,9 @@ def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
 
 
 def test_tactile_preprocessing_matches_encoder_for_non_square_bchw() -> None:
+    from lerobot.policies.smolvla_jax.preprocessing import prepare_tactile_batch
+    from tactile_encoder.utils.image_dataset import parse_image_to_unit
+
     image = np.arange(3 * 5 * 9, dtype=np.uint8).reshape(3, 5, 9)
     batch = np.stack((image, np.flip(image, axis=-1)), axis=0)
 
@@ -299,7 +317,7 @@ def test_split_sources_train_val_uses_explicit_episodes(monkeypatch) -> None:
             self.total_episodes = 100
 
     monkeypatch.setattr(
-        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
+        "train_smolvla.data.LeRobotDatasetMetadata",
         FakeMeta,
     )
     sources = [
@@ -361,7 +379,7 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
         [
             "observation.images.camera0",
             "observation.images.camera1",
-            "observation.images.tactile_left_0",
+            "observation.images.unused",
         ],
     )
     assert keys == ["observation.images.camera0", "observation.images.camera1"]
@@ -397,7 +415,7 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
         [
             "observation.images.camera0",
             "observation.images.camera1",
-            "observation.images.tactile_left_0",
+            "observation.images.unused",
         ],
         allow_missing=4,
     )
@@ -408,8 +426,13 @@ def test_resolve_source_visual_keys_with_rename_map() -> None:
 
 
 def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
+    from lerobot.policies.smolvla_jax.configuration import (
+        JaxSmolVLAConfig as JaxVTSmolVLAConfig,
+    )
+    from lerobot.policies.smolvla_jax.data import resolve_model_visual_keys as resolve_vt_visual_keys
+
     config = dataclasses.replace(
-        JaxSmolVLAConfig(),
+        JaxVTSmolVLAConfig(),
         image_keys=("observation.images.camera1", "observation.images.camera2"),
         use_tactile_encoder=True,
         tactile_encoder_path="checkpoints/encoder/best",
@@ -419,13 +442,13 @@ def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
         ),
         tactile_num_tokens=2,
     )
-    assert resolve_model_visual_keys(config) == (
+    assert resolve_vt_visual_keys(config) == (
         "observation.images.camera1",
         "observation.images.camera2",
         "observation.images.tactile_left_0",
         "observation.images.tactile_right_0",
     )
-    assert resolve_model_visual_keys(config, use_tactile_embedding_cache=True) == (
+    assert resolve_vt_visual_keys(config, use_tactile_embedding_cache=True) == (
         "observation.images.camera1",
         "observation.images.camera2",
     )

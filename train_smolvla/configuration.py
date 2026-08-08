@@ -115,6 +115,12 @@ class JaxSmolVLAConfig:
         with config_path.open() as config_file:
             raw: dict[str, Any] = json.load(config_file)
 
+        if raw.get("use_tactile_encoder", False) or raw.get("tactile_keys"):
+            raise ValueError(
+                "train_smolvla only loads visual SmolVLA checkpoints; "
+                "use train_vtsmolvla for checkpoints with tactile inputs"
+            )
+
         output_features = raw.get("output_features", {})
         input_features = raw.get("input_features", {})
         action_dim = output_features.get("action", {}).get("shape", [raw.get("max_action_dim", 32)])[0]

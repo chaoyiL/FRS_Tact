@@ -5,8 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lerobot.policies.smolvla_jax import atomic_checkpoint
-from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically
+from train_smolvla import atomic_checkpoint
+from train_smolvla.atomic_checkpoint import assemble_checkpoint_atomically
 
 
 def test_final_path_appears_only_after_validation(tmp_path: Path) -> None:

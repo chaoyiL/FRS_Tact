@@ -193,6 +193,40 @@ def test_effective_config_preserves_requested_camera_order(tmp_path: Path) -> No
     assert JaxSmolVLAConfig.from_pretrained(tmp_path).image_keys == config.image_keys
 
 
+def test_visual_config_accepts_disabled_legacy_tactile_defaults(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "use_tactile_encoder": False,
+                "tactile_keys": [],
+                "tactile_num_tokens": 4,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = JaxSmolVLAConfig.from_pretrained(tmp_path)
+
+    assert config.image_keys == ()
+
+
+@pytest.mark.parametrize(
+    "tactile_fields",
+    [
+        {"use_tactile_encoder": True, "tactile_keys": []},
+        {"use_tactile_encoder": False, "tactile_keys": ["observation.images.tactile_left_0"]},
+    ],
+)
+def test_visual_config_rejects_tactile_checkpoints(
+    tmp_path: Path,
+    tactile_fields: dict[str, object],
+) -> None:
+    (tmp_path / "config.json").write_text(json.dumps(tactile_fields), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="train_vtsmolvla"):
+        JaxSmolVLAConfig.from_pretrained(tmp_path)
+
+
 def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
     from lerobot.policies.smolvla_jax.checkpoint import write_effective_config as write_vt_config
     from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig as JaxVTSmolVLAConfig
