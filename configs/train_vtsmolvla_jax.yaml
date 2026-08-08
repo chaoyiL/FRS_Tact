@@ -190,7 +190,6 @@ model:
   # 只复用当前帧的 ResNet backbone；不加载 checkpoint 中可能存在的 GRU/history 分支。
   use_tactile_encoder: true
   tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_05
-  tactile_encoder_repo_id: liuchaoyi/encoder_ckpt_05
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_left_0

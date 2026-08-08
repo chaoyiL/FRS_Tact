@@ -16,12 +16,8 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, Dataset, Subset
 
-from lerobot.datasets import LeRobotDataset
-from lerobot.policies.smolvla_jax.data import (
-    parse_dataset_sources,
-    resolve_source_metadata,
-    resolve_source_visual_keys,
-)
+from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.policies.smolvla_jax.data import parse_dataset_sources, resolve_source_visual_keys
 from lerobot.policies.smolvla_jax.tactile_cache import (
     TACTILE_EMBEDDINGS_NAME,
     TACTILE_METADATA_NAME,
@@ -29,7 +25,6 @@ from lerobot.policies.smolvla_jax.tactile_cache import (
     create_tactile_cache_metadata,
     load_tactile_cache_metadata,
     tactile_cache_dir,
-    validate_tactile_encoder_provenance,
 )
 from tactile_encoder.utils.checkpoint import load_tactile_encoder
 from tactile_encoder.utils.image_dataset import parse_image_to_uint8
@@ -145,25 +140,19 @@ def _precompute_source(
     flush_every: int,
     overwrite: bool,
 ) -> None:
-    source_metadata = resolve_source_metadata(source)
+    metadata = LeRobotDatasetMetadata(
+        repo_id=source.repo_id,
+        root=source.root,
+        revision=source.revision,
+    )
     model_tactile_keys = tuple(model_config["tactile_keys"])
     source_tactile_keys = tuple(
         resolve_source_visual_keys(
             model_tactile_keys,
             source.rename_map,
-            source_metadata.info.camera_keys,
+            metadata.camera_keys,
         )
     )
-    dataset = LeRobotDataset(
-        repo_id=source.repo_id,
-        root=source_metadata.root,
-        revision=source_metadata.revision,
-        visual_keys=source_tactile_keys,
-        video_backend=video_backend,
-        return_uint8=True,
-        download_videos=True,
-    )
-    metadata = dataset.meta
     tactile_config = tactile_clip_config_from_dict(
         encoder_bundle.metadata["tactile_clip_config"]
     )
@@ -186,8 +175,8 @@ def _precompute_source(
     embeddings_path = output_dir / TACTILE_EMBEDDINGS_NAME
     expected_metadata = create_tactile_cache_metadata(
         repo_id=source.repo_id,
-        revision=source_metadata.revision,
-        dataset_root=dataset.root,
+        revision=metadata.revision,
+        dataset_root=metadata.root,
         total_frames=metadata.total_frames,
         tactile_keys=model_tactile_keys,
         source_tactile_keys=source_tactile_keys,
@@ -204,6 +193,10 @@ def _precompute_source(
     if metadata_path.exists():
         existing = load_tactile_cache_metadata(output_dir)
         comparable_keys = set(expected_metadata) - {"status", "completed_frames"}
+        # Version-1 caches created before dataset fingerprints remain readable;
+        # newly written caches validate same-path data replacement as well.
+        if "dataset_fingerprint" not in existing:
+            comparable_keys.discard("dataset_fingerprint")
         mismatches = {
             key: (existing.get(key), expected_metadata.get(key))
             for key in comparable_keys
@@ -232,6 +225,15 @@ def _precompute_source(
         )
         atomic_write_json(metadata_path, expected_metadata)
 
+    dataset = LeRobotDataset(
+        repo_id=source.repo_id,
+        root=metadata.root,
+        revision=metadata.revision,
+        visual_keys=source_tactile_keys,
+        video_backend=video_backend,
+        return_uint8=True,
+        download_videos=True,
+    )
     frame_dataset: Dataset = _TactileFrameDataset(
         dataset,
         tactile_keys=source_tactile_keys,
@@ -350,16 +352,10 @@ def main() -> None:
     model_config = config.get("model") or {}
     if not bool(model_config.get("use_tactile_encoder", False)):
         raise ValueError("model.use_tactile_encoder 必须为 true")
-    for key in ("tactile_encoder_path", "tactile_encoder_repo_id", "tactile_keys"):
+    for key in ("tactile_encoder_path", "tactile_keys"):
         if not model_config.get(key):
             raise ValueError(f"model.{key} 是必填项")
-    if model_config["tactile_encoder_repo_id"] != "liuchaoyi/encoder_ckpt_05":
-        raise ValueError("tactile encoder repo 必须是已批准的 liuchaoyi/encoder_ckpt_05")
     cache_root, cache_dtype = _cache_settings(config, args)
-    encoder_provenance = validate_tactile_encoder_provenance(
-        model_config["tactile_encoder_path"],
-        expected_repo_id=str(model_config["tactile_encoder_repo_id"]),
-    )
     encoder_bundle = load_tactile_encoder(model_config["tactile_encoder_path"])
     if "tactile_resnet" not in encoder_bundle.params:
         raise KeyError("tactile encoder checkpoint 缺少 tactile_resnet")
@@ -368,11 +364,6 @@ def main() -> None:
     print(
         f"cache_root={cache_root.resolve()} dtype={cache_dtype.name} "
         f"batch={batch_size} workers={num_workers}",
-        flush=True,
-    )
-    print(
-        f"encoder={encoder_provenance['repo_id']}@{encoder_provenance['resolved_revision']} "
-        f"sha256={encoder_provenance['checkpoint_sha256']}",
         flush=True,
     )
     for source in parse_dataset_sources(config):

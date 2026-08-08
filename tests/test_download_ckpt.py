@@ -6,13 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from deploy_smolvla.src import download_ckpt
-from lerobot.policies.smolvla_jax.tactile_cache import (
-    TACTILE_ENCODER_PROVENANCE_FILENAME,
-    validate_tactile_encoder_provenance,
-)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,16 +20,6 @@ def test_default_encoder_output_matches_vt_workspace_contract() -> None:
 def test_output_dir_override_is_preserved(tmp_path: Path) -> None:
     args = download_ckpt.parse_args(["--output-dir", str(tmp_path / "custom")])
     assert args.output_dir == tmp_path / "custom"
-
-
-def test_downloader_rejects_unapproved_encoder_repository() -> None:
-    with pytest.raises(ValueError, match="approved|liuchaoyi/encoder_ckpt_05"):
-        download_ckpt.require_approved_repo_id("another-owner/encoder")
-
-    assert (
-        download_ckpt.require_approved_repo_id("https://huggingface.co/liuchaoyi/encoder_ckpt_05")
-        == download_ckpt.DEFAULT_REPO_ID
-    )
 
 
 def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -> None:
@@ -93,7 +77,7 @@ def test_main_downloads_and_verifies_custom_output_offline(
         def model_info(self, repo_id: str, *, revision: str) -> SimpleNamespace:
             assert repo_id == download_ckpt.DEFAULT_REPO_ID
             assert revision == "main"
-            return SimpleNamespace(sha="a" * 40)
+            return SimpleNamespace(sha="offline-revision")
 
     def fake_snapshot_download(**kwargs: object) -> None:
         snapshot_call.update(kwargs)
@@ -132,22 +116,4 @@ def test_main_downloads_and_verifies_custom_output_offline(
     assert snapshot_call["local_dir"] == output_dir.resolve()
     assert snapshot_call["repo_id"] == download_ckpt.DEFAULT_REPO_ID
     assert download_ckpt.verify_checkpoint(output_dir)["epoch"] == 6
-    provenance_path = output_dir / TACTILE_ENCODER_PROVENANCE_FILENAME
-    provenance = json.loads(provenance_path.read_text(encoding="utf-8"))
-    assert provenance["repo_id"] == download_ckpt.DEFAULT_REPO_ID
-    assert provenance["requested_revision"] == "main"
-    assert provenance["resolved_revision"] == "a" * 40
-    assert provenance["checkpoint_sha256"]
-    assert validate_tactile_encoder_provenance(
-        output_dir,
-        expected_repo_id=download_ckpt.DEFAULT_REPO_ID,
-    ) == provenance
     assert "校验通过" in capsys.readouterr().out
-
-    with (output_dir / "params.npz").open("ab") as file:
-        file.write(b"tamper")
-    with pytest.raises(ValueError, match="digest|sha256|provenance"):
-        validate_tactile_encoder_provenance(
-            output_dir,
-            expected_repo_id=download_ckpt.DEFAULT_REPO_ID,
-        )

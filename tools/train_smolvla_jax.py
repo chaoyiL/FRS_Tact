@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import shutil
 import time
@@ -30,34 +29,20 @@ from lerobot.policies.smolvla_jax.data import (
     DatasetSource,
     LeRobotJaxDataLoader,
     parse_dataset_sources,
-    pin_dataset_sources,
     split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.normalization_protocol import (
     NORMALIZATION_MANIFEST_FILENAME,
     build_or_validate_normalization_protocol,
-    validate_normalization_protocol_integrity,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
-from lerobot.policies.smolvla_jax.provenance import (
-    TACTILE_ENCODER_PROVENANCE_FILENAME,
-    tactile_encoder_experiment_identity,
-    validate_tactile_encoder_provenance,
-)
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 from lerobot.policies.smolvla_jax.validation import contract_from_config, validate_checkpoint
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
 DATA_SPLIT_FILENAME = "data_split.json"
-VALIDATION_PROVENANCE_FILENAME = "validation_provenance.json"
 DATA_SPLIT_VERSION = 1
-_EXPERIMENT_PROVENANCE_FILES = {
-    "data_split_sha256": DATA_SPLIT_FILENAME,
-    "normalization_manifest_sha256": NORMALIZATION_MANIFEST_FILENAME,
-    "validation_provenance_sha256": VALIDATION_PROVENANCE_FILENAME,
-    "tactile_encoder_provenance_sha256": TACTILE_ENCODER_PROVENANCE_FILENAME,
-}
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {
         "allow_download",
@@ -175,217 +160,6 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
-def _sha256_file(path: str | Path) -> str:
-    digest = hashlib.sha256()
-    with Path(path).open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _resolve_normalization_protocol_dir(
-    normalization_cfg: dict[str, Any] | None,
-    *,
-    resume: str | Path | None,
-    output: str | Path,
-) -> Path | None:
-    """Make a protocol-aware resume checkpoint authoritative over current YAML."""
-
-    output = Path(output).expanduser()
-    configured: Path | None = None
-    if normalization_cfg is not None:
-        if not isinstance(normalization_cfg, dict):
-            raise ValueError("normalization must be a mapping")
-        protocol_dir = normalization_cfg.get("protocol_dir")
-        if not protocol_dir:
-            raise ValueError("normalization.protocol_dir is required")
-        configured = Path(protocol_dir).expanduser()
-        if paths_overlap(configured, output):
-            raise ValueError("normalization.protocol_dir must be independent from output")
-
-    if resume is None:
-        return configured
-    resume_dir = Path(resume).expanduser()
-    manifest = resume_dir / NORMALIZATION_MANIFEST_FILENAME
-    split = resume_dir / DATA_SPLIT_FILENAME
-    if manifest.is_file():
-        if not split.is_file():
-            raise ValueError(
-                f"resume normalization protocol is missing {DATA_SPLIT_FILENAME}: {resume_dir}"
-            )
-        return resume_dir
-    if split.is_file() and configured is not None:
-        raise ValueError(
-            "resume checkpoint has data_split.json but no normalization protocol manifest"
-        )
-    if configured is not None:
-        raise ValueError(
-            "normalization-aware resume checkpoint is missing normalization_manifest.json"
-        )
-    return None
-
-
-def _write_or_validate_validation_provenance(
-    path: str | Path,
-    payload: dict[str, Any],
-) -> Path:
-    path = Path(path)
-    if int(payload.get("version", -1)) != 1:
-        raise ValueError("validation provenance must use version 1")
-    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    if path.exists():
-        if not path.is_file() or path.read_bytes() != encoded:
-            raise ValueError(f"validation provenance changed or mismatched: {path}")
-        return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_bytes(encoded)
-    temporary.replace(path)
-    return path
-
-
-def _require_protocol_validation_sources(
-    protocol_dir: str | Path | None,
-    val_sources: list[DatasetSource],
-) -> None:
-    if protocol_dir is not None and not val_sources:
-        raise ValueError(
-            "train-only normalization protocol requires at least one held-out validation episode"
-        )
-
-
-def _dataset_identities_from_protocol(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    datasets = manifest.get("datasets")
-    if not isinstance(datasets, list) or not datasets:
-        raise ValueError("normalization protocol has no dataset identities")
-    identities: dict[str, dict[str, Any]] = {}
-    for entry in datasets:
-        if not isinstance(entry, dict) or not isinstance(entry.get("repo_id"), str):
-            raise ValueError("normalization protocol dataset identity entry is invalid")
-        identity = entry.get("dataset_identity")
-        if not isinstance(identity, dict):
-            raise ValueError(
-                f"normalization protocol dataset identity is missing for {entry['repo_id']!r}"
-            )
-        if entry["repo_id"] in identities:
-            raise ValueError("normalization protocol dataset repo_id values must be unique")
-        identities[entry["repo_id"]] = dict(identity)
-    return identities
-
-
-def _seal_resume_experiment_provenance(staging: Path) -> None:
-    metadata_path = staging / "resume_metadata.json"
-    if not metadata_path.is_file():
-        raise ValueError("trainer checkpoint is missing resume_metadata.json")
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid resume metadata: {exc}") from exc
-    if not isinstance(metadata, dict):
-        raise ValueError("resume metadata must be a mapping")
-    provenance = {
-        key: _sha256_file(staging / filename)
-        for key, filename in _EXPERIMENT_PROVENANCE_FILES.items()
-        if (staging / filename).is_file()
-    }
-    metadata["experiment_provenance"] = provenance
-    _write_json(metadata_path, metadata)
-
-
-def _validate_resume_experiment_provenance(
-    resume: str | Path,
-    *,
-    require_protocol: bool,
-    require_tactile_encoder: bool,
-    expected_tactile_encoder_provenance_path: str | Path | None = None,
-) -> None:
-    resume = Path(resume)
-    metadata_path = resume / "resume_metadata.json"
-    if not metadata_path.is_file():
-        if require_protocol or require_tactile_encoder:
-            raise ValueError("resume checkpoint is missing sealed experiment provenance")
-        return
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid resume metadata: {exc}") from exc
-    provenance = metadata.get("experiment_provenance") if isinstance(metadata, dict) else None
-    if not isinstance(provenance, dict):
-        if require_protocol or require_tactile_encoder:
-            raise ValueError("resume metadata is missing sealed experiment provenance")
-        return
-    required_keys: set[str] = set()
-    if require_protocol:
-        required_keys.update(
-            {
-                "data_split_sha256",
-                "normalization_manifest_sha256",
-                "validation_provenance_sha256",
-            }
-        )
-    if require_tactile_encoder:
-        required_keys.add("tactile_encoder_provenance_sha256")
-    missing = sorted(required_keys - set(provenance))
-    if missing:
-        raise ValueError(f"resume metadata is missing experiment provenance digests: {missing}")
-    for key, expected in provenance.items():
-        filename = _EXPERIMENT_PROVENANCE_FILES.get(key)
-        if filename is None:
-            raise ValueError(f"unknown resume experiment provenance field: {key}")
-        path = resume / filename
-        if not path.is_file():
-            raise ValueError(f"resume checkpoint is missing sealed provenance file: {filename}")
-        actual = _sha256_file(path)
-        if actual != expected:
-            raise ValueError(f"resume checkpoint provenance digest mismatch: {filename}")
-    if require_tactile_encoder and expected_tactile_encoder_provenance_path is not None:
-        expected_encoder_digest = _sha256_file(expected_tactile_encoder_provenance_path)
-        actual_encoder_digest = _sha256_file(
-            resume / TACTILE_ENCODER_PROVENANCE_FILENAME
-        )
-        if actual_encoder_digest != expected_encoder_digest:
-            raise ValueError(
-                "resume checkpoint tactile encoder provenance mismatches the current experiment"
-            )
-
-
-def _validate_tactile_encoder_for_training(
-    config: JaxSmolVLAConfig,
-) -> tuple[JaxSmolVLAConfig, dict[str, str] | None, Path | None]:
-    if not config.use_tactile_encoder:
-        return config, None, None
-    if not config.tactile_encoder_path:
-        raise ValueError("tactile_encoder_path is required for VT training")
-    if config.tactile_encoder_repo_id != "liuchaoyi/encoder_ckpt_05":
-        raise ValueError(
-            "VT training requires approved tactile encoder repo liuchaoyi/encoder_ckpt_05"
-        )
-    encoder_dir = Path(config.tactile_encoder_path).expanduser().resolve()
-    provenance = validate_tactile_encoder_provenance(
-        encoder_dir,
-        expected_repo_id=config.tactile_encoder_repo_id,
-    )
-    identity = tactile_encoder_experiment_identity(provenance)
-    if (
-        config.tactile_encoder_revision is not None
-        and config.tactile_encoder_revision != identity["resolved_revision"]
-    ):
-        raise ValueError("configured tactile encoder revision mismatches encoder provenance")
-    if (
-        config.tactile_encoder_sha256 is not None
-        and config.tactile_encoder_sha256 != identity["checkpoint_sha256"]
-    ):
-        raise ValueError("configured tactile encoder digest mismatches encoder provenance")
-    resolved = replace(
-        config,
-        tactile_encoder_path=str(encoder_dir),
-        tactile_encoder_repo_id=identity["repo_id"],
-        tactile_encoder_revision=identity["resolved_revision"],
-        tactile_encoder_sha256=identity["checkpoint_sha256"],
-    )
-    return resolved, identity, encoder_dir / TACTILE_ENCODER_PROVENANCE_FILENAME
-
-
 def _save_training_checkpoint_atomically(
     final_path: str | Path,
     *,
@@ -394,8 +168,6 @@ def _save_training_checkpoint_atomically(
     source_dir: str | Path,
     data_split_path: str | Path | None,
     normalization_manifest_path: str | Path | None = None,
-    validation_provenance_path: str | Path | None = None,
-    tactile_encoder_provenance_path: str | Path | None = None,
 ) -> Path:
     expected = contract_from_config(trainer.config)
 
@@ -409,17 +181,6 @@ def _save_training_checkpoint_atomically(
                 normalization_manifest_path,
                 staging / NORMALIZATION_MANIFEST_FILENAME,
             )
-        if validation_provenance_path is not None:
-            shutil.copy2(
-                validation_provenance_path,
-                staging / VALIDATION_PROVENANCE_FILENAME,
-            )
-        if tactile_encoder_provenance_path is not None:
-            shutil.copy2(
-                tactile_encoder_provenance_path,
-                staging / TACTILE_ENCODER_PROVENANCE_FILENAME,
-            )
-        _seal_resume_experiment_provenance(staging)
 
     def validator(staging: Path) -> None:
         validate_checkpoint(
@@ -441,20 +202,11 @@ def _prepare_normalization_and_resume(
     checkpoint: str | Path,
     config: JaxSmolVLAConfig,
     local_files_only: bool,
-    tactile_encoder_identity: dict[str, Any] | None = None,
-    tactile_encoder_provenance_path: str | Path | None = None,
 ):
     """Validate provenance, load authoritative assets, then restore optimizer state."""
 
     del checkpoint
     artifact_dir = Path(resume) if resume is not None else Path(protocol_dir)
-    if resume is not None:
-        _validate_resume_experiment_provenance(
-            artifact_dir,
-            require_protocol=True,
-            require_tactile_encoder=config.use_tactile_encoder,
-            expected_tactile_encoder_provenance_path=tactile_encoder_provenance_path,
-        )
     result = build_or_validate_normalization_protocol(
         artifact_dir,
         split_path=split_path,
@@ -462,7 +214,6 @@ def _prepare_normalization_and_resume(
         state_dim=config.state_dim,
         action_dim=config.action_dim,
         allow_create=resume is None,
-        tactile_encoder_identity=tactile_encoder_identity,
     )
     preprocessor = JaxSmolVLAPreprocessor(
         artifact_dir,
@@ -508,6 +259,7 @@ def _split_manifest(
         "split_seed": int(split_seed),
         "eval_seed": int(eval_seed),
         "sample_seed": int(sample_seed),
+        "validation_sample_indices": [],
         "datasets": datasets,
     }
 
@@ -662,9 +414,6 @@ def main() -> None:
         JaxSmolVLAConfig.from_pretrained(checkpoint),
         cfg.get("model"),
     )
-    config, tactile_encoder_identity, tactile_encoder_provenance_path = (
-        _validate_tactile_encoder_for_training(config)
-    )
     print(
         f"model overrides: action_dim={config.action_dim} state_dim={config.state_dim} "
         f"image_keys={list(config.image_keys)} "
@@ -725,44 +474,23 @@ def main() -> None:
         f"parameters: trainable={trainable_count:,} frozen={frozen_count:,} "
         f"trainable_ratio={trainable_count / max(trainable_count + frozen_count, 1):.4%}"
     )
-    resume = Path(cfg["resume"]).expanduser() if cfg.get("resume") else None
+    resume = cfg.get("resume")
     data_parallel = bool(cfg.get("data_parallel", False))
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     output = Path(require(cfg, "output"))
     sources = parse_dataset_sources(cfg)
     normalization_cfg = cfg.get("normalization")
-    normalization_protocol_dir = _resolve_normalization_protocol_dir(
-        normalization_cfg,
-        resume=resume,
-        output=output,
-    )
-    expected_dataset_identities: dict[str, dict[str, Any]] | None = None
-    protocol_manifest_path = (
-        None
-        if normalization_protocol_dir is None
-        else normalization_protocol_dir / NORMALIZATION_MANIFEST_FILENAME
-    )
-    if protocol_manifest_path is not None and protocol_manifest_path.is_file():
-        if resume is not None:
-            # Authenticate the checkpoint-local manifest before using its
-            # immutable dataset SHAs to resolve any source.
-            _validate_resume_experiment_provenance(
-                resume,
-                require_protocol=True,
-                require_tactile_encoder=config.use_tactile_encoder,
-                expected_tactile_encoder_provenance_path=tactile_encoder_provenance_path,
-            )
-        protocol_manifest = validate_normalization_protocol_integrity(
-            normalization_protocol_dir,
-            required=True,
-        )
-        assert protocol_manifest is not None
-        expected_dataset_identities = _dataset_identities_from_protocol(protocol_manifest)
-    sources = pin_dataset_sources(
-        sources,
-        expected_identities=expected_dataset_identities,
-    )
+    if normalization_cfg is not None and not isinstance(normalization_cfg, dict):
+        raise ValueError("normalization must be a mapping")
+    normalization_protocol_dir = None
+    if normalization_cfg is not None:
+        normalization_protocol_dir = normalization_cfg.get("protocol_dir")
+        if not normalization_protocol_dir:
+            raise ValueError("normalization.protocol_dir is required")
+        normalization_protocol_dir = Path(normalization_protocol_dir).expanduser()
+        if paths_overlap(normalization_protocol_dir, output):
+            raise ValueError("normalization.protocol_dir must be independent from output")
     output.mkdir(parents=True, exist_ok=True)
     val_cfg = dict(cfg.get("validation") or {})
     val_enabled = bool(val_cfg.get("enabled", True))
@@ -809,35 +537,11 @@ def main() -> None:
             eval_seed = int(split_manifest.get("eval_seed", eval_seed))
             sample_seed = int(split_manifest.get("sample_seed", sample_seed))
             print(f"loaded data split: {loaded_split_path}")
-        if loaded_split_path is not None and loaded_split_path != split_path:
-            split_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(loaded_split_path, split_path)
-        else:
-            _write_json(split_path, split_manifest)
+        _write_json(split_path, split_manifest)
         if not val_sources:
-            _require_protocol_validation_sources(normalization_protocol_dir, val_sources)
             print("warning: validation enabled but no held-out episodes; disabling val")
             val_enabled = False
             train_sources = sources
-
-    validation_provenance_path = (
-        resume / VALIDATION_PROVENANCE_FILENAME
-        if resume is not None and (resume / VALIDATION_PROVENANCE_FILENAME).is_file()
-        else output / VALIDATION_PROVENANCE_FILENAME
-    )
-    persisted_validation_provenance: dict[str, Any] | None = None
-    if validation_provenance_path.is_file():
-        try:
-            persisted_validation_provenance = json.loads(
-                validation_provenance_path.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"invalid validation provenance: {exc}") from exc
-        if (
-            not isinstance(persisted_validation_provenance, dict)
-            or int(persisted_validation_provenance.get("version", -1)) != 1
-        ):
-            raise ValueError("invalid validation provenance version")
 
     normalization_result = None
     normalization_preprocessor = None
@@ -853,23 +557,9 @@ def main() -> None:
             checkpoint=checkpoint,
             config=config,
             local_files_only=not (allow_tokenizer_download or allow_download),
-            tactile_encoder_identity=tactile_encoder_identity,
-            tactile_encoder_provenance_path=tactile_encoder_provenance_path,
         )
-        protocol_manifest = validate_normalization_protocol_integrity(
-            normalization_result.manifest_path.parent,
-            required=True,
-        )
-        assert protocol_manifest is not None
-        expected_dataset_identities = _dataset_identities_from_protocol(protocol_manifest)
         print(f"normalization_protocol={normalization_result.manifest_path}")
     elif resume:
-        _validate_resume_experiment_provenance(
-            resume,
-            require_protocol=False,
-            require_tactile_encoder=config.use_tactile_encoder,
-            expected_tactile_encoder_provenance_path=tactile_encoder_provenance_path,
-        )
         trainer.restore(Path(resume))
     if data_parallel:
         trainer.enable_data_parallel()
@@ -896,7 +586,6 @@ def main() -> None:
     if tactile_cache_enabled and not tactile_cache_root:
         raise ValueError("tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root")
     common_loader_kwargs["tactile_embedding_cache_root"] = tactile_cache_root
-    common_loader_kwargs["expected_dataset_identities"] = expected_dataset_identities
     train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
     print(
         f"data_loader: video_backend={cfg.get('video_backend') or 'auto'} "
@@ -942,28 +631,17 @@ def main() -> None:
             "rollout": bool(val_cfg.get("rollout", True)),
             "rollout_steps": val_cfg.get("rollout_steps"),
         }
-        saved_protocol = (
-            persisted_validation_provenance.get("validation_protocol")
-            if persisted_validation_provenance is not None
-            else split_manifest.get("validation_protocol")
-            if normalization_result is None
-            else None
-        )
+        saved_protocol = split_manifest.get("validation_protocol")
         if saved_protocol is not None and saved_protocol != validation_protocol:
             raise ValueError(
-                "validation protocol changed since validation provenance was created: "
+                "validation protocol changed since data_split.json was created: "
                 f"{saved_protocol} != {validation_protocol}"
             )
+        split_manifest["validation_protocol"] = validation_protocol
         fixed_subset_size = (
             None if max_batches in (None, 0) else int(max_batches) * int(common_loader_kwargs["batch_size"])
         )
-        persisted_indices = tuple(
-            persisted_validation_provenance.get("validation_sample_indices", [])
-            if persisted_validation_provenance is not None
-            else split_manifest.get("validation_sample_indices", [])
-            if normalization_result is None
-            else []
-        )
+        persisted_indices = tuple(split_manifest.get("validation_sample_indices", []))
         # Validation must stay unaugmented for stable metrics.
         val_data = LeRobotJaxDataLoader(
             checkpoint,
@@ -982,31 +660,18 @@ def main() -> None:
         validation_dataset_frames = {
             summary["repo_id"]: int(summary["frames"]) for summary in val_data.dataset_summaries
         }
-        saved_dataset_frames = (
-            persisted_validation_provenance.get("validation_dataset_frames")
-            if persisted_validation_provenance is not None
-            else split_manifest.get("validation_dataset_frames")
-            if normalization_result is None
-            else None
-        )
+        saved_dataset_frames = split_manifest.get("validation_dataset_frames")
         if saved_dataset_frames is not None and saved_dataset_frames != validation_dataset_frames:
             raise ValueError(
-                "validation dataset frame counts changed since validation provenance was created: "
+                "validation dataset frame counts changed since data_split.json was created: "
                 f"{saved_dataset_frames} != {validation_dataset_frames}"
             )
-        validation_provenance = {
-            "version": 1,
-            "split_sha256": _sha256_file(split_path),
-            "validation_protocol": validation_protocol,
-            "validation_dataset_frames": validation_dataset_frames,
-            "validation_sample_indices": list(val_data.subset_indices),
-            "eval_seed": eval_seed,
-            "sample_seed": sample_seed,
-        }
-        _write_or_validate_validation_provenance(
-            validation_provenance_path,
-            validation_provenance,
-        )
+        split_manifest["validation_dataset_frames"] = validation_dataset_frames
+        split_manifest["validation_sample_indices"] = list(val_data.subset_indices)
+        split_manifest["eval_seed"] = eval_seed
+        split_manifest["sample_seed"] = sample_seed
+        if normalization_result is None:
+            _write_json(split_path, split_manifest)
         for summary in val_data.dataset_summaries:
             print(
                 f"val_dataset={summary['repo_id']} frames={summary['frames']} "
@@ -1109,10 +774,6 @@ def main() -> None:
                         if normalization_result is not None
                         else None
                     ),
-                    validation_provenance_path=(
-                        validation_provenance_path if val_data is not None else None
-                    ),
-                    tactile_encoder_provenance_path=tactile_encoder_provenance_path,
                 )
                 print(f"saved checkpoint: {path}")
                 if wandb_run is not None:

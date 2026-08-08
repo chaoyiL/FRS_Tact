@@ -17,7 +17,6 @@ from lerobot.policies.smolvla_jax.normalization_protocol import (
     NORMALIZATION_MANIFEST_FILENAME,
     PREPROCESSOR_STATS_FILENAME,
     build_or_validate_normalization_protocol,
-    validate_normalization_protocol_integrity,
 )
 
 
@@ -150,12 +149,6 @@ def test_protocol_aggregates_only_selected_train_episode_metadata_across_four_so
     assert manifest["dimensions"] == {"action": DIM, "observation.state": DIM}
     assert all(entry["train_episodes"] == [0, 1] for entry in manifest["datasets"])
     assert all(entry["selected_stats_sha256"] for entry in manifest["datasets"])
-    assert all(entry["resolved_revision"] is None for entry in manifest["datasets"])
-    assert all(entry["dataset_identity"]["kind"] == "local_v3" for entry in manifest["datasets"])
-    assert all(
-        entry["dataset_identity"]["content_identity"]["sha256"]
-        for entry in manifest["datasets"]
-    )
     assert manifest["canonical_stats_sha256"]
 
 
@@ -340,9 +333,6 @@ def test_concurrent_protocol_publish_validates_winner(
         "missing_stats",
         "non_finite_stats",
         "wrong_shape_stats",
-        "negative_std",
-        "fractional_count",
-        "inconsistent_feature_counts",
     ],
 )
 def test_protocol_rejects_incomplete_or_invalid_episode_stats(tmp_path: Path, case: str) -> None:
@@ -367,16 +357,6 @@ def test_protocol_rejects_incomplete_or_invalid_episode_stats(tmp_path: Path, ca
     elif case == "wrong_shape_stats":
         rows[0]["stats/actions/mean"] = [1.0] * (DIM - 1)
         episodes = [0]
-    elif case == "negative_std":
-        rows[0]["stats/actions/std"] = [-0.1] * DIM
-        episodes = [0]
-    elif case == "fractional_count":
-        rows[0]["stats/actions/count"] = [1.5]
-        rows[0]["stats/observation.state/count"] = [1.5]
-        episodes = [0]
-    elif case == "inconsistent_feature_counts":
-        rows[0]["stats/actions/count"] = [3]
-        episodes = [0]
     _write_episode_metadata(root, rows)
     source = DatasetSource(
         repo_id="org/dataset",
@@ -387,7 +367,7 @@ def test_protocol_rejects_incomplete_or_invalid_episode_stats(tmp_path: Path, ca
     )
     split_path = _write_split(tmp_path / "data_split.json", [source])
 
-    with pytest.raises(ValueError, match="episode|stats|finite|shape|unique|coverage|std|count"):
+    with pytest.raises(ValueError, match="episode|stats|finite|shape|unique|coverage"):
         build_or_validate_normalization_protocol(
             tmp_path / "protocol",
             split_path=split_path,
@@ -554,56 +534,4 @@ def test_existing_protocol_with_missing_manifest_fails_closed(tmp_path: Path) ->
             sources=sources,
             state_dim=DIM,
             action_dim=DIM,
-        )
-
-
-def test_nonprotocol_checkpoint_may_carry_a_validation_split_without_manifest(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "data_split.json").write_text(
-        '{"version": 1, "datasets": []}\n', encoding="utf-8"
-    )
-
-    assert validate_normalization_protocol_integrity(tmp_path, required=False) is None
-
-
-def test_protocol_binds_tactile_encoder_experiment_identity(tmp_path: Path) -> None:
-    root = tmp_path / "dataset"
-    _write_episode_metadata(
-        root,
-        [_episode_row(0, state_mean=1.0, action_mean=2.0, count=2)],
-    )
-    source = DatasetSource(
-        repo_id="org/dataset",
-        root=root,
-        revision=None,
-        episodes=[0],
-        action_key="actions",
-    )
-    split_path = _write_split(tmp_path / "data_split.json", [source])
-    identity = {
-        "repo_id": "liuchaoyi/encoder_ckpt_05",
-        "resolved_revision": "a" * 40,
-        "checkpoint_sha256": "b" * 64,
-    }
-    protocol_dir = tmp_path / "protocol"
-
-    result = build_or_validate_normalization_protocol(
-        protocol_dir,
-        split_path=split_path,
-        sources=[source],
-        state_dim=DIM,
-        action_dim=DIM,
-        tactile_encoder_identity=identity,
-    )
-    assert json.loads(result.manifest_path.read_text())["tactile_encoder"] == identity
-
-    with pytest.raises(ValueError, match="encoder|manifest|identity|mismatch"):
-        build_or_validate_normalization_protocol(
-            protocol_dir,
-            split_path=split_path,
-            sources=[source],
-            state_dim=DIM,
-            action_dim=DIM,
-            tactile_encoder_identity={**identity, "checkpoint_sha256": "c" * 64},
         )

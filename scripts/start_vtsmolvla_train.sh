@@ -157,9 +157,6 @@ import sys
 import jax
 import yaml
 
-from tools.train_vtsmolvla_jax import _validate_runtime_devices
-from lerobot.policies.smolvla_jax.provenance import validate_tactile_encoder_provenance
-
 with pathlib.Path(sys.argv[1]).open(encoding="utf-8") as file:
     config = yaml.safe_load(file) or {}
 missing = []
@@ -172,15 +169,10 @@ if encoder and not pathlib.Path(encoder).is_dir():
     missing.append(f"tactile encoder: {encoder}")
 if missing:
     raise FileNotFoundError("缺少训练输入：\n  " + "\n  ".join(missing))
-model = config.get("model") or {}
-if encoder:
-    validate_tactile_encoder_provenance(
-        encoder,
-        expected_repo_id=model.get("tactile_encoder_repo_id"),
-    )
 devices = jax.devices()
 print(f"JAX devices={devices}")
-_validate_runtime_devices(config, jax.devices())
+if not any(device.platform == "gpu" for device in devices):
+    raise RuntimeError("JAX 没有识别到 GPU，拒绝启动正式训练")
 PY
     if compgen -G "${OUTPUT_DIR}/checkpoint-*" >/dev/null && [[ -z "${RESUME_PATH}" ]]; then
         fail "${OUTPUT_DIR} 已有 checkpoint，但 YAML 的 resume 为空。请设置新 output 或在 YAML 配置 resume。"

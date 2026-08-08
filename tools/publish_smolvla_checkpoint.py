@@ -24,15 +24,6 @@ from lerobot.policies.smolvla_jax.validation import (
     CheckpointValidationReport,
     validate_checkpoint,
 )
-from lerobot.policies.smolvla_jax.normalization_protocol import (
-    DATA_SPLIT_FILENAME,
-    NORMALIZATION_MANIFEST_FILENAME,
-    validate_normalization_protocol_integrity,
-)
-from lerobot.policies.smolvla_jax.provenance import (
-    TACTILE_ENCODER_PROVENANCE_FILENAME,
-    validate_tactile_encoder_provenance_record,
-)
 
 MODEL_FILENAME = "model.safetensors"
 MANIFEST_FILENAME = "conversion_manifest.json"
@@ -43,8 +34,6 @@ SIDECAR_FILENAMES = (
     "policy_preprocessor_step_5_normalizer_processor.safetensors",
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
 )
-PROTOCOL_FILENAMES = (DATA_SPLIT_FILENAME, NORMALIZATION_MANIFEST_FILENAME)
-ENCODER_PROVENANCE_FILENAMES = (TACTILE_ENCODER_PROVENANCE_FILENAME,)
 INFERENCE_FILENAMES = (MODEL_FILENAME, *SIDECAR_FILENAMES, MANIFEST_FILENAME)
 _COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 _LEGACY_METADATA_ALLOW_PATTERNS = ("meta/info.json", "meta/episodes_stats.jsonl")
@@ -219,7 +208,6 @@ def build_inference_bundle(
         require_weight=True,
     )
     source_report.require_valid()
-    source_protocol = validate_normalization_protocol_integrity(source_path, required=False)
 
     staging = destination_path.with_name(f".{destination_path.name}.{uuid.uuid4().hex}.incomplete")
     if staging.exists():
@@ -227,12 +215,6 @@ def build_inference_bundle(
     staging.mkdir(parents=True)
     for filename in SIDECAR_FILENAMES:
         shutil.copy2(source_path / filename, staging / filename)
-    if source_protocol is not None:
-        for filename in PROTOCOL_FILENAMES:
-            shutil.copy2(source_path / filename, staging / filename)
-    for filename in ENCODER_PROVENANCE_FILENAMES:
-        if (source_path / filename).is_file():
-            shutil.copy2(source_path / filename, staging / filename)
     source_weight = source_path / MODEL_FILENAME
     weight_sha = _sha256(source_weight)
     if include_model:
@@ -249,8 +231,6 @@ def build_inference_bundle(
     )
     staged_report = validate_checkpoint(staging, expected=expected, require_weight=include_model)
     staged_report.require_valid()
-    if source_protocol is not None:
-        validate_normalization_protocol_integrity(staging, required=True)
     staging.replace(destination_path)
     return destination_path
 
@@ -458,11 +438,7 @@ def _verify_manifest_files(
             f"(manifest={sorted(files)}, payload={sorted(payload_names)})"
         )
     for filename, metadata in files.items():
-        if filename == MANIFEST_FILENAME or filename not in {
-            *INFERENCE_FILENAMES,
-            *PROTOCOL_FILENAMES,
-            *ENCODER_PROVENANCE_FILENAMES,
-        }:
+        if filename == MANIFEST_FILENAME or filename not in INFERENCE_FILENAMES:
             raise ValueError(f"invalid bundle manifest file: {filename!r}")
         path = bundle / filename
         if not path.is_file():
@@ -488,12 +464,7 @@ def publish_bundle(
     bundle_path = Path(bundle).expanduser().resolve()
     _reject_incomplete(bundle_path)
     actual_files = _safe_bundle_files(bundle_path)
-    allowed_files = (
-        set(INFERENCE_FILENAMES)
-        | set(PROTOCOL_FILENAMES)
-        | set(ENCODER_PROVENANCE_FILENAMES)
-    )
-    unexpected = sorted(actual_files - allowed_files)
+    unexpected = sorted(actual_files - set(INFERENCE_FILENAMES))
     if unexpected:
         raise ValueError(f"bundle contains unexpected files: {unexpected}")
     missing = sorted(set(INFERENCE_FILENAMES) - actual_files)
@@ -501,12 +472,6 @@ def publish_bundle(
         if missing == [MODEL_FILENAME]:
             raise ValueError("sidecar artifact is not publishable without model.safetensors")
         raise ValueError(f"bundle is missing inference files: {missing}")
-    present_protocol = actual_files & set(PROTOCOL_FILENAMES)
-    present_encoder_provenance = actual_files & set(ENCODER_PROVENANCE_FILENAMES)
-    if present_protocol and present_protocol != set(PROTOCOL_FILENAMES):
-        raise ValueError("bundle normalization protocol must contain both split and manifest")
-    if present_protocol:
-        validate_normalization_protocol_integrity(bundle_path, required=True)
     manifest, manifest_contract = _load_manifest(bundle_path)
     if manifest_contract != expected:
         raise ValueError("manifest contract does not match expected contract")
@@ -531,20 +496,9 @@ def publish_bundle(
                 "remote model.safetensors SHA-256 does not match the validated source weight "
                 f"({before_sha} != {expected_weight_sha})"
             )
-        names = (
-            *SIDECAR_FILENAMES,
-            *(PROTOCOL_FILENAMES if present_protocol else ()),
-            *(ENCODER_PROVENANCE_FILENAMES if present_encoder_provenance else ()),
-            MANIFEST_FILENAME,
-        )
+        names = (*SIDECAR_FILENAMES, MANIFEST_FILENAME)
     else:
-        names = (
-            MODEL_FILENAME,
-            *SIDECAR_FILENAMES,
-            *(PROTOCOL_FILENAMES if present_protocol else ()),
-            *(ENCODER_PROVENANCE_FILENAMES if present_encoder_provenance else ()),
-            MANIFEST_FILENAME,
-        )
+        names = INFERENCE_FILENAMES
 
     from huggingface_hub import CommitOperationAdd
 
@@ -563,8 +517,6 @@ def publish_bundle(
             require_weight=not sidecars_only,
         )
         snapshot_report.require_valid()
-        if present_protocol:
-            validate_normalization_protocol_integrity(upload_snapshot, required=True)
         snapshot_files = snapshot_manifest["files"]
         for name in names:
             if name == MANIFEST_FILENAME:
@@ -616,12 +568,7 @@ def _default_snapshot_resolver(repo_id: str, revision: str | None) -> Path:
         snapshot_download(
             repo_id=repo_id,
             revision=revision,
-            allow_patterns=[
-                MODEL_FILENAME,
-                *SIDECAR_FILENAMES,
-                *PROTOCOL_FILENAMES,
-                *ENCODER_PROVENANCE_FILENAMES,
-            ],
+            allow_patterns=[MODEL_FILENAME, *SIDECAR_FILENAMES],
         )
     )
 
@@ -802,50 +749,18 @@ def repair_sidecars(
         raise ValueError(
             f"remote model.safetensors SHA-256 mismatch ({remote_sha} != {expected_weight_sha256})"
         )
-    protocol_declared = isinstance(raw.get("normalization"), Mapping)
-    pre_resolved_datasets: list[dict[str, Any]] | None = None
-    if not protocol_declared:
-        # Preserve the legacy fail-closed proof ordering: an unpinned dataset
-        # with no model weight timestamp fails before any snapshot download.
-        pre_resolved_datasets = resolve_dataset_revisions(
-            datasets,
-            model_weight_uploaded_at=weight_time,
-            api=api,
-        )
+    resolved_datasets = resolve_dataset_revisions(
+        datasets,
+        model_weight_uploaded_at=weight_time,
+        api=api,
+    )
+    stats, dataset_provenance = _metadata_stats(
+        resolved_datasets,
+        metadata_loader=metadata_loader,
+    )
+
     resolver = snapshot_resolver or _default_snapshot_resolver
     snapshot = Path(resolver(repo_id, revision)).expanduser().resolve()
-    if expected.tactile_num_tokens > 0:
-        encoder_provenance_path = snapshot / TACTILE_ENCODER_PROVENANCE_FILENAME
-        if not encoder_provenance_path.is_file():
-            raise ValueError(
-                f"active VT snapshot is missing {TACTILE_ENCODER_PROVENANCE_FILENAME}"
-            )
-        validate_tactile_encoder_provenance_record(
-            encoder_provenance_path,
-            expected_repo_id="liuchaoyi/encoder_ckpt_05",
-        )
-    protocol_manifest_present = (snapshot / NORMALIZATION_MANIFEST_FILENAME).is_file()
-    if protocol_declared and not protocol_manifest_present:
-        raise ValueError(
-            "training config declares a normalization protocol but the remote snapshot "
-            "is missing normalization_manifest.json"
-        )
-    protocol_manifest: dict[str, Any] | None = None
-    stats: dict[str, dict[str, Any]] | None = None
-    if protocol_manifest_present:
-        protocol_manifest = validate_normalization_protocol_integrity(snapshot, required=True)
-        assert protocol_manifest is not None
-        validate_checkpoint(snapshot, expected=expected, require_weight=True).require_valid()
-        dataset_provenance = [dict(entry) for entry in protocol_manifest["datasets"]]
-    else:
-        resolved_datasets = pre_resolved_datasets or resolve_dataset_revisions(
-            datasets, model_weight_uploaded_at=weight_time, api=api
-        )
-        stats, dataset_provenance = _metadata_stats(
-            resolved_datasets,
-            metadata_loader=metadata_loader,
-        )
-
     output_path = Path(output).expanduser().resolve()
     if output_path.exists():
         raise FileExistsError(f"repair output already exists: {output_path}")
@@ -856,12 +771,6 @@ def repair_sidecars(
         if not source_file.is_file():
             raise FileNotFoundError(f"remote snapshot is missing {filename}")
         shutil.copy2(source_file, staging / filename)
-    if protocol_manifest is not None:
-        for filename in PROTOCOL_FILENAMES:
-            shutil.copy2(snapshot / filename, staging / filename)
-    for filename in ENCODER_PROVENANCE_FILENAMES:
-        if (snapshot / filename).is_file():
-            shutil.copy2(snapshot / filename, staging / filename)
     source_weight = snapshot / MODEL_FILENAME
     if _sha256(source_weight) != remote_sha:
         raise ValueError("downloaded model.safetensors does not match remote LFS SHA-256")
@@ -873,19 +782,13 @@ def repair_sidecars(
 
     effective_config = JaxSmolVLAConfig.from_pretrained(staging).with_overrides(model_overrides)
     write_effective_config(staging, effective_config)
-    if protocol_manifest is None:
-        assert stats is not None
-        preprocessor = JaxSmolVLAPreprocessor.__new__(JaxSmolVLAPreprocessor)
-        preprocessor.checkpoint = staging
-        preprocessor.config = effective_config
-        preprocessor.rename_map = {}
-        preprocessor.stats = preprocessor._flatten_stats(stats)
-        preprocessor.post_stats = dict(preprocessor.stats)
-        preprocessor.save_normalization_assets(staging)
-    else:
-        # The train-only stats are authoritative. Repair may update config
-        # metadata, but it must never regenerate these assets from global stats.
-        validate_normalization_protocol_integrity(staging, required=True)
+    preprocessor = JaxSmolVLAPreprocessor.__new__(JaxSmolVLAPreprocessor)
+    preprocessor.checkpoint = staging
+    preprocessor.config = effective_config
+    preprocessor.rename_map = {}
+    preprocessor.stats = preprocessor._flatten_stats(stats)
+    preprocessor.post_stats = dict(preprocessor.stats)
+    preprocessor.save_normalization_assets(staging)
     _write_json(
         staging / MANIFEST_FILENAME,
         _manifest(
@@ -898,8 +801,6 @@ def repair_sidecars(
     )
     report = validate_checkpoint(staging, expected=expected, require_weight=True)
     report.require_valid()
-    if protocol_manifest is not None:
-        validate_normalization_protocol_integrity(staging, required=True)
     staging.replace(output_path)
     return output_path
 

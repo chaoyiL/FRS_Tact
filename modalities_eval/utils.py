@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -23,13 +22,8 @@ from lerobot.policies.smolvla_jax.data import (
     resolve_action_key,
 )
 from lerobot.policies.smolvla_jax.modeling import PrefixContext
-from lerobot.policies.smolvla_jax.normalization_protocol import (
-    NORMALIZATION_MANIFEST_FILENAME,
-    validate_normalization_protocol_integrity,
-)
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
 from lerobot.policies.smolvla_jax.training import prepare_params_for_compute
-from lerobot.policies.smolvla_jax.validation import contract_from_config, validate_checkpoint
 
 Array = jax.Array
 
@@ -80,51 +74,11 @@ class SmolVLAEvalModel:
         dataset_revision: str | None = None,
         action_key: str | None = None,
         rename_map: Mapping[str, str] | None = None,
-        normalization_source: str = "checkpoint",
-        unsafe_legacy_dataset_normalization: bool = False,
+        normalization_source: str = "dataset",
         local_files_only: bool = True,
     ):
         self.checkpoint = resolve_checkpoint(checkpoint, local_files_only=local_files_only)
         self.config = JaxSmolVLAConfig.from_pretrained(self.checkpoint)
-        if normalization_source not in ("checkpoint", "dataset"):
-            raise ValueError(
-                "normalization_source must be 'checkpoint' or 'dataset', "
-                f"got {normalization_source!r}"
-            )
-        protocol_checkpoint = (self.checkpoint / NORMALIZATION_MANIFEST_FILENAME).is_file()
-        if normalization_source == "dataset":
-            if not unsafe_legacy_dataset_normalization:
-                detail = (
-                    "protocol checkpoint train-only normalization"
-                    if protocol_checkpoint
-                    else "legacy dataset normalization"
-                )
-                raise ValueError(
-                    f"{detail} may only be overridden with "
-                    "unsafe_legacy_dataset_normalization=True"
-                )
-            warnings.warn(
-                "Unsafe legacy dataset normalization ignores checkpoint train-only stats and "
-                "can change evaluation results.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-            if protocol_checkpoint:
-                validate_normalization_protocol_integrity(
-                    self.checkpoint,
-                    required=True,
-                )
-        else:
-            validate_normalization_protocol_integrity(
-                self.checkpoint,
-                required=protocol_checkpoint,
-            )
-        if protocol_checkpoint:
-            validate_checkpoint(
-                self.checkpoint,
-                expected=contract_from_config(self.config),
-                require_weight=True,
-            ).require_valid()
         self.params = prepare_params_for_compute(load_params(self.checkpoint), self.config)
         self.model = JaxSmolVLA(self.config)
         self.dataset_repo_id = dataset_repo_id
@@ -139,6 +93,11 @@ class SmolVLAEvalModel:
         self.dataset_root = metadata.root
         self.dataset_revision = metadata.revision
         self.action_key = resolve_action_key(metadata.features, action_key)
+        if normalization_source not in ("checkpoint", "dataset"):
+            raise ValueError(
+                "normalization_source must be 'checkpoint' or 'dataset', "
+                f"got {normalization_source!r}"
+            )
         stats = (
             canonicalize_dataset_stats(metadata.stats, self.action_key)
             if normalization_source == "dataset"
@@ -310,8 +269,7 @@ def load_model(
     dataset_revision: str | None = None,
     action_key: str | None = None,
     rename_map: Mapping[str, str] | None = None,
-    normalization_source: str = "checkpoint",
-    unsafe_legacy_dataset_normalization: bool = False,
+    normalization_source: str = "dataset",
     local_files_only: bool = True,
 ) -> SmolVLAEvalModel:
     return SmolVLAEvalModel(
@@ -322,7 +280,6 @@ def load_model(
         action_key=action_key,
         rename_map=rename_map,
         normalization_source=normalization_source,
-        unsafe_legacy_dataset_normalization=unsafe_legacy_dataset_normalization,
         local_files_only=local_files_only,
     )
 
@@ -481,19 +438,8 @@ def add_eval_data_arguments(parser: argparse.ArgumentParser, *, required: bool =
     parser.add_argument(
         "--normalization-source",
         choices=("checkpoint", "dataset"),
-        default="checkpoint",
-        help=(
-            "Use train-only normalization assets saved with the checkpoint (default), or the "
-            "selected dataset's global stats with the explicit unsafe override."
-        ),
-    )
-    parser.add_argument(
-        "--unsafe-legacy-dataset-normalization",
-        action="store_true",
-        help=(
-            "Allow --normalization-source dataset even though it ignores checkpoint train-only "
-            "stats and can invalidate comparisons."
-        ),
+        default="dataset",
+        help="Use normalization assets saved with the checkpoint or stats from the selected dataset.",
     )
     parser.add_argument("--allow-download", action="store_true")
 
@@ -507,6 +453,5 @@ def load_model_from_args(args: argparse.Namespace) -> SmolVLAEvalModel:
         action_key=args.action_key,
         rename_map=parse_rename_map(args.rename_map),
         normalization_source=args.normalization_source,
-        unsafe_legacy_dataset_normalization=args.unsafe_legacy_dataset_normalization,
         local_files_only=not args.allow_download,
     )

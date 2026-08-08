@@ -1,33 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .provenance import (
-    TACTILE_ENCODER_PROVENANCE_FILENAME,
-    local_dataset_content_identity,
-    sha256_file,
-    validate_tactile_encoder_provenance,
-    write_tactile_encoder_provenance,
-)
-
-TACTILE_CACHE_VERSION = 2
+TACTILE_CACHE_VERSION = 1
 TACTILE_EMBEDDINGS_NAME = "embeddings.npy"
 TACTILE_METADATA_NAME = "metadata.json"
 TACTILE_EMBEDDING_OBSERVATION_KEY = "observation.tactile_embeddings"
-
-
-def _immutable_revision(revision: str | None) -> str | None:
-    if revision is None:
-        return None
-    value = str(revision).lower()
-    if len(value) == 40 and all(character in "0123456789abcdef" for character in value):
-        return value
-    return None
 
 
 def tactile_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -40,12 +25,19 @@ def tactile_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
 
 
 def dataset_root_fingerprint(dataset_root: str | Path) -> str | None:
-    """Return the path-independent canonical local dataset identity digest."""
+    """Fingerprint dataset file identities without reading large video payloads."""
 
     root = Path(dataset_root).expanduser().resolve()
     if not root.is_dir():
         return None
-    return str(local_dataset_content_identity(root)["sha256"])
+    digest = hashlib.sha256()
+    files = sorted(path for path in root.rglob("*") if path.is_file())
+    for path in files:
+        stat = path.stat()
+        digest.update(
+            f"{path.relative_to(root)}:{stat.st_size}:{stat.st_mtime_ns}\n".encode()
+        )
+    return digest.hexdigest()
 
 
 def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
@@ -59,11 +51,28 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
     temporary.replace(path)
 
 
+@lru_cache(maxsize=8)
 def tactile_encoder_fingerprint(checkpoint_dir: str | Path) -> str:
-    """Validate encoder provenance and return its canonical checkpoint digest."""
+    """Hash the encoder files that determine frozen ResNet embeddings."""
 
-    provenance = validate_tactile_encoder_provenance(checkpoint_dir)
-    return str(provenance["checkpoint_sha256"])
+    directory = Path(checkpoint_dir).expanduser().resolve()
+    checkpoint_path = directory / "checkpoint.json"
+    params_name = "params.npz"
+    if checkpoint_path.is_file():
+        with checkpoint_path.open(encoding="utf-8") as file:
+            checkpoint_metadata = json.load(file)
+        params_name = str(checkpoint_metadata.get("params_file", params_name))
+    candidates = [checkpoint_path, directory / params_name]
+    missing = [path for path in candidates if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(f"tactile encoder files are missing: {missing}")
+    digest = hashlib.sha256()
+    for path in candidates:
+        digest.update(path.name.encode())
+        with path.open("rb") as file:
+            while chunk := file.read(8 * 1024 * 1024):
+                digest.update(chunk)
+    return digest.hexdigest()
 
 
 def create_tactile_cache_metadata(
@@ -84,21 +93,14 @@ def create_tactile_cache_metadata(
     resolved_dtype = np.dtype(dtype)
     if resolved_dtype not in (np.dtype(np.float16), np.dtype(np.float32)):
         raise ValueError(f"cache dtype must be float16 or float32, got {resolved_dtype}")
-    dataset_identity = local_dataset_content_identity(dataset_root)
-    encoder_provenance = validate_tactile_encoder_provenance(encoder_path)
-    encoder_provenance_path = (
-        Path(encoder_path).expanduser().resolve() / TACTILE_ENCODER_PROVENANCE_FILENAME
-    )
     return {
         "version": TACTILE_CACHE_VERSION,
         "status": status,
         "completed_frames": int(completed_frames),
         "repo_id": str(repo_id),
-        "revision": _immutable_revision(revision),
-        "dataset_content_identity": dataset_identity,
-        # Keep the concise field name for diagnostics while version 2 rejects
-        # every legacy cache that did not carry the full canonical identity.
-        "dataset_fingerprint": dataset_identity["sha256"],
+        "revision": None if revision is None else str(revision),
+        "dataset_root": str(Path(dataset_root).expanduser().resolve()),
+        "dataset_fingerprint": dataset_root_fingerprint(dataset_root),
         "total_frames": int(total_frames),
         "tactile_keys": list(tactile_keys),
         "source_tactile_keys": list(source_tactile_keys),
@@ -106,12 +108,8 @@ def create_tactile_cache_metadata(
         "embedding_dim": int(embedding_dim),
         "image_size": int(image_size),
         "dtype": resolved_dtype.name,
-        "encoder_repo_id": encoder_provenance["repo_id"],
-        "encoder_requested_revision": encoder_provenance["requested_revision"],
-        "encoder_revision": encoder_provenance["resolved_revision"],
-        "encoder_checkpoint_sha256": encoder_provenance["checkpoint_sha256"],
-        "encoder_sha256": encoder_provenance["checkpoint_sha256"],
-        "encoder_provenance_sha256": sha256_file(encoder_provenance_path),
+        "encoder_path": str(Path(encoder_path).expanduser().resolve()),
+        "encoder_sha256": tactile_encoder_fingerprint(encoder_path),
         "preprocessing": "tactile_encoder.parse_image_to_unit.v1",
     }
 
@@ -148,34 +146,24 @@ class TactileEmbeddingCache:
         dataset_root: str | Path | None = None,
     ):
         self.cache_dir = Path(cache_dir).expanduser()
-        if dataset_root is None:
-            raise ValueError("dataset_root is required to validate tactile cache content identity")
-        encoder_provenance = validate_tactile_encoder_provenance(encoder_path)
-        encoder_provenance_path = (
-            Path(encoder_path).expanduser().resolve() / TACTILE_ENCODER_PROVENANCE_FILENAME
-        )
         self.metadata = load_tactile_cache_metadata(self.cache_dir)
         self._embeddings: np.ndarray | None = None
 
         expected = {
             "repo_id": str(repo_id),
-            "revision": _immutable_revision(revision),
+            "revision": None if revision is None else str(revision),
             "total_frames": int(total_frames),
             "tactile_keys": list(tactile_keys),
             "source_tactile_keys": list(source_tactile_keys),
             "num_tactile_tokens": len(tactile_keys),
             "embedding_dim": int(embedding_dim),
             "image_size": int(image_size),
-            "encoder_repo_id": encoder_provenance["repo_id"],
-            "encoder_requested_revision": encoder_provenance["requested_revision"],
-            "encoder_revision": encoder_provenance["resolved_revision"],
-            "encoder_checkpoint_sha256": encoder_provenance["checkpoint_sha256"],
-            "encoder_sha256": encoder_provenance["checkpoint_sha256"],
-            "encoder_provenance_sha256": sha256_file(encoder_provenance_path),
+            "encoder_sha256": tactile_encoder_fingerprint(encoder_path),
         }
-        dataset_identity = local_dataset_content_identity(dataset_root)
-        expected["dataset_content_identity"] = dataset_identity
-        expected["dataset_fingerprint"] = dataset_identity["sha256"]
+        if dataset_root is not None:
+            expected["dataset_root"] = str(Path(dataset_root).expanduser().resolve())
+            if "dataset_fingerprint" in self.metadata:
+                expected["dataset_fingerprint"] = dataset_root_fingerprint(dataset_root)
         mismatches = {
             key: (self.metadata.get(key), value)
             for key, value in expected.items()

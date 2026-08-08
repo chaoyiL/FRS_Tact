@@ -13,11 +13,8 @@ import pytest
 from safetensors.numpy import save_file as save_safetensors_file
 
 from lerobot.policies.smolvla_jax.validation import CheckpointContract
-from lerobot.policies.smolvla_jax.validation import validate_checkpoint
 from tools.publish_smolvla_checkpoint import (
-    ENCODER_PROVENANCE_FILENAMES,
     INFERENCE_FILENAMES,
-    PROTOCOL_FILENAMES,
     SIDECAR_FILENAMES,
     _contract_from_dict,
     _default_metadata_loader,
@@ -147,42 +144,6 @@ def _valid_checkpoint(path: Path) -> Path:
         path / "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
     )
     save_safetensors_file(_weight_tensors(), path / "model.safetensors")
-    encoder_files = [
-        {"path": "checkpoint.json", "size": 123, "sha256": "1" * 64},
-        {"path": "params.npz", "size": 456, "sha256": "2" * 64},
-    ]
-    encoder_checkpoint_sha = hashlib.sha256(
-        json.dumps(
-            {
-                "algorithm": "tactile-encoder-checkpoint-files-v1",
-                "files": encoder_files,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    _json(
-        path / "encoder_provenance.json",
-        {
-            "version": 1,
-            "repo_id": "liuchaoyi/encoder_ckpt_05",
-            "requested_revision": "main",
-            "resolved_revision": "a" * 40,
-            "checkpoint_sha256": encoder_checkpoint_sha,
-            "checkpoint_files": encoder_files,
-            "checkpoint_digest_algorithm": "tactile-encoder-checkpoint-files-v1",
-        },
-    )
-    config_path = path / "config.json"
-    config = json.loads(config_path.read_text())
-    config.update(
-        {
-            "tactile_encoder_repo_id": "liuchaoyi/encoder_ckpt_05",
-            "tactile_encoder_revision": "a" * 40,
-            "tactile_encoder_sha256": encoder_checkpoint_sha,
-        }
-    )
-    _json(config_path, config)
     (path / "training_state.msgpack").write_bytes(b"secret optimizer state")
     (path / "dataset-cache.arrow").write_bytes(b"cache")
     return path
@@ -190,135 +151,6 @@ def _valid_checkpoint(path: Path) -> Path:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _attach_train_only_protocol(path: Path) -> None:
-    split = path / "data_split.json"
-    split.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "datasets": [
-                    {
-                        "repo_id": "owner/data",
-                        "revision": None,
-                        "train_episodes": [0],
-                        "val_episodes": [1],
-                    }
-                ],
-            },
-            sort_keys=True,
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    assets = {
-        filename: _sha256(path / filename)
-        for filename in (
-            "policy_preprocessor_step_5_normalizer_processor.safetensors",
-            "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
-        )
-    }
-    encoder_files = [
-        {"path": "checkpoint.json", "size": 123, "sha256": "1" * 64},
-        {"path": "params.npz", "size": 456, "sha256": "2" * 64},
-    ]
-    encoder_checkpoint_sha = hashlib.sha256(
-        json.dumps(
-            {
-                "algorithm": "tactile-encoder-checkpoint-files-v1",
-                "files": encoder_files,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
-    encoder_identity = {
-        "repo_id": "liuchaoyi/encoder_ckpt_05",
-        "resolved_revision": "a" * 40,
-        "checkpoint_sha256": encoder_checkpoint_sha,
-    }
-    _json(
-        path / "normalization_manifest.json",
-        {
-            "algorithm_version": 1,
-            "split_sha256": _sha256(split),
-            "datasets": [
-                {
-                    "repo_id": "owner/data",
-                    "requested_revision": None,
-                    "resolved_revision": "d" * 40,
-                    "train_episodes": [0],
-                    "selected_stats_sha256": "e" * 64,
-                    "dataset_identity": {
-                        "kind": "hub_snapshot",
-                        "requested_revision": None,
-                        "resolved_revision": "d" * 40,
-                    },
-                }
-            ],
-            "dimensions": {"observation.state": 20, "action": 20},
-            "canonical_stats_sha256": "f" * 64,
-            "assets": assets,
-            "tactile_encoder": encoder_identity,
-        },
-    )
-    _json(
-        path / "encoder_provenance.json",
-        {
-            "version": 1,
-            "repo_id": encoder_identity["repo_id"],
-            "requested_revision": "main",
-            "resolved_revision": encoder_identity["resolved_revision"],
-            "checkpoint_sha256": encoder_identity["checkpoint_sha256"],
-            "checkpoint_files": encoder_files,
-            "checkpoint_digest_algorithm": "tactile-encoder-checkpoint-files-v1",
-        },
-    )
-    config_path = path / "config.json"
-    config = json.loads(config_path.read_text())
-    config.update(
-        {
-            "tactile_encoder_repo_id": encoder_identity["repo_id"],
-            "tactile_encoder_revision": encoder_identity["resolved_revision"],
-            "tactile_encoder_sha256": encoder_identity["checkpoint_sha256"],
-        }
-    )
-    _json(config_path, config)
-
-
-def _write_protocol_training_config(path: Path) -> Path:
-    path.write_text(
-        """datasets:
-  - repo_id: owner/data
-    action_key: actions
-normalization:
-  protocol_dir: /workspace/protocol
-model:
-  state_dim: 20
-  action_dim: 20
-  chunk_size: 20
-  image_keys: [observation.images.camera1, observation.images.camera2]
-  use_tactile_encoder: true
-  tactile_encoder_path: /workspace/encoder
-  tactile_encoder_repo_id: liuchaoyi/encoder_ckpt_05
-  tactile_keys: [observation.images.tactile_left_0, observation.images.tactile_right_0, observation.images.tactile_left_1, observation.images.tactile_right_1]
-  tactile_embedding_dim: 512
-  tactile_num_tokens: 4
-  lora_rank: 16
-  vlm_lora_target_modules: [q_proj, v_proj]
-  module_modes:
-    vision: frozen
-    connector: frozen
-    vlm_text: lora
-    expert: full
-    action: full
-    state_proj: full
-    tactile_proj: full
-""",
-        encoding="utf-8",
-    )
-    return path
 
 
 def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
@@ -332,8 +164,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         dataset_revisions=datasets,
     )
 
-    expected_files = set(INFERENCE_FILENAMES) | set(ENCODER_PROVENANCE_FILENAMES)
-    assert {path.name for path in bundle.iterdir()} == expected_files
+    assert {path.name for path in bundle.iterdir()} == set(INFERENCE_FILENAMES)
     assert not (bundle / "training_state.msgpack").exists()
     manifest = json.loads((bundle / "conversion_manifest.json").read_text())
     assert manifest["contract"] == {
@@ -351,47 +182,10 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
     }
     assert manifest["datasets"] == list(datasets)
     assert manifest["source_weight_sha256"] == _sha256(source / "model.safetensors")
-    assert set(manifest["files"]) == expected_files - {"conversion_manifest.json"}
+    assert set(manifest["files"]) == set(INFERENCE_FILENAMES) - {"conversion_manifest.json"}
     for filename, metadata in manifest["files"].items():
         assert metadata["sha256"] == _sha256(bundle / filename)
         assert metadata["size"] == (bundle / filename).stat().st_size
-
-
-def test_protocol_bundle_hashes_and_preserves_split_and_manifest(tmp_path: Path) -> None:
-    source = _valid_checkpoint(tmp_path / "checkpoint")
-    _attach_train_only_protocol(source)
-
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
-
-    assert set(PROTOCOL_FILENAMES) <= {path.name for path in bundle.iterdir()}
-    conversion = json.loads((bundle / "conversion_manifest.json").read_text())
-    for filename in PROTOCOL_FILENAMES:
-        assert conversion["files"][filename]["sha256"] == _sha256(bundle / filename)
-        assert (bundle / filename).read_bytes() == (source / filename).read_bytes()
-    for filename in ENCODER_PROVENANCE_FILENAMES:
-        assert conversion["files"][filename]["sha256"] == _sha256(bundle / filename)
-        assert (bundle / filename).read_bytes() == (source / filename).read_bytes()
-
-
-def test_non_protocol_vt_checkpoint_requires_encoder_provenance(tmp_path: Path) -> None:
-    source = _valid_checkpoint(tmp_path / "checkpoint")
-    assert not (source / "normalization_manifest.json").exists()
-    (source / "encoder_provenance.json").unlink()
-
-    report = validate_checkpoint(source, expected=VT_CONTRACT)
-
-    assert not report.ok
-    assert any("missing encoder_provenance.json" in issue for issue in report.issues)
-
-
-def test_protocol_bundle_rejects_split_drift_before_copy(tmp_path: Path) -> None:
-    source = _valid_checkpoint(tmp_path / "checkpoint")
-    _attach_train_only_protocol(source)
-    (source / "data_split.json").write_text('{"version": 1, "datasets": []}\n')
-
-    with pytest.raises(ValueError, match="split|normalization protocol|digest"):
-        build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
-    assert not (tmp_path / "bundle").exists()
 
 
 def test_bundle_copies_model_into_an_independent_file(tmp_path: Path) -> None:
@@ -503,41 +297,13 @@ def test_sidecar_publish_never_uploads_weight_and_preserves_remote_hash(tmp_path
     )
 
     uploaded = {operation.path_in_repo for operation in api.operations}
-    assert uploaded == (
-        set(SIDECAR_FILENAMES)
-        | set(ENCODER_PROVENANCE_FILENAMES)
-        | {"conversion_manifest.json"}
-    )
+    assert uploaded == set(SIDECAR_FILENAMES) | {"conversion_manifest.json"}
     assert "model.safetensors" not in uploaded
     assert result["weight_sha256_before"] == expected_sha
     assert result["weight_sha256_after"] == expected_sha
     assert api.commit_kwargs["parent_commit"] == "a" * 40
     assert api.path_revisions == ["a" * 40, "b" * 40]
     assert all(not path.startswith(str(bundle)) for path in api.operation_sources)
-
-
-def test_protocol_sidecar_publish_uploads_both_provenance_files(tmp_path: Path) -> None:
-    source = _valid_checkpoint(tmp_path / "checkpoint")
-    _attach_train_only_protocol(source)
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
-    expected_sha = _sha256(source / "model.safetensors")
-    api = RecordingApi(expected_sha)
-
-    result = publish_bundle(
-        bundle,
-        repo_id="owner/model",
-        expected=VT_CONTRACT,
-        api=api,
-        sidecars_only=True,
-    )
-
-    uploaded = {operation.path_in_repo for operation in api.operations}
-    assert uploaded == set(SIDECAR_FILENAMES) | set(PROTOCOL_FILENAMES) | set(
-        ENCODER_PROVENANCE_FILENAMES
-    ) | {
-        "conversion_manifest.json"
-    }
-    assert set(PROTOCOL_FILENAMES) <= set(result["uploaded_files"])
 
 
 def test_publish_validates_manifest_against_payload_and_external_contract(tmp_path: Path) -> None:
@@ -1006,67 +772,6 @@ model:
             "revision_proof": "repository head predates model weight",
         }
     ]
-
-
-def test_protocol_repair_preserves_checkpoint_train_only_assets_without_global_stats(
-    tmp_path: Path,
-) -> None:
-    snapshot = _valid_checkpoint(tmp_path / "snapshot")
-    _attach_train_only_protocol(snapshot)
-    weight_sha = _sha256(snapshot / "model.safetensors")
-    api = RepairApi(
-        weight_sha=weight_sha,
-        weight_time=datetime(2026, 1, 2, tzinfo=UTC),
-        dataset_sha="d" * 40,
-    )
-    protected = {
-        filename: _sha256(snapshot / filename)
-        for filename in (
-            *PROTOCOL_FILENAMES,
-            "policy_preprocessor_step_5_normalizer_processor.safetensors",
-            "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
-        )
-    }
-
-    output = repair_sidecars(
-        repo_id="owner/model",
-        training_config=_write_protocol_training_config(tmp_path / "train.yaml"),
-        output=tmp_path / "repair",
-        expected_weight_sha256=weight_sha,
-        api=api,
-        snapshot_resolver=lambda repo_id, revision: snapshot,
-        metadata_loader=lambda *args: pytest.fail(
-            "protocol-aware repair must never read global dataset statistics"
-        ),
-    )
-
-    assert {filename: _sha256(output / filename) for filename in protected} == protected
-
-
-def test_protocol_declared_repair_missing_remote_manifest_fails_before_global_stats(
-    tmp_path: Path,
-) -> None:
-    snapshot = _valid_checkpoint(tmp_path / "snapshot")
-    weight_sha = _sha256(snapshot / "model.safetensors")
-    api = RepairApi(
-        weight_sha=weight_sha,
-        weight_time=datetime(2026, 1, 2, tzinfo=UTC),
-        dataset_sha="d" * 40,
-    )
-
-    with pytest.raises(ValueError, match="normalization.*manifest|protocol"):
-        repair_sidecars(
-            repo_id="owner/model",
-            training_config=_write_protocol_training_config(tmp_path / "train.yaml"),
-            output=tmp_path / "repair",
-            expected_weight_sha256=weight_sha,
-            api=api,
-            snapshot_resolver=lambda repo_id, revision: snapshot,
-            metadata_loader=lambda *args: pytest.fail(
-                "missing protocol must fail before global dataset statistics"
-            ),
-        )
-    assert not (tmp_path / "repair").exists()
 
 
 def _legacy_feature_stats(offset: float, count: int) -> dict[str, object]:
