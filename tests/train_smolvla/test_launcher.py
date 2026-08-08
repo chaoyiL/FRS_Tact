@@ -130,6 +130,7 @@ def test_preflight_resolves_checkpoint_checks_local_data_gpu_and_existing_output
     preflight(
         settings,
         {"checkpoint": "local-checkpoint", "allow_download": False, "datasets": [{"root": "dataset"}]},
+        checkpoint_resolver=launcher.resolve_checkpoint,
     )
 
     assert calls == [("local-checkpoint", {"revision": None, "local_files_only": True})]
@@ -162,7 +163,11 @@ def test_preflight_rebases_an_existing_relative_checkpoint_from_a_non_repo_cwd(
     )
     monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "gpu"})()])
 
-    preflight(settings, {"checkpoint": "checkpoints/local", "datasets": []})
+    preflight(
+        settings,
+        {"checkpoint": "checkpoints/local", "datasets": []},
+        checkpoint_resolver=launcher.resolve_checkpoint,
+    )
 
     assert calls == [(checkpoint, {"revision": None, "local_files_only": True})]
 
@@ -185,7 +190,11 @@ def test_preflight_leaves_huggingface_repo_ids_unmodified(monkeypatch, tmp_path)
     )
     monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "gpu"})()])
 
-    preflight(settings, {"checkpoint": "org/model", "datasets": []})
+    preflight(
+        settings,
+        {"checkpoint": "org/model", "datasets": []},
+        checkpoint_resolver=launcher.resolve_checkpoint,
+    )
 
     assert calls == [("org/model", {"revision": None, "local_files_only": True})]
 
@@ -204,7 +213,11 @@ def test_preflight_reports_an_absolute_path_for_a_missing_local_checkpoint(monke
     monkeypatch.setattr(launcher, "resolve_checkpoint", lambda *args, **kwargs: pytest.fail("unexpected resolver call"))
 
     with pytest.raises(FileNotFoundError, match=str(missing)) as error:
-        preflight(settings, {"checkpoint": "./checkpoints/missing", "datasets": []})
+        preflight(
+            settings,
+            {"checkpoint": "./checkpoints/missing", "datasets": []},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
 
     assert "set checkpoint" in str(error.value)
 
@@ -223,11 +236,28 @@ def test_preflight_rejects_missing_local_data_resume_and_checkpoint_overwrite(mo
     monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "gpu"})()])
 
     with pytest.raises(FileNotFoundError, match=str(tmp_path / "missing-data")):
-        preflight(settings, {"checkpoint": "checkpoint", "datasets": [{"root": "missing-data"}]})
+        preflight(
+            settings,
+            {"checkpoint": "checkpoint", "datasets": [{"root": "missing-data"}]},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
+
+    dataset_file = tmp_path / "dataset-file"
+    dataset_file.write_text("not a dataset directory", encoding="utf-8")
+    with pytest.raises(FileNotFoundError, match=str(dataset_file)):
+        preflight(
+            settings,
+            {"checkpoint": "checkpoint", "datasets": [{"root": "dataset-file"}]},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
 
     (tmp_path / "output" / "checkpoint-1").mkdir(parents=True)
     with pytest.raises(FileExistsError, match="resume"):
-        preflight(settings, {"checkpoint": "checkpoint", "datasets": []})
+        preflight(
+            settings,
+            {"checkpoint": "checkpoint", "datasets": []},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
 
     resume_settings = LauncherSettings(
         project_root=tmp_path,
@@ -239,7 +269,11 @@ def test_preflight_rejects_missing_local_data_resume_and_checkpoint_overwrite(mo
         logs_dir=tmp_path / "logs",
     )
     with pytest.raises(FileNotFoundError, match=str(tmp_path / "missing-resume")):
-        preflight(resume_settings, {"checkpoint": "checkpoint", "datasets": []})
+        preflight(
+            resume_settings,
+            {"checkpoint": "checkpoint", "datasets": []},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
 
 
 def test_preflight_rejects_cpu_only_jax(monkeypatch, tmp_path):
@@ -256,7 +290,11 @@ def test_preflight_rejects_cpu_only_jax(monkeypatch, tmp_path):
     monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "cpu"})()])
 
     with pytest.raises(RuntimeError, match="GPU"):
-        preflight(settings, {"checkpoint": "owner/model", "datasets": []})
+        preflight(
+            settings,
+            {"checkpoint": "owner/model", "datasets": []},
+            checkpoint_resolver=launcher.resolve_checkpoint,
+        )
 
 
 def test_stream_command_tees_output_and_returns_child_exit_code(tmp_path, capsys):

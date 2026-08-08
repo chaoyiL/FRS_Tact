@@ -48,6 +48,18 @@ def load_launcher_settings(config_path: Path, project_root: Path) -> LauncherSet
     root = project_root.expanduser().resolve()
     resolved_config = _project_path(root, config_path).resolve()
     config = load_yaml_config(resolved_config)
+    return launcher_settings_from_config(resolved_config, root, config)
+
+
+def launcher_settings_from_config(
+    config_path: Path,
+    project_root: Path,
+    config: dict[str, Any],
+) -> LauncherSettings:
+    """Build launcher settings from a validated YAML mapping."""
+
+    root = project_root.expanduser().resolve()
+    resolved_config = _project_path(root, config_path).resolve()
     launcher = config.get("launcher")
     if not isinstance(launcher, dict):
         raise ValueError("missing required config mapping: launcher")
@@ -70,9 +82,14 @@ def find_uv() -> str:
     return executable
 
 
-def timestamped_log_path(settings: LauncherSettings, now: datetime | None = None) -> Path:
+def timestamped_log_path(
+    settings: LauncherSettings,
+    now: datetime | None = None,
+    *,
+    kind: str = "train",
+) -> Path:
     instant = now or datetime.now()
-    return settings.logs_dir / f"train_{instant:%Y%m%d_%H%M%S}.log"
+    return settings.logs_dir / f"{kind}_{instant:%Y%m%d_%H%M%S}.log"
 
 
 def tmux_session_exists(session: str) -> bool:
@@ -82,6 +99,56 @@ def tmux_session_exists(session: str) -> bool:
         stderr=subprocess.DEVNULL,
         check=False,
     ).returncode == 0
+
+
+def maybe_launch_tmux(
+    settings: LauncherSettings,
+    *,
+    foreground_env: str,
+    launcher_module: str,
+    log_prefix: str,
+) -> bool:
+    """Launch this launcher in tmux when foreground execution was not requested."""
+
+    if (
+        settings.foreground
+        or os.environ.get(foreground_env) == "1"
+        or bool(os.environ.get("TMUX"))
+    ):
+        return False
+    tmux_bin = shutil.which("tmux")
+    if tmux_bin is None:
+        print(f"[{log_prefix}] warning: tmux is unavailable; running in the foreground", file=sys.stderr)
+        return False
+    if tmux_session_exists(settings.tmux_session):
+        raise RuntimeError(
+            f"tmux session {settings.tmux_session!r} already exists; attach with "
+            f"tmux attach -t {settings.tmux_session}"
+        )
+    subprocess.run(
+        [
+            tmux_bin,
+            "new-session",
+            "-d",
+            "-s",
+            settings.tmux_session,
+            "-c",
+            str(settings.project_root),
+            "env",
+            f"{foreground_env}=1",
+            find_uv(),
+            "run",
+            "--no-sync",
+            "python",
+            "-m",
+            launcher_module,
+            "--config",
+            str(settings.config_path),
+        ],
+        check=True,
+    )
+    print(f"[{log_prefix}] started tmux session: {settings.tmux_session}")
+    return True
 
 
 def _configured_dataset_roots(config: dict[str, Any], project_root: Path) -> list[Path]:
@@ -120,16 +187,21 @@ def _checkpoint_target(project_root: Path, value: str | Path) -> str | Path:
     return local_path
 
 
-def preflight(settings: LauncherSettings, config: dict[str, Any]) -> Path:
+def preflight(
+    settings: LauncherSettings,
+    config: dict[str, Any],
+    *,
+    checkpoint_resolver=resolve_checkpoint,
+) -> Path:
     """Reject missing local resources and unsafe launches before creating tmux."""
 
     for dataset_root in _configured_dataset_roots(config, settings.project_root):
-        if not dataset_root.exists():
+        if not dataset_root.is_dir():
             raise FileNotFoundError(
                 f"dataset root does not exist: {dataset_root}; update datasets[].root or prepare the dataset"
             )
 
-    checkpoint = resolve_checkpoint(
+    checkpoint = checkpoint_resolver(
         _checkpoint_target(settings.project_root, _required(config, "checkpoint")),
         revision=config.get("revision"),
         local_files_only=not bool(config.get("allow_download", False)),
@@ -187,44 +259,13 @@ def _foreground_command(settings: LauncherSettings, uv_bin: str) -> list[str]:
 def launch(settings: LauncherSettings) -> int:
     """Start training in tmux when possible, otherwise stream it in this process."""
 
-    in_foreground = (
-        settings.foreground
-        or os.environ.get("SMOLVLA_FOREGROUND") == "1"
-        or bool(os.environ.get("TMUX"))
-    )
-    tmux_bin = None if in_foreground else shutil.which("tmux")
-    if not in_foreground and tmux_bin is not None:
-        if tmux_session_exists(settings.tmux_session):
-            raise RuntimeError(
-                f"tmux session {settings.tmux_session!r} already exists; attach with "
-                f"tmux attach -t {settings.tmux_session}"
-            )
-        uv_bin = find_uv()
-        command = [
-            tmux_bin,
-            "new-session",
-            "-d",
-            "-s",
-            settings.tmux_session,
-            "-c",
-            str(settings.project_root),
-            "env",
-            "SMOLVLA_FOREGROUND=1",
-            uv_bin,
-            "run",
-            "--no-sync",
-            "python",
-            "-m",
-            "train_smolvla.launcher",
-            "--config",
-            str(settings.config_path),
-        ]
-        subprocess.run(command, check=True)
-        print(f"[smolvla] started tmux session: {settings.tmux_session}")
+    if maybe_launch_tmux(
+        settings,
+        foreground_env="SMOLVLA_FOREGROUND",
+        launcher_module="train_smolvla.launcher",
+        log_prefix="smolvla",
+    ):
         return 0
-
-    if not in_foreground and tmux_bin is None:
-        print("[smolvla] warning: tmux is unavailable; running in the foreground", file=sys.stderr)
     log_path = timestamped_log_path(settings).resolve()
     print(f"[smolvla] log: {log_path}")
     return stream_command(_foreground_command(settings, find_uv()), cwd=settings.project_root, log_path=log_path)
