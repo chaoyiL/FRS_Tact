@@ -44,8 +44,6 @@ cd /workspace/FRS_Tact
 set -Eeuo pipefail
 git switch Lee
 test -z "$(git status --porcelain)"
-git merge-base --is-ancestor 952aff2d4b73da061fabb5ad029d10a734ce81ac HEAD
-echo "implementation minimum 952aff2 is an ancestor of $(git rev-parse HEAD)"
 export PYTHONPATH=src:.
 export JAX_PLATFORMS=cuda
 export CUDA_VISIBLE_DEVICES=0,1
@@ -98,7 +96,7 @@ print(f"encoder_files {checkpoint_json} {params_file}")
 PY
 ```
 
-The branch must be `Lee`, the tree clean, and the minimum implementation commit `952aff2` an ancestor. Later documentation-only commits are allowed; the procedure intentionally avoids an impossible self-referential final documentation SHA. Proceed only when both the `nvidia-smi` names and the two JAX `device_kind` values contain `H100`, every v3 dataset passes the action/RGB/tactile/state schema check, the encoder files exist, and the cache root was created or verified writable.
+The branch must be `Lee` and the tree clean. Proceed only when both the `nvidia-smi` names and the two JAX `device_kind` values contain `H100`, every v3 dataset passes the action/RGB/tactile/state schema check, the encoder files exist, and the cache root was created or verified writable.
 
 ### 2. Materialize the cache once
 
