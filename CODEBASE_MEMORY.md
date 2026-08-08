@@ -133,3 +133,11 @@
 - CPU/schema evidence is not H100 training validation. Production remains blocked until server-side two-H100 K8 and K21 one-step save smokes plus strict same-total-steps resume smokes have no OOM, non-finite loss/gradient, cache or contract error, provenance/resume mismatch, or missing resumed checkpoint. Exact commands and pass/fail criteria: `docs/reports/2026-08-08-h100-vt-training-consistency.md`.
 - H100 handoff begins on a clean `Lee` worktree without a commit-SHA gate; it asserts two H100 names via `nvidia-smi` and two H100 JAX `device_kind` values, creates/verifies the cache output root writable, validates each v3 `meta/info.json` action/RGB/tactile/state schema plus encoder files, and preserves cache/smoke/resume logs with `set -o pipefail` and `tee`.
 - 用户明确当前仍是实验室试验阶段，不需要远端 dataset/encoder commit SHA、发布 provenance 或运行时代码树哈希锁定；这类扩展不属于当前训练前 debug。一次过度 provenance 提交已由后续 revert 完整抵消，未提交的尾部改动保存在可恢复 stash，当前生产净代码保持在已审核的 launcher/encoder_05、BF16 compute 和 train-only normalization 范围。
+
+### 双 H100 三脚本工作流设计（2026-08-08）
+
+- 用户批准只保留三个服务器入口：`setup_env.sh`、`download_data.sh`、`start_vtsmolvla_train.sh`。
+- `download_data.sh` 同时准备四个 pick_tube v3 数据集和 `liuchaoyi/encoder_ckpt_05`；tactile cache 仍由训练 launcher 在 GPU 上幂等生成。
+- 默认训练顺序固定为 K8 后 K21；K8 非零退出时不得启动 K21。两者共用 cache 和 train-only normalization protocol，但输出与日志独立。
+- 三脚本统一 source `.env.frs`，默认持久根 `/workspace`；正式 launcher 使用单个 JAX 进程看到恰好两张 H100，不使用 `torchrun`。
+- 当前仅完成并批准设计，尚未实施；书面 spec 为 `docs/superpowers/specs/2026-08-08-three-script-h100-workflow-design.md`。
