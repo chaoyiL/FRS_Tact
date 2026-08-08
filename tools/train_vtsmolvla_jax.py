@@ -80,6 +80,16 @@ def _validate_vt_config(path: Path) -> None:
             "model.tactile_token_repeat_factor 必须是正整数，"
             f"当前值：{repeat_factor!r}"
         )
+    normalization = cfg.get("normalization")
+    if repeat_factor > 1:
+        if not isinstance(normalization, dict) or not normalization.get("protocol_dir"):
+            raise ValueError(
+                "K8/K21 配置必须显式设置 normalization.protocol_dir"
+            )
+        if Path(normalization["protocol_dir"]).expanduser() == Path(
+            cfg.get("output", "")
+        ).expanduser():
+            raise ValueError("normalization.protocol_dir 必须独立于单个 K 的 output")
 
     image_keys = model.get("image_keys") or []
     overlap = sorted(set(image_keys) & set(tactile_keys))

@@ -112,3 +112,11 @@
 - trainer state 和 `model.safetensors` 继续保存 FP32 trainable master parameters；固定 batch/rng/noise 的 save-load-prepare 数值测试逐元素一致。未修改 tactile cache、schema 或 repeat-factor 语义。
 - 用户批准的 Task 2 BF16 支持面仅为 active VT tactile runtime `src/lerobot/policies/smolvla_jax` 及其 `modalities_eval`、publish、deploy consumers；预先损坏的纯视觉 `train_smolvla` package 和 `tests/jax/test_training.py` 明确不属于验收面，也不在本任务中修复。
 - Task 2 聚焦 RED 为 `43 failed, 105 passed`，direct-contract 补充 RED 为 `1 failed`；最终聚焦 GREEN 为 `151 passed`。较宽但仍可运行的回归实际为 `269 passed, 1 skipped, 2 deselected`，不是先前误记的 267；被排除项来自上述纯视觉 package boundary 与既有默认部署身份漂移，不改变 VT focused 验收结论。
+
+### Immutable train-only normalization protocol（2026-08-08）
+
+- K8/K21 YAML 现在显式共享 `/workspace/normalization_protocols/pick_tube_vt_k8_k21`，split 在 normalization 前解析；协议只用选中 train episode 的 v3 `stats/*` parquet 元数据，并通过官方 `cast_stats_to_numpy` / `aggregate_stats` 做 count-weighted 聚合。validation episode 不参与，协议阶段不读取 frame/data parquet 或解码图像/视频。
+- 协议 artifact 包含 immutable `data_split.json`、pre/post safetensors 和 `normalization_manifest.json`；manifest 固定 source 顺序、requested/resolved revision/action key、rename map、sorted train episode IDs、逐 episode/source/final float32 stats digest、split digest、asset hashes 与 20D state/action contract。创建用同父目录 staging + atomic rename；已有 identical artifact 只读复用，缺失、损坏或 drift fail closed。
+- 本地 v3 root 直接读取 `meta/info.json` 后做 predicate-pushed episode stats 读取，避免 eager metadata container 加载全局 stats/未过滤 episode metadata；remote/unmaterialized source 才使用 `LeRobotDatasetMetadata` 完成 metadata 解析。显式 preprocessor 下 loader 完全跳过 full-dataset stats，validation 复用 train preprocessor。
+- checkpoint 保存精确复制协议 split/manifest，并保存 byte-identical normalization assets；strict resume 先用当前选中 episode metadata 校验 checkpoint-authoritative artifact，再加载 normalization assets，最后才 restore optimizer/trainer state，保证 step 1 前 fail closed。
+- Task 3 严格 TDD RED 包括新 module collection `ModuleNotFoundError`、resume-order helper 缺失、K8/K21 protocol config 缺失、aggregate-preserving per-episode drift 未被发现、requested action-key drift未被发现及 eager metadata 读取；最终 focused/broader 计数以 `.git/worktrees/FRS_Tact-modalities-eval/sdd/task-3-report.md` 为准。未启动 H100 训练；真实双 H100 K8/K21 save/resume smoke 仍是 production gate。

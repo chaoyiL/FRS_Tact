@@ -594,11 +594,16 @@ class LeRobotJaxDataLoader:
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
 
-            canonical_stats = rename_dataset_stats(
-                canonicalize_dataset_stats(dataset.meta.stats, resolved_action_key),
-                source_rename,
-            )
-            stats_list.append(ensure_stats_counts(canonical_stats, frame_count=len(dataset)))
+            # An explicit preprocessor is authoritative (for example, an immutable
+            # train-only normalization protocol). Do not even inspect the dataset's
+            # full-split stats in that path: validation episodes may be represented
+            # there and must never influence normalization.
+            if preprocessor is None:
+                canonical_stats = rename_dataset_stats(
+                    canonicalize_dataset_stats(dataset.meta.stats, resolved_action_key),
+                    source_rename,
+                )
+                stats_list.append(ensure_stats_counts(canonical_stats, frame_count=len(dataset)))
             self.dataset_summaries.append(
                 {
                     "repo_id": source.repo_id,

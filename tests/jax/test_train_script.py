@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -120,6 +121,66 @@ def test_unknown_top_level_training_key_is_rejected(tmp_path: Path) -> None:
         load_yaml_config(config)
 
 
+def test_normalization_protocol_is_an_allowed_training_config(tmp_path: Path) -> None:
+    config = tmp_path / "train.yaml"
+    config.write_text(
+        "checkpoint: model\nsteps: 10\nnormalization:\n  protocol_dir: /shared/protocol\n",
+        encoding="utf-8",
+    )
+
+    assert load_yaml_config(config)["normalization"]["protocol_dir"] == "/shared/protocol"
+
+
+def test_resume_provenance_is_validated_before_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    resume = tmp_path / "checkpoint"
+    resume.mkdir()
+    split_path = resume / TRAIN_SCRIPT.DATA_SPLIT_FILENAME
+    split_path.write_text('{"version": 1}\n', encoding="utf-8")
+    result = SimpleNamespace(
+        stats={},
+        split_path=split_path,
+        manifest_path=resume / TRAIN_SCRIPT.NORMALIZATION_MANIFEST_FILENAME,
+    )
+
+    def build_or_validate(protocol_dir, **kwargs):
+        events.append("validate_protocol")
+        assert protocol_dir == resume
+        assert kwargs["allow_create"] is False
+        return result
+
+    class FakePreprocessor:
+        def __init__(self, checkpoint, *args, **kwargs):
+            events.append("load_authoritative_assets")
+            assert checkpoint == resume
+            assert kwargs["stats"] is None
+
+    class FakeTrainer:
+        def restore(self, path):
+            events.append("restore")
+            assert path == resume
+
+    monkeypatch.setattr(TRAIN_SCRIPT, "build_or_validate_normalization_protocol", build_or_validate)
+    monkeypatch.setattr(TRAIN_SCRIPT, "JaxSmolVLAPreprocessor", FakePreprocessor)
+
+    actual, _ = TRAIN_SCRIPT._prepare_normalization_and_resume(
+        trainer=FakeTrainer(),
+        resume=resume,
+        protocol_dir=tmp_path / "shared-protocol",
+        split_path=split_path,
+        train_sources=[DatasetSource(repo_id="org/a", episodes=[0])],
+        checkpoint=tmp_path / "base",
+        config=_vt_config(),
+        local_files_only=True,
+    )
+
+    assert actual is result
+    assert events == ["validate_protocol", "load_authoritative_assets", "restore"]
+
+
 def test_validation_without_rollout_does_not_log_nan(capsys) -> None:
     class FakeTrainer:
         def evaluate(self, batches, *, seed, **kwargs):
@@ -152,6 +213,8 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
     source.mkdir()
     split_path = tmp_path / TRAIN_SCRIPT.DATA_SPLIT_FILENAME
     split_path.write_text('{"version": 1}\n', encoding="utf-8")
+    normalization_manifest_path = tmp_path / TRAIN_SCRIPT.NORMALIZATION_MANIFEST_FILENAME
+    normalization_manifest_path.write_text('{"algorithm_version": 1}\n', encoding="utf-8")
     events: list[str] = []
 
     class FakeTrainer:
@@ -190,6 +253,9 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
         assert (staging / TRAIN_SCRIPT.DATA_SPLIT_FILENAME).read_text(encoding="utf-8") == (
             split_path.read_text(encoding="utf-8")
         )
+        assert (
+            staging / TRAIN_SCRIPT.NORMALIZATION_MANIFEST_FILENAME
+        ).read_text(encoding="utf-8") == normalization_manifest_path.read_text(encoding="utf-8")
         return PassingReport()
 
     monkeypatch.setattr(TRAIN_SCRIPT, "validate_checkpoint", validate_checkpoint)
@@ -200,6 +266,7 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
         preprocessor=FakePreprocessor(),
         source_dir=source,
         data_split_path=split_path,
+        normalization_manifest_path=normalization_manifest_path,
     )
 
     assert result == final
@@ -210,6 +277,7 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
         "require_valid",
     ]
     assert (final / TRAIN_SCRIPT.DATA_SPLIT_FILENAME).is_file()
+    assert (final / TRAIN_SCRIPT.NORMALIZATION_MANIFEST_FILENAME).is_file()
 
 
 def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path) -> None:
@@ -320,6 +388,7 @@ def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path
             preprocessor=NoOpPreprocessor(),
             source_dir=source,
             data_split_path=None,
+            normalization_manifest_path=None,
         )
 
     assert not final.exists()

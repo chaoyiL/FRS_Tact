@@ -46,6 +46,11 @@ datasets:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
 
+# ---- 共享的 train-only normalization 协议 ----
+# K8/K21 必须复用同一个非 output 目录；已有内容只能严格校验，不能覆盖。
+normalization:
+  protocol_dir: /workspace/normalization_protocols/pick_tube_vt_k8_k21
+
 # ---- 触觉 embedding 缓存 ----
 # 首次训练前运行一次：
 #   uv run --no-sync python tools/precompute_tactile_embeddings.py \

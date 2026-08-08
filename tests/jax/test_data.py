@@ -351,6 +351,69 @@ def test_rename_and_count_stats_for_aggregation() -> None:
     np.testing.assert_array_equal(counted["action"]["count"], [10])
 
 
+def test_explicit_preprocessor_does_not_read_full_dataset_stats(monkeypatch) -> None:
+    class FakeMetadata:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.root = Path("/metadata-only")
+            self.revision = "revision"
+            self.features = {
+                "observation.state": {"dtype": "float32", "shape": [20]},
+                "actions": {"dtype": "float32", "shape": [20]},
+                "observation.images.camera1": {"dtype": "video", "shape": [3, 8, 8]},
+            }
+            self.camera_keys = ["observation.images.camera1"]
+            self.fps = 10
+
+    class StatsMustNotBeRead:
+        @property
+        def stats(self):
+            raise AssertionError("full-dataset stats must not be read")
+
+    class FakeDataset:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.features = FakeMetadata().features
+            self.meta = StatsMustNotBeRead()
+            self.num_episodes = 1
+            self.fps = 10
+
+        def __len__(self):
+            return 2
+
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
+        FakeMetadata,
+    )
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDataset",
+        FakeDataset,
+    )
+    config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        state_dim=20,
+        action_dim=20,
+        chunk_size=2,
+        image_keys=("observation.images.camera1",),
+    )
+    preprocessor = object()
+
+    loader = __import__(
+        "lerobot.policies.smolvla_jax.data", fromlist=["LeRobotJaxDataLoader"]
+    ).LeRobotJaxDataLoader(
+        "checkpoint",
+        config,
+        sources=[DatasetSource(repo_id="org/dataset", episodes=[0], action_key="actions")],
+        preprocessor=preprocessor,
+        batch_size=1,
+        num_workers=0,
+        infinite=False,
+        drop_last=False,
+    )
+
+    assert loader.preprocessor is preprocessor
+
+
 def test_resolve_source_visual_keys_with_rename_map() -> None:
     keys = resolve_source_visual_keys(
         ["observation.images.camera1", "observation.images.camera2"],

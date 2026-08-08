@@ -32,6 +32,11 @@ from lerobot.policies.smolvla_jax.data import (
     split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
+from lerobot.policies.smolvla_jax.normalization_protocol import (
+    NORMALIZATION_MANIFEST_FILENAME,
+    build_or_validate_normalization_protocol,
+)
+from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
 from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
 from lerobot.policies.smolvla_jax.validation import contract_from_config, validate_checkpoint
 
@@ -52,6 +57,7 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "log_freq",
         "modality_dropout",
         "model",
+        "normalization",
         "num_workers",
         "output",
         "prefetch_factor",
@@ -161,6 +167,7 @@ def _save_training_checkpoint_atomically(
     preprocessor: Any,
     source_dir: str | Path,
     data_split_path: str | Path | None,
+    normalization_manifest_path: str | Path | None = None,
 ) -> Path:
     expected = contract_from_config(trainer.config)
 
@@ -169,6 +176,11 @@ def _save_training_checkpoint_atomically(
         preprocessor.save_normalization_assets(staging)
         if data_split_path is not None:
             shutil.copy2(data_split_path, staging / DATA_SPLIT_FILENAME)
+        if normalization_manifest_path is not None:
+            shutil.copy2(
+                normalization_manifest_path,
+                staging / NORMALIZATION_MANIFEST_FILENAME,
+            )
 
     def validator(staging: Path) -> None:
         validate_checkpoint(
@@ -178,6 +190,41 @@ def _save_training_checkpoint_atomically(
         ).require_valid()
 
     return assemble_checkpoint_atomically(final_path, writer, validator)
+
+
+def _prepare_normalization_and_resume(
+    *,
+    trainer: JaxSmolVLATrainer,
+    resume: str | Path | None,
+    protocol_dir: str | Path,
+    split_path: str | Path,
+    train_sources: list[DatasetSource],
+    checkpoint: str | Path,
+    config: JaxSmolVLAConfig,
+    local_files_only: bool,
+):
+    """Validate provenance, load authoritative assets, then restore optimizer state."""
+
+    del checkpoint
+    artifact_dir = Path(resume) if resume is not None else Path(protocol_dir)
+    result = build_or_validate_normalization_protocol(
+        artifact_dir,
+        split_path=split_path,
+        sources=train_sources,
+        state_dim=config.state_dim,
+        action_dim=config.action_dim,
+        allow_create=resume is None,
+    )
+    preprocessor = JaxSmolVLAPreprocessor(
+        artifact_dir,
+        config,
+        rename_map={},
+        stats=None,
+        local_files_only=local_files_only,
+    )
+    if resume is not None:
+        trainer.restore(Path(resume))
+    return result, preprocessor
 
 
 def _split_manifest(
@@ -428,18 +475,25 @@ def main() -> None:
         f"trainable_ratio={trainable_count / max(trainable_count + frozen_count, 1):.4%}"
     )
     resume = cfg.get("resume")
-    if resume:
-        trainer.restore(Path(resume))
     data_parallel = bool(cfg.get("data_parallel", False))
-    if data_parallel:
-        trainer.enable_data_parallel()
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     output = Path(require(cfg, "output"))
     output.mkdir(parents=True, exist_ok=True)
     sources = parse_dataset_sources(cfg)
+    normalization_cfg = cfg.get("normalization")
+    if normalization_cfg is not None and not isinstance(normalization_cfg, dict):
+        raise ValueError("normalization must be a mapping")
+    normalization_protocol_dir = None
+    if normalization_cfg is not None:
+        normalization_protocol_dir = normalization_cfg.get("protocol_dir")
+        if not normalization_protocol_dir:
+            raise ValueError("normalization.protocol_dir is required")
+        normalization_protocol_dir = Path(normalization_protocol_dir).expanduser()
     val_cfg = dict(cfg.get("validation") or {})
     val_enabled = bool(val_cfg.get("enabled", True))
+    if normalization_protocol_dir is not None and not val_enabled:
+        raise ValueError("train-only normalization protocol requires validation.enabled=true")
     val_fraction = float(val_cfg.get("fraction", 0.1))
     split_seed = int(val_cfg.get("split_seed", cfg.get("seed", 0)))
     eval_seed = int(val_cfg.get("seed", 0))
@@ -453,6 +507,8 @@ def main() -> None:
         if resume:
             split_candidates.append(Path(resume) / DATA_SPLIT_FILENAME)
         split_candidates.append(split_path)
+        if normalization_protocol_dir is not None and not resume:
+            split_candidates.append(normalization_protocol_dir / DATA_SPLIT_FILENAME)
         split_manifest, loaded_split_path = _load_split_manifest(split_candidates)
         if split_manifest is None:
             train_sources, val_sources = split_sources_train_val(
@@ -484,6 +540,27 @@ def main() -> None:
             print("warning: validation enabled but no held-out episodes; disabling val")
             val_enabled = False
             train_sources = sources
+
+    normalization_result = None
+    normalization_preprocessor = None
+    if normalization_protocol_dir is not None:
+        if split_manifest is None:
+            raise ValueError("train-only normalization protocol requires a persisted episode split")
+        normalization_result, normalization_preprocessor = _prepare_normalization_and_resume(
+            trainer=trainer,
+            resume=resume,
+            protocol_dir=normalization_protocol_dir,
+            split_path=split_path,
+            train_sources=train_sources,
+            checkpoint=checkpoint,
+            config=config,
+            local_files_only=not (allow_tokenizer_download or allow_download),
+        )
+        print(f"normalization_protocol={normalization_result.manifest_path}")
+    elif resume:
+        trainer.restore(Path(resume))
+    if data_parallel:
+        trainer.enable_data_parallel()
 
     common_loader_kwargs = {
         "batch_size": int(cfg.get("batch_size", 8)),
@@ -528,6 +605,7 @@ def main() -> None:
         checkpoint,
         config,
         sources=train_sources,
+        preprocessor=normalization_preprocessor,
         image_transforms=train_image_transforms,
         **common_loader_kwargs,
     )
@@ -590,7 +668,8 @@ def main() -> None:
         split_manifest["validation_sample_indices"] = list(val_data.subset_indices)
         split_manifest["eval_seed"] = eval_seed
         split_manifest["sample_seed"] = sample_seed
-        _write_json(split_path, split_manifest)
+        if normalization_result is None:
+            _write_json(split_path, split_manifest)
         for summary in val_data.dataset_summaries:
             print(
                 f"val_dataset={summary['repo_id']} frames={summary['frames']} "
@@ -683,7 +762,16 @@ def main() -> None:
                     trainer=trainer,
                     preprocessor=data.preprocessor,
                     source_dir=checkpoint,
-                    data_split_path=split_path if split_manifest is not None else None,
+                    data_split_path=(
+                        normalization_result.split_path
+                        if normalization_result is not None
+                        else split_path if split_manifest is not None else None
+                    ),
+                    normalization_manifest_path=(
+                        normalization_result.manifest_path
+                        if normalization_result is not None
+                        else None
+                    ),
                 )
                 print(f"saved checkpoint: {path}")
                 if wandb_run is not None:

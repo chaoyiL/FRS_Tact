@@ -19,6 +19,7 @@ def _load_repo_yaml(name: str) -> dict:
 def _scientific_config(config: dict) -> dict:
     normalized = deepcopy(config)
     normalized.pop("output", None)
+    normalized.pop("normalization", None)
     wandb = normalized.get("wandb") or {}
     wandb.pop("name", None)
     wandb.pop("tags", None)
@@ -39,6 +40,13 @@ def test_paper_ratio_configs_only_change_factor_and_output_identity() -> None:
     assert _scientific_config(base) == _scientific_config(tactile16)
     assert _scientific_config(base) == _scientific_config(tactile32)
     assert len({base["output"], tactile16["output"], tactile32["output"]}) == 3
+    assert tactile16["normalization"] == tactile32["normalization"] == {
+        "protocol_dir": "/workspace/normalization_protocols/pick_tube_vt_k8_k21"
+    }
+    assert tactile16["normalization"]["protocol_dir"] not in {
+        tactile16["output"],
+        tactile32["output"],
+    }
 
 
 def test_all_vt_configs_use_identical_encoder_05_path() -> None:
@@ -82,6 +90,7 @@ def _valid_config() -> dict:
             "tactile_token_repeat_factor": 8,
             "image_keys": ["camera1", "camera2"],
         },
+        "normalization": {"protocol_dir": "/shared/protocol"},
         "tactile_embedding_cache": {"enabled": False},
     }
 
@@ -98,7 +107,16 @@ def test_vt_launcher_accepts_legacy_default_and_paper_factors(tmp_path: Path) ->
         _validate_vt_config(_write(tmp_path / f"k{factor}.yaml", config))
 
     del config["model"]["tactile_token_repeat_factor"]
+    config.pop("normalization")
     _validate_vt_config(_write(tmp_path / "legacy.yaml", config))
+
+
+def test_paper_factors_require_explicit_normalization_protocol(tmp_path: Path) -> None:
+    config = _valid_config()
+    config.pop("normalization")
+
+    with pytest.raises(ValueError, match="normalization.*protocol_dir"):
+        _validate_vt_config(_write(tmp_path / "missing-protocol.yaml", config))
 
 
 @pytest.mark.parametrize("invalid", [0, -1, 1.5, True, "8"])
