@@ -147,3 +147,11 @@
 
 - v2.1 materialized work copy 在官方 converter 前同时修复 parquet 的全局/episode/frame index 与 `meta/episodes_stats.jsonl` 对应的 `min/max/mean/std/count`；已有 quantile 按 LeRobot 线性 episode quantile 语义重算，RGB/state/action stats 保持不变，Hub snapshot 不写入。
 - v3 candidate validation 会把 projected parquet index rows 与 `meta/stats.json` 对照，并按官方 count-weighted episode quantile 聚合口径校验；下载锁的 EXIT trap 只释放锁，INT/TERM 在释放后分别退出 130/143，真实进程组信号测试锁定该契约。
+
+### 双 H100 三脚本最小实现（2026-08-09）
+
+- 服务器入口已收口为 `scripts/setup_env.sh`、`scripts/download_data.sh`、`scripts/start_vtsmolvla_train.sh`；不要求 SHA/provenance/publish 流程。
+- `download_data.sh` 准备 `pick_tube_01..04` 的 v3 数据和 `/workspace/checkpoints/encoder_ckpt_05`；训练 launcher 负责在 GPU 上幂等检查/补齐共享 tactile cache。
+- `start_vtsmolvla_train.sh` 无参数时使用单个 JAX 进程和 `CUDA_VISIBLE_DEVICES=0,1`，要求 JAX 恰好看到两张 H100；cache 只用 K8 配置预计算一次，随后同步训练 K8，再训练 K21。K8 失败会由 `set -Eeuo pipefail` 终止链路，不启动 K21。
+- 最小 CLI 支持 `--experiment both|k8|k21`、`--gpus`、`--foreground`、`--session`，并保留 `--config PATH` 单配置兼容模式；tmux 透传原始参数。
+- fresh 本机脚本验证：三脚本相关 pytest `53 passed in 29.43s`，launcher config pytest `15 passed`；四个 shell 文件 `bash -n`、`repair_v21_indexes.py` 编译及 `git diff --check` 均通过。真实四数据集在线下载/转换及双 H100 训练仍需在目标服务器执行。
