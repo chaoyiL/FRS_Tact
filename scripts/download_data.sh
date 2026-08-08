@@ -1,614 +1,447 @@
 #!/usr/bin/env bash
-set -euo pipefail
+
+set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
-if [[ -f "${ENV_FILE}" ]]; then
-    # 复用 setup_env.sh 创建的 uv 环境，避免在 workspace 中重复安装依赖。
-    # shellcheck disable=SC1090
-    source "${ENV_FILE}"
-fi
-
-# ===================== 配置区域 =====================
 HF_NAMESPACE="KaiyueChen"
-# Hub 下载、LeRobot 缓存和 v3.0 转换结果统一使用同一个命名空间。
-LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
-# 让脚本内的 Hub、Transformers 和 LeRobot 下载统一使用 workspace 缓存。
-export HF_HOME="${FRS_HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
-export HF_HUB_CACHE="${HF_HOME}/hub"
-export HF_DATASETS_CACHE="${HF_HOME}/datasets_arrow"
-export HF_LEROBOT_HOME="${HF_HOME}/lerobot"
-export TMPDIR="${FRS_TMPDIR:-${WORKSPACE_ROOT}/tmp}"
-mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
-# 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
-HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
-if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
-    HF_DATASET_CACHE_DIR="$1"
-fi
-# ====================================================
-
-DATASETS=(
-    # white_smash_01
-    # white_smash_03
-    # white_smash_04
-    # white_smash_05
-    # white_smash_06
-    # white_smash_07
-    # yellow_smash_01
-    # yellow_smash_02
-    # yellow_smash_03
-    # yellow_smash_05
-    # yellow_smash_06
-    # yellow_smash_07
-    # black_smash_01
-    # black_smash_02
-    # black_smash_03
-    # black_smash_04
-    # black_smash_06
-    # black_smash_07
-    # tactile_test_02
-    # tactile_test_05
-    pick_tube_01
-    pick_tube_02
-    pick_tube_03
-    pick_tube_04
-    # pick_cube_01
-    # pick_cube_02
-    # pick_cube_03
-    # pick_cube_fix
-)
+DATASETS=(pick_tube_01 pick_tube_02 pick_tube_03 pick_tube_04)
+CLEANUP_SOURCE=0
+PROJECT_PYTHON=""
+UV_BIN=""
+DATASET_ALREADY_VALIDATED=0
 
 log() {
-    # 打到 stderr，避免被 $(...) 命令替换吞掉
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
+    echo "[download-data] $*" >&2
 }
 
-load_lerobot_config() {
-    LEROBOT_CACHE_DIR="${HF_LEROBOT_HOME:-${WORKSPACE_ROOT}/huggingface/lerobot}/${LEROBOT_NAMESPACE}"
-    V30_CONVERT_ROOT="${V30_CONVERT_ROOT:-${WORKSPACE_ROOT}/lerobot_v30}"
-    V30_CONVERT_WORK_ROOT="${V30_CONVERT_WORK_ROOT:-${WORKSPACE_ROOT}/lerobot_v30_work}"
+fail() {
+    echo "[download-data] 错误：$*" >&2
+    exit 1
 }
 
-check_deps() {
-    if ! command -v uv &>/dev/null; then
-        echo "=========================================="
-        echo " 未检测到 uv，请先安装 uv:"
-        echo "   curl -LsSf https://astral.sh/uv/install.sh | sh"
-        echo ""
-        echo " 然后在项目环境中安装依赖:"
-        echo "   uv add huggingface_hub lerobot"
-        echo "=========================================="
-        exit 1
-    fi
-
-    if ! uv run --no-sync hf version &>/dev/null; then
-        echo "=========================================="
-        echo " uv 环境中未检测到 hf 命令，请执行:"
-        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
-        echo ""
-        echo " 安装后如需登录，请执行:"
-        echo "   uv run --no-sync hf auth login"
-        echo "=========================================="
-        exit 1
-    fi
-
-    if ! uv run --no-sync python -c "import lerobot" &>/dev/null; then
-        echo "=========================================="
-        echo " uv 环境中未检测到 lerobot，请执行:"
-        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
-        echo "=========================================="
-        exit 1
-    fi
+usage() {
+    printf '%s\n' \
+        "用法：scripts/download_data.sh [--cleanup-source]" \
+        "" \
+        "下载并验证四个 pick_tube v3 数据集，然后准备最小 encoder_05。" \
+        "  --cleanup-source    全部验证成功后删除四个源 snapshot cache 和转换残留" \
+        "  --help              显示本帮助"
 }
 
-get_dataset_version() {
-    local dataset_dir="$1"
-    local info_json="${dataset_dir}/meta/info.json"
+parse_arguments() {
+    while (($#)); do
+        case "$1" in
+            --cleanup-source)
+                CLEANUP_SOURCE=1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                fail "未知参数：$1"
+                ;;
+        esac
+        shift
+    done
+}
 
-    if [[ ! -f "$info_json" ]]; then
-        echo "unknown"
-        return 0
-    fi
+require_environment() {
+    [[ -f "${ENV_FILE}" ]] || fail "缺少 ${ENV_FILE}；请先运行 scripts/setup_env.sh"
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
 
-    python - "$info_json" <<'PY'
+    local variable
+    for variable in \
+        FRS_STORAGE_ROOT FRS_VENV_DIR UV_PROJECT_ENVIRONMENT \
+        HF_HOME HF_HUB_CACHE HF_DATASETS_CACHE HF_LEROBOT_HOME TMPDIR
+    do
+        [[ -n "${!variable:-}" ]] || fail ".env.frs 缺少 ${variable}"
+    done
+    [[ "${UV_PROJECT_ENVIRONMENT}" == "${FRS_VENV_DIR}" ]] || \
+        fail ".env.frs 中 UV_PROJECT_ENVIRONMENT 必须等于 FRS_VENV_DIR"
+    PROJECT_PYTHON="${FRS_VENV_DIR}/bin/python"
+    [[ -x "${PROJECT_PYTHON}" ]] || \
+        fail "FRS_VENV_DIR 指向的环境不存在或没有 Python：${FRS_VENV_DIR}"
+
+    command -v uv >/dev/null 2>&1 || fail "找不到 uv；请先运行 scripts/setup_env.sh"
+    UV_BIN="$(command -v uv)"
+}
+
+configure_paths() {
+    HF_DATASET_CACHE_DIR="${HF_HOME}/datasets"
+    V30_ROOT="${FRS_STORAGE_ROOT}/lerobot_v30"
+    V30_WORK_ROOT="${FRS_STORAGE_ROOT}/lerobot_v30_work"
+    LOCK_ROOT="${FRS_STORAGE_ROOT}/.locks"
+    mkdir -p \
+        "${HF_DATASET_CACHE_DIR}" \
+        "${V30_ROOT}/${HF_NAMESPACE}" \
+        "${V30_WORK_ROOT}/${HF_NAMESPACE}" \
+        "${LOCK_ROOT}"
+}
+
+acquire_download_lock() {
+    command -v flock >/dev/null 2>&1 || fail "找不到 flock（util-linux）"
+    exec 9>"${LOCK_ROOT}/frs-download-data.lock"
+    flock -n 9 || fail "另一个 FRS 数据下载正在运行"
+}
+
+repo_id_for() {
+    printf '%s/%s\n' "${HF_NAMESPACE}" "$1"
+}
+
+source_cache_for() {
+    printf '%s/datasets--%s--%s\n' "${HF_DATASET_CACHE_DIR}" "${HF_NAMESPACE}" "$1"
+}
+
+final_root_for() {
+    printf '%s/%s/%s\n' "${V30_ROOT}" "${HF_NAMESPACE}" "$1"
+}
+
+work_root_for() {
+    printf '%s/%s/%s\n' "${V30_WORK_ROOT}" "${HF_NAMESPACE}" "$1"
+}
+
+dataset_version() {
+    "${PROJECT_PYTHON}" - "$1" <<'PY'
 import json
 import sys
+from pathlib import Path
 
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    info = json.load(f)
-print(info.get("codebase_version", "unknown"))
+path = Path(sys.argv[1]) / "meta" / "info.json"
+if not path.is_file():
+    print("unknown")
+else:
+    try:
+        print(json.loads(path.read_text(encoding="utf-8")).get("codebase_version", "unknown"))
+    except (OSError, ValueError, TypeError):
+        print("unknown")
 PY
 }
 
-create_lerobot_symlink() {
+latest_snapshot_for() {
     local dataset_name="$1"
-    local source_dir="$2"
-    local link_path="${LEROBOT_CACHE_DIR}/${dataset_name}"
-    local source_abs
+    local snapshots_root
+    snapshots_root="$(source_cache_for "${dataset_name}")/snapshots"
+    [[ -d "${snapshots_root}" ]] || return 0
+    find "${snapshots_root}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
+        | sort -nr \
+        | head -n 1 \
+        | cut -d' ' -f2-
+}
 
-    if [[ -z "$source_dir" || "$source_dir" == *$'\n'* ]]; then
-        log "错误: 软链接源路径非法: ${source_dir@Q}"
-        return 1
+clear_conversion_paths() {
+    local dataset_name="$1"
+    local work_root
+    work_root="$(work_root_for "${dataset_name}")"
+    # These are fixed derived paths for one of the four known repositories.
+    rm -rf -- "${work_root}" "${work_root}_old" "${work_root}_v30"
+}
+
+copy_snapshot_to_work() {
+    local dataset_name="$1"
+    local snapshot_root="$2"
+    local work_root
+    work_root="$(work_root_for "${dataset_name}")"
+    clear_conversion_paths "${dataset_name}"
+    mkdir -p "${work_root}"
+    cp -a -- "${snapshot_root}/." "${work_root}/"
+}
+
+convert_v21_to_v30() {
+    local dataset_name="$1"
+    local repo_id
+    local work_root
+    repo_id="$(repo_id_for "${dataset_name}")"
+    work_root="$(work_root_for "${dataset_name}")"
+
+    log "使用官方 LeRobot converter：${repo_id}"
+    if ! "${UV_BIN}" run --no-sync python \
+        -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
+        --repo-id="${repo_id}" \
+        --root="${work_root}" \
+        --push-to-hub=false \
+        --force-conversion
+    then
+        fail "${repo_id} v2.1 → v3.0 转换失败；源 snapshot 已保留"
     fi
-    if [[ ! -e "$source_dir" ]]; then
-        log "错误: 软链接源不存在: ${source_dir}"
-        return 1
-    fi
-
-    source_abs="$(realpath "$source_dir")"
-
-    mkdir -p "$LEROBOT_CACHE_DIR"
-
-    if [[ -L "$link_path" ]]; then
-        rm -f "$link_path"
-    elif [[ -e "$link_path" ]]; then
-        log "警告: 目标已存在且不是软链接，跳过: $link_path"
-        return 0
-    fi
-
-    ln -s "$source_abs" "$link_path"
-    log "已创建软链接 ${link_path} -> ${source_abs}"
 }
 
-get_snapshot_dir() {
+promote_work_to_final() {
     local dataset_name="$1"
-    local repo_cache_dir="${HF_DATASET_CACHE_DIR}/datasets--${HF_NAMESPACE//\//--}--${dataset_name}"
-    local snapshots_dir="${repo_cache_dir}/snapshots"
-    local latest_snapshot=""
+    local work_root
+    local final_root
+    work_root="$(work_root_for "${dataset_name}")"
+    final_root="$(final_root_for "${dataset_name}")"
+    [[ "$(dataset_version "${work_root}")" == "v3.0" ]] || \
+        fail "转换结果不是 v3.0：${work_root}"
 
-    if [[ ! -d "$snapshots_dir" ]]; then
-        echo ""
-        return 0
-    fi
-
-    latest_snapshot="$(ls -1dt "${snapshots_dir}"/* 2>/dev/null | head -n 1 || true)"
-    echo "$latest_snapshot"
+    # final_root is a fixed derived repository root, never a caller-provided path.
+    rm -rf -- "${final_root}"
+    mv -- "${work_root}" "${final_root}"
 }
 
-get_v30_dataset_dir() {
+download_and_prepare_dataset() {
     local dataset_name="$1"
-    echo "${V30_CONVERT_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}"
-}
+    local repo_id
+    local final_root
+    local snapshot_root
+    local source_version
+    repo_id="$(repo_id_for "${dataset_name}")"
+    final_root="$(final_root_for "${dataset_name}")"
+    DATASET_ALREADY_VALIDATED=0
 
-get_v30_work_dataset_dir() {
-    local dataset_name="$1"
-    echo "${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}"
-}
-
-get_hf_repo_cache_dir() {
-    local dataset_name="$1"
-    echo "${HF_DATASET_CACHE_DIR}/datasets--${HF_NAMESPACE//\//--}--${dataset_name}"
-}
-
-# 搬迁成功后清理转换残留（工作目录 / _old / _v30）
-cleanup_local_convert_work() {
-    local dataset_name="$1"
-    local work_dir
-    local old_backup
-    local leftover_v30
-    local ns_dir
-    local before_kb=""
-    local after_kb=""
-
-    work_dir="$(get_v30_work_dataset_dir "$dataset_name")"
-    old_backup="${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}_old"
-    leftover_v30="${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}_v30"
-    ns_dir="${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}"
-
-    before_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
-
-    log "清理转换残留:"
-    for p in "$work_dir" "$old_backup" "$leftover_v30"; do
-        if [[ -e "$p" || -L "$p" ]]; then
-            log "  删除: ${p}"
-            rm -rf "$p"
+    if [[ -d "${final_root}" && ! -L "${final_root}" ]] \
+        && [[ "$(dataset_version "${final_root}")" == "v3.0" ]]
+    then
+        if validate_dataset "${dataset_name}"; then
+            DATASET_ALREADY_VALIDATED=1
+            log "复用现有且验证有效的 v3 数据集：${repo_id}"
+            return 0
         fi
-    done
-
-    # 命名空间目录若已空则一并去掉
-    if [[ -d "$ns_dir" ]] && [[ -z "$(ls -A "$ns_dir" 2>/dev/null)" ]]; then
-        rmdir "$ns_dir" 2>/dev/null || true
-    fi
-    if [[ -d "$V30_CONVERT_WORK_ROOT" ]] && [[ -z "$(ls -A "$V30_CONVERT_WORK_ROOT" 2>/dev/null)" ]]; then
-        rmdir "$V30_CONVERT_WORK_ROOT" 2>/dev/null || true
+        log "现有 v3 数据集验证失败，将从保留的 snapshot 重建：${repo_id}"
     fi
 
-    after_kb="$(df -Pk "$WORKSPACE_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
-    if [[ -n "$before_kb" && -n "$after_kb" && "$after_kb" -ge "$before_kb" ]]; then
-        log "转换残留清理完成，可用空间约 $((after_kb / 1024 / 1024))G（清理前约 $((before_kb / 1024 / 1024))G）"
-    else
-        log "转换残留清理完成"
-    fi
+    log "下载数据集：${repo_id}"
+    "${UV_BIN}" run --no-sync hf download "${repo_id}" \
+        --repo-type dataset \
+        --cache-dir "${HF_DATASET_CACHE_DIR}"
+
+    snapshot_root="$(latest_snapshot_for "${dataset_name}")"
+    [[ -n "${snapshot_root}" && -d "${snapshot_root}" ]] || \
+        fail "下载后未找到 ${repo_id} snapshot"
+    source_version="$(dataset_version "${snapshot_root}")"
+    case "${source_version}" in
+        v3.0)
+            copy_snapshot_to_work "${dataset_name}" "${snapshot_root}"
+            ;;
+        v2.1)
+            copy_snapshot_to_work "${dataset_name}" "${snapshot_root}"
+            convert_v21_to_v30 "${dataset_name}"
+            ;;
+        *)
+            fail "${repo_id} 版本为 ${source_version@Q}；只支持 v2.1 或 v3.0"
+            ;;
+    esac
+    promote_work_to_final "${dataset_name}"
 }
 
-# 按文件拷贝到最终目录：单文件超时则杀进程重试，支持中断后续传
-rsync_to_workspace_resilient() {
-    local src_dir="$1"
-    local dst_dir="$2"
-    local timeout_sec="${3:-120}"
-    local retries="${4:-3}"
-    local rel=""
-    local src_file=""
-    local dst_file=""
-    local attempt=0
-    local n_total=0
-    local n_done=0
-
-    mkdir -p "$dst_dir"
-    mapfile -t files < <(cd "$src_dir" && find . -type f | sed 's|^\./||' | sort)
-    n_total=${#files[@]}
-    log "开始按文件 rsync 到 workspace（共 ${n_total} 个，单文件超时 ${timeout_sec}s，重试 ${retries} 次）"
-
-    for rel in "${files[@]}"; do
-        src_file="${src_dir}/${rel}"
-        dst_file="${dst_dir}/${rel}"
-        mkdir -p "$(dirname "$dst_file")"
-
-        # 已存在且大小一致则跳过（支持断点续传）
-        if [[ -f "$dst_file" ]] && [[ "$(stat -c%s "$dst_file")" == "$(stat -c%s "$src_file")" ]]; then
-            n_done=$((n_done + 1))
-            continue
-        fi
-
-        attempt=0
-        while true; do
-            attempt=$((attempt + 1))
-            rm -f "$dst_file"
-            if timeout "${timeout_sec}s" rsync -a --partial "$src_file" "$dst_file"; then
-                if [[ -f "$dst_file" ]] && [[ "$(stat -c%s "$dst_file")" == "$(stat -c%s "$src_file")" ]]; then
-                    break
-                fi
-                log "警告: ${rel} 拷贝后大小不一致，重试 (${attempt}/${retries})"
-            else
-                log "警告: ${rel} 拷贝超时/失败，重试 (${attempt}/${retries})"
-                # 杀掉可能残留的卡住 rsync
-                pkill -9 -f "rsync -a --partial ${src_file}" 2>/dev/null || true
-                rm -f "$dst_file"
-            fi
-            if [[ "$attempt" -ge "$retries" ]]; then
-                log "错误: ${rel} 连续 ${retries} 次失败，中止搬迁（已完成 ${n_done}/${n_total}）"
-                return 1
-            fi
-            sleep 2
-        done
-
-        n_done=$((n_done + 1))
-        if (( n_done % 10 == 0 || n_done == n_total )); then
-            log "搬迁进度: ${n_done}/${n_total}"
-        fi
-    done
-
-    # 同步空目录结构（若有）
-    (cd "$src_dir" && find . -type d | sed 's|^\./||') | while read -r d; do
-        [[ -z "$d" || "$d" == "." ]] && continue
-        mkdir -p "${dst_dir}/${d}"
-    done
-
-    log "按文件 rsync 完成: ${n_done}/${n_total}"
-}
-
-# 转换成功后：先删 workspace 旧版，再把 v3.0 放到最终目录，避免长期保留双份数据
-promote_v30_to_workspace() {
+validate_dataset() {
     local dataset_name="$1"
-    local work_dir
-    local final_dir
-    local hf_cache_dir
-    work_dir="$(get_v30_work_dataset_dir "$dataset_name")"
-    final_dir="$(get_v30_dataset_dir "$dataset_name")"
-    hf_cache_dir="$(get_hf_repo_cache_dir "$dataset_name")"
+    local repo_id
+    local final_root
+    repo_id="$(repo_id_for "${dataset_name}")"
+    final_root="$(final_root_for "${dataset_name}")"
 
-    # 1) 确认本地工作目录已是独立的 v3.0（不再依赖 snapshot 软链）
-    if [[ -L "$work_dir" ]]; then
-        log "错误: 工作目录仍是软链，不能删除 workspace 旧版: ${work_dir}"
-        return 1
-    fi
-    if [[ "$(get_dataset_version "$work_dir")" != "v3.0" ]]; then
-        log "错误: 工作目录不是 v3.0，拒绝删旧搬迁: ${work_dir}"
-        return 1
-    fi
-
-    # 先链到本地，保证即使搬迁失败也能训练
-    create_lerobot_symlink "$dataset_name" "$work_dir"
-
-    # 2) 删除 workspace 上的旧版本（HF 下载缓存）；最终目录若完整 v3 则跳过搬迁
-    if [[ -e "$hf_cache_dir" ]]; then
-        log "删除 workspace 旧版 HF cache: ${hf_cache_dir}"
-        rm -rf "$hf_cache_dir"
-    fi
-    rm -rf "${final_dir}_old" "${final_dir}_v30" "${final_dir}_xfer" 2>/dev/null || true
-
-    if [[ -d "$final_dir" && ! -L "$final_dir" && "$(get_dataset_version "$final_dir")" == "v3.0" ]]; then
-        log "workspace 最终目录已是 v3.0，跳过搬迁: ${final_dir}"
-        create_lerobot_symlink "$dataset_name" "$final_dir"
-        cleanup_local_convert_work "$dataset_name"
-        return 0
-    fi
-
-    if ! command -v rsync &>/dev/null; then
-        log "错误: 未找到 rsync"
-        return 1
-    fi
-    if ! command -v timeout &>/dev/null; then
-        log "错误: 未找到 timeout（coreutils）"
-        return 1
-    fi
-
-    # 3) 按文件拷到最终目录（可续传）；成功后再切软链、清理转换目录
-    local xfer_dir="${final_dir}_xfer"
-    mkdir -p "$(dirname "$final_dir")"
-    log "将 v3.0 按文件搬迁到 workspace:"
-    log "  ${work_dir}/ -> ${xfer_dir}/"
-    if ! rsync_to_workspace_resilient "$work_dir" "$xfer_dir" 180 3; then
-        log "错误: 搬迁失败。本地 v3.0 仍保留，软链仍指向: ${work_dir}"
-        return 1
-    fi
-
-    if [[ "$(get_dataset_version "$xfer_dir")" != "v3.0" ]]; then
-        log "错误: 搬迁后版本异常: ${xfer_dir}"
-        return 1
-    fi
-
-    rm -rf "$final_dir"
-    mv "$xfer_dir" "$final_dir"
-    create_lerobot_symlink "$dataset_name" "$final_dir"
-
-    # 搬迁成功后清理本地硬盘上的转换产物
-    cleanup_local_convert_work "$dataset_name"
-    log "已搬迁到最终目录: ${final_dir}"
-}
-
-link_snapshot_for_convert() {
-    local snapshot_dir="$1"
-    local target_dir="$2"
-    local snapshot_abs
-
-    snapshot_abs="$(realpath "$snapshot_dir")"
-    mkdir -p "$(dirname "$target_dir")"
-    rm -rf "$target_dir"
-    # 不整包复制：软链到 HF snapshot，转换脚本读这里、把 v3.0 写到旁路目录
-    ln -s "$snapshot_abs" "$target_dir"
-}
-
-# 检查 snapshot 内 parquet 是否完整；返回损坏文件列表（每行一个绝对路径）
-find_corrupt_parquets() {
-    local dataset_dir="$1"
-    python - "$dataset_dir" <<'PY'
-from pathlib import Path
+    "${PROJECT_PYTHON}" - "${repo_id}" "${final_root}" <<'PY' || return 1
+import json
+import math
 import sys
+from pathlib import Path
+
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+
+
+repo_id = sys.argv[1]
+root = Path(sys.argv[2])
+
+
+def fail(message: str) -> None:
+    raise ValueError(f"{repo_id}: {message}")
+
+
+def numeric_leaves(value):
+    if isinstance(value, list):
+        for item in value:
+            yield from numeric_leaves(item)
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        yield float(value)
+    else:
+        fail(f"统计值包含非数值：{value!r}")
+
+
+info_path = root / "meta" / "info.json"
+stats_path = root / "meta" / "stats.json"
+if not info_path.is_file():
+    fail("缺少 meta/info.json")
+if not stats_path.is_file():
+    fail("缺少 meta/stats.json")
+info = json.loads(info_path.read_text(encoding="utf-8"))
+stats = json.loads(stats_path.read_text(encoding="utf-8"))
+
+if info.get("codebase_version") != "v3.0":
+    fail(f"codebase_version 必须为 v3.0，实际为 {info.get('codebase_version')!r}")
+if not isinstance(info.get("total_episodes"), int) or info["total_episodes"] < 1:
+    fail("total_episodes 必须为正整数")
+if not isinstance(info.get("total_frames"), int) or info["total_frames"] < 1:
+    fail("total_frames 必须为正整数")
+
+features = info.get("features")
+if not isinstance(features, dict):
+    fail("features 必须为对象")
+
+
+def require_feature(key: str, *, width: int | None = None, visual: bool = False) -> None:
+    feature = features.get(key)
+    if not isinstance(feature, dict):
+        fail(f"缺少 feature {key}")
+    if visual and feature.get("dtype") not in {"image", "video"}:
+        fail(f"{key} 必须是 image/video")
+    if width is not None and feature.get("shape") != [width]:
+        fail(f"{key} shape 必须为 [{width}]，实际为 {feature.get('shape')!r}")
+
+
+# The training rename map is camera0 -> camera1 and camera1 -> camera2.
+for key in ("observation.images.camera0", "observation.images.camera1"):
+    require_feature(key, visual=True)
+for key in (
+    "observation.images.tactile_left_0",
+    "observation.images.tactile_right_0",
+    "observation.images.tactile_left_1",
+    "observation.images.tactile_right_1",
+):
+    require_feature(key, visual=True)
+require_feature("observation.state", width=20)
+require_feature("actions", width=20)
+for key in ("index", "frame_index", "episode_index"):
+    require_feature(key, width=1)
+
+for key in ("observation.state", "actions"):
+    feature_stats = stats.get(key)
+    if not isinstance(feature_stats, dict):
+        fail(f"缺少 {key} normalization stats")
+    for stat_name in ("min", "max", "mean", "std", "count"):
+        if stat_name not in feature_stats:
+            fail(f"{key} stats 缺少 {stat_name}")
+        values = list(numeric_leaves(feature_stats[stat_name]))
+        if not values or not all(math.isfinite(value) for value in values):
+            fail(f"{key}.{stat_name} 必须为有限数值")
+        if stat_name in {"min", "max", "mean", "std"} and len(values) != 20:
+            fail(f"{key}.{stat_name} 宽度必须为 20")
+        if stat_name == "count" and any(value <= 0 for value in values):
+            fail(f"{key}.count 必须为正数")
+
+metadata = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
+if metadata.total_episodes < 1:
+    fail("LeRobotDatasetMetadata 未解析到 episode")
+dataset = LeRobotDataset(repo_id=repo_id, root=root, episodes=[0])
+sample = dataset[0]
+for key in ("observation.state", "actions", "index", "frame_index", "episode_index"):
+    if key not in sample:
+        fail(f"sample zero 缺少 {key}")
+PY
+    log "数据集验证通过：${repo_id}"
+}
+
+resolve_encoder_path() {
+    "${PROJECT_PYTHON}" - \
+        "${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile16.yaml" \
+        "${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile32.yaml" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+
+paths = []
+for config_path in map(Path, sys.argv[1:]):
+    in_model = False
+    raw_path = None
+    for line in config_path.read_text(encoding="utf-8").splitlines():
+        content = line.split("#", 1)[0].rstrip()
+        if not content:
+            continue
+        indentation = len(content) - len(content.lstrip())
+        stripped = content.strip()
+        if indentation == 0:
+            in_model = stripped == "model:"
+            continue
+        if in_model and indentation > 0 and stripped.startswith("tactile_encoder_path:"):
+            raw_path = stripped.split(":", 1)[1].strip()
+            if raw_path[:1] in {'"', "'"}:
+                raw_path = ast.literal_eval(raw_path)
+            break
+    if raw_path is None:
+        raise ValueError(f"{config_path} 缺少 model.tactile_encoder_path")
+    path = Path(str(raw_path)).expanduser()
+    if not path.is_absolute():
+        raise ValueError(f"{config_path} 的 tactile_encoder_path 必须是绝对路径")
+    paths.append(path)
+if len(set(paths)) != 1:
+    raise ValueError(f"K8/K21 tactile_encoder_path 不一致：{paths}")
+print(paths[0])
+PY
+}
+
+validate_encoder() {
+    local encoder_root="$1"
+    "${PROJECT_PYTHON}" - "${encoder_root}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
 
 root = Path(sys.argv[1])
-bad = []
-for path in sorted((root / "data").glob("*/*.parquet")):
-    try:
-        size = path.stat().st_size
-        if size < 8:
-            bad.append(path.resolve())
-            continue
-        with open(path, "rb") as f:
-            head = f.read(4)
-            f.seek(-4, 2)
-            tail = f.read(4)
-        if head != b"PAR1" or tail != b"PAR1":
-            bad.append(path.resolve())
-    except OSError:
-        bad.append(path.resolve())
-for p in bad:
-    print(p)
+checkpoint_path = root / "checkpoint.json"
+if not checkpoint_path.is_file():
+    raise FileNotFoundError(f"缺少 {checkpoint_path}")
+metadata = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+params_file = metadata.get("params_file")
+if not isinstance(params_file, str) or not params_file:
+    raise ValueError(f"{checkpoint_path} 缺少 params_file")
+relative = Path(params_file)
+if relative.is_absolute() or ".." in relative.parts:
+    raise ValueError(f"params_file 必须位于 encoder 目录内：{params_file!r}")
+params_path = root / relative
+if not params_path.is_file():
+    raise FileNotFoundError(f"缺少 checkpoint 声明的参数文件：{params_path}")
 PY
 }
 
-repair_corrupt_parquets() {
-    local dataset_name="$1"
-    local snapshot_dir="$2"
-    local repo_id="${HF_NAMESPACE}/${dataset_name}"
-    local bad_files=()
-    local blob_path=""
-    local rel_path=""
-    local line=""
-
-    mapfile -t bad_files < <(find_corrupt_parquets "$snapshot_dir" || true)
-    if [[ ${#bad_files[@]} -eq 0 ]]; then
-        return 0
-    fi
-
-    log "发现 ${#bad_files[@]} 个损坏的 parquet（常见于下载中断），将删除后强制重下:"
-    for line in "${bad_files[@]}"; do
-        [[ -z "$line" ]] && continue
-        log "  - ${line} ($(stat -c%s "$line" 2>/dev/null || echo '?') bytes)"
-        blob_path="$(readlink -f "$line")"
-        # 删 blob，让 hf download 重新拉取
-        rm -f "$blob_path" "$line"
+cleanup_successful_sources() {
+    local dataset_name
+    local source_cache
+    local work_root
+    for dataset_name in "${DATASETS[@]}"; do
+        source_cache="$(source_cache_for "${dataset_name}")"
+        work_root="$(work_root_for "${dataset_name}")"
+        rm -rf -- \
+            "${source_cache}" \
+            "${work_root}" \
+            "${work_root}_old" \
+            "${work_root}_v30"
     done
-
-    log "重新下载缺失文件: ${repo_id}"
-    # stdout 重定向，避免污染外层 $(...) 路径捕获
-    uv run --no-sync hf download "$repo_id" \
-        --repo-type dataset \
-        --cache-dir "$HF_DATASET_CACHE_DIR" >&2
-
-    mapfile -t bad_files < <(find_corrupt_parquets "$snapshot_dir" || true)
-    if [[ ${#bad_files[@]} -gt 0 ]]; then
-        log "错误: 重下后仍有损坏 parquet:"
-        printf '  %s\n' "${bad_files[@]}" >&2
-        return 1
-    fi
-    log "损坏 parquet 已修复"
-}
-
-upgrade_dataset_to_v30() {
-    local dataset_name="$1"
-    local snapshot_dir="$2"
-    local repo_id="${LEROBOT_NAMESPACE}/${dataset_name}"
-    local final_dir
-    local work_dir
-    local old_backup
-    local leftover_v30
-    local version=""
-    local avail_kb=""
-
-    final_dir="$(get_v30_dataset_dir "$dataset_name")"
-    work_dir="$(get_v30_work_dataset_dir "$dataset_name")"
-    old_backup="${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}_old"
-    leftover_v30="${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}_v30"
-
-    # 最终目录已是真实 v3.0 则跳过
-    if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
-        version="$(get_dataset_version "$final_dir")"
-        if [[ "$version" == "v3.0" ]]; then
-            log "本地已存在 v3.0 数据集，跳过升级: ${final_dir}"
-            cleanup_local_convert_work "$dataset_name"
-            UPGRADED_DATASET_DIR="$final_dir"
-            return 0
-        fi
-    fi
-
-    version="$(get_dataset_version "$snapshot_dir")"
-    if [[ "$version" == "v3.0" ]]; then
-        log "下载产物已是 v3.0，直接作为升级结果: ${snapshot_dir}"
-        rm -rf "$old_backup" "$leftover_v30" "$work_dir"
-        UPGRADED_DATASET_DIR="$snapshot_dir"
-        return 0
-    fi
-
-    if [[ "$version" != "v2.1" ]]; then
-        log "错误: 期望 v2.1 数据集以升级到 v3.0，实际版本为 '${version}': ${snapshot_dir}"
-        return 1
-    fi
-
-    repair_corrupt_parquets "$dataset_name" "$snapshot_dir"
-
-    # workspace 至少留约 50G，避免写到一半空间不足
-    avail_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
-    if [[ -n "$avail_kb" && "$avail_kb" -lt 52428800 ]]; then
-        log "警告: 转换工作盘可用空间约 $((avail_kb / 1024 / 1024))G，建议 >= 50G（目录: ${V30_CONVERT_WORK_ROOT}）"
-    fi
-
-    log "准备本地升级到 v3.0: ${repo_id}"
-    log "  源 snapshot: ${snapshot_dir}"
-    log "  转换工作目录: ${work_dir}"
-    log "  最终目录: ${final_dir}"
-
-    # 清理残留；在转换工作目录软链接入 snapshot，并在旁路目录写出 v3.0
-    mkdir -p "${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}"
-    rm -rf "$old_backup" "$leftover_v30" "$work_dir"
-    link_snapshot_for_convert "$snapshot_dir" "$work_dir"
-
-    # 仅本地升级：指定 --root，跳过 hub 上 v3.0 检索；不上传
-    # 显式指定转换工作目录，避免改写原始 Hub snapshot
-    # convert 的 print 走 stderr，避免污染路径变量
-    if ! uv run --no-sync python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
-        --repo-id="$repo_id" \
-        --root="$work_dir" \
-        --push-to-hub=false \
-        --force-conversion >&2
-    then
-        log "错误: v2.1 → v3.0 转换失败（数据集仍是原来的 v2.1，并未升级成功）"
-        rm -rf "$leftover_v30"
-        if [[ -L "$work_dir" ]]; then
-            rm -f "$work_dir"
-        fi
-        return 1
-    fi
-
-    # *_old 此时只是指向 snapshot 的软链，删掉不影响 HF cache
-    if [[ -e "$old_backup" ]]; then
-        log "删除旧版本入口: ${old_backup}"
-        rm -rf "$old_backup"
-    fi
-    rm -rf "$leftover_v30"
-
-    version="$(get_dataset_version "$work_dir")"
-    if [[ "$version" != "v3.0" ]]; then
-        log "错误: 转换命令已返回成功，但目录版本为 '${version}'（期望 v3.0）: ${work_dir}"
-        return 1
-    fi
-
-    # 转换完成后删除旧版缓存，再放入 workspace 最终目录
-    promote_v30_to_workspace "$dataset_name"
-
-    version="$(get_dataset_version "$final_dir")"
-    if [[ "$version" != "v3.0" ]]; then
-        log "错误: 搬迁到最终目录后版本为 '${version}'（期望 v3.0）: ${final_dir}"
-        return 1
-    fi
-
-    log "升级完成: ${final_dir} (v3.0)"
-    UPGRADED_DATASET_DIR="$final_dir"
-}
-
-download_dataset() {
-    local dataset_name="$1"
-    local repo_id="${HF_NAMESPACE}/${dataset_name}"
-    local snapshot_dir=""
-    local upgraded_dir=""
-    local final_dir=""
-    local version=""
-
-    final_dir="$(get_v30_dataset_dir "$dataset_name")"
-    if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
-        version="$(get_dataset_version "$final_dir")"
-        if [[ "$version" == "v3.0" ]]; then
-            log "最终目录已是 v3.0，跳过下载与转换: ${final_dir}"
-            create_lerobot_symlink "$dataset_name" "$final_dir"
-            return 0
-        fi
-    fi
-
-    log "开始下载 ${repo_id} (cache: ${HF_DATASET_CACHE_DIR})"
-
-    uv run --no-sync hf download "$repo_id" \
-        --repo-type dataset \
-        --cache-dir "$HF_DATASET_CACHE_DIR" >&2
-
-    snapshot_dir="$(get_snapshot_dir "$dataset_name")"
-    if [[ -z "$snapshot_dir" ]]; then
-        log "错误: 未找到 snapshot 目录，期望路径: ${HF_DATASET_CACHE_DIR}/datasets--${HF_NAMESPACE//\//--}--${dataset_name}/snapshots/*"
-        return 1
-    fi
-
-    # 通过 UPGRADED_DATASET_DIR 传回路径，避免 $(...) 吞掉 convert/hf 的 stdout
-    UPGRADED_DATASET_DIR=""
-    upgrade_dataset_to_v30 "$dataset_name" "$snapshot_dir"
-    upgraded_dir="${UPGRADED_DATASET_DIR}"
-    if [[ -z "$upgraded_dir" || ! -e "$upgraded_dir" ]]; then
-        log "错误: 升级后未得到有效目录"
-        return 1
-    fi
-    create_lerobot_symlink "$dataset_name" "$upgraded_dir"
-    log "完成下载与升级 ${repo_id}"
+    log "已清理四个已验证数据集的源 snapshot cache 和转换残留"
 }
 
 main() {
+    parse_arguments "$@"
+    require_environment
+    configure_paths
+    acquire_download_lock
     cd "${PROJECT_ROOT}"
-    check_deps
-    load_lerobot_config
-    mkdir -p "$HF_DATASET_CACHE_DIR"
-    mkdir -p "$V30_CONVERT_ROOT"
-    mkdir -p "$V30_CONVERT_WORK_ROOT"
 
-    log "============================================"
-    log "Hugging Face smash 数据集下载脚本启动"
-    log "workspace 根目录: ${WORKSPACE_ROOT}"
-    log "HF_HOME: ${HF_HOME}"
-    log "命名空间: ${HF_NAMESPACE}"
-    log "HF dataset cache: ${HF_DATASET_CACHE_DIR}"
-    log "LeRobot namespace: ${LEROBOT_NAMESPACE}"
-    log "LeRobot 链接目录: ${LEROBOT_CACHE_DIR}"
-    log "v3.0 最终目录: ${V30_CONVERT_ROOT}"
-    log "v3.0 转换工作目录: ${V30_CONVERT_WORK_ROOT}"
-    log "数据集数量: ${#DATASETS[@]}"
-    log "============================================"
-
+    local dataset_name
+    local encoder_root
     for dataset_name in "${DATASETS[@]}"; do
-        download_dataset "$dataset_name"
+        download_and_prepare_dataset "${dataset_name}"
+        if ((!DATASET_ALREADY_VALIDATED)); then
+            validate_dataset "${dataset_name}"
+        fi
     done
 
-    log "全部数据集下载并升级完成"
+    encoder_root="$(resolve_encoder_path)"
+    bash "${PROJECT_ROOT}/scripts/download_ckpt.sh"
+    validate_encoder "${encoder_root}"
+    log "最小 tactile encoder 验证通过：${encoder_root}"
+
+    if ((CLEANUP_SOURCE)); then
+        cleanup_successful_sources
+    fi
+    log "四个 v3 数据集与 encoder_05 均已准备完成"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main "$@"
-fi
+main "$@"
