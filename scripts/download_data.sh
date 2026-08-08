@@ -148,7 +148,22 @@ configure_paths() {
 release_download_lock() {
     if ((LOCK_OWNED)) && [[ -n "${LOCK_DIR}" ]]; then
         rmdir -- "${LOCK_DIR}" 2>/dev/null || true
+        LOCK_OWNED=0
     fi
+}
+
+handle_interrupt() {
+    trap - INT TERM
+    release_download_lock
+    trap - EXIT
+    exit 130
+}
+
+handle_terminate() {
+    trap - INT TERM
+    release_download_lock
+    trap - EXIT
+    exit 143
 }
 
 acquire_download_lock() {
@@ -159,7 +174,9 @@ acquire_download_lock() {
         fail "另一个 FRS 数据下载正在运行，或下载锁路径不安全：${LOCK_DIR}"
     fi
     LOCK_OWNED=1
-    trap release_download_lock EXIT INT TERM
+    trap release_download_lock EXIT
+    trap handle_interrupt INT
+    trap handle_terminate TERM
 }
 
 repo_id_for() {
@@ -438,6 +455,10 @@ if not data_paths:
 expected_index = 0
 current_episode = -1
 expected_frame = 0
+projected_values = {name: [] for name in ("index", "episode_index", "frame_index")}
+episode_projected_values = {
+    name: {} for name in ("index", "episode_index", "frame_index")
+}
 for data_path in data_paths:
     table = pq.read_table(
         data_path, columns=["index", "episode_index", "frame_index"]
@@ -467,6 +488,14 @@ for data_path in data_paths:
                 f"episode {current_episode} frame_index 必须连续："
                 f"期望 {expected_frame}，得到 {frame_value}"
             )
+        values = {
+            "index": index_value,
+            "episode_index": episode_value,
+            "frame_index": frame_value,
+        }
+        for name, value in values.items():
+            projected_values[name].append(value)
+            episode_projected_values[name].setdefault(episode_value, []).append(value)
         expected_index += 1
         expected_frame += 1
 if expected_index != info["total_frames"]:
@@ -478,6 +507,60 @@ if current_episode + 1 != info["total_episodes"]:
         "parquet episode 数必须等于 total_episodes："
         f"{current_episode + 1} != {info['total_episodes']}"
     )
+
+
+def quantile(values: list[int], percentile: int) -> float:
+    position = percentile / 100 * (len(values) - 1)
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return float(values[lower])
+    fraction = position - lower
+    return float(values[lower] + (values[upper] - values[lower]) * fraction)
+
+
+def expected_projected_stats(name: str, feature_stats: dict) -> dict[str, float]:
+    values = projected_values[name]
+    mean = math.fsum(values) / len(values)
+    variance = math.fsum((value - mean) ** 2 for value in values) / len(values)
+    expected = {
+        "min": float(min(values)),
+        "max": float(max(values)),
+        "mean": mean,
+        "std": math.sqrt(variance),
+        "count": float(len(values)),
+    }
+    for stat_name in feature_stats:
+        if not (stat_name.startswith("q") and stat_name[1:].isdigit()):
+            continue
+        percentile = int(stat_name[1:])
+        if not 0 <= percentile <= 100:
+            fail(f"{name}.{stat_name} 不是有效 quantile 字段")
+        weighted_sum = 0.0
+        for episode_values in episode_projected_values[name].values():
+            weighted_sum += quantile(episode_values, percentile) * len(episode_values)
+        expected[stat_name] = weighted_sum / len(values)
+    return expected
+
+
+for name in ("index", "episode_index", "frame_index"):
+    feature_stats = stats.get(name)
+    if not isinstance(feature_stats, dict):
+        fail(f"缺少 {name} projected stats")
+    expected_stats = expected_projected_stats(name, feature_stats)
+    for stat_name, expected_value in expected_stats.items():
+        if stat_name not in feature_stats:
+            fail(f"{name} stats 缺少 {stat_name}")
+        actual_values = list(numeric_leaves(feature_stats[stat_name]))
+        if len(actual_values) != 1 or not math.isfinite(actual_values[0]):
+            fail(f"{name}.{stat_name} 必须是单个有限数值")
+        if not math.isclose(
+            actual_values[0], expected_value, rel_tol=1e-9, abs_tol=1e-9
+        ):
+            fail(
+                f"{name}.{stat_name} 与 parquet 不一致："
+                f"{actual_values[0]} != {expected_value}"
+            )
 
 metadata = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 if metadata.total_episodes < 1:

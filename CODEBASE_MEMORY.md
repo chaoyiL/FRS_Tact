@@ -142,3 +142,8 @@
 - 三脚本统一 source `.env.frs`，默认持久根 `/workspace`；正式 launcher 使用单个 JAX 进程看到恰好两张 H100，不使用 `torchrun`。
 - 当前仅完成并批准设计，尚未实施；书面 spec 为 `docs/superpowers/specs/2026-08-08-three-script-h100-workflow-design.md`。
 - 实施计划为 `docs/superpowers/plans/2026-08-08-three-script-h100-workflow.md`，按环境、数据+encoder、K8→K21 launcher、整体验证四个 TDD 任务执行。
+
+### 双 H100 数据下载审查修复（2026-08-09）
+
+- v2.1 materialized work copy 在官方 converter 前同时修复 parquet 的全局/episode/frame index 与 `meta/episodes_stats.jsonl` 对应的 `min/max/mean/std/count`；已有 quantile 按 LeRobot 线性 episode quantile 语义重算，RGB/state/action stats 保持不变，Hub snapshot 不写入。
+- v3 candidate validation 会把 projected parquet index rows 与 `meta/stats.json` 对照，并按官方 count-weighted episode quantile 聚合口径校验；下载锁的 EXIT trap 只释放锁，INT/TERM 在释放后分别退出 130/143，真实进程组信号测试锁定该契约。

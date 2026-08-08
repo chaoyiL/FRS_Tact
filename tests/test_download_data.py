@@ -1,14 +1,18 @@
 import json
 import os
+import signal
 import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -72,6 +76,49 @@ def _stats() -> dict[str, object]:
     }
 
 
+def _scalar_stats(values: list[int], *, quantiles: bool = True) -> dict[str, object]:
+    array = np.asarray(values, dtype=np.float64)
+    stats: dict[str, object] = {
+        "min": [float(array.min())],
+        "max": [float(array.max())],
+        "mean": [float(array.mean())],
+        "std": [float(array.std())],
+        "count": [len(values)],
+    }
+    if quantiles:
+        for key, quantile in (("q01", 0.01), ("q50", 0.5), ("q99", 0.99)):
+            stats[key] = [float(np.quantile(array, quantile))]
+    return stats
+
+
+def _episode_stats_row(
+    episode_index: int,
+    indexes: list[int],
+    frame_indexes: list[int],
+    *,
+    stale_indexes: bool = False,
+) -> dict[str, object]:
+    row_stats = _stats()
+    if stale_indexes:
+        stale = _scalar_stats([99] * len(indexes))
+        row_stats.update(
+            {
+                "index": stale,
+                "episode_index": stale,
+                "frame_index": stale,
+            }
+        )
+    else:
+        row_stats.update(
+            {
+                "index": _scalar_stats(indexes),
+                "episode_index": _scalar_stats([episode_index] * len(indexes)),
+                "frame_index": _scalar_stats(frame_indexes),
+            }
+        )
+    return {"episode_index": episode_index, "stats": row_stats}
+
+
 def _write_dataset(root: Path, version: str = "v3.0") -> None:
     rows = 2 if version == "v2.1" else 1
     info = _info(version)
@@ -79,9 +126,6 @@ def _write_dataset(root: Path, version: str = "v3.0") -> None:
     (root / "meta").mkdir(parents=True, exist_ok=True)
     (root / "meta" / "info.json").write_text(
         json.dumps(info), encoding="utf-8"
-    )
-    (root / "meta" / "stats.json").write_text(
-        json.dumps(_stats()), encoding="utf-8"
     )
     (root / "payload.bin").write_bytes(b"source-snapshot")
     data_path = root / "data" / "chunk-000" / "episode_000000.parquet"
@@ -92,6 +136,24 @@ def _write_dataset(root: Path, version: str = "v3.0") -> None:
     else:
         indexes = [0]
         frame_indexes = [0]
+    global_stats = _stats()
+    global_stats.update(
+        {
+            "index": _scalar_stats(indexes),
+            "episode_index": _scalar_stats([0] * rows),
+            "frame_index": _scalar_stats(frame_indexes),
+        }
+    )
+    (root / "meta" / "stats.json").write_text(
+        json.dumps(global_stats), encoding="utf-8"
+    )
+    if version == "v2.1":
+        episode_stats = _episode_stats_row(
+            0, indexes, frame_indexes, stale_indexes=True
+        )
+        (root / "meta" / "episodes_stats.jsonl").write_text(
+            json.dumps(episode_stats) + "\n", encoding="utf-8"
+        )
     pq.write_table(
         pa.table(
             {
@@ -273,6 +335,14 @@ with Path(os.environ["FAKE_EVENT_LOG"]).open("a", encoding="utf-8") as stream:
 if "download" in args:
     repo_id = args[args.index("download") + 1]
     cache_root = Path(args[args.index("--cache-dir") + 1])
+    ready_path = os.environ.get("FAKE_DOWNLOAD_SIGNAL_READY")
+    if ready_path:
+        Path(ready_path).write_text(repo_id, encoding="utf-8")
+        import time
+        time.sleep(60)
+        Path(os.environ["FAKE_DOWNLOAD_SIGNAL_SENTINEL"]).write_text(
+            "continued-after-signal", encoding="utf-8"
+        )
     print(cache_root / f"datasets--{repo_id.replace('/', '--')}" / "snapshots" / "test-snapshot")
     raise SystemExit(0)
 
@@ -294,6 +364,41 @@ if "lerobot.datasets.v30.convert_dataset_v21_to_v30" in args:
     info = json.loads(info_path.read_text(encoding="utf-8"))
     info["codebase_version"] = "v3.0"
     info_path.write_text(json.dumps(info), encoding="utf-8")
+    episode_stats_path = converted / "meta" / "episodes_stats.jsonl"
+    if episode_stats_path.is_file():
+        rows = [json.loads(line) for line in episode_stats_path.read_text(encoding="utf-8").splitlines()]
+        global_stats_path = converted / "meta" / "stats.json"
+        global_stats = json.loads(global_stats_path.read_text(encoding="utf-8"))
+        for key in ("index", "episode_index", "frame_index"):
+            feature_stats = [row["stats"][key] for row in rows]
+            counts = [float(stats["count"][0]) for stats in feature_stats]
+            total_count = sum(counts)
+            mean = sum(stats["mean"][0] * count for stats, count in zip(feature_stats, counts)) / total_count
+            variance = sum(
+                count * (stats["std"][0] ** 2 + (stats["mean"][0] - mean) ** 2)
+                for stats, count in zip(feature_stats, counts)
+            ) / total_count
+            aggregated = {
+                "min": [min(stats["min"][0] for stats in feature_stats)],
+                "max": [max(stats["max"][0] for stats in feature_stats)],
+                "mean": [mean],
+                "std": [variance ** 0.5],
+                "count": [int(total_count)],
+            }
+            quantile_keys = [
+                name for name in feature_stats[0]
+                if name.startswith("q") and name[1:].isdigit()
+                and all(name in stats for stats in feature_stats)
+            ]
+            for quantile_key in quantile_keys:
+                aggregated[quantile_key] = [
+                    sum(
+                        stats[quantile_key][0] * count
+                        for stats, count in zip(feature_stats, counts)
+                    ) / total_count
+                ]
+            global_stats[key] = aggregated
+        global_stats_path.write_text(json.dumps(global_stats), encoding="utf-8")
     root.rename(old)
     converted.rename(root)
 
@@ -403,6 +508,77 @@ def _read_index_columns(root: Path) -> tuple[list[int], list[int], list[int]]:
     return indexes, episodes, frames
 
 
+def _assert_scalar_stats(actual: dict[str, object], values: list[int]) -> None:
+    expected = _scalar_stats(values)
+    assert set(actual) == set(expected)
+    for key in expected:
+        np.testing.assert_allclose(actual[key], expected[key], rtol=1e-12, atol=1e-12)
+
+
+def test_repair_helper_updates_multiple_episode_index_stats_only(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "v21"
+    info = _info("v2.1")
+    info["total_episodes"] = 2
+    info["total_frames"] = 5
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    episode_rows = []
+    for episode, length in enumerate((3, 2)):
+        path = root / "data" / "chunk-000" / f"episode_{episode:06d}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(
+            pa.table(
+                {
+                    "index": pa.array([52_802] * length, type=pa.int64()),
+                    "episode_index": pa.array([8] * length, type=pa.int64()),
+                    "frame_index": pa.array([61_810] * length, type=pa.int64()),
+                }
+            ),
+            path,
+        )
+        episode_rows.append(
+            _episode_stats_row(
+                episode,
+                [52_802] * length,
+                [61_810] * length,
+                stale_indexes=True,
+            )
+        )
+    non_index_stats = [row["stats"]["actions"] for row in episode_rows]
+    (root / "meta" / "episodes_stats.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in episode_rows), encoding="utf-8"
+    )
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "repair_v21_indexes.py"), str(root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    repaired_rows = [
+        json.loads(line)
+        for line in (root / "meta" / "episodes_stats.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    ]
+    expected_values = (
+        ([0, 1, 2], [0, 0, 0], [0, 1, 2]),
+        ([3, 4], [1, 1], [0, 1]),
+    )
+    for episode, (row, (indexes, episodes, frames)) in enumerate(
+        zip(repaired_rows, expected_values, strict=True)
+    ):
+        assert row["episode_index"] == episode
+        _assert_scalar_stats(row["stats"]["index"], indexes)
+        _assert_scalar_stats(row["stats"]["episode_index"], episodes)
+        _assert_scalar_stats(row["stats"]["frame_index"], frames)
+        assert row["stats"]["actions"] == non_index_stats[episode]
+
+
 def test_repair_helper_fixes_61811_rows_with_52802_maximum_index(tmp_path: Path) -> None:
     root = tmp_path / "v21"
     first_length = 52_803
@@ -412,6 +588,7 @@ def test_repair_helper_fixes_61811_rows_with_52802_maximum_index(tmp_path: Path)
     info["total_frames"] = 61_811
     (root / "meta").mkdir(parents=True)
     (root / "meta" / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    episode_stats_rows = []
     for episode, length in enumerate((first_length, second_length)):
         path = root / "data" / "chunk-000" / f"episode_{episode:06d}.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -431,6 +608,18 @@ def test_repair_helper_fixes_61811_rows_with_52802_maximum_index(tmp_path: Path)
             ),
             path,
         )
+        episode_stats_rows.append(
+            _episode_stats_row(
+                episode,
+                [52_802] * length,
+                [61_810] * length,
+                stale_indexes=True,
+            )
+        )
+    (root / "meta" / "episodes_stats.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in episode_stats_rows),
+        encoding="utf-8",
+    )
     before, _, _ = _read_index_columns(root)
     assert len(before) == 61_811
     assert max(before) == 52_802
@@ -622,6 +811,21 @@ def test_bad_candidate_does_not_replace_a_structurally_valid_existing_final(
     assert final_info["features"]["actions"]["shape"] == [20]
 
 
+def test_v3_index_stats_must_match_projected_parquet_rows(tmp_path: Path) -> None:
+    harness = _make_harness(tmp_path, source_version="v3.0")
+    stats_path = harness.source_root(DATASETS[0]) / "meta" / "stats.json"
+    stats = json.loads(stats_path.read_text(encoding="utf-8"))
+    stats["index"]["max"] = [99.0]
+    stats_path.write_text(json.dumps(stats), encoding="utf-8")
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "index.max" in result.stderr
+    assert not harness.final_root(DATASETS[0]).exists()
+    assert not [event for event in harness.events if event["kind"] == "encoder"]
+
+
 def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Path) -> None:
     harness = _make_harness(tmp_path, source_version="v2.1")
 
@@ -635,6 +839,12 @@ def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Pat
         assert f"--repo-id=KaiyueChen/{name}" in args
         assert f"--root={harness.work_root(name)}" in args
         assert harness.source_root(name).exists()
+        source_episode_stats = json.loads(
+            (harness.source_root(name) / "meta" / "episodes_stats.jsonl")
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+        assert source_episode_stats["stats"]["index"]["min"] == [99.0]
         assert harness.work_root(name).with_name(name + "_old").exists()
         info = json.loads(
             (harness.final_root(name) / "meta" / "info.json").read_text(encoding="utf-8")
@@ -644,6 +854,14 @@ def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Pat
         assert indexes == [0, 1]
         assert episodes == [0, 0]
         assert frames == [0, 1]
+        final_stats = json.loads(
+            (harness.final_root(name) / "meta" / "stats.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        _assert_scalar_stats(final_stats["index"], indexes)
+        _assert_scalar_stats(final_stats["episode_index"], episodes)
+        _assert_scalar_stats(final_stats["frame_index"], frames)
 
 
 def test_failed_conversion_preserves_source_even_when_cleanup_was_requested(
@@ -733,6 +951,55 @@ def test_second_process_is_rejected_by_scoped_download_lock(tmp_path: Path) -> N
     assert result.returncode != 0
     assert "下载" in result.stderr and "运行" in result.stderr
     assert harness.events == []
+
+
+@pytest.mark.parametrize(
+    ("sent_signal", "expected_returncode"),
+    ((signal.SIGINT, 130), (signal.SIGTERM, 143)),
+)
+def test_signal_exits_with_shell_status_releases_lock_and_stops_execution(
+    tmp_path: Path,
+    sent_signal: signal.Signals,
+    expected_returncode: int,
+) -> None:
+    harness = _make_harness(tmp_path)
+    ready = tmp_path / f"signal-{sent_signal.name}-ready"
+    sentinel = tmp_path / f"signal-{sent_signal.name}-post-signal"
+    with (harness.project / ".env.frs").open("a", encoding="utf-8") as stream:
+        stream.write(
+            f"export FAKE_DOWNLOAD_SIGNAL_READY={shlex.quote(str(ready))}\n"
+        )
+        stream.write(
+            "export FAKE_DOWNLOAD_SIGNAL_SENTINEL="
+            f"{shlex.quote(str(sentinel))}\n"
+        )
+    process = subprocess.Popen(
+        ["bash", str(harness.project / "scripts" / "download_data.sh")],
+        cwd=harness.project,
+        env=os.environ.copy(),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.is_file(), "fake download did not reach the signal rendezvous"
+        lock_path = harness.storage / ".locks" / "frs-download-data.lock"
+        assert lock_path.is_dir()
+        os.killpg(process.pid, sent_signal)
+        stdout, stderr = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate(timeout=5)
+
+    assert process.returncode == expected_returncode, (stdout, stderr)
+    assert not lock_path.exists()
+    assert not sentinel.exists()
+    assert not [event for event in harness.events if event["kind"] == "encoder"]
 
 
 def test_help_and_unknown_option_contract(tmp_path: Path) -> None:
