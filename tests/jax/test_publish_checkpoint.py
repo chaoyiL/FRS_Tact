@@ -831,7 +831,7 @@ def test_current_unpinned_training_yaml_fails_closed_without_weight_history(tmp_
     with pytest.raises(ValueError, match="model weight upload time is unavailable"):
         repair_sidecars(
             repo_id="owner/model",
-            training_config="configs/train_vtsmolvla_jax.yaml",
+            training_config="train_vtsmolvla/configs/train.yaml",
             output=output,
             api=UnprovenApi(),
             snapshot_resolver=lambda repo_id, revision: pytest.fail("must fail before download"),

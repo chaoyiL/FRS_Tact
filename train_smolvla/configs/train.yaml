@@ -1,45 +1,51 @@
 # SmolVLA JAX 微调配置。改这里即可，不必手改 Hugging Face cache 里的 config.json。
 # 运行:
-#   uv run python tools/train_smolvla_jax.py --config configs/train_smolvla_jax.yaml
+#   uv run python -m train_smolvla.train --config train_smolvla/configs/train.yaml
 
 # ---- 预训练权重 ----
 checkpoint: lerobot/smolvla_base
 revision: null
-allow_download: true
+allow_download: false
 # num_vlm_layers 超过 checkpoint 自带层数时，从这里按需下载并补齐缺失 VLM 层；HF cache 已有则直接复用
 full_vlm_checkpoint: HuggingFaceTB/SmolVLM2-500M-Video-Instruct
 
 # ---- 数据集 ----
 # 写一个或多个均可；每个条目可有独立 root / action_key / rename_map / weight
 datasets:
-  - repo_id: chaoyi/tactile_test_05
-    # root: /workspace/lerobot_v30/chaoyi/tactile_test_03
-    action_key: actions
+  - repo_id: lerobot/aloha_sim_insertion_human
+    action_key: action
     weight: 1.0
     rename_map:
-      observation.images.camera0: observation.images.camera1
-      observation.images.camera1: observation.images.camera2
-  # - repo_id: chaoyi/another_dataset
-  #   action_key: actions
+      observation.images.cam_high: observation.images.camera1
+      observation.images.cam_low: observation.images.camera2
+  # - repo_id: lerobot/aloha_sim_transfer_cube_human
+  #   action_key: action
   #   weight: 1.0
   #   rename_map:
   #     observation.images.cam_high: observation.images.camera1
   #     observation.images.cam_low: observation.images.camera2
 
 # ---- 输出与训练超参 ----
-output: /workspace/tactile_02
+output: train_smolvla/outputs/checkpoints
 steps: 60000
 batch_size: 192          # 全局 batch，多卡时必须能被 GPU 数整除
 num_workers: 16
 prefetch_factor: 4
 video_backend: null
+return_uint8: true
 log_freq: 10
 save_freq: 5000
 eval_freq: 500       # 每隔多少 step 跑一次验证（也在最后一步跑）
 seed: 42
 resume: null
 data_parallel: true
-allow_tokenizer_download: true
+allow_tokenizer_download: false
+
+# ---- 启动器 ----
+launcher:
+  tmux_session: smolvla_train
+  foreground: false
+  logs_dir: train_smolvla/outputs/logs
 
 # ---- 图像增强（仅训练集；验证集始终关闭）----
 # enable: false 可关闭。省略 tfs 则用下方默认 brightness/contrast/saturation/hue/sharpness/affine。
@@ -105,11 +111,11 @@ wandb:
   enabled: true
   project: smolvla-jax
   entity: null          # 可选：你的 team / username
-  name: tactile_test_03_3gpu
+  name: smolvla_visual_baseline
   mode: online          # online | offline | disabled
   tags:
     - smolvla
-    - tactile
+    - visual
   log_checkpoints: false
 
 # ---- 覆盖 checkpoint 的模型配置（对应原 config.json）----
@@ -127,8 +133,8 @@ model:
   lora_rank: 8
   lora_alpha: 16.0
 
-  action_dim: 20
-  state_dim: 20
+  action_dim: 14
+  state_dim: 14
   max_action_dim: 32
   max_state_dim: 32
   # 与 rename_map 之后的相机名对齐；数量通常保持与预训练一致（3 路）
@@ -138,7 +144,7 @@ model:
   chunk_size: 50
   n_action_steps: 50
   # image_keys 里缺的相机，最多用几路空图（mask=0）补齐；训练/部署共用，写进 checkpoint
-  empty_cameras: 0
+  empty_cameras: 1
 
   # ---- VLM / Expert 架构维度（覆盖 checkpoint；改这里即可）----
   # 1~16 直接使用 SmolVLA 权重；17~32 自动从 full_vlm_checkpoint 补齐缺失层

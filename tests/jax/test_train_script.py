@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 import shutil
 from pathlib import Path
@@ -9,49 +8,32 @@ import numpy as np
 import pytest
 from safetensors.numpy import save_file as save_safetensors_file
 
-from lerobot.policies.smolvla_jax.data import DatasetSource
-from lerobot.policies.smolvla_jax.validation import CheckpointContract
+from train_smolvla import train as TRAIN_SCRIPT
+from train_smolvla.data import DatasetSource
+from train_smolvla.validation import CheckpointContract
 
-SCRIPT_PATH = Path(__file__).resolve().parents[2] / "tools" / "train_smolvla_jax.py"
-SPEC = importlib.util.spec_from_file_location("train_smolvla_jax_test_module", SCRIPT_PATH)
-assert SPEC is not None and SPEC.loader is not None
-TRAIN_SCRIPT = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(TRAIN_SCRIPT)
 _sources_from_split_manifest = TRAIN_SCRIPT._sources_from_split_manifest
 _split_manifest = TRAIN_SCRIPT._split_manifest
 run_validation = TRAIN_SCRIPT.run_validation
 load_yaml_config = TRAIN_SCRIPT.load_yaml_config
 
-VT_IMAGE_KEYS = ("observation.images.camera1", "observation.images.camera2")
-VT_TACTILE_KEYS = (
-    "observation.images.tactile_left_0",
-    "observation.images.tactile_right_0",
-    "observation.images.tactile_left_1",
-    "observation.images.tactile_right_1",
-)
-VT_CONTRACT = CheckpointContract(
+VISUAL_IMAGE_KEYS = ("observation.images.camera1", "observation.images.camera2")
+VISUAL_CONTRACT = CheckpointContract(
     state_dim=20,
     action_dim=20,
     chunk_size=20,
-    image_keys=VT_IMAGE_KEYS,
-    tactile_keys=VT_TACTILE_KEYS,
-    tactile_embedding_dim=512,
-    tactile_num_tokens=4,
+    image_keys=VISUAL_IMAGE_KEYS,
     lora_rank=16,
     vlm_lora_target_modules=("q_proj", "v_proj"),
 )
 
 
-def _vt_config():
+def _visual_config():
     return TRAIN_SCRIPT.JaxSmolVLAConfig(
         state_dim=20,
         action_dim=20,
         chunk_size=20,
-        image_keys=VT_IMAGE_KEYS,
-        use_tactile_encoder=True,
-        tactile_keys=VT_TACTILE_KEYS,
-        tactile_embedding_dim=512,
-        tactile_num_tokens=4,
+        image_keys=VISUAL_IMAGE_KEYS,
         lora_rank=16,
         vlm_lora_target_modules=("q_proj", "v_proj"),
     )
@@ -155,7 +137,7 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
     events: list[str] = []
 
     class FakeTrainer:
-        config = _vt_config()
+        config = _visual_config()
 
         def save(self, destination: Path, *, source_dir: Path) -> None:
             events.append("trainer.save")
@@ -182,7 +164,7 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
         base_sidecars: Path,
     ) -> PassingReport:
         events.append("validate_checkpoint")
-        assert expected == VT_CONTRACT
+        assert expected == VISUAL_CONTRACT
         assert base_sidecars == source
         assert not final.exists()
         assert (staging / "model-marker").is_file()
@@ -212,7 +194,7 @@ def test_training_checkpoint_writes_all_assets_before_shared_validation(
     assert (final / TRAIN_SCRIPT.DATA_SPLIT_FILENAME).is_file()
 
 
-def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path) -> None:
+def test_training_checkpoint_rejects_incompatible_base_sidecars(tmp_path: Path) -> None:
     source = tmp_path / "base"
     source.mkdir()
     input_features = {
@@ -227,10 +209,6 @@ def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path
                 "chunk_size": 50,
                 "input_features": input_features,
                 "output_features": {"action": {"type": "ACTION", "shape": [6]}},
-                "use_tactile_encoder": False,
-                "tactile_keys": [],
-                "tactile_embedding_dim": 512,
-                "tactile_num_tokens": 0,
                 "lora_rank": 0,
                 "vlm_lora_target_modules": [],
             }
@@ -288,7 +266,7 @@ def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path
     )
 
     class FakeTrainer:
-        config = _vt_config()
+        config = _visual_config()
 
         def save(self, destination: Path, *, source_dir: Path) -> None:
             for sidecar in (
@@ -302,8 +280,6 @@ def test_training_checkpoint_rejects_base_sidecars_for_vt_weights(tmp_path: Path
             save_safetensors_file(
                 {
                     "model.state_proj.weight": np.zeros((1, 1), dtype=np.float32),
-                    "model.tactile_encoder.params/conv_init/kernel": np.zeros((1,), dtype=np.float32),
-                    "model.tactile_proj.weight": np.zeros((1, 1), dtype=np.float32),
                 },
                 destination / "model.safetensors",
             )

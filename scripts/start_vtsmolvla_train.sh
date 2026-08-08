@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_PATH="${PROJECT_ROOT}/configs/train_vtsmolvla_jax.yaml"
+CONFIG_PATH="${PROJECT_ROOT}/train_vtsmolvla/configs/train.yaml"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 SCRIPT_PATH="${SCRIPT_DIR}/start_vtsmolvla_train.sh"
 TMUX_SESSION="${FRS_TMUX_SESSION:-vtsmolvla_train}"
@@ -157,7 +157,7 @@ run_pipeline() {
     fi
 
     log "开始 VT-SmolVLA 训练，日志=${train_log}"
-    "${UV_BIN}" run --no-sync python tools/train_vtsmolvla_jax.py \
+    "${UV_BIN}" run --no-sync python -m train_vtsmolvla.train \
         --config "${CONFIG_PATH}" \
         2>&1 | tee -a "${train_log}"
 }

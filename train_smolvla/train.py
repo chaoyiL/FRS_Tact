@@ -7,7 +7,8 @@ import argparse
 import json
 import shutil
 import time
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -15,27 +16,26 @@ import jax
 import yaml
 
 from lerobot.datasets.transforms import build_image_transforms
-from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically
-from lerobot.policies.smolvla_jax.checkpoint import (
+from train_smolvla import JaxSmolVLA, JaxSmolVLAConfig
+from train_smolvla.atomic_checkpoint import assemble_checkpoint_atomically
+from train_smolvla.checkpoint import (
     count_expert_layers,
     count_vlm_layers,
     extend_vlm_layers,
-    initialize_tactile_fusion_params,
     load_params,
     resolve_checkpoint,
 )
-from lerobot.policies.smolvla_jax.data import (
+from train_smolvla.data import (
     DatasetSource,
     LeRobotJaxDataLoader,
     parse_dataset_sources,
     split_sources_train_val,
 )
-from lerobot.policies.smolvla_jax.lora import resolve_module_modes
-from lerobot.policies.smolvla_jax.training import JaxSmolVLATrainer
-from lerobot.policies.smolvla_jax.validation import contract_from_config, validate_checkpoint
+from train_smolvla.lora import resolve_module_modes
+from train_smolvla.training import JaxSmolVLATrainer
+from train_smolvla.validation import contract_from_config, validate_checkpoint
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_smolvla_jax.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train.yaml"
 DATA_SPLIT_FILENAME = "data_split.json"
 DATA_SPLIT_VERSION = 1
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
@@ -61,7 +61,7 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "save_freq",
         "seed",
         "steps",
-        "tactile_embedding_cache",
+        "launcher",
         "validation",
         "video_backend",
         "wandb",
@@ -69,70 +69,77 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
 )
 
 
-def parse_args() -> argparse.Namespace:
+def _no_extra_loader_kwargs(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    del cfg
+    return {}
+
+
+@dataclass(frozen=True)
+class TrainingComponents:
+    """Concrete package components used by the shared training orchestration."""
+
+    config_type: type[Any]
+    model_type: type[Any]
+    loader_type: type[Any]
+    trainer_type: type[Any]
+    resolve_checkpoint: Callable[..., Path]
+    load_params: Callable[[str | Path], dict[str, Any]]
+    count_vlm_layers: Callable[[Mapping[str, Any]], int]
+    count_expert_layers: Callable[[Mapping[str, Any]], int]
+    extend_vlm_layers: Callable[..., dict[str, Any]]
+    resolve_module_modes: Callable[[Any], Mapping[str, Any]]
+    contract_from_config: Callable[[Any], Any]
+    validate_checkpoint: Callable[..., Any]
+    extra_loader_kwargs: Callable[[Mapping[str, Any]], dict[str, Any]] = _no_extra_loader_kwargs
+    allowed_top_level_keys: frozenset[str] = ALLOWED_TOP_LEVEL_KEYS
+
+
+VISUAL_COMPONENTS = TrainingComponents(
+    config_type=JaxSmolVLAConfig,
+    model_type=JaxSmolVLA,
+    loader_type=LeRobotJaxDataLoader,
+    trainer_type=JaxSmolVLATrainer,
+    resolve_checkpoint=resolve_checkpoint,
+    load_params=load_params,
+    count_vlm_layers=count_vlm_layers,
+    count_expert_layers=count_expert_layers,
+    extend_vlm_layers=extend_vlm_layers,
+    resolve_module_modes=resolve_module_modes,
+    contract_from_config=contract_from_config,
+    validate_checkpoint=validate_checkpoint,
+)
+
+
+def parse_args(
+    argv: Sequence[str] | None = None,
+    *,
+    default_config: Path = DEFAULT_CONFIG,
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
         type=Path,
-        default=DEFAULT_CONFIG,
-        help=f"YAML config path (default: {DEFAULT_CONFIG})",
+        default=default_config,
+        help=f"YAML config path (default: {default_config})",
     )
-    parser.add_argument("--checkpoint", help="Override YAML: local path or Hugging Face repo id")
-    parser.add_argument("--revision")
-    parser.add_argument("--allow-download", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--num-workers", type=int)
-    parser.add_argument("--prefetch-factor", type=int)
-    parser.add_argument("--video-backend")
-    parser.add_argument("--allow-tokenizer-download", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--output", type=Path)
-    parser.add_argument("--steps", type=int)
-    parser.add_argument("--batch-size", type=int)
-    parser.add_argument("--seed", type=int)
-    parser.add_argument("--log-freq", type=int)
-    parser.add_argument("--save-freq", type=int)
-    parser.add_argument("--eval-freq", type=int)
-    parser.add_argument("--resume", type=Path)
-    parser.add_argument("--data-parallel", action=argparse.BooleanOptionalAction, default=None)
-    return parser.parse_args()
+    return parser.parse_args(argv)
 
 
-def load_yaml_config(path: Path) -> dict[str, Any]:
+def load_yaml_config(
+    path: Path,
+    *,
+    allowed_top_level_keys: frozenset[str] = ALLOWED_TOP_LEVEL_KEYS,
+) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"config not found: {path}")
     with path.open(encoding="utf-8") as file:
         data = yaml.safe_load(file) or {}
     if not isinstance(data, dict):
         raise ValueError(f"config root must be a mapping: {path}")
-    unknown = sorted(set(data) - ALLOWED_TOP_LEVEL_KEYS)
+    unknown = sorted(set(data) - allowed_top_level_keys)
     if unknown:
         raise ValueError(f"unknown top-level config keys in {path}: {unknown}")
     return data
-
-
-def merge_cli_overrides(cfg: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    merged = dict(cfg)
-    cli = {
-        "checkpoint": args.checkpoint,
-        "revision": args.revision,
-        "allow_download": args.allow_download,
-        "num_workers": args.num_workers,
-        "prefetch_factor": args.prefetch_factor,
-        "video_backend": args.video_backend,
-        "allow_tokenizer_download": args.allow_tokenizer_download,
-        "output": args.output,
-        "steps": args.steps,
-        "batch_size": args.batch_size,
-        "seed": args.seed,
-        "log_freq": args.log_freq,
-        "save_freq": args.save_freq,
-        "eval_freq": args.eval_freq,
-        "resume": args.resume,
-        "data_parallel": args.data_parallel,
-    }
-    for key, value in cli.items():
-        if value is not None:
-            merged[key] = value
-    return merged
 
 
 def require(cfg: dict[str, Any], key: str) -> Any:
@@ -161,8 +168,15 @@ def _save_training_checkpoint_atomically(
     preprocessor: Any,
     source_dir: str | Path,
     data_split_path: str | Path | None,
+    components: TrainingComponents | None = None,
 ) -> Path:
-    expected = contract_from_config(trainer.config)
+    contract_factory = (
+        contract_from_config if components is None else components.contract_from_config
+    )
+    checkpoint_validator = (
+        validate_checkpoint if components is None else components.validate_checkpoint
+    )
+    expected = contract_factory(trainer.config)
 
     def writer(staging: Path) -> None:
         trainer.save(staging, source_dir=source_dir)
@@ -171,7 +185,7 @@ def _save_training_checkpoint_atomically(
             shutil.copy2(data_split_path, staging / DATA_SPLIT_FILENAME)
 
     def validator(staging: Path) -> None:
-        validate_checkpoint(
+        checkpoint_validator(
             staging,
             expected=expected,
             base_sidecars=source_dir,
@@ -305,7 +319,6 @@ def init_wandb(
             "validation": cfg.get("validation"),
             "resolved_data_split": data_split,
             "image_transforms": cfg.get("image_transforms"),
-            "tactile_embedding_cache": cfg.get("tactile_embedding_cache"),
             "modality_dropout": cfg.get("modality_dropout"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
@@ -351,20 +364,26 @@ def run_validation(
     return eval_count
 
 
-def main() -> None:
-    args = parse_args()
-    cfg = merge_cli_overrides(load_yaml_config(args.config), args)
+def run_training(
+    config_path: Path,
+    *,
+    components: TrainingComponents = VISUAL_COMPONENTS,
+) -> None:
+    cfg = load_yaml_config(
+        config_path,
+        allowed_top_level_keys=components.allowed_top_level_keys,
+    )
 
-    checkpoint = resolve_checkpoint(
+    checkpoint = components.resolve_checkpoint(
         require(cfg, "checkpoint"),
         revision=cfg.get("revision"),
         local_files_only=not bool(cfg.get("allow_download", False)),
     )
-    print(f"config={args.config.resolve()}")
+    print(f"config={config_path.resolve()}")
     print(f"checkpoint={checkpoint}")
 
     config = apply_model_overrides(
-        JaxSmolVLAConfig.from_pretrained(checkpoint),
+        components.config_type.from_pretrained(checkpoint),
         cfg.get("model"),
     )
     print(
@@ -376,9 +395,9 @@ def main() -> None:
     )
 
     allow_download = bool(cfg.get("allow_download", False))
-    params = load_params(checkpoint)
-    checkpoint_vlm_layers = count_vlm_layers(params)
-    checkpoint_expert_layers = count_expert_layers(params)
+    params = components.load_params(checkpoint)
+    checkpoint_vlm_layers = components.count_vlm_layers(params)
+    checkpoint_expert_layers = components.count_expert_layers(params)
     if config.num_expert_layers > checkpoint_expert_layers:
         raise ValueError(
             f"requested {config.num_expert_layers} expert layers, but checkpoint only has "
@@ -391,18 +410,17 @@ def main() -> None:
             f"extending VLM: checkpoint_layers={checkpoint_vlm_layers} "
             f"requested_layers={config.num_vlm_layers} source={full_vlm_checkpoint}"
         )
-        params = extend_vlm_layers(
+        params = components.extend_vlm_layers(
             params,
             config.num_vlm_layers,
             source=full_vlm_checkpoint,
             local_files_only=not allow_download,
         )
-        print(f"extended VLM parameters to {count_vlm_layers(params)} layers")
-    params = initialize_tactile_fusion_params(params, config, seed=int(cfg.get("seed", 0)))
+        print(f"extended VLM parameters to {components.count_vlm_layers(params)} layers")
 
-    model = JaxSmolVLA(config)
+    model = components.model_type(config)
     modality_dropout_cfg = cfg.get("modality_dropout")
-    trainer = JaxSmolVLATrainer(
+    trainer = components.trainer_type(
         model,
         params,
         seed=int(cfg.get("seed", 0)),
@@ -422,7 +440,7 @@ def main() -> None:
     )
     trainable_count = sum(int(value.size) for value in trainer.state.params.values())
     frozen_count = sum(int(value.size) for value in trainer.frozen_params.values())
-    print(f"module_modes={resolve_module_modes(config)}")
+    print(f"module_modes={components.resolve_module_modes(config)}")
     print(
         f"parameters: trainable={trainable_count:,} frozen={frozen_count:,} "
         f"trainable_ratio={trainable_count / max(trainable_count + frozen_count, 1):.4%}"
@@ -494,26 +512,18 @@ def main() -> None:
         "seed": trainer.seed,
         "local_files_only": not (allow_tokenizer_download or allow_download),
     }
+    common_loader_kwargs.update(components.extra_loader_kwargs(cfg))
     if data_parallel and common_loader_kwargs["batch_size"] % jax.device_count():
         raise ValueError(
             f"batch_size={common_loader_kwargs['batch_size']} must be divisible by "
             f"the {jax.device_count()} data-parallel devices"
         )
-    tactile_cache_cfg = cfg.get("tactile_embedding_cache") or {}
-    if not isinstance(tactile_cache_cfg, dict):
-        raise ValueError("tactile_embedding_cache must be a mapping")
-    tactile_cache_enabled = bool(tactile_cache_cfg.get("enabled", False))
-    tactile_cache_root = tactile_cache_cfg.get("root") if tactile_cache_enabled else None
-    if tactile_cache_enabled and not tactile_cache_root:
-        raise ValueError("tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root")
-    common_loader_kwargs["tactile_embedding_cache_root"] = tactile_cache_root
     train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
     print(
         f"data_loader: video_backend={cfg.get('video_backend') or 'auto'} "
         f"return_uint8={common_loader_kwargs['return_uint8']} "
         f"num_workers={common_loader_kwargs['num_workers']} "
-        f"prefetch_factor={common_loader_kwargs['prefetch_factor']} "
-        f"tactile_embedding_cache={tactile_cache_root or 'disabled'}"
+        f"prefetch_factor={common_loader_kwargs['prefetch_factor']}"
     )
     print(
         "image_transforms="
@@ -524,7 +534,7 @@ def main() -> None:
             else "disabled"
         )
     )
-    data = LeRobotJaxDataLoader(
+    data = components.loader_type(
         checkpoint,
         config,
         sources=train_sources,
@@ -537,8 +547,7 @@ def main() -> None:
             f"train_dataset={summary['repo_id']} frames={summary['frames']} "
             f"episodes={summary['episodes']} fps={summary['fps']} "
             f"action_key={summary['action_key']!r} weight={summary['weight']} "
-            f"visual_keys={summary.get('visual_keys')} "
-            f"tactile_cache={summary.get('tactile_embedding_cache')}"
+            f"visual_keys={summary.get('visual_keys')}"
         )
     print(f"train_frames={len(data.dataset)}")
 
@@ -563,7 +572,7 @@ def main() -> None:
         )
         persisted_indices = tuple(split_manifest.get("validation_sample_indices", []))
         # Validation must stay unaugmented for stable metrics.
-        val_data = LeRobotJaxDataLoader(
+        val_data = components.loader_type(
             checkpoint,
             config,
             sources=val_sources,
@@ -612,7 +621,7 @@ def main() -> None:
     wandb_cfg = cfg.get("wandb") or {}
     wandb_run = init_wandb(
         cfg,
-        config_path=args.config,
+        config_path=config_path,
         checkpoint=checkpoint,
         model=config,
         data_split=split_manifest,
@@ -684,6 +693,7 @@ def main() -> None:
                     preprocessor=data.preprocessor,
                     source_dir=checkpoint,
                     data_split_path=split_path if split_manifest is not None else None,
+                    components=components,
                 )
                 print(f"saved checkpoint: {path}")
                 if wandb_run is not None:
@@ -697,6 +707,11 @@ def main() -> None:
             import wandb
 
             wandb.finish()
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    args = parse_args(argv)
+    run_training(args.config)
 
 
 if __name__ == "__main__":

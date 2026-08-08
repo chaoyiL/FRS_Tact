@@ -1,7 +1,7 @@
 # 视觉 + 触觉 encoder 版 SmolVLA JAX 微调配置。
-# 这个文件和 train_smolvla_jax.yaml 分开；后者保留为纯视觉基线配置。
+# 这个文件和 train_smolvla/configs/train.yaml 分开；后者保留为纯视觉基线配置。
 # 运行：
-#   uv run python tools/train_vtsmolvla_jax.py --config configs/train_vtsmolvla_jax.yaml
+#   uv run python -m train_vtsmolvla.train --config train_vtsmolvla/configs/train.yaml
 
 # ---- 预训练权重 ----
 checkpoint: lerobot/smolvla_base
@@ -48,7 +48,7 @@ datasets:
 # ---- 触觉 embedding 缓存 ----
 # 首次训练前运行一次：
 #   uv run --no-sync python tools/precompute_tactile_embeddings.py \
-#     --config configs/train_vtsmolvla_jax.yaml
+#     --config train_vtsmolvla/configs/train.yaml
 # 缓存覆盖数据集中的所有帧；训练时只解码两路 RGB，不再解码四路触觉视频或重复运行 ResNet18。
 # 每帧保存原始 [4, 512] ResNet 特征，当前 VT 使用当前帧，后续 FRS 可按帧索引组成 history。
 tactile_embedding_cache:
@@ -81,6 +81,12 @@ seed: 42
 resume: null
 data_parallel: true
 allow_tokenizer_download: true
+
+# ---- 启动器 ----
+launcher:
+  tmux_session: vtsmolvla_train
+  foreground: false
+  logs_dir: train_vtsmolvla/outputs/logs
 
 # ---- 图像增强 ----
 # 仅对 model.image_keys 中的 RGB 图像生效，触觉图像保持原始分布。
