@@ -1,7 +1,8 @@
 # 视觉 + 触觉 encoder 版 SmolVLA JAX 微调配置。
 # 这个文件和 train_smolvla_jax.yaml 分开；后者保留为纯视觉基线配置。
 # 运行：
-#   uv run python tools/train_vtsmolvla_jax.py --config configs/train_vtsmolvla_jax.yaml
+#   FRS_TMUX_SESSION=vtsmolvla_tactile16 bash scripts/start_vtsmolvla_train.sh \
+#     --config configs/train_vtsmolvla_jax_tactile16.yaml
 
 # ---- 预训练权重 ----
 checkpoint: lerobot/smolvla_base

@@ -53,6 +53,24 @@ def test_all_vt_configs_use_identical_encoder_05_path() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("config_name", "tmux_session"),
+    [
+        ("train_vtsmolvla_jax_tactile16.yaml", "vtsmolvla_tactile16"),
+        ("train_vtsmolvla_jax_tactile32.yaml", "vtsmolvla_tactile32"),
+    ],
+)
+def test_paper_ratio_config_header_selects_its_own_launcher_session(
+    config_name: str, tmux_session: str
+) -> None:
+    header = (ROOT / "configs" / config_name).read_text().split("# ----", maxsplit=1)[0]
+
+    assert (
+        f"#   FRS_TMUX_SESSION={tmux_session} bash scripts/start_vtsmolvla_train.sh \\\n"
+        f"#     --config configs/{config_name}"
+    ) in header
+
+
 def _valid_config() -> dict:
     return {
         "model": {
