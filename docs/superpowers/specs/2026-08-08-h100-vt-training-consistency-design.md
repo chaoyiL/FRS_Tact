@@ -48,6 +48,12 @@ casts only trainable floating leaves. The trainer uses it to form compute params
 loading. Save continues to write FP32 master weights and strict resume continues
 to restore those masters.
 
+The supported BF16 surface is deliberately limited to the active VT tactile
+runtime in `src/lerobot/policies/smolvla_jax` and its `modalities_eval`,
+checkpoint publication, and deployment consumers. The pre-existing pure-visual
+top-level `train_smolvla` package is outside this design and acceptance boundary;
+its broken package imports are not repaired or used as BF16 evidence here.
+
 The effective checkpoint config, publication manifest, validation contract, and
 deployment contract carry the dtype field. A missing legacy field canonicalizes
 to BF16; explicit unsupported values and cross-dtype mismatches are rejected.

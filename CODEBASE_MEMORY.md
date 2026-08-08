@@ -110,4 +110,5 @@
 - `JaxSmolVLAConfig.trainable_compute_dtype` 现在只接受并显式序列化 `"bfloat16"`；旧 config、resume metadata、publish manifest、training YAML 和 deploy contract 缺字段时统一迁移为 BF16，显式非法值 fail closed。
 - 唯一计算转换入口为 `src/lerobot/policies/smolvla_jax/training.py::prepare_params_for_compute(params, config)`：仅按现有 `is_trainable_parameter` 将 trainable floating leaves 转为 BF16，frozen 与 integer leaves 保持原 dtype；trainer train/eval、`JaxSmolVLAPolicy` 和 `modalities_eval.SmolVLAEvalModel` 共用该入口。
 - trainer state 和 `model.safetensors` 继续保存 FP32 trainable master parameters；固定 batch/rng/noise 的 save-load-prepare 数值测试逐元素一致。未修改 tactile cache、schema 或 repeat-factor 语义。
-- Task 2 聚焦 RED 为 `43 failed, 105 passed`，direct-contract 补充 RED 为 `1 failed`；最终聚焦 GREEN 为 `151 passed`。可运行回归为 `267 passed, 1 skipped, 2 deselected`；完整集合仍被已知 `train_smolvla` package-boundary collection 缺失和默认部署身份漂移阻断。
+- 用户批准的 Task 2 BF16 支持面仅为 active VT tactile runtime `src/lerobot/policies/smolvla_jax` 及其 `modalities_eval`、publish、deploy consumers；预先损坏的纯视觉 `train_smolvla` package 和 `tests/jax/test_training.py` 明确不属于验收面，也不在本任务中修复。
+- Task 2 聚焦 RED 为 `43 failed, 105 passed`，direct-contract 补充 RED 为 `1 failed`；最终聚焦 GREEN 为 `151 passed`。较宽但仍可运行的回归实际为 `269 passed, 1 skipped, 2 deselected`，不是先前误记的 267；被排除项来自上述纯视觉 package boundary 与既有默认部署身份漂移，不改变 VT focused 验收结论。

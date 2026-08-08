@@ -16,6 +16,10 @@
 - Normalization uses training episodes only; no fallback to full-dataset stats.
 - Do not change tactile cache `[F,4,512]`, projection parameters, repeat order, masks or RoPE.
 - One Python process sees both H100 devices; do not use torchrun or two Slurm tasks.
+- BF16 acceptance covers only the active VT tactile runtime under
+  `src/lerobot/policies/smolvla_jax` and its `modalities_eval`, publish, and
+  deploy consumers. The pre-existing broken pure-visual `train_smolvla`
+  package is explicitly out of scope and must not be repaired for this plan.
 
 ---
 
@@ -53,21 +57,21 @@
 - Modify: `tools/publish_smolvla_checkpoint.py`
 - Modify: `deploy_smolvla/remote_client.py`
 - Modify: `deploy_smolvla/configs/deploy_smolvla_jax.yaml`
-- Test: `tests/jax/test_training.py`
 - Test: `tests/jax/test_tactile_training.py`
 - Test: `tests/jax/test_tactile_checkpoint.py`
 - Test: `tests/jax/test_checkpoint_validation.py`
 - Test: `tests/jax/test_publish_checkpoint.py`
 - Test: `tests/jax/test_remote_client.py`
+- Test: `modalities_eval/test/test_eval_tactile_contract.py`
 
 **Interfaces:**
 - Produces: `prepare_params_for_compute(params, config)` and serialized `trainable_compute_dtype="bfloat16"`.
 - Consumes: existing `is_trainable_parameter(path, config)` classification.
 
 - [ ] **Step 1: Write failing tests** proving only trainable floating leaves become BF16, frozen/integer leaves retain dtype, save-load-prepare matches trainer compute params, policy/evaluator apply the helper, FP32 masters remain in safetensors, missing legacy config resolves BF16, invalid values and deployment/publish mismatches fail closed.
-- [ ] **Step 2: Run RED** on the focused JAX validation/publish/remote tests; expect missing field/helper and FP32 inference failures.
+- [ ] **Step 2: Run RED** with `python -m pytest -p no:cacheprovider tests/jax/test_tactile_checkpoint.py tests/jax/test_tactile_training.py tests/jax/test_checkpoint_validation.py tests/jax/test_publish_checkpoint.py tests/jax/test_remote_client.py modalities_eval/test/test_eval_tactile_contract.py -q`; expect missing field/helper and FP32 inference failures. Do not include pure-visual `tests/jax/test_training.py`.
 - [ ] **Step 3: Implement the helper and config/contract plumbing**; replace trainer's private cast, invoke once in policy/evaluator constructors, serialize effective config, and preserve full FP32 masters in save/resume.
-- [ ] **Step 4: Run GREEN** on the focused tests; then run one fixed batch/rng/noise numerical parity test before/after save-load.
+- [ ] **Step 4: Run GREEN** with the exact focused RED command; then run one fixed batch/rng/noise numerical parity test before/after save-load.
 - [ ] **Step 5: Commit** only Task 2 files with `git commit -m "fix: unify VT BF16 compute parameters"`.
 
 ### Task 3: Immutable train-only normalization protocol
