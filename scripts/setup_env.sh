@@ -242,8 +242,10 @@ main() {
     echo "  ${UV_BIN} run --no-sync hf auth login"
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
+    echo "一键启动视觉 SmolVLA："
+    echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/train.sh"
     echo "一键启动 VT-SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/scripts/start_vtsmolvla_train.sh"
+    echo "  bash ${PROJECT_ROOT}/train_vtsmolvla/scripts/train.sh"
 }
 
 main "$@"

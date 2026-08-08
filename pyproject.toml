@@ -135,6 +135,8 @@ include = ["lerobot*", "deploy*", "tactile_encoder*", "utils*", "modalities_eval
 
 [tool.setuptools.package-data]
 train_frs = ["README.md", "configs/*.yaml", "scripts/*.sh"]
+train_smolvla = ["README.md", "configs/*.yaml", "scripts/*.sh"]
+train_vtsmolvla = ["README.md", "configs/*.yaml", "scripts/*.sh"]
 
 [tool.pytest.ini_options]
 addopts = "--import-mode=importlib"

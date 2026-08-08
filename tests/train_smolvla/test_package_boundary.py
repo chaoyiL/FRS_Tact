@@ -3,7 +3,23 @@ import importlib.util
 import json
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_visual_runtime_assets_are_packaged_and_outputs_are_ignored():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    package_data = project["tool"]["setuptools"]["package-data"]["train_smolvla"]
+    assert {"README.md", "configs/*.yaml", "scripts/*.sh"} <= set(package_data)
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "train_smolvla/outputs/logs/example.log"],
+        cwd=ROOT,
+        check=False,
+    )
+    assert ignored.returncode == 0
 
 
 def test_visual_package_is_discoverable():

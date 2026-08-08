@@ -101,6 +101,8 @@ tensorboard/
 *.ckpt
 *.safetensors
 *.bin
+/train_smolvla/outputs/
+/train_vtsmolvla/outputs/
 
 # Hugging Face cache (local)
 .huggingface/
