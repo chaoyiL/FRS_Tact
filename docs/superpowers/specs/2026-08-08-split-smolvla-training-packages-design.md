@@ -123,7 +123,14 @@ bash train_vtsmolvla/scripts/train.sh
 3. 检查 JAX GPU。
 4. 检查已有 checkpoint 与 resume 配置，防止覆盖。
 5. 在可用且未处于 tmux 时创建后台会话，否则前台运行。
-6. 把日志写到 YAML 指定的 output 目录。
+6. 为每次训练创建独立的时间戳日志，并同时记录标准输出和标准错误。
+
+纯视觉训练默认使用 tmux 后台会话 `smolvla_train`。日志目录由
+`launcher.logs_dir` 配置，默认固定为仓库内的
+`train_smolvla/outputs/logs/`，日志文件名为
+`train_YYYYMMDD_HHMMSS.log`。仓库通过 `.gitignore` 忽略整个
+`train_smolvla/outputs/`，防止日志及同目录下的运行产物被提交。若同名 tmux
+会话已经存在，launcher 必须拒绝重复启动并输出 attach 命令。
 
 一键训练不安装系统/Python 环境，不登录外部服务，也不自动下载大文件。现有根级 `scripts/setup_env.sh`、`scripts/download_data.sh` 和 `scripts/download_ckpt.sh` 继续作为训练前的独立准备步骤。
 
