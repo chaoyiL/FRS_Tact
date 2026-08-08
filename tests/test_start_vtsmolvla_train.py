@@ -125,3 +125,14 @@ def test_launcher_tmux_forwards_config_path_with_spaces(tmp_path: Path) -> None:
     inner_command = tmux_log.read_text(encoding="utf-8")
     assert "--config" in inner_command
     assert "paper\\ config.yaml" in inner_command
+
+
+def test_launcher_enforces_runtime_device_contract_before_cache_precompute() -> None:
+    script = (ROOT / "scripts" / "start_vtsmolvla_train.sh").read_text(encoding="utf-8")
+
+    device_gate = script.index("_validate_runtime_devices(config, jax.devices())")
+    encoder_gate = script.index("validate_tactile_encoder_provenance(")
+    cache_precompute = script.index("tools/precompute_tactile_embeddings.py")
+
+    assert device_gate < cache_precompute
+    assert encoder_gate < cache_precompute

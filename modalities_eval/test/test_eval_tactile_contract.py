@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import inspect
 from types import SimpleNamespace
 
 import jax
@@ -87,6 +89,157 @@ def test_evaluator_prepares_loaded_master_params_for_compute(
 
     assert calls == [(master_params, config)]
     assert evaluator.params is prepared_params
+
+
+def test_evaluation_normalization_defaults_to_checkpoint_everywhere() -> None:
+    assert inspect.signature(SmolVLAEvalModel).parameters["normalization_source"].default == (
+        "checkpoint"
+    )
+    assert inspect.signature(eval_utils.load_model).parameters["normalization_source"].default == (
+        "checkpoint"
+    )
+    parser = argparse.ArgumentParser()
+    eval_utils.add_eval_data_arguments(parser, required=False)
+    args = parser.parse_args([])
+    assert args.normalization_source == "checkpoint"
+    assert args.unsafe_legacy_dataset_normalization is False
+
+
+def test_protocol_checkpoint_rejects_dataset_stats_without_explicit_unsafe_override(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "normalization_manifest.json").write_text("{}\n", encoding="utf-8")
+    stats_reads: list[str] = []
+
+    class Metadata:
+        root = tmp_path
+        revision = "revision"
+        features = {"action": {}}
+
+        @property
+        def stats(self):
+            stats_reads.append("dataset_stats")
+            return {}
+
+    monkeypatch.setattr(eval_utils, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAConfig",
+        SimpleNamespace(from_pretrained=lambda checkpoint: SimpleNamespace()),
+    )
+    monkeypatch.setattr(eval_utils, "load_params", lambda checkpoint: {})
+    monkeypatch.setattr(eval_utils, "prepare_params_for_compute", lambda params, config: params)
+    monkeypatch.setattr(eval_utils, "JaxSmolVLA", lambda config: SimpleNamespace())
+    monkeypatch.setattr(eval_utils, "LeRobotDatasetMetadata", lambda *args, **kwargs: Metadata())
+    monkeypatch.setattr(eval_utils, "resolve_action_key", lambda *args, **kwargs: "action")
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAPreprocessor",
+        lambda *args, **kwargs: pytest.fail("unsafe dataset normalization must fail first"),
+    )
+
+    with pytest.raises(ValueError, match="unsafe|train-only|protocol"):
+        SmolVLAEvalModel(
+            tmp_path,
+            dataset_repo_id="owner/data",
+            normalization_source="dataset",
+        )
+    assert stats_reads == [], "protocol checkpoints must fail before global dataset stats are read"
+
+
+def test_protocol_checkpoint_requires_complete_checkpoint_assets_before_metadata(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "normalization_manifest.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(eval_utils, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAConfig",
+        SimpleNamespace(from_pretrained=lambda checkpoint: SimpleNamespace()),
+    )
+    monkeypatch.setattr(eval_utils, "load_params", lambda checkpoint: {})
+    monkeypatch.setattr(eval_utils, "prepare_params_for_compute", lambda params, config: params)
+    monkeypatch.setattr(eval_utils, "JaxSmolVLA", lambda config: SimpleNamespace())
+    monkeypatch.setattr(
+        eval_utils,
+        "LeRobotDatasetMetadata",
+        lambda *args, **kwargs: pytest.fail("protocol integrity must fail before dataset metadata"),
+    )
+
+    with pytest.raises(ValueError, match="normalization protocol|data_split|manifest|asset"):
+        SmolVLAEvalModel(tmp_path, dataset_repo_id="owner/data")
+
+
+def test_unsafe_dataset_override_cannot_bypass_protocol_integrity(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "normalization_manifest.json").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(eval_utils, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAConfig",
+        SimpleNamespace(from_pretrained=lambda checkpoint: SimpleNamespace()),
+    )
+    monkeypatch.setattr(eval_utils, "load_params", lambda checkpoint: {})
+    monkeypatch.setattr(eval_utils, "prepare_params_for_compute", lambda params, config: params)
+    monkeypatch.setattr(eval_utils, "JaxSmolVLA", lambda config: SimpleNamespace())
+    monkeypatch.setattr(
+        eval_utils,
+        "LeRobotDatasetMetadata",
+        lambda *args, **kwargs: pytest.fail("unsafe override must not bypass protocol integrity"),
+    )
+
+    with pytest.raises(ValueError, match="normalization protocol|data_split|manifest|asset"):
+        SmolVLAEvalModel(
+            tmp_path,
+            dataset_repo_id="owner/data",
+            normalization_source="dataset",
+            unsafe_legacy_dataset_normalization=True,
+        )
+
+
+def test_legacy_dataset_normalization_requires_named_unsafe_override(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    stats = {"action": {"mean": np.zeros(1), "std": np.ones(1)}}
+    metadata = SimpleNamespace(
+        root=tmp_path,
+        revision="revision",
+        features={"action": {}},
+        stats=stats,
+    )
+    monkeypatch.setattr(eval_utils, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        eval_utils,
+        "JaxSmolVLAConfig",
+        SimpleNamespace(from_pretrained=lambda checkpoint: SimpleNamespace()),
+    )
+    monkeypatch.setattr(eval_utils, "load_params", lambda checkpoint: {})
+    monkeypatch.setattr(eval_utils, "prepare_params_for_compute", lambda params, config: params)
+    monkeypatch.setattr(eval_utils, "JaxSmolVLA", lambda config: SimpleNamespace())
+    monkeypatch.setattr(eval_utils, "LeRobotDatasetMetadata", lambda *args, **kwargs: metadata)
+    monkeypatch.setattr(eval_utils, "resolve_action_key", lambda *args, **kwargs: "action")
+    monkeypatch.setattr(eval_utils, "canonicalize_dataset_stats", lambda value, key: value)
+
+    def preprocessor(*args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace()
+
+    monkeypatch.setattr(eval_utils, "JaxSmolVLAPreprocessor", preprocessor)
+
+    evaluator = SmolVLAEvalModel(
+        tmp_path,
+        dataset_repo_id="owner/data",
+        normalization_source="dataset",
+        unsafe_legacy_dataset_normalization=True,
+    )
+    assert evaluator.normalization_source == "dataset"
+    assert captured["stats"] is stats
 
 
 def test_prepare_sample_preserves_independent_tactile_and_action_padding() -> None:

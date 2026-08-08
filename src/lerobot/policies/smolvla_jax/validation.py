@@ -11,6 +11,11 @@ from typing import Any
 from safetensors import SafetensorError, safe_open
 
 from .architecture import SMOLVLA_TEXT_HIDDEN_SIZE
+from .provenance import (
+    TACTILE_ENCODER_PROVENANCE_FILENAME,
+    tactile_encoder_experiment_identity,
+    validate_tactile_encoder_provenance_record,
+)
 
 _PREPROCESSOR_FILE = "policy_preprocessor.json"
 _POSTPROCESSOR_FILE = "policy_postprocessor.json"
@@ -825,4 +830,49 @@ def validate_checkpoint(
             expected or (config.as_contract() if config is not None else None),
             issues,
         )
+    protocol_manifest: dict[str, Any] | None = None
+    try:
+        from .normalization_protocol import validate_normalization_protocol_integrity
+
+        protocol_manifest = validate_normalization_protocol_integrity(checkpoint, required=False)
+    except (OSError, ValueError) as exc:
+        issues.append(f"normalization protocol integrity: {exc}")
+    encoder_provenance_path = checkpoint / TACTILE_ENCODER_PROVENANCE_FILENAME
+    encoder_identity: dict[str, str] | None = None
+    if encoder_provenance_path.is_file():
+        try:
+            encoder_record = validate_tactile_encoder_provenance_record(
+                encoder_provenance_path,
+                expected_repo_id="liuchaoyi/encoder_ckpt_05",
+            )
+            encoder_identity = tactile_encoder_experiment_identity(encoder_record)
+        except (OSError, ValueError) as exc:
+            issues.append(f"tactile encoder provenance: {exc}")
+    active_vt = target is not None and target.tactile_num_tokens > 0
+    if active_vt and encoder_identity is None:
+        issues.append(
+            f"active VT checkpoint is missing {TACTILE_ENCODER_PROVENANCE_FILENAME}"
+        )
+    if protocol_manifest is not None and active_vt:
+        dimensions = protocol_manifest.get("dimensions")
+        if dimensions != {
+            "observation.state": target.state_dim,
+            "action": target.action_dim,
+        }:
+            issues.append("normalization protocol dimensions mismatch checkpoint contract")
+        manifest_identity = protocol_manifest.get("tactile_encoder")
+        if not isinstance(manifest_identity, dict):
+            issues.append("normalization protocol is missing tactile encoder experiment identity")
+        if encoder_identity is not None and manifest_identity != encoder_identity:
+            issues.append("normalization protocol tactile encoder identity mismatches provenance")
+    if encoder_identity is not None and isinstance(config_raw, Mapping):
+        expected_config_identity = {
+            "repo_id": config_raw.get("tactile_encoder_repo_id"),
+            "resolved_revision": config_raw.get("tactile_encoder_revision"),
+            "checkpoint_sha256": config_raw.get("tactile_encoder_sha256"),
+        }
+        if any(value is not None for value in expected_config_identity.values()) and (
+            expected_config_identity != encoder_identity
+        ):
+            issues.append("effective config tactile encoder identity mismatches provenance")
     return CheckpointValidationReport(checkpoint, tuple(issues))

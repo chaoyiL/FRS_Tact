@@ -14,8 +14,10 @@ from safetensors.flax import load_file as load_safetensors_file
 
 from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.data import (
+    DatasetMetadataView,
     DeterministicEpochBatchSampler,
     DatasetSource,
+    LeRobotJaxDataLoader,
     _KeyMappedLeRobotDataset,
     action_delta_timestamps,
     canonicalize_dataset_stats,
@@ -26,10 +28,13 @@ from lerobot.policies.smolvla_jax.data import (
     rename_dataset_stats,
     resolve_action_key,
     resolve_model_visual_keys,
+    pin_dataset_sources,
+    resolve_source_metadata,
     resolve_source_visual_keys,
     split_sources_train_val,
 )
 from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor, prepare_tactile_batch
+from lerobot.policies.smolvla_jax.provenance import local_dataset_identity
 from lerobot.policies.smolvla_jax.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 from tactile_encoder.utils.image_dataset import parse_image_to_unit
 
@@ -362,7 +367,8 @@ def test_remote_split_download_projects_only_info_and_episode_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    snapshot = tmp_path / "snapshot"
+    resolved_sha = "a" * 40
+    snapshot = tmp_path / "hub" / "datasets--org--remote" / "snapshots" / resolved_sha
     info_path = snapshot / "meta" / "info.json"
     info_path.parent.mkdir(parents=True)
     info_path.write_text(
@@ -389,15 +395,20 @@ def test_remote_split_download_projects_only_info_and_episode_metadata(
         calls.append({"repo_id": repo_id, **kwargs})
         return str(snapshot)
 
-    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.HF_LEROBOT_HOME", tmp_path / "empty-cache")
     monkeypatch.setattr("lerobot.policies.smolvla_jax.data.snapshot_download", snapshot_download)
     monkeypatch.setattr(
         "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
         lambda **kwargs: pytest.fail(f"full metadata/global stats were accessed: {kwargs}"),
     )
 
+    source = DatasetSource(repo_id="org/remote", revision="main", action_key="actions")
+    metadata = resolve_source_metadata(source)
+    assert metadata.identity["kind"] == "hub_snapshot"
+    assert metadata.identity["requested_revision"] == "main"
+    assert metadata.identity["resolved_revision"] == resolved_sha
+
     train, val = split_sources_train_val(
-        [DatasetSource(repo_id="org/remote", revision="commit-sha", action_key="actions")],
+        [source],
         val_fraction=0.5,
         seed=0,
     )
@@ -408,6 +419,261 @@ def test_remote_split_download_projects_only_info_and_episode_metadata(
         "meta/episodes/*/*.parquet",
     ]
     assert "meta/stats.json" not in calls[0]["allow_patterns"]
+
+
+def test_remote_source_ignores_default_local_projection_and_pins_snapshot_sha(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A root-less Hub source stays a Hub source even if HF_LEROBOT_HOME has metadata."""
+
+    default_root = tmp_path / "lerobot-home" / "org" / "remote"
+    info = {
+        "codebase_version": "v3.0",
+        "fps": 30,
+        "total_episodes": 1,
+        "features": {
+            "observation.state": {"dtype": "float32", "shape": [20]},
+            "actions": {"dtype": "float32", "shape": [20]},
+        },
+    }
+    (default_root / "meta" / "info.json").parent.mkdir(parents=True)
+    (default_root / "meta" / "info.json").write_text(json.dumps(info) + "\n")
+    projected_episodes = default_root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    projected_episodes.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"episode_index": 0}]), projected_episodes)
+
+    resolved_sha = "b" * 40
+    snapshot = tmp_path / "hub" / "datasets--org--remote" / "snapshots" / resolved_sha
+    (snapshot / "meta").mkdir(parents=True)
+    (snapshot / "meta" / "info.json").write_text(json.dumps(info) + "\n")
+    snapshot_episodes = snapshot / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    snapshot_episodes.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"episode_index": 0}]), snapshot_episodes)
+    calls: list[str] = []
+
+    def snapshot_download(repo_id: str, **kwargs) -> str:
+        del repo_id
+        calls.append(str(kwargs["revision"]))
+        return str(snapshot)
+
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.snapshot_download", snapshot_download)
+
+    requested = DatasetSource(repo_id="org/remote", revision="main")
+    pinned = pin_dataset_sources([requested])[0]
+    assert pinned.revision == "main"
+    assert pinned.resolved_revision == resolved_sha
+
+    metadata = resolve_source_metadata(pinned)
+    assert metadata.root == snapshot
+    assert metadata.revision == resolved_sha
+    assert metadata.identity == {
+        "kind": "hub_snapshot",
+        "requested_revision": "main",
+        "resolved_revision": resolved_sha,
+    }
+    assert calls == ["main", resolved_sha]
+
+
+def test_loader_uses_pinned_metadata_and_rejects_protocol_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved_sha = "c" * 40
+    snapshot = tmp_path / "snapshots" / resolved_sha
+    expected_identity = {
+        "kind": "hub_snapshot",
+        "requested_revision": "main",
+        "resolved_revision": resolved_sha,
+    }
+    info = type(
+        "Info",
+        (),
+        {
+            "features": {
+                "observation.state": {"dtype": "float32", "shape": [20]},
+                "actions": {"dtype": "float32", "shape": [20]},
+                "observation.images.camera1": {"dtype": "video", "shape": [3, 8, 8]},
+            },
+            "fps": 10,
+        },
+    )()
+    resolved_calls: list[DatasetSource] = []
+    metadata_calls: list[dict[str, object]] = []
+    dataset_calls: list[dict[str, object]] = []
+
+    def resolve(source: DatasetSource) -> DatasetMetadataView:
+        resolved_calls.append(source)
+        return DatasetMetadataView(snapshot, info, resolved_sha, expected_identity)
+
+    class FakeMetadata:
+        def __init__(self, **kwargs):
+            metadata_calls.append(kwargs)
+            self.root = Path(kwargs["root"])
+            self.revision = kwargs["revision"]
+            self.features = info.features
+            self.camera_keys = ["observation.images.camera1"]
+            self.fps = 10
+            self.total_frames = 2
+
+    class FakeDataset:
+        def __init__(self, **kwargs):
+            dataset_calls.append(kwargs)
+            self.features = info.features
+            self.meta = type("Meta", (), {"stats": {}})()
+            self.num_episodes = 1
+            self.fps = 10
+
+        def __len__(self):
+            return 2
+
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.resolve_source_metadata", resolve)
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.LeRobotDataset", FakeDataset)
+    config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        state_dim=20,
+        action_dim=20,
+        chunk_size=2,
+        image_keys=("observation.images.camera1",),
+    )
+    source = DatasetSource(
+        repo_id="org/remote",
+        revision="main",
+        resolved_revision=resolved_sha,
+        episodes=[0],
+        action_key="actions",
+    )
+
+    LeRobotJaxDataLoader(
+        "checkpoint",
+        config,
+        sources=[source],
+        preprocessor=object(),
+        expected_dataset_identities={"org/remote": expected_identity},
+        batch_size=1,
+        num_workers=0,
+        infinite=False,
+        drop_last=False,
+    )
+
+    assert resolved_calls == [source]
+    assert metadata_calls == [
+        {"repo_id": "org/remote", "root": snapshot, "revision": resolved_sha}
+    ]
+    assert dataset_calls[0]["root"] == snapshot
+    assert dataset_calls[0]["revision"] == resolved_sha
+
+    drifted = dict(expected_identity, resolved_revision="d" * 40)
+    with pytest.raises(ValueError, match="dataset identity.*mismatch|identity drift"):
+        LeRobotJaxDataLoader(
+            "checkpoint",
+            config,
+            sources=[source],
+            preprocessor=object(),
+            expected_dataset_identities={"org/remote": drifted},
+            batch_size=1,
+            num_workers=0,
+            infinite=False,
+            drop_last=False,
+        )
+
+
+def test_loader_rechecks_sealed_local_identity_after_dataset_construction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "local-v3"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text("{}\n", encoding="utf-8")
+    expected_identity = local_dataset_identity(root)
+    features = {
+        "observation.state": {"dtype": "float32", "shape": [20]},
+        "actions": {"dtype": "float32", "shape": [20]},
+        "observation.images.camera1": {"dtype": "video", "shape": [3, 8, 8]},
+    }
+    info = type("Info", (), {"features": features, "fps": 10})()
+
+    class FakeMetadata:
+        def __init__(self, **kwargs):
+            self.root = Path(kwargs["root"])
+            self.revision = kwargs["revision"]
+            self.features = features
+            self.camera_keys = ["observation.images.camera1"]
+            self.fps = 10
+            self.total_frames = 2
+
+    class MutatingDataset:
+        def __init__(self, **kwargs):
+            self.root = Path(kwargs["root"])
+            payload = self.root / "data" / "chunk-000" / "file-000.parquet"
+            payload.parent.mkdir(parents=True)
+            payload.write_bytes(b"downloaded-after-protocol-seal")
+            self.features = features
+            self.meta = type("Meta", (), {"stats": {}})()
+            self.num_episodes = 1
+            self.fps = 10
+
+        def __len__(self):
+            return 2
+
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.resolve_source_metadata",
+        lambda source: DatasetMetadataView(root, info, None, expected_identity),
+    )
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata", FakeMetadata)
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.LeRobotDataset", MutatingDataset)
+    config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        state_dim=20,
+        action_dim=20,
+        chunk_size=2,
+        image_keys=("observation.images.camera1",),
+    )
+
+    with pytest.raises(ValueError, match="dataset identity.*construction|local.*drift"):
+        LeRobotJaxDataLoader(
+            "checkpoint",
+            config,
+            sources=[
+                DatasetSource(
+                    repo_id="org/local",
+                    root=root,
+                    episodes=[0],
+                    action_key="actions",
+                )
+            ],
+            preprocessor=object(),
+            expected_dataset_identities={"org/local": expected_identity},
+            batch_size=1,
+            num_workers=0,
+            infinite=False,
+            drop_last=False,
+        )
+
+
+def test_dataset_state_width_must_match_config_exactly() -> None:
+    config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        state_dim=20,
+        action_dim=20,
+        image_keys=("observation.images.camera1",),
+    )
+    features = {
+        "observation.state": {"shape": [19]},
+        "action": {"shape": [20]},
+        "observation.images.camera1": {"dtype": "image", "shape": [224, 224, 3]},
+    }
+
+    with pytest.raises(ValueError, match="state.*20|state_dim"):
+        LeRobotJaxDataLoader._validate_features(
+            object.__new__(LeRobotJaxDataLoader),
+            config,
+            features,
+            "action",
+            None,
+            repo_id="org/data",
+        )
 
 
 def test_fixed_stratified_subset_is_reproducible_and_covers_every_dataset() -> None:
@@ -481,6 +747,24 @@ def test_explicit_preprocessor_does_not_read_full_dataset_stats(monkeypatch) -> 
     monkeypatch.setattr(
         "lerobot.policies.smolvla_jax.data.LeRobotDataset",
         FakeDataset,
+    )
+    fake_info = type(
+        "Info",
+        (),
+        {"features": FakeMetadata().features, "fps": 10},
+    )()
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.resolve_source_metadata",
+        lambda source: DatasetMetadataView(
+            Path("/metadata-only"),
+            fake_info,
+            "a" * 40,
+            {
+                "kind": "hub_snapshot",
+                "requested_revision": "v3.0",
+                "resolved_revision": "a" * 40,
+            },
+        ),
     )
     config = dataclasses.replace(
         JaxSmolVLAConfig(),

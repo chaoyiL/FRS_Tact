@@ -27,6 +27,7 @@ from .data import (
     resolve_action_key,
     resolve_source_metadata,
 )
+from .provenance import validate_local_dataset_content_identity_record
 
 DATA_SPLIT_FILENAME = "data_split.json"
 NORMALIZATION_MANIFEST_FILENAME = "normalization_manifest.json"
@@ -35,6 +36,7 @@ POSTPROCESSOR_STATS_FILENAME = "policy_postprocessor_step_0_unnormalizer_process
 NORMALIZATION_ALGORITHM_VERSION = 1
 _CANONICAL_FEATURES = ("observation.state", CANONICAL_ACTION_KEY)
 _REQUIRED_STATS = ("min", "max", "mean", "std", "count")
+_SHA256_HEX_LENGTH = 64
 
 
 class NormalizationProtocolResult(NamedTuple):
@@ -120,6 +122,7 @@ def _validate_feature_stats(
         raise ValueError(
             f"{context} stats must canonicalize exactly to {_CANONICAL_FEATURES}, got {sorted(stats)}"
         )
+    feature_counts: dict[str, int] = {}
     for feature, dimension in dimensions.items():
         feature_stats = stats[feature]
         missing = set(_REQUIRED_STATS) - set(feature_stats)
@@ -139,8 +142,19 @@ def _validate_feature_stats(
                 )
             if not finite:
                 raise ValueError(f"{context} stats for {feature!r}.{stat} must be finite")
-            if stat == "count" and float(value[0]) <= 0:
-                raise ValueError(f"{context} stats for {feature!r}.count must be positive")
+            if stat == "std" and bool(np.any(value < 0)):
+                raise ValueError(f"{context} stats for {feature!r}.std must be non-negative")
+            if stat == "count":
+                count = float(value[0])
+                if count <= 0 or not count.is_integer():
+                    raise ValueError(
+                        f"{context} stats for {feature!r}.count must be a positive integer"
+                    )
+                feature_counts[feature] = int(count)
+    if len(set(feature_counts.values())) != 1:
+        raise ValueError(
+            f"{context} stats feature counts must match, got {feature_counts}"
+        )
 
 
 def _load_split(path: Path, sources: Sequence[DatasetSource]) -> None:
@@ -263,13 +277,14 @@ def _selected_source_stats(
     )
     source_manifest = {
         "repo_id": source.repo_id,
-        "requested_revision": source.revision,
+        "requested_revision": metadata.identity.get("requested_revision", source.revision),
         "resolved_revision": resolved_revision,
         "requested_action_key": source.action_key,
         "resolved_action_key": resolved_action_key,
         "rename_map": dict(sorted((source.rename_map or {}).items())),
         "train_episodes": requested,
         "selected_stats_sha256": _selected_episode_digest(episode_digests),
+        "dataset_identity": metadata.identity,
     }
     return selected_stats, source_manifest
 
@@ -310,8 +325,9 @@ def _manifest(
     state_dim: int,
     action_dim: int,
     asset_hashes: Mapping[str, str],
+    tactile_encoder_identity: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
-    return {
+    manifest = {
         "algorithm_version": NORMALIZATION_ALGORITHM_VERSION,
         "split_sha256": split_sha256,
         "datasets": datasets,
@@ -319,6 +335,168 @@ def _manifest(
         "canonical_stats_sha256": _stats_digest(stats),
         "assets": dict(sorted(asset_hashes.items())),
     }
+    if tactile_encoder_identity is not None:
+        manifest["tactile_encoder"] = dict(tactile_encoder_identity)
+    return manifest
+
+
+def _require_sha256(value: Any, *, context: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != _SHA256_HEX_LENGTH
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context} must be a lowercase SHA-256 digest")
+    return value
+
+
+def validate_normalization_protocol_integrity(
+    artifact_dir: str | Path,
+    *,
+    required: bool = False,
+) -> dict[str, Any] | None:
+    """Validate protocol structure and file hashes without reading dataset metadata.
+
+    This is the common, side-effect-free checkpoint gate used by resume, eval,
+    publication, and repair.  Training additionally calls
+    :func:`build_or_validate_normalization_protocol` to re-resolve current source
+    identities and selected episode statistics.
+    """
+
+    artifact_dir = Path(artifact_dir).expanduser()
+    paths = {
+        DATA_SPLIT_FILENAME: artifact_dir / DATA_SPLIT_FILENAME,
+        NORMALIZATION_MANIFEST_FILENAME: artifact_dir / NORMALIZATION_MANIFEST_FILENAME,
+        PREPROCESSOR_STATS_FILENAME: artifact_dir / PREPROCESSOR_STATS_FILENAME,
+        POSTPROCESSOR_STATS_FILENAME: artifact_dir / POSTPROCESSOR_STATS_FILENAME,
+    }
+    present = {name for name, path in paths.items() if path.is_file()}
+    if NORMALIZATION_MANIFEST_FILENAME not in present:
+        if required:
+            raise ValueError(f"normalization protocol is missing from {artifact_dir}")
+        return None
+    if present != set(paths):
+        missing = sorted(set(paths) - present)
+        raise ValueError(
+            f"normalization protocol in {artifact_dir} is incomplete; missing {missing}"
+        )
+    if any(path.is_symlink() for path in paths.values()):
+        raise ValueError("normalization protocol files must not be symbolic links")
+
+    try:
+        manifest = json.loads(paths[NORMALIZATION_MANIFEST_FILENAME].read_text(encoding="utf-8"))
+        split = json.loads(paths[DATA_SPLIT_FILENAME].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid normalization protocol JSON: {exc}") from exc
+    if not isinstance(manifest, dict):
+        raise ValueError("normalization protocol manifest must be a mapping")
+    if int(manifest.get("algorithm_version", -1)) != NORMALIZATION_ALGORITHM_VERSION:
+        raise ValueError("normalization protocol manifest algorithm version mismatch")
+    if not isinstance(split, dict) or int(split.get("version", -1)) != 1:
+        raise ValueError("normalization protocol data_split.json has an invalid version")
+    if not isinstance(split.get("datasets"), list):
+        raise ValueError("normalization protocol data_split.json is missing datasets")
+
+    expected_split = _require_sha256(
+        manifest.get("split_sha256"), context="normalization manifest split_sha256"
+    )
+    if _sha256_file(paths[DATA_SPLIT_FILENAME]) != expected_split:
+        raise ValueError("normalization protocol split digest mismatch")
+
+    dimensions = manifest.get("dimensions")
+    if not isinstance(dimensions, dict) or set(dimensions) != set(_CANONICAL_FEATURES):
+        raise ValueError("normalization protocol manifest dimensions are invalid")
+    for feature, dimension in dimensions.items():
+        if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+            raise ValueError(
+                f"normalization protocol dimension for {feature!r} must be positive"
+            )
+    _require_sha256(
+        manifest.get("canonical_stats_sha256"),
+        context="normalization manifest canonical_stats_sha256",
+    )
+
+    datasets = manifest.get("datasets")
+    if not isinstance(datasets, list) or not datasets:
+        raise ValueError("normalization protocol manifest datasets are missing")
+    for index, dataset in enumerate(datasets):
+        if not isinstance(dataset, dict) or not dataset.get("repo_id"):
+            raise ValueError(f"normalization protocol dataset {index} is invalid")
+        _require_sha256(
+            dataset.get("selected_stats_sha256"),
+            context=f"normalization protocol dataset {index} selected_stats_sha256",
+        )
+        identity = dataset.get("dataset_identity")
+        if not isinstance(identity, dict) or identity.get("kind") not in {
+            "local_v3",
+            "hub_snapshot",
+        }:
+            raise ValueError(
+                f"normalization protocol dataset {index} identity is missing or invalid"
+            )
+        if identity["kind"] == "local_v3":
+            if dataset.get("resolved_revision") is not None:
+                raise ValueError(
+                    f"normalization protocol dataset {index} local revision must be null"
+                )
+            content_identity = identity.get("content_identity")
+            if not isinstance(content_identity, dict):
+                raise ValueError(
+                    f"normalization protocol dataset {index} local content identity is missing"
+                )
+            _require_sha256(
+                content_identity.get("sha256"),
+                context=f"normalization protocol dataset {index} content identity",
+            )
+            validate_local_dataset_content_identity_record(content_identity)
+        else:
+            revision = identity.get("resolved_revision")
+            if (
+                not isinstance(revision, str)
+                or len(revision) != 40
+                or any(character not in "0123456789abcdef" for character in revision)
+            ):
+                raise ValueError(
+                    f"normalization protocol dataset {index} snapshot SHA is invalid"
+                )
+            if dataset.get("resolved_revision") != revision:
+                raise ValueError(
+                    f"normalization protocol dataset {index} resolved revision is inconsistent"
+                )
+            if dataset.get("requested_revision") != identity.get("requested_revision"):
+                raise ValueError(
+                    f"normalization protocol dataset {index} requested revision is inconsistent"
+                )
+
+    assets = manifest.get("assets")
+    expected_assets = {PREPROCESSOR_STATS_FILENAME, POSTPROCESSOR_STATS_FILENAME}
+    if not isinstance(assets, dict) or set(assets) != expected_assets:
+        raise ValueError("normalization protocol manifest assets are invalid")
+    for name in expected_assets:
+        expected_digest = _require_sha256(
+            assets.get(name), context=f"normalization protocol asset {name}"
+        )
+        if _sha256_file(paths[name]) != expected_digest:
+            raise ValueError(f"normalization protocol asset digest mismatch: {name}")
+
+    tactile_encoder = manifest.get("tactile_encoder")
+    if tactile_encoder is not None:
+        if not isinstance(tactile_encoder, dict):
+            raise ValueError("normalization protocol tactile encoder identity is invalid")
+        if tactile_encoder.get("repo_id") != "liuchaoyi/encoder_ckpt_05":
+            raise ValueError("normalization protocol tactile encoder repo is not approved")
+        revision = tactile_encoder.get("resolved_revision")
+        if (
+            not isinstance(revision, str)
+            or len(revision) != 40
+            or any(character not in "0123456789abcdef" for character in revision)
+        ):
+            raise ValueError("normalization protocol tactile encoder revision must be immutable")
+        _require_sha256(
+            tactile_encoder.get("checkpoint_sha256"),
+            context="normalization protocol tactile encoder checkpoint_sha256",
+        )
+    return manifest
 
 
 def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -335,6 +513,7 @@ def _validate_existing_protocol(
     canonical_stats: Mapping[str, Mapping[str, Any]],
     state_dim: int,
     action_dim: int,
+    tactile_encoder_identity: Mapping[str, Any] | None,
 ) -> NormalizationProtocolResult:
     required_paths = {
         DATA_SPLIT_FILENAME: protocol_dir / DATA_SPLIT_FILENAME,
@@ -366,6 +545,7 @@ def _validate_existing_protocol(
         state_dim=state_dim,
         action_dim=action_dim,
         asset_hashes=asset_hashes,
+        tactile_encoder_identity=tactile_encoder_identity,
     )
     if existing_manifest != expected_manifest:
         raise ValueError("normalization protocol manifest digest/source mismatch")
@@ -385,6 +565,7 @@ def build_or_validate_normalization_protocol(
     state_dim: int = 20,
     action_dim: int = 20,
     allow_create: bool = True,
+    tactile_encoder_identity: Mapping[str, Any] | None = None,
 ) -> NormalizationProtocolResult:
     """Build or strictly validate immutable train-episode normalization assets."""
 
@@ -428,6 +609,7 @@ def build_or_validate_normalization_protocol(
             canonical_stats=canonical_stats,
             state_dim=state_dim,
             action_dim=action_dim,
+            tactile_encoder_identity=tactile_encoder_identity,
         )
 
     if not allow_create:
@@ -452,6 +634,7 @@ def build_or_validate_normalization_protocol(
             state_dim=state_dim,
             action_dim=action_dim,
             asset_hashes=asset_hashes,
+            tactile_encoder_identity=tactile_encoder_identity,
         )
         _write_json(staging / NORMALIZATION_MANIFEST_FILENAME, manifest)
         _load_and_validate_assets(staging, canonical_stats)
@@ -463,6 +646,7 @@ def build_or_validate_normalization_protocol(
                 canonical_stats=canonical_stats,
                 state_dim=state_dim,
                 action_dim=action_dim,
+                tactile_encoder_identity=tactile_encoder_identity,
             )
         try:
             _rename_noreplace(staging, protocol_dir)
@@ -474,6 +658,7 @@ def build_or_validate_normalization_protocol(
                 canonical_stats=canonical_stats,
                 state_dim=state_dim,
                 action_dim=action_dim,
+                tactile_encoder_identity=tactile_encoder_identity,
             )
     finally:
         if staging.exists():

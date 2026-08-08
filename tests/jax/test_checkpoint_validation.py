@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import subprocess
@@ -190,32 +191,64 @@ def _write_bundle(path: Path, contract: CheckpointContract, *, include_weight: b
         "observation.state": {"type": "STATE", "shape": [contract.state_dim]},
         **{key: {"type": "VISUAL", "shape": [3, 512, 512]} for key in contract.image_keys},
     }
-    _write_json(
-        path / "config.json",
-        {
-            "chunk_size": contract.chunk_size,
-            "num_vlm_layers": 1,
-            "input_features": input_features,
-            "output_features": {"action": {"type": "ACTION", "shape": [contract.action_dim]}},
-            "use_tactile_encoder": use_tactile,
-            "freeze_tactile_encoder": True,
-            "tactile_keys": list(contract.tactile_keys),
-            "tactile_embedding_dim": contract.tactile_embedding_dim,
-            "tactile_num_tokens": contract.tactile_num_tokens,
-            "tactile_token_repeat_factor": contract.tactile_token_repeat_factor,
-            "lora_rank": contract.lora_rank,
-            "vlm_lora_target_modules": list(contract.vlm_lora_target_modules),
-            "module_modes": {
-                "vision": "frozen",
-                "connector": "frozen",
-                "vlm_text": "lora" if contract.vlm_lora_target_modules else "frozen",
-                "expert": "full",
-                "action": "full",
-                "state_proj": "full",
-                "tactile_proj": "full" if use_tactile else "frozen",
-            },
+    config = {
+        "chunk_size": contract.chunk_size,
+        "num_vlm_layers": 1,
+        "input_features": input_features,
+        "output_features": {"action": {"type": "ACTION", "shape": [contract.action_dim]}},
+        "use_tactile_encoder": use_tactile,
+        "freeze_tactile_encoder": True,
+        "tactile_keys": list(contract.tactile_keys),
+        "tactile_embedding_dim": contract.tactile_embedding_dim,
+        "tactile_num_tokens": contract.tactile_num_tokens,
+        "tactile_token_repeat_factor": contract.tactile_token_repeat_factor,
+        "lora_rank": contract.lora_rank,
+        "vlm_lora_target_modules": list(contract.vlm_lora_target_modules),
+        "module_modes": {
+            "vision": "frozen",
+            "connector": "frozen",
+            "vlm_text": "lora" if contract.vlm_lora_target_modules else "frozen",
+            "expert": "full",
+            "action": "full",
+            "state_proj": "full",
+            "tactile_proj": "full" if use_tactile else "frozen",
         },
-    )
+    }
+    if use_tactile:
+        encoder_files = [
+            {"path": "checkpoint.json", "size": 123, "sha256": "1" * 64},
+            {"path": "params.npz", "size": 456, "sha256": "2" * 64},
+        ]
+        encoder_sha = hashlib.sha256(
+            json.dumps(
+                {
+                    "algorithm": "tactile-encoder-checkpoint-files-v1",
+                    "files": encoder_files,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        config.update(
+            {
+                "tactile_encoder_repo_id": "liuchaoyi/encoder_ckpt_05",
+                "tactile_encoder_revision": "a" * 40,
+                "tactile_encoder_sha256": encoder_sha,
+            }
+        )
+        _write_json(
+            path / "encoder_provenance.json",
+            {
+                "version": 1,
+                "repo_id": "liuchaoyi/encoder_ckpt_05",
+                "requested_revision": "main",
+                "resolved_revision": "a" * 40,
+                "checkpoint_sha256": encoder_sha,
+                "checkpoint_files": encoder_files,
+                "checkpoint_digest_algorithm": "tactile-encoder-checkpoint-files-v1",
+            },
+        )
+    _write_json(path / "config.json", config)
     normalizer_features = {
         "observation.state": {"type": "STATE", "shape": [contract.state_dim]},
         "action": {"type": "ACTION", "shape": [contract.action_dim]},

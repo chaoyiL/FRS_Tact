@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Callable, Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -21,13 +22,13 @@ from lerobot.datasets.utils import (
     DatasetInfo,
     check_version_compatibility,
     get_safe_version,
-    has_legacy_hub_download_metadata,
     is_valid_version,
 )
-from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
+from lerobot.utils.constants import HF_LEROBOT_HUB_CACHE
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
+from .provenance import hub_snapshot_sha, local_dataset_identity
 from .tactile_cache import (
     TACTILE_EMBEDDING_OBSERVATION_KEY,
     TactileEmbeddingCache,
@@ -111,6 +112,9 @@ class DatasetSource:
     repo_id: str
     root: str | Path | None = None
     revision: str | None = None
+    # Runtime-only immutable Hub commit resolved from ``revision``.  Keep the
+    # requested label separately so manifests can record both values.
+    resolved_revision: str | None = None
     episodes: Sequence[int] | None = None
     action_key: str | None = None
     rename_map: Mapping[str, str] | None = None
@@ -123,49 +127,124 @@ class DatasetMetadataView:
 
     root: Path
     info: DatasetInfo
-    revision: str
+    revision: str | None
+    identity: dict[str, Any]
 
 
 def resolve_source_metadata(source: DatasetSource) -> DatasetMetadataView:
     """Resolve only info.json and episode Parquet metadata for a source."""
 
     requested_root = None if source.root is None else Path(source.root).expanduser()
-    local_root = requested_root or (HF_LEROBOT_HOME / source.repo_id)
-    episodes_root = local_root / EPISODES_DIR
+    local_root = requested_root
+    episodes_root = None if local_root is None else local_root / EPISODES_DIR
     has_local_metadata = (
-        (local_root / INFO_PATH).is_file()
+        local_root is not None
+        and source.resolved_revision is None
+        and (local_root / INFO_PATH).is_file()
         and any(episodes_root.glob("*/*.parquet"))
-        and not (requested_root is None and has_legacy_hub_download_metadata(local_root))
     )
-    resolved_revision = source.revision or CODEBASE_VERSION
-    if not has_local_metadata:
-        if is_valid_version(resolved_revision):
-            resolved_revision = get_safe_version(source.repo_id, resolved_revision)
-        allow_patterns = [INFO_PATH, f"{EPISODES_DIR}/*/*.parquet"]
-        if requested_root is None:
-            local_root = Path(
-                snapshot_download(
-                    source.repo_id,
-                    repo_type="dataset",
-                    revision=resolved_revision,
-                    cache_dir=HF_LEROBOT_HUB_CACHE,
-                    allow_patterns=allow_patterns,
+    if has_local_metadata:
+        resolved_revision = None
+        assert local_root is not None
+        identity = local_dataset_identity(local_root)
+    else:
+        requested_revision = source.revision or CODEBASE_VERSION
+        download_revision = source.resolved_revision or requested_revision
+        if source.resolved_revision is not None:
+            if (
+                len(source.resolved_revision) != 40
+                or any(character not in "0123456789abcdef" for character in source.resolved_revision)
+            ):
+                raise ValueError(
+                    f"dataset {source.repo_id!r} resolved revision must be a 40-character Hub SHA"
                 )
-            )
-        else:
-            requested_root.mkdir(parents=True, exist_ok=True)
+        if is_valid_version(download_revision):
+            download_revision = get_safe_version(source.repo_id, download_revision)
+        allow_patterns = [INFO_PATH, f"{EPISODES_DIR}/*/*.parquet"]
+        snapshot_root = Path(
             snapshot_download(
                 source.repo_id,
                 repo_type="dataset",
-                revision=resolved_revision,
-                local_dir=requested_root,
+                revision=download_revision,
+                cache_dir=HF_LEROBOT_HUB_CACHE,
                 allow_patterns=allow_patterns,
             )
+        )
+        resolved_revision = hub_snapshot_sha(snapshot_root)
+        if source.resolved_revision is not None and resolved_revision != source.resolved_revision:
+            raise ValueError(
+                f"dataset {source.repo_id!r} snapshot SHA mismatch: "
+                f"{resolved_revision} != {source.resolved_revision}"
+            )
+        identity = {
+            "kind": "hub_snapshot",
+            "requested_revision": requested_revision,
+            "resolved_revision": resolved_revision,
+        }
+        if requested_root is None:
+            local_root = snapshot_root
+        else:
+            requested_root.mkdir(parents=True, exist_ok=True)
+            projected_paths = [snapshot_root / INFO_PATH]
+            projected_paths.extend(sorted((snapshot_root / EPISODES_DIR).glob("*/*.parquet")))
+            for source_path in projected_paths:
+                destination = requested_root / source_path.relative_to(snapshot_root)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source_path, destination)
             local_root = requested_root
 
+    assert local_root is not None
     info = load_info(local_root)
     check_version_compatibility(source.repo_id, info.codebase_version, CODEBASE_VERSION)
-    return DatasetMetadataView(root=local_root, info=info, revision=resolved_revision)
+    return DatasetMetadataView(
+        root=local_root,
+        info=info,
+        revision=resolved_revision,
+        identity=identity,
+    )
+
+
+def pin_dataset_sources(
+    sources: Sequence[DatasetSource],
+    *,
+    expected_identities: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[DatasetSource]:
+    """Resolve mutable Hub labels once and optionally enforce sealed identities."""
+
+    if len({source.repo_id for source in sources}) != len(sources):
+        raise ValueError("dataset identity pinning requires unique repo_id values")
+    expected = dict(expected_identities or {})
+    if expected and set(expected) != {source.repo_id for source in sources}:
+        raise ValueError("sealed dataset identities do not match configured datasets")
+
+    pinned: list[DatasetSource] = []
+    for source in sources:
+        identity = expected.get(source.repo_id)
+        candidate = source
+        if identity is not None:
+            kind = identity.get("kind")
+            if kind == "hub_snapshot":
+                requested_revision = source.revision or CODEBASE_VERSION
+                if identity.get("requested_revision") != requested_revision:
+                    raise ValueError(
+                        f"sealed dataset requested revision mismatch for {source.repo_id!r}"
+                    )
+                resolved_revision = identity.get("resolved_revision")
+                if not isinstance(resolved_revision, str):
+                    raise ValueError(
+                        f"sealed dataset snapshot SHA is missing for {source.repo_id!r}"
+                    )
+                candidate = replace(source, resolved_revision=resolved_revision)
+            elif kind != "local_v3":
+                raise ValueError(f"sealed dataset identity is invalid for {source.repo_id!r}")
+
+        metadata = resolve_source_metadata(candidate)
+        if identity is not None and metadata.identity != dict(identity):
+            raise ValueError(f"sealed dataset identity mismatch for {source.repo_id!r}")
+        if metadata.identity.get("kind") == "hub_snapshot":
+            candidate = replace(candidate, resolved_revision=metadata.revision)
+        pinned.append(candidate)
+    return pinned
 
 
 def _source_episode_indices(source: DatasetSource) -> list[int]:
@@ -465,6 +544,7 @@ def split_sources_train_val(
                 repo_id=source.repo_id,
                 root=source.root,
                 revision=source.revision,
+                resolved_revision=source.resolved_revision,
                 episodes=train_ids,
                 action_key=source.action_key,
                 rename_map=source.rename_map,
@@ -476,6 +556,7 @@ def split_sources_train_val(
                 repo_id=source.repo_id,
                 root=source.root,
                 revision=source.revision,
+                resolved_revision=source.resolved_revision,
                 episodes=val_ids,
                 action_key=source.action_key,
                 rename_map=source.rename_map,
@@ -552,6 +633,7 @@ class LeRobotJaxDataLoader:
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
         tactile_embedding_cache_root: str | Path | None = None,
+        expected_dataset_identities: Mapping[str, Mapping[str, Any]] | None = None,
         fixed_subset_size: int | None = None,
         fixed_subset_seed: int = 0,
         subset_indices: Sequence[int] | None = None,
@@ -576,6 +658,10 @@ class LeRobotJaxDataLoader:
         )
         if self.tactile_embedding_cache_root is not None and not config.use_tactile_encoder:
             raise ValueError("tactile embedding cache requires use_tactile_encoder=True")
+        expected_identities = dict(expected_dataset_identities or {})
+        source_repo_ids = {source.repo_id for source in self.sources}
+        if expected_identities and not source_repo_ids <= set(expected_identities):
+            raise ValueError("expected dataset identities do not cover loader sources")
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -583,10 +669,14 @@ class LeRobotJaxDataLoader:
         self.dataset_summaries: list[dict[str, Any]] = []
 
         for source in self.sources:
+            metadata_view = resolve_source_metadata(source)
+            expected_identity = expected_identities.get(source.repo_id)
+            if expected_identity is not None and metadata_view.identity != dict(expected_identity):
+                raise ValueError(f"dataset identity mismatch for {source.repo_id!r}")
             metadata = LeRobotDatasetMetadata(
                 repo_id=source.repo_id,
-                root=source.root,
-                revision=source.revision,
+                root=metadata_view.root,
+                revision=metadata_view.revision,
             )
             resolved_action_key = resolve_action_key(metadata.features, source.action_key)
             delta_timestamps = action_delta_timestamps(
@@ -605,23 +695,6 @@ class LeRobotJaxDataLoader:
                         metadata.camera_keys,
                     )
                 )
-            if self.tactile_embedding_cache_root is not None:
-                cache_dir = tactile_cache_dir(
-                    self.tactile_embedding_cache_root,
-                    source.repo_id,
-                )
-                tactile_embedding_cache = TactileEmbeddingCache(
-                    cache_dir,
-                    repo_id=source.repo_id,
-                    revision=metadata.revision,
-                    total_frames=metadata.total_frames,
-                    tactile_keys=config.tactile_keys,
-                    source_tactile_keys=source_tactile_keys,
-                    embedding_dim=config.tactile_embedding_dim,
-                    image_size=config.tactile_image_size,
-                    encoder_path=config.tactile_encoder_path,
-                    dataset_root=metadata.root,
-                )
             visual_keys = resolve_source_visual_keys(
                 config.image_keys,
                 source_rename,
@@ -631,7 +704,7 @@ class LeRobotJaxDataLoader:
                 # by its empty-camera policy.
                 allow_missing=len(config.image_keys),
             )
-            if config.use_tactile_encoder and tactile_embedding_cache is None:
+            if config.use_tactile_encoder and self.tactile_embedding_cache_root is None:
                 visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
             dataset = LeRobotDataset(
                 repo_id=source.repo_id,
@@ -648,8 +721,31 @@ class LeRobotJaxDataLoader:
                 download_videos=True,
                 visual_keys=visual_keys,
             )
+            if expected_identity is not None and expected_identity.get("kind") == "local_v3":
+                post_construction_identity = local_dataset_identity(dataset.root)
+                if post_construction_identity != dict(expected_identity):
+                    raise ValueError(
+                        f"dataset identity changed during construction for {source.repo_id!r}"
+                    )
             if len(dataset) == 0:
                 raise ValueError(f"dataset {source.repo_id!r} contains no frames")
+            if self.tactile_embedding_cache_root is not None:
+                cache_dir = tactile_cache_dir(
+                    self.tactile_embedding_cache_root,
+                    source.repo_id,
+                )
+                tactile_embedding_cache = TactileEmbeddingCache(
+                    cache_dir,
+                    repo_id=source.repo_id,
+                    revision=metadata_view.revision,
+                    total_frames=metadata.total_frames,
+                    tactile_keys=config.tactile_keys,
+                    source_tactile_keys=source_tactile_keys,
+                    embedding_dim=config.tactile_embedding_dim,
+                    image_size=config.tactile_image_size,
+                    encoder_path=config.tactile_encoder_path,
+                    dataset_root=dataset.root,
+                )
 
             self._validate_features(
                 config,
@@ -796,10 +892,10 @@ class LeRobotJaxDataLoader:
     ) -> None:
         state_shape = tuple(features.get("observation.state", {}).get("shape", ()))
         action_shape = tuple(features[action_key].get("shape", ()))
-        if not state_shape or state_shape[-1] > config.max_state_dim:
+        if state_shape != (config.state_dim,):
             raise ValueError(
-                f"dataset {repo_id!r} state shape {state_shape} is incompatible with "
-                f"max_state_dim={config.max_state_dim}"
+                f"dataset {repo_id!r} state shape {state_shape} does not match "
+                f"checkpoint state_dim={config.state_dim}"
             )
         if action_shape != (config.action_dim,):
             raise ValueError(

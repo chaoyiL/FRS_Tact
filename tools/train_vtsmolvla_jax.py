@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 import yaml
 
@@ -21,14 +21,23 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_vtsmol
 
 
 def _config_arg(argv: Sequence[str]) -> Path | None:
+    values: list[str] = []
     for index, arg in enumerate(argv):
         if arg == "--config":
             if index + 1 >= len(argv):
                 raise ValueError("--config 后面需要跟一个 YAML 路径")
-            return Path(argv[index + 1])
+            value = argv[index + 1]
+            if not value or value.startswith("--"):
+                raise ValueError("--config 后面需要跟一个 YAML 路径")
+            values.append(value)
         if arg.startswith("--config="):
-            return Path(arg.split("=", 1)[1])
-    return None
+            value = arg.split("=", 1)[1]
+            if not value:
+                raise ValueError("--config 后面需要跟一个 YAML 路径")
+            values.append(value)
+    if len(values) > 1:
+        raise ValueError("--config 只能指定一次")
+    return Path(values[0]) if values else None
 
 
 def _argv_with_default_config(argv: Sequence[str]) -> list[str]:
@@ -37,7 +46,7 @@ def _argv_with_default_config(argv: Sequence[str]) -> list[str]:
     return ["--config", str(DEFAULT_CONFIG), *argv]
 
 
-def _validate_vt_config(path: Path) -> None:
+def _validate_vt_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"配置文件不存在：{path}")
     with path.open(encoding="utf-8") as file:
@@ -54,6 +63,7 @@ def _validate_vt_config(path: Path) -> None:
 
     required = (
         "tactile_encoder_path",
+        "tactile_encoder_repo_id",
         "tactile_keys",
         "tactile_embedding_dim",
         "tactile_num_tokens",
@@ -61,6 +71,11 @@ def _validate_vt_config(path: Path) -> None:
     missing = [name for name in required if model.get(name) in (None, "", [])]
     if missing:
         raise ValueError(f"{path} 缺少触觉配置字段：{missing}")
+    if model["tactile_encoder_repo_id"] != "liuchaoyi/encoder_ckpt_05":
+        raise ValueError(
+            "model.tactile_encoder_repo_id 必须是审批的 "
+            "liuchaoyi/encoder_ckpt_05"
+        )
 
     tactile_keys = model["tactile_keys"]
     if not isinstance(tactile_keys, list | tuple) or len(tactile_keys) != int(
@@ -107,13 +122,39 @@ def _validate_vt_config(path: Path) -> None:
         raise ValueError(
             "tactile_embedding_cache.enabled=true 时必须配置 root"
         )
+    return cfg
+
+
+def _validate_runtime_devices(config: dict[str, Any], devices: Sequence[Any]) -> None:
+    """Enforce the paper K8/K21 hardware contract before any cache work starts."""
+
+    repeat_factor = int((config.get("model") or {}).get("tactile_token_repeat_factor", 1))
+    visible = list(devices)
+    if repeat_factor > 1:
+        exact_h100_pair = len(visible) == 2 and all(
+            getattr(device, "platform", None) == "gpu"
+            and "H100" in str(getattr(device, "device_kind", "")).upper()
+            for device in visible
+        )
+        if not exact_h100_pair:
+            raise RuntimeError(
+                "K8/K21 paper runs require exactly two visible NVIDIA H100 GPUs; "
+                f"got {visible!r}"
+            )
+        return
+    if not any(getattr(device, "platform", None) == "gpu" for device in visible):
+        raise RuntimeError("K1 VT training requires at least one visible GPU")
 
 
 def main() -> None:
     argv = _argv_with_default_config(sys.argv[1:])
     config_path = _config_arg(argv)
     assert config_path is not None
-    _validate_vt_config(config_path)
+    config = _validate_vt_config(config_path)
+
+    import jax
+
+    _validate_runtime_devices(config, jax.devices())
     sys.argv = [sys.argv[0], *argv]
 
     import train_smolvla_jax as base

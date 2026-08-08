@@ -85,6 +85,9 @@ class JaxSmolVLAConfig:
     vlm_lora_target_modules: tuple[str, ...] = ()
     use_tactile_encoder: bool = False
     tactile_encoder_path: str | None = None
+    tactile_encoder_repo_id: str | None = None
+    tactile_encoder_revision: str | None = None
+    tactile_encoder_sha256: str | None = None
     freeze_tactile_encoder: bool = True
     tactile_keys: tuple[str, ...] = ()
     tactile_embedding_dim: int = 512
@@ -202,6 +205,9 @@ class JaxSmolVLAConfig:
             vlm_lora_target_modules=tuple(raw.get("vlm_lora_target_modules") or ()),
             use_tactile_encoder=bool(raw.get("use_tactile_encoder", False)),
             tactile_encoder_path=raw.get("tactile_encoder_path"),
+            tactile_encoder_repo_id=raw.get("tactile_encoder_repo_id"),
+            tactile_encoder_revision=raw.get("tactile_encoder_revision"),
+            tactile_encoder_sha256=raw.get("tactile_encoder_sha256"),
             freeze_tactile_encoder=bool(raw.get("freeze_tactile_encoder", True)),
             tactile_keys=tuple(raw.get("tactile_keys") or ()),
             tactile_embedding_dim=int(raw.get("tactile_embedding_dim", 512)),

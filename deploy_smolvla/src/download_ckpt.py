@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 import numpy as np
 from huggingface_hub import HfApi, snapshot_download
 from huggingface_hub.errors import HfHubHTTPError
+from lerobot.policies.smolvla_jax.provenance import write_tactile_encoder_provenance
 
 
 DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_05"
@@ -49,6 +50,15 @@ def normalize_repo_id(value: str) -> str:
     if value.count("/") != 1:
         raise ValueError(f"repo id 应为 namespace/name，实际为：{value!r}")
     return value
+
+
+def require_approved_repo_id(value: str) -> str:
+    repo_id = normalize_repo_id(value)
+    if repo_id != DEFAULT_REPO_ID:
+        raise ValueError(
+            f"approved tactile encoder repository is {DEFAULT_REPO_ID}, got {repo_id}"
+        )
+    return repo_id
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -112,7 +122,7 @@ def verify_checkpoint(directory: Path) -> dict:
 
 def main() -> None:
     args = parse_args()
-    repo_id = normalize_repo_id(args.repo_id)
+    repo_id = require_approved_repo_id(args.repo_id)
     output_dir = args.output_dir.expanduser().resolve()
     cache_dir = None if args.cache_dir is None else args.cache_dir.expanduser().resolve()
     token = args.token or os.environ.get("HF_TOKEN") or None
@@ -147,6 +157,12 @@ def main() -> None:
         raise
 
     metadata = verify_checkpoint(output_dir)
+    provenance = write_tactile_encoder_provenance(
+        output_dir,
+        repo_id=repo_id,
+        requested_revision=args.revision,
+        resolved_revision=resolved_revision,
+    )
     tactile_config = metadata["tactile_clip_config"]
     print("校验通过：")
     print(f"  epoch={metadata.get('epoch')}")
@@ -154,6 +170,8 @@ def main() -> None:
     print(f"  embedding_dim={tactile_config.get('embedding_dim')}")
     print(f"  tactile_image_size={tactile_config.get('tactile_image_size')}")
     print(f"  tactile_history={tactile_config.get('tactile_history')}")
+    print(f"  resolved_revision={provenance['resolved_revision']}")
+    print(f"  checkpoint_sha256={provenance['checkpoint_sha256']}")
     print(f"  本地路径={output_dir}")
 
 

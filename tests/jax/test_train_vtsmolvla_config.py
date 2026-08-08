@@ -5,8 +5,13 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tools import train_vtsmolvla_jax as vt_entry
 
-from tools.train_vtsmolvla_jax import _validate_vt_config
+from tools.train_vtsmolvla_jax import (
+    _config_arg,
+    _validate_runtime_devices,
+    _validate_vt_config,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +64,77 @@ def test_all_vt_configs_use_identical_encoder_05_path() -> None:
     assert {config["model"]["tactile_encoder_path"] for config in configs} == {
         "/workspace/checkpoints/encoder_ckpt_05"
     }
+    assert {config["model"]["tactile_encoder_repo_id"] for config in configs} == {
+        "liuchaoyi/encoder_ckpt_05"
+    }
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--config", "first.yaml", "--config", "second.yaml"],
+        ["--config=first.yaml", "--config=second.yaml"],
+        ["--config", "first.yaml", "--config=second.yaml"],
+    ],
+)
+def test_python_vt_entry_rejects_duplicate_config_before_validation(argv: list[str]) -> None:
+    with pytest.raises(ValueError, match="--config.*once|--config.*一次"):
+        _config_arg(argv)
+
+
+def test_duplicate_config_exploit_never_reaches_validation_or_base_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        vt_entry.sys,
+        "argv",
+        ["train_vtsmolvla_jax.py", "--config", "approved.yaml", "--config", "other.yaml"],
+    )
+    monkeypatch.setattr(
+        vt_entry,
+        "_validate_vt_config",
+        lambda path: pytest.fail(f"duplicate exploit reached validation: {path}"),
+    )
+
+    with pytest.raises(ValueError, match="--config.*一次"):
+        vt_entry.main()
+
+
+class _Device:
+    def __init__(self, platform: str, device_kind: str) -> None:
+        self.platform = platform
+        self.device_kind = device_kind
+
+
+@pytest.mark.parametrize(
+    "devices",
+    [
+        [_Device("gpu", "NVIDIA H100 80GB HBM3")],
+        [_Device("gpu", "NVIDIA A100"), _Device("gpu", "NVIDIA A100")],
+        [
+            _Device("gpu", "NVIDIA H100 80GB HBM3"),
+            _Device("gpu", "NVIDIA H100 80GB HBM3"),
+            _Device("gpu", "NVIDIA H100 80GB HBM3"),
+        ],
+    ],
+)
+def test_paper_configs_require_exactly_two_visible_h100s(devices: list[_Device]) -> None:
+    with pytest.raises(RuntimeError, match="exactly two|H100|two visible"):
+        _validate_runtime_devices(_valid_config(), devices)
+
+
+def test_paper_configs_accept_exactly_two_visible_h100s() -> None:
+    devices = [
+        _Device("gpu", "NVIDIA H100 80GB HBM3"),
+        _Device("gpu", "NVIDIA H100 80GB HBM3"),
+    ]
+    _validate_runtime_devices(_valid_config(), devices)
+
+
+def test_k1_keeps_single_gpu_compatibility() -> None:
+    config = _valid_config()
+    config["model"]["tactile_token_repeat_factor"] = 1
+    _validate_runtime_devices(config, [_Device("gpu", "NVIDIA RTX 4090")])
 
 
 @pytest.mark.parametrize(
@@ -84,6 +160,7 @@ def _valid_config() -> dict:
         "model": {
             "use_tactile_encoder": True,
             "tactile_encoder_path": "encoder",
+            "tactile_encoder_repo_id": "liuchaoyi/encoder_ckpt_05",
             "tactile_keys": ["t0", "t1", "t2", "t3"],
             "tactile_embedding_dim": 512,
             "tactile_num_tokens": 4,
