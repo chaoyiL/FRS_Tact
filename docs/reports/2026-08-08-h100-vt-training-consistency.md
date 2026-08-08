@@ -56,6 +56,7 @@ test "$(grep -ci 'H100' /workspace/vt_h100_smoke/logs/preflight-nvidia-smi.log)"
 uv run --no-sync python -c 'import jax; devices = jax.devices(); print(devices); assert len(devices) == 2 and all(d.platform == "gpu" and "H100" in d.device_kind.upper() for d in devices), devices' 2>&1 | tee /workspace/vt_h100_smoke/logs/preflight-jax.log
 uv run --no-sync python - <<'PY' 2>&1 | tee /workspace/vt_h100_smoke/logs/preflight-schema.log
 import json
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -64,10 +65,15 @@ cfg = yaml.safe_load(Path("configs/train_vtsmolvla_jax_tactile16.yaml").read_tex
 model = cfg["model"]
 cache_root = Path(cfg["tactile_embedding_cache"]["root"])
 cache_root.mkdir(parents=True, exist_ok=True)
-assert cache_root.is_dir() and cache_root.stat().st_mode
-probe = cache_root / ".frs_write_probe"
-probe.write_text("ok")
-probe.unlink()
+assert cache_root.is_dir(), cache_root
+probe = None
+try:
+    with tempfile.NamedTemporaryFile(dir=cache_root, prefix=".frs_write_probe-", delete=False) as file:
+        probe = Path(file.name)
+        file.write(b"ok")
+finally:
+    if probe is not None:
+        probe.unlink(missing_ok=True)
 encoder = Path(model["tactile_encoder_path"])
 checkpoint_json = encoder / "checkpoint.json"
 assert checkpoint_json.is_file(), checkpoint_json
