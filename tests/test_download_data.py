@@ -1,4 +1,3 @@
-import fcntl
 import json
 import os
 import shlex
@@ -7,6 +6,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,14 +73,35 @@ def _stats() -> dict[str, object]:
 
 
 def _write_dataset(root: Path, version: str = "v3.0") -> None:
+    rows = 2 if version == "v2.1" else 1
+    info = _info(version)
+    info["total_frames"] = rows
     (root / "meta").mkdir(parents=True, exist_ok=True)
     (root / "meta" / "info.json").write_text(
-        json.dumps(_info(version)), encoding="utf-8"
+        json.dumps(info), encoding="utf-8"
     )
     (root / "meta" / "stats.json").write_text(
         json.dumps(_stats()), encoding="utf-8"
     )
     (root / "payload.bin").write_bytes(b"source-snapshot")
+    data_path = root / "data" / "chunk-000" / "episode_000000.parquet"
+    data_path.parent.mkdir(parents=True)
+    if version == "v2.1":
+        indexes = [0, 0]
+        frame_indexes = [5, 5]
+    else:
+        indexes = [0]
+        frame_indexes = [0]
+    pq.write_table(
+        pa.table(
+            {
+                "index": pa.array(indexes, type=pa.int64()),
+                "episode_index": pa.array([0] * rows, type=pa.int64()),
+                "frame_index": pa.array(frame_indexes, type=pa.int64()),
+            }
+        ),
+        data_path,
+    )
 
 
 def _write_executable(path: Path, contents: str) -> None:
@@ -150,10 +173,17 @@ def _make_harness(tmp_path: Path, *, source_version: str = "v3.0") -> Harness:
     configs.mkdir()
     tools.mkdir()
     fake_bin.mkdir()
+    storage.mkdir()
     (fake_package / "lerobot" / "datasets").mkdir(parents=True)
     (venv / "bin").mkdir(parents=True)
     shutil.copy2(ROOT / "scripts" / "download_data.sh", scripts / "download_data.sh")
-    (venv / "bin" / "python").symlink_to(sys.executable)
+    _write_executable(
+        venv / "bin" / "python",
+        f"#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+    )
+    repair_helper = ROOT / "scripts" / "repair_v21_indexes.py"
+    if repair_helper.is_file():
+        shutil.copy2(repair_helper, scripts / repair_helper.name)
 
     for config_name in (
         "train_vtsmolvla_jax_tactile16.yaml",
@@ -201,6 +231,10 @@ class LeRobotDataset:
 
     def __getitem__(self, index):
         _log("sample", repo_id=self.repo_id, index=index)
+        fail_once = self.root / ".fail_sample_once"
+        if fail_once.exists():
+            fail_once.unlink()
+            raise RuntimeError("forced one-time sample decode failure")
         if (self.root / ".fail_sample").exists():
             raise RuntimeError("forced sample decode failure")
         return {
@@ -219,6 +253,7 @@ class LeRobotDataset:
         """#!/usr/bin/env python3
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -235,20 +270,32 @@ event = {
 with Path(os.environ["FAKE_EVENT_LOG"]).open("a", encoding="utf-8") as stream:
     stream.write(json.dumps(event) + "\\n")
 
+if "download" in args:
+    repo_id = args[args.index("download") + 1]
+    cache_root = Path(args[args.index("--cache-dir") + 1])
+    print(cache_root / f"datasets--{repo_id.replace('/', '--')}" / "snapshots" / "test-snapshot")
+    raise SystemExit(0)
+
 if "lerobot.datasets.v30.convert_dataset_v21_to_v30" in args:
     root_arg = next(value for value in args if value.startswith("--root="))
     root = Path(root_arg.split("=", 1)[1])
     repo_arg = next(value for value in args if value.startswith("--repo-id="))
     repo_id = repo_arg.split("=", 1)[1]
-    if os.environ.get("FAKE_CONVERT_FAIL_REPO") == repo_id:
-        raise SystemExit(23)
     old = root.with_name(root.name + "_old")
-    old.mkdir(parents=True, exist_ok=True)
-    (old / "conversion-leftover").write_text("keep unless cleanup", encoding="utf-8")
-    info_path = root / "meta" / "info.json"
+    converted = root.with_name(root.name + "_v30")
+    if os.environ.get("FAKE_CONVERT_FAIL_REPO") == repo_id:
+        old.mkdir(parents=True, exist_ok=True)
+        (old / "partial-old").write_text("partial", encoding="utf-8")
+        shutil.copytree(root, converted)
+        (converted / "partial-v30").write_text("partial", encoding="utf-8")
+        raise SystemExit(23)
+    shutil.copytree(root, converted)
+    info_path = converted / "meta" / "info.json"
     info = json.loads(info_path.read_text(encoding="utf-8"))
     info["codebase_version"] = "v3.0"
     info_path.write_text(json.dumps(info), encoding="utf-8")
+    root.rename(old)
+    converted.rename(root)
 
 raise SystemExit(0)
 """,
@@ -344,6 +391,64 @@ def _converter_events(events: list[dict[str, object]]) -> list[dict[str, object]
     ]
 
 
+def _read_index_columns(root: Path) -> tuple[list[int], list[int], list[int]]:
+    indexes: list[int] = []
+    episodes: list[int] = []
+    frames: list[int] = []
+    for path in sorted((root / "data").glob("*/*.parquet")):
+        table = pq.read_table(path, columns=["index", "episode_index", "frame_index"])
+        indexes.extend(table["index"].to_pylist())
+        episodes.extend(table["episode_index"].to_pylist())
+        frames.extend(table["frame_index"].to_pylist())
+    return indexes, episodes, frames
+
+
+def test_repair_helper_fixes_61811_rows_with_52802_maximum_index(tmp_path: Path) -> None:
+    root = tmp_path / "v21"
+    first_length = 52_803
+    second_length = 61_811 - first_length
+    info = _info("v2.1")
+    info["total_episodes"] = 2
+    info["total_frames"] = 61_811
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    for episode, length in enumerate((first_length, second_length)):
+        path = root / "data" / "chunk-000" / f"episode_{episode:06d}.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        start = 0 if episode == 0 else first_length
+        pq.write_table(
+            pa.table(
+                {
+                    "index": pa.array(
+                        [(start + offset) % 52_803 for offset in range(length)],
+                        type=pa.int64(),
+                    ),
+                    "episode_index": pa.array([episode] * length, type=pa.int64()),
+                    "frame_index": pa.array(
+                        [start + offset for offset in range(length)], type=pa.int64()
+                    ),
+                }
+            ),
+            path,
+        )
+    before, _, _ = _read_index_columns(root)
+    assert len(before) == 61_811
+    assert max(before) == 52_802
+
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "repair_v21_indexes.py"), str(root)],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    indexes, episodes, frames = _read_index_columns(root)
+    assert indexes == list(range(61_811))
+    assert episodes == [0] * first_length + [1] * second_length
+    assert frames == list(range(first_length)) + list(range(second_length))
+
+
 def test_requires_task1_environment_file(tmp_path: Path) -> None:
     harness = _make_harness(tmp_path)
     (harness.project / ".env.frs").unlink()
@@ -392,6 +497,70 @@ def test_orchestrates_fixed_datasets_loader_validation_and_minimal_encoder(
         assert event["HF_LEROBOT_HOME"] == str(tmp_path / "custom-lerobot-home")
 
 
+def test_uses_printed_snapshot_and_dereferences_relative_hf_symlinks_before_cleanup(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(tmp_path, source_version="v3.0")
+    source = harness.source_root(DATASETS[0])
+    repo_cache = source.parents[1]
+    blob = repo_cache / "blobs" / "payload-blob"
+    blob.parent.mkdir(parents=True, exist_ok=True)
+    source_payload = source / "payload.bin"
+    source_payload.replace(blob)
+    source_payload.symlink_to("../../blobs/payload-blob")
+    decoy = repo_cache / "snapshots" / "newer-decoy"
+    _write_dataset(decoy, "broken")
+    os.utime(decoy, (4_000_000_000, 4_000_000_000))
+
+    result = harness.run("--cleanup-source")
+
+    assert result.returncode == 0, result.stderr
+    final_payload = harness.final_root(DATASETS[0]) / "payload.bin"
+    assert final_payload.is_file()
+    assert not final_payload.is_symlink()
+    assert final_payload.read_bytes() == b"source-snapshot"
+    assert not repo_cache.exists()
+
+
+def test_rejects_symlinked_derived_ancestor_without_touching_escape_target(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(tmp_path)
+    outside = tmp_path / "outside-work"
+    outside.mkdir()
+    sentinel = outside / "keep"
+    sentinel.write_text("untouched", encoding="utf-8")
+    work_parent = harness.storage / "lerobot_v30_work"
+    work_parent.parent.mkdir(parents=True, exist_ok=True)
+    work_parent.symlink_to(outside, target_is_directory=True)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "symlink" in result.stderr.lower() or "符号链接" in result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "untouched"
+    assert not (outside / "KaiyueChen").exists()
+    assert harness.events == []
+
+
+def test_lock_creation_rejects_preexisting_symlink_without_following_it(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(tmp_path)
+    lock_root = harness.storage / ".locks"
+    lock_root.mkdir(parents=True)
+    outside = tmp_path / "outside-lock"
+    outside.write_text("do-not-truncate", encoding="utf-8")
+    (lock_root / "frs-download-data.lock").symlink_to(outside)
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "下载" in result.stderr and "运行" in result.stderr
+    assert outside.read_text(encoding="utf-8") == "do-not-truncate"
+    assert harness.events == []
+
+
 def test_existing_valid_v3_destinations_skip_download_and_rerun_idempotently(
     tmp_path: Path,
 ) -> None:
@@ -427,6 +596,32 @@ def test_existing_v3_with_invalid_schema_is_rebuilt_from_source(tmp_path: Path) 
     assert repaired["features"]["observation.state"]["shape"] == [20]
 
 
+def test_bad_candidate_does_not_replace_a_structurally_valid_existing_final(
+    tmp_path: Path,
+) -> None:
+    harness = _make_harness(tmp_path, source_version="v3.0")
+    for name in DATASETS:
+        _write_dataset(harness.final_root(name), "v3.0")
+    protected_final = harness.final_root(DATASETS[0])
+    sentinel = protected_final / "valid-final-sentinel"
+    sentinel.write_text("preserve-me", encoding="utf-8")
+    (protected_final / ".fail_sample_once").touch()
+    candidate_info_path = harness.source_root(DATASETS[0]) / "meta" / "info.json"
+    candidate_info = json.loads(candidate_info_path.read_text(encoding="utf-8"))
+    candidate_info["features"]["actions"]["shape"] = [19]
+    candidate_info_path.write_text(json.dumps(candidate_info), encoding="utf-8")
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "actions" in result.stderr
+    assert sentinel.read_text(encoding="utf-8") == "preserve-me"
+    final_info = json.loads(
+        (protected_final / "meta" / "info.json").read_text(encoding="utf-8")
+    )
+    assert final_info["features"]["actions"]["shape"] == [20]
+
+
 def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Path) -> None:
     harness = _make_harness(tmp_path, source_version="v2.1")
 
@@ -445,6 +640,10 @@ def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Pat
             (harness.final_root(name) / "meta" / "info.json").read_text(encoding="utf-8")
         )
         assert info["codebase_version"] == "v3.0"
+        indexes, episodes, frames = _read_index_columns(harness.final_root(name))
+        assert indexes == [0, 1]
+        assert episodes == [0, 0]
+        assert frames == [0, 1]
 
 
 def test_failed_conversion_preserves_source_even_when_cleanup_was_requested(
@@ -460,7 +659,20 @@ def test_failed_conversion_preserves_source_even_when_cleanup_was_requested(
     assert len(_converter_events(harness.events)) == 1
     assert "转换失败" in result.stderr
     assert harness.source_root("pick_tube_01").exists()
+    work_root = harness.work_root("pick_tube_01")
+    assert work_root.exists()
+    assert work_root.with_name(work_root.name + "_old").joinpath("partial-old").is_file()
+    assert work_root.with_name(work_root.name + "_v30").joinpath("partial-v30").is_file()
     assert not [event for event in harness.events if event["kind"] == "encoder"]
+
+    with (harness.project / ".env.frs").open("a", encoding="utf-8") as stream:
+        stream.write("unset FAKE_CONVERT_FAIL_REPO\n")
+    recovered = harness.run()
+
+    assert recovered.returncode == 0, recovered.stderr
+    assert harness.source_root("pick_tube_01").exists()
+    assert not work_root.with_name(work_root.name + "_v30").exists()
+    assert not work_root.with_name(work_root.name + "_old").joinpath("partial-old").exists()
 
 
 def test_schema_validation_failure_blocks_encoder_and_preserves_source(tmp_path: Path) -> None:
@@ -514,10 +726,9 @@ def test_encoder_metadata_must_resolve_to_an_existing_params_archive(tmp_path: P
 def test_second_process_is_rejected_by_scoped_download_lock(tmp_path: Path) -> None:
     harness = _make_harness(tmp_path)
     lock_path = harness.storage / ".locks" / "frs-download-data.lock"
-    lock_path.parent.mkdir(parents=True)
-    with lock_path.open("w", encoding="utf-8") as held_lock:
-        fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        result = harness.run()
+    lock_path.mkdir(parents=True)
+
+    result = harness.run()
 
     assert result.returncode != 0
     assert "下载" in result.stderr and "运行" in result.stderr

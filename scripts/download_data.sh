@@ -12,6 +12,8 @@ CLEANUP_SOURCE=0
 PROJECT_PYTHON=""
 UV_BIN=""
 DATASET_ALREADY_VALIDATED=0
+LOCK_DIR=""
+LOCK_OWNED=0
 
 log() {
     echo "[download-data] $*" >&2
@@ -72,22 +74,92 @@ require_environment() {
     UV_BIN="$(command -v uv)"
 }
 
+assert_safe_path() {
+    local base="$1"
+    local candidate="$2"
+    "${PROJECT_PYTHON}" - "${base}" "${candidate}" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+
+base = Path(os.path.abspath(sys.argv[1]))
+candidate = Path(os.path.abspath(sys.argv[2]))
+if not base.is_dir():
+    raise ValueError(f"Safety base is not a directory: {base}")
+try:
+    relative = candidate.relative_to(base)
+except ValueError as exc:
+    raise ValueError(f"Path escapes safety base {base}: {candidate}") from exc
+
+cursor = base
+for component in relative.parts:
+    cursor = cursor / component
+    if cursor.is_symlink():
+        raise ValueError(f"Path contains a symlink component: {cursor}")
+    if cursor.exists() and cursor != candidate and not cursor.is_dir():
+        raise ValueError(f"Path ancestor is not a directory: {cursor}")
+
+resolved_base = base.resolve()
+resolved_parent = candidate.parent.resolve(strict=False)
+try:
+    resolved_parent.relative_to(resolved_base)
+except ValueError as exc:
+    raise ValueError(
+        f"Resolved parent escapes safety base {resolved_base}: {resolved_parent}"
+    ) from exc
+PY
+}
+
+ensure_safe_directory() {
+    local base="$1"
+    local directory="$2"
+    assert_safe_path "${base}" "${directory}" || \
+        fail "拒绝不安全目录（symlink/越界）：${directory}"
+    mkdir -p -- "${directory}"
+    assert_safe_path "${base}" "${directory}" || \
+        fail "目录创建后安全检查失败：${directory}"
+}
+
+safe_remove_tree() {
+    local base="$1"
+    local target="$2"
+    assert_safe_path "${base}" "${target}" || \
+        fail "拒绝递归删除不安全路径（symlink/越界）：${target}"
+    if [[ -e "${target}" || -L "${target}" ]]; then
+        rm -rf -- "${target}"
+    fi
+}
+
 configure_paths() {
+    [[ -d "${FRS_STORAGE_ROOT}" ]] || \
+        fail "FRS_STORAGE_ROOT 不存在；请重新运行 scripts/setup_env.sh：${FRS_STORAGE_ROOT}"
+    [[ -d "${HF_HOME}" ]] || fail "HF_HOME 不存在：${HF_HOME}"
     HF_DATASET_CACHE_DIR="${HF_HOME}/datasets"
     V30_ROOT="${FRS_STORAGE_ROOT}/lerobot_v30"
     V30_WORK_ROOT="${FRS_STORAGE_ROOT}/lerobot_v30_work"
     LOCK_ROOT="${FRS_STORAGE_ROOT}/.locks"
-    mkdir -p \
-        "${HF_DATASET_CACHE_DIR}" \
-        "${V30_ROOT}/${HF_NAMESPACE}" \
-        "${V30_WORK_ROOT}/${HF_NAMESPACE}" \
-        "${LOCK_ROOT}"
+    ensure_safe_directory "${HF_HOME}" "${HF_DATASET_CACHE_DIR}"
+    ensure_safe_directory "${FRS_STORAGE_ROOT}" "${V30_ROOT}/${HF_NAMESPACE}"
+    ensure_safe_directory "${FRS_STORAGE_ROOT}" "${V30_WORK_ROOT}/${HF_NAMESPACE}"
+    ensure_safe_directory "${FRS_STORAGE_ROOT}" "${LOCK_ROOT}"
+}
+
+release_download_lock() {
+    if ((LOCK_OWNED)) && [[ -n "${LOCK_DIR}" ]]; then
+        rmdir -- "${LOCK_DIR}" 2>/dev/null || true
+    fi
 }
 
 acquire_download_lock() {
-    command -v flock >/dev/null 2>&1 || fail "找不到 flock（util-linux）"
-    exec 9>"${LOCK_ROOT}/frs-download-data.lock"
-    flock -n 9 || fail "另一个 FRS 数据下载正在运行"
+    LOCK_DIR="${LOCK_ROOT}/frs-download-data.lock"
+    assert_safe_path "${LOCK_ROOT}" "${LOCK_DIR}" || \
+        fail "下载锁路径包含 symlink 或越界，拒绝运行：${LOCK_DIR}"
+    if ! mkdir -- "${LOCK_DIR}" 2>/dev/null; then
+        fail "另一个 FRS 数据下载正在运行，或下载锁路径不安全：${LOCK_DIR}"
+    fi
+    LOCK_OWNED=1
+    trap release_download_lock EXIT INT TERM
 }
 
 repo_id_for() {
@@ -123,33 +195,37 @@ else:
 PY
 }
 
-latest_snapshot_for() {
-    local dataset_name="$1"
-    local snapshots_root
-    snapshots_root="$(source_cache_for "${dataset_name}")/snapshots"
-    [[ -d "${snapshots_root}" ]] || return 0
-    find "${snapshots_root}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' \
-        | sort -nr \
-        | head -n 1 \
-        | cut -d' ' -f2-
-}
-
 clear_conversion_paths() {
     local dataset_name="$1"
     local work_root
+    local work_namespace_root
     work_root="$(work_root_for "${dataset_name}")"
-    # These are fixed derived paths for one of the four known repositories.
-    rm -rf -- "${work_root}" "${work_root}_old" "${work_root}_v30"
+    work_namespace_root="${V30_WORK_ROOT}/${HF_NAMESPACE}"
+    safe_remove_tree "${work_namespace_root}" "${work_root}"
+    safe_remove_tree "${work_namespace_root}" "${work_root}_old"
+    safe_remove_tree "${work_namespace_root}" "${work_root}_v30"
 }
 
-copy_snapshot_to_work() {
+materialize_snapshot_to_work() {
     local dataset_name="$1"
     local snapshot_root="$2"
+    local source_cache
+    local work_root
+    source_cache="$(source_cache_for "${dataset_name}")"
+    work_root="$(work_root_for "${dataset_name}")"
+    assert_safe_path "${source_cache}" "${snapshot_root}" || \
+        fail "hf download 返回了不安全的 snapshot 路径：${snapshot_root}"
+    clear_conversion_paths "${dataset_name}"
+    ensure_safe_directory "${V30_WORK_ROOT}/${HF_NAMESPACE}" "${work_root}"
+    command -v rsync >/dev/null 2>&1 || fail "找不到 rsync；请重新运行 scripts/setup_env.sh"
+    rsync -aL -- "${snapshot_root}/" "${work_root}/"
+}
+
+repair_v21_indexes() {
+    local dataset_name="$1"
     local work_root
     work_root="$(work_root_for "${dataset_name}")"
-    clear_conversion_paths "${dataset_name}"
-    mkdir -p "${work_root}"
-    cp -a -- "${snapshot_root}/." "${work_root}/"
+    "${PROJECT_PYTHON}" "${PROJECT_ROOT}/scripts/repair_v21_indexes.py" "${work_root}"
 }
 
 convert_v21_to_v30() {
@@ -175,14 +251,39 @@ promote_work_to_final() {
     local dataset_name="$1"
     local work_root
     local final_root
+    local backup_root
+    local final_namespace_root
     work_root="$(work_root_for "${dataset_name}")"
     final_root="$(final_root_for "${dataset_name}")"
+    backup_root="${final_root}_previous"
+    final_namespace_root="${V30_ROOT}/${HF_NAMESPACE}"
     [[ "$(dataset_version "${work_root}")" == "v3.0" ]] || \
         fail "转换结果不是 v3.0：${work_root}"
 
-    # final_root is a fixed derived repository root, never a caller-provided path.
-    rm -rf -- "${final_root}"
-    mv -- "${work_root}" "${final_root}"
+    assert_safe_path "${V30_WORK_ROOT}/${HF_NAMESPACE}" "${work_root}" || \
+        fail "候选数据集路径不安全：${work_root}"
+    assert_safe_path "${final_namespace_root}" "${final_root}" || \
+        fail "final 数据集路径不安全：${final_root}"
+    assert_safe_path "${final_namespace_root}" "${backup_root}" || \
+        fail "final 备份路径不安全：${backup_root}"
+
+    if [[ -e "${backup_root}" || -L "${backup_root}" ]]; then
+        if [[ ! -e "${final_root}" && ! -L "${final_root}" ]]; then
+            mv -- "${backup_root}" "${final_root}"
+        else
+            safe_remove_tree "${final_namespace_root}" "${backup_root}"
+        fi
+    fi
+    if [[ -e "${final_root}" || -L "${final_root}" ]]; then
+        mv -- "${final_root}" "${backup_root}"
+    fi
+    if ! mv -- "${work_root}" "${final_root}"; then
+        if [[ -e "${backup_root}" || -L "${backup_root}" ]]; then
+            mv -- "${backup_root}" "${final_root}"
+        fi
+        fail "提升候选数据集失败，旧 final 已恢复：${final_root}"
+    fi
+    safe_remove_tree "${final_namespace_root}" "${backup_root}"
 }
 
 download_and_prepare_dataset() {
@@ -191,6 +292,7 @@ download_and_prepare_dataset() {
     local final_root
     local snapshot_root
     local source_version
+    local download_output
     repo_id="$(repo_id_for "${dataset_name}")"
     final_root="$(final_root_for "${dataset_name}")"
     DATASET_ALREADY_VALIDATED=0
@@ -207,41 +309,46 @@ download_and_prepare_dataset() {
     fi
 
     log "下载数据集：${repo_id}"
-    "${UV_BIN}" run --no-sync hf download "${repo_id}" \
+    if ! download_output="$("${UV_BIN}" run --no-sync hf download "${repo_id}" \
         --repo-type dataset \
-        --cache-dir "${HF_DATASET_CACHE_DIR}"
-
-    snapshot_root="$(latest_snapshot_for "${dataset_name}")"
+        --cache-dir "${HF_DATASET_CACHE_DIR}")"
+    then
+        fail "下载失败：${repo_id}"
+    fi
+    snapshot_root="$(printf '%s\n' "${download_output}" | awk 'NF { path = $0 } END { print path }')"
     [[ -n "${snapshot_root}" && -d "${snapshot_root}" ]] || \
-        fail "下载后未找到 ${repo_id} snapshot"
+        fail "hf download 未返回有效 ${repo_id} snapshot：${snapshot_root@Q}"
     source_version="$(dataset_version "${snapshot_root}")"
     case "${source_version}" in
         v3.0)
-            copy_snapshot_to_work "${dataset_name}" "${snapshot_root}"
+            materialize_snapshot_to_work "${dataset_name}" "${snapshot_root}"
             ;;
         v2.1)
-            copy_snapshot_to_work "${dataset_name}" "${snapshot_root}"
+            materialize_snapshot_to_work "${dataset_name}" "${snapshot_root}"
+            repair_v21_indexes "${dataset_name}"
             convert_v21_to_v30 "${dataset_name}"
             ;;
         *)
             fail "${repo_id} 版本为 ${source_version@Q}；只支持 v2.1 或 v3.0"
             ;;
     esac
-    promote_work_to_final "${dataset_name}"
 }
 
 validate_dataset() {
     local dataset_name="$1"
     local repo_id
-    local final_root
+    local dataset_root
     repo_id="$(repo_id_for "${dataset_name}")"
-    final_root="$(final_root_for "${dataset_name}")"
+    dataset_root="${2:-$(final_root_for "${dataset_name}")}"
 
-    "${PROJECT_PYTHON}" - "${repo_id}" "${final_root}" <<'PY' || return 1
+    "${PROJECT_PYTHON}" - "${repo_id}" "${dataset_root}" <<'PY' || return 1
 import json
 import math
 import sys
 from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 
@@ -325,6 +432,53 @@ for key in ("observation.state", "actions"):
         if stat_name == "count" and any(value <= 0 for value in values):
             fail(f"{key}.count 必须为正数")
 
+data_paths = sorted((root / "data").glob("*/*.parquet"))
+if not data_paths:
+    fail("data 目录没有 parquet")
+expected_index = 0
+current_episode = -1
+expected_frame = 0
+for data_path in data_paths:
+    table = pq.read_table(
+        data_path, columns=["index", "episode_index", "frame_index"]
+    )
+    for column_name in ("index", "episode_index", "frame_index"):
+        if not pa.types.is_integer(table.schema.field(column_name).type):
+            fail(f"{data_path} 的 {column_name} 必须是整数列")
+    for index_value, episode_value, frame_value in zip(
+        table["index"].to_pylist(),
+        table["episode_index"].to_pylist(),
+        table["frame_index"].to_pylist(),
+        strict=True,
+    ):
+        if index_value != expected_index:
+            fail(
+                f"global index 必须连续且唯一：位置 {expected_index} 得到 {index_value}"
+            )
+        if episode_value != current_episode:
+            if episode_value != current_episode + 1:
+                fail(
+                    f"episode_index 必须按 0..N-1 连续：{current_episode} 后得到 {episode_value}"
+                )
+            current_episode = episode_value
+            expected_frame = 0
+        if frame_value != expected_frame:
+            fail(
+                f"episode {current_episode} frame_index 必须连续："
+                f"期望 {expected_frame}，得到 {frame_value}"
+            )
+        expected_index += 1
+        expected_frame += 1
+if expected_index != info["total_frames"]:
+    fail(
+        f"parquet 行数必须等于 total_frames：{expected_index} != {info['total_frames']}"
+    )
+if current_episode + 1 != info["total_episodes"]:
+    fail(
+        "parquet episode 数必须等于 total_episodes："
+        f"{current_episode + 1} != {info['total_episodes']}"
+    )
+
 metadata = LeRobotDatasetMetadata(repo_id=repo_id, root=root)
 if metadata.total_episodes < 1:
     fail("LeRobotDatasetMetadata 未解析到 episode")
@@ -405,14 +559,15 @@ cleanup_successful_sources() {
     local dataset_name
     local source_cache
     local work_root
+    local work_namespace_root
+    work_namespace_root="${V30_WORK_ROOT}/${HF_NAMESPACE}"
     for dataset_name in "${DATASETS[@]}"; do
         source_cache="$(source_cache_for "${dataset_name}")"
         work_root="$(work_root_for "${dataset_name}")"
-        rm -rf -- \
-            "${source_cache}" \
-            "${work_root}" \
-            "${work_root}_old" \
-            "${work_root}_v30"
+        safe_remove_tree "${HF_DATASET_CACHE_DIR}" "${source_cache}"
+        safe_remove_tree "${work_namespace_root}" "${work_root}"
+        safe_remove_tree "${work_namespace_root}" "${work_root}_old"
+        safe_remove_tree "${work_namespace_root}" "${work_root}_v30"
     done
     log "已清理四个已验证数据集的源 snapshot cache 和转换残留"
 }
@@ -426,10 +581,13 @@ main() {
 
     local dataset_name
     local encoder_root
+    local candidate_root
     for dataset_name in "${DATASETS[@]}"; do
         download_and_prepare_dataset "${dataset_name}"
         if ((!DATASET_ALREADY_VALIDATED)); then
-            validate_dataset "${dataset_name}"
+            candidate_root="$(work_root_for "${dataset_name}")"
+            validate_dataset "${dataset_name}" "${candidate_root}"
+            promote_work_to_final "${dataset_name}"
         fi
     done
 
