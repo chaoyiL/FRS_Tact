@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from dataclasses import replace
 
 import jax
-import jax.numpy as jnp
 import numpy as np
 
 from train_smolvla import lora as visual_lora
@@ -69,34 +68,14 @@ def initialize_lora_params(
     *,
     seed: int = 0,
 ) -> dict[str, Array]:
-    output = visual_lora.initialize_lora_params(params, _visual_config(config), seed=seed)
-    if resolve_module_modes(config)[TACTILE_MODULE_NAME] != "lora":
-        return output
-    if config.lora_rank <= 0:
-        raise ValueError(f"lora_rank must be positive, got {config.lora_rank}")
-    if config.lora_alpha <= 0:
-        raise ValueError(f"lora_alpha must be positive, got {config.lora_alpha}")
-    weight = output.get("model.tactile_proj.weight")
-    if weight is None:
-        return output
-    out_features, in_features = weight.shape
-    rng = np.random.default_rng(seed + 211)
-    output.setdefault(
-        "model.tactile_proj.lora_a",
-        jnp.asarray(
-            rng.normal(0.0, 1.0 / np.sqrt(float(in_features)), (config.lora_rank, in_features)),
-            dtype=jnp.float32,
-        ),
+    return visual_lora.initialize_lora_params_for_modules(
+        params,
+        config,
+        module_modes=resolve_module_modes(config),
+        module_resolver=module_for_parameter,
+        weight_eligibility=is_lora_eligible_weight,
+        seed=seed,
     )
-    output.setdefault(
-        "model.tactile_proj.lora_b",
-        jnp.zeros((out_features, config.lora_rank), dtype=jnp.float32),
-    )
-    output.setdefault(
-        "model.tactile_proj.lora_scale",
-        jnp.asarray(config.lora_alpha / config.lora_rank, dtype=jnp.float32),
-    )
-    return output
 
 
 def is_trainable_parameter(name: str, config: VTSmolVLAConfig) -> bool:

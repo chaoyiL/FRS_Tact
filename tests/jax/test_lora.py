@@ -184,6 +184,42 @@ def test_tactile_projection_lora_initializes_and_partitions_adapter() -> None:
     assert not is_vt_trainable_parameter("model.tactile_proj.lora_scale", config)
 
 
+def test_vt_lora_initialization_matches_legacy_parameter_order() -> None:
+    from lerobot.policies.smolvla_jax.lora import (
+        initialize_lora_params as initialize_legacy_lora_params,
+    )
+    from train_vtsmolvla.configuration import VTSmolVLAConfig
+    from train_vtsmolvla.lora import initialize_lora_params as initialize_vt_lora_params
+
+    config = replace(
+        VTSmolVLAConfig(),
+        use_tactile_encoder=True,
+        module_modes={**all_modes(vision="lora"), "tactile_proj": "lora"},
+        lora_rank=2,
+        lora_alpha=4.0,
+    )
+    visual_q_proj = (
+        "model.vlm_with_expert.vlm.model.vision_model.encoder.layers.0."
+        "self_attn.q_proj"
+    )
+    params = {
+        "model.tactile_proj.weight": jnp.ones((4, 3), dtype=jnp.float32),
+        f"{visual_q_proj}.weight": jnp.ones((5, 4), dtype=jnp.float32),
+    }
+
+    expected = initialize_legacy_lora_params(params, config, seed=17)
+    actual = initialize_vt_lora_params(params, config, seed=17)
+
+    np.testing.assert_array_equal(
+        actual["model.tactile_proj.lora_a"],
+        expected["model.tactile_proj.lora_a"],
+    )
+    np.testing.assert_array_equal(
+        actual[f"{visual_q_proj}.lora_a"],
+        expected[f"{visual_q_proj}.lora_a"],
+    )
+
+
 def test_vlm_lora_targets_can_match_vb3_qv_only() -> None:
     config = replace(
         JaxSmolVLAConfig(),

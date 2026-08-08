@@ -128,7 +128,19 @@ def test_key_mapped_dataset_augments_only_selected_visual_keys() -> None:
     np.testing.assert_array_equal(sample["observation.images.auxiliary"], np.ones((3, 4, 4)))
 
 
-def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
+@pytest.mark.parametrize(
+    ("episode_index", "frame_index"),
+    [
+        (torch.tensor(3), torch.tensor(5)),
+        (np.int64(3), np.int32(5)),
+        (3, 5),
+    ],
+    ids=("torch", "numpy", "python"),
+)
+def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame(
+    episode_index,
+    frame_index,
+) -> None:
     from train_vtsmolvla.data import _VTKeyMappedLeRobotDataset as VtKeyMappedDataset
     from train_vtsmolvla.tactile_cache import TACTILE_EMBEDDING_OBSERVATION_KEY
 
@@ -148,8 +160,8 @@ def test_key_mapped_dataset_loads_cached_embedding_by_absolute_frame() -> None:
             return {
                 "actions": torch.zeros(2, 3),
                 "observation.images.cam0": torch.zeros(3, 4, 4),
-                "episode_index": torch.tensor(3),
-                "frame_index": torch.tensor(5),
+                "episode_index": episode_index,
+                "frame_index": frame_index,
                 "task": "pick cube",
             }
 

@@ -10,6 +10,7 @@ from train_smolvla.data import (
     LeRobotDatasetMetadata,
     LeRobotJaxDataLoader,
     _KeyMappedLeRobotDataset,
+    _to_numpy,
     resolve_source_visual_keys,
 )
 
@@ -41,8 +42,8 @@ class _VTKeyMappedLeRobotDataset(_KeyMappedLeRobotDataset):
     ) -> None:
         if self.tactile_embedding_cache is None:
             return
-        episode_index = int(source_sample["episode_index"].reshape(()).item())
-        frame_index = int(source_sample["frame_index"].reshape(()).item())
+        episode_index = int(_to_numpy(source_sample["episode_index"]).reshape(()).item())
+        frame_index = int(_to_numpy(source_sample["frame_index"]).reshape(()).item())
         episode = self.dataset.meta.episodes[episode_index]
         absolute_index = int(episode["dataset_from_index"]) + frame_index
         mapped[TACTILE_EMBEDDING_OBSERVATION_KEY] = self.tactile_embedding_cache[

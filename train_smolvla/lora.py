@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 import jax
@@ -143,7 +143,28 @@ def initialize_lora_params(
 ) -> dict[str, Array]:
     """Add zero-impact LoRA adapters for every linear layer in LoRA modules."""
 
-    modes = resolve_module_modes(config)
+    return initialize_lora_params_for_modules(
+        params,
+        config,
+        module_modes=resolve_module_modes(config),
+        module_resolver=module_for_parameter,
+        weight_eligibility=is_lora_eligible_weight,
+        seed=seed,
+    )
+
+
+def initialize_lora_params_for_modules(
+    params: Mapping[str, Array],
+    config: JaxSmolVLAConfig,
+    *,
+    module_modes: Mapping[str, TrainMode],
+    module_resolver: Callable[[str], str | None],
+    weight_eligibility: Callable[[str, Array | np.ndarray | None], bool],
+    seed: int = 0,
+) -> dict[str, Array]:
+    """Initialize adapters in one stable pass using caller-provided module rules."""
+
+    modes = dict(module_modes)
     if not any(mode == "lora" for mode in modes.values()):
         return dict(params)
     if config.lora_rank <= 0:
@@ -155,8 +176,12 @@ def initialize_lora_params(
     rng = np.random.default_rng(seed)
     scale = np.float32(config.lora_alpha / config.lora_rank)
     for name, value in tuple(params.items()):
-        module = module_for_parameter(name)
-        if module is None or modes[module] != "lora" or not is_lora_eligible_weight(name, value):
+        module = module_resolver(name)
+        if (
+            module is None
+            or modes.get(module) != "lora"
+            or not weight_eligibility(name, value)
+        ):
             continue
         if module == "vlm_text" and not _matches_vlm_lora_target(name, config):
             continue
