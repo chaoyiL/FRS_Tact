@@ -64,6 +64,6 @@ fi
 command+=("${forwarded[@]}")
 
 log "下载 tactile encoder checkpoint"
-log "默认仓库：liuchaoyi/encoder_ckpt_06"
-log "默认目录：${PROJECT_ROOT}/checkpoints/encoder/encoder_ckpt_06"
+log "默认仓库：liuchaoyi/encoder_ckpt_05"
+log "默认目录：${PROJECT_ROOT}/checkpoints/encoder/encoder_ckpt_05"
 "${command[@]}"

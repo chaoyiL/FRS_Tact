@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_default_encoder_output_is_project_local() -> None:
-    assert download_ckpt.DEFAULT_OUTPUT_DIR == ROOT / "checkpoints" / "encoder" / "encoder_ckpt_06"
+    assert download_ckpt.DEFAULT_REPO_ID == "liuchaoyi/encoder_ckpt_05"
+    assert download_ckpt.DEFAULT_OUTPUT_DIR == ROOT / "checkpoints" / "encoder" / "encoder_ckpt_05"
 
 
 def test_output_dir_override_is_preserved(tmp_path: Path) -> None:
@@ -49,9 +50,9 @@ def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -
     )
 
     assert result.returncode == 0, result.stderr
-    assert "默认仓库：liuchaoyi/encoder_ckpt_06" in result.stdout
+    assert "默认仓库：liuchaoyi/encoder_ckpt_05" in result.stdout
     assert (
-        f"默认目录：{project / 'checkpoints' / 'encoder' / 'encoder_ckpt_06'}"
+        f"默认目录：{project / 'checkpoints' / 'encoder' / 'encoder_ckpt_05'}"
         in result.stdout
     )
     output_lines = result.stdout.splitlines()

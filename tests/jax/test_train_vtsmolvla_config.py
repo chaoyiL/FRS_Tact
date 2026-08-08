@@ -41,6 +41,18 @@ def test_paper_ratio_configs_only_change_factor_and_output_identity() -> None:
     assert len({base["output"], tactile16["output"], tactile32["output"]}) == 3
 
 
+def test_all_vt_configs_use_identical_encoder_05_path() -> None:
+    configs = [
+        _load_repo_yaml("train_vtsmolvla_jax.yaml"),
+        _load_repo_yaml("train_vtsmolvla_jax_tactile16.yaml"),
+        _load_repo_yaml("train_vtsmolvla_jax_tactile32.yaml"),
+    ]
+
+    assert {config["model"]["tactile_encoder_path"] for config in configs} == {
+        "/workspace/checkpoints/encoder_ckpt_05"
+    }
+
+
 def _valid_config() -> dict:
     return {
         "model": {

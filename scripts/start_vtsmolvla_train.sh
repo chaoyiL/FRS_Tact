@@ -24,6 +24,48 @@ fail() {
     exit 1
 }
 
+usage() {
+    printf '%s\n' \
+        "用法：scripts/start_vtsmolvla_train.sh [--config PATH]" \
+        "" \
+        "默认使用 configs/train_vtsmolvla_jax.yaml。" \
+        "相对路径以项目根目录为基准。"
+}
+
+parse_arguments() {
+    local config_set=0
+    while (($#)); do
+        case "$1" in
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            --config)
+                (($# >= 2)) || fail "--config 需要一个路径"
+                ((config_set == 0)) || fail "--config 只能指定一次"
+                [[ -n "$2" ]] || fail "--config 需要一个路径"
+                CONFIG_PATH="$2"
+                config_set=1
+                shift 2
+                ;;
+            --config=*)
+                ((config_set == 0)) || fail "--config 只能指定一次"
+                CONFIG_PATH="${1#--config=}"
+                [[ -n "${CONFIG_PATH}" ]] || fail "--config 需要一个路径"
+                config_set=1
+                shift
+                ;;
+            *)
+                fail "未知参数：$1"
+                ;;
+        esac
+    done
+
+    if ((config_set)) && [[ "${CONFIG_PATH}" != /* ]]; then
+        CONFIG_PATH="${PROJECT_ROOT}/${CONFIG_PATH}"
+    fi
+}
+
 on_error() {
     local status=$?
     echo "[vtsmolvla] 训练链路在第 ${BASH_LINENO[0]} 行失败，退出码 ${status}" >&2
@@ -71,7 +113,7 @@ start_tmux_if_needed() {
         fail "tmux session ${TMUX_SESSION} 已存在。查看：tmux attach -t ${TMUX_SESSION}"
     fi
     local inner_command
-    printf -v inner_command 'FRS_FOREGROUND=1 bash %q' "${SCRIPT_PATH}"
+    printf -v inner_command 'FRS_FOREGROUND=1 bash %q --config %q' "${SCRIPT_PATH}" "${CONFIG_PATH}"
     tmux new-session -d -s "${TMUX_SESSION}" -c "${PROJECT_ROOT}" "${inner_command}"
     log "训练已在 tmux 后台启动：${TMUX_SESSION}"
     log "查看实时输出：tmux attach -t ${TMUX_SESSION}"
@@ -162,6 +204,7 @@ run_pipeline() {
         2>&1 | tee -a "${train_log}"
 }
 
+parse_arguments "$@"
 load_environment
 read_yaml_settings
 preflight
