@@ -14,6 +14,8 @@ from typing import Sequence
 
 import yaml
 
+from lerobot.policies.smolvla_jax.atomic_checkpoint import paths_overlap
+
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_vtsmolvla_jax.yaml"
 
@@ -86,9 +88,8 @@ def _validate_vt_config(path: Path) -> None:
             raise ValueError(
                 "K8/K21 配置必须显式设置 normalization.protocol_dir"
             )
-        if Path(normalization["protocol_dir"]).expanduser() == Path(
-            cfg.get("output", "")
-        ).expanduser():
+        output = cfg.get("output")
+        if output and paths_overlap(normalization["protocol_dir"], output):
             raise ValueError("normalization.protocol_dir 必须独立于单个 K 的 output")
 
     image_keys = model.get("image_keys") or []

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import torch
 from safetensors.flax import load_file as load_safetensors_file
@@ -293,14 +296,11 @@ def test_parse_dataset_sources() -> None:
 
 
 def test_split_sources_train_val_uses_explicit_episodes(monkeypatch) -> None:
-    class FakeMeta:
-        def __init__(self, **kwargs):
-            del kwargs
-            self.total_episodes = 100
-
     monkeypatch.setattr(
         "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
-        FakeMeta,
+        lambda **kwargs: pytest.fail(
+            f"explicit split must not construct full metadata: {kwargs}"
+        ),
     )
     sources = [
         DatasetSource(
@@ -315,6 +315,99 @@ def test_split_sources_train_val_uses_explicit_episodes(monkeypatch) -> None:
     assert set(train[0].episodes).isdisjoint(val[0].episodes)
     assert len(train[0].episodes) + len(val[0].episodes) == 10
     assert len(val[0].episodes) == 2
+
+
+def test_split_sources_without_explicit_episodes_never_loads_full_stats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "dataset"
+    info_path = root / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True)
+    info_path.write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "fps": 30,
+                "total_episodes": 3,
+                "features": {
+                    "observation.state": {"dtype": "float32", "shape": [20]},
+                    "actions": {"dtype": "float32", "shape": [20]},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    episodes_path = root / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    episodes_path.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"episode_index": index} for index in (2, 4, 7)]), episodes_path)
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
+        lambda **kwargs: pytest.fail(f"full metadata/global stats were accessed: {kwargs}"),
+    )
+
+    train, val = split_sources_train_val(
+        [DatasetSource(repo_id="org/a", root=root, action_key="actions")],
+        val_fraction=1 / 3,
+        seed=0,
+    )
+
+    selected = list(train[0].episodes or []) + list(val[0].episodes or [])
+    assert sorted(selected) == [2, 4, 7]
+    assert len(val[0].episodes or []) == 1
+
+
+def test_remote_split_download_projects_only_info_and_episode_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    info_path = snapshot / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True)
+    info_path.write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "fps": 30,
+                "total_episodes": 2,
+                "features": {
+                    "observation.state": {"dtype": "float32", "shape": [20]},
+                    "actions": {"dtype": "float32", "shape": [20]},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    episodes_path = snapshot / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+    episodes_path.parent.mkdir(parents=True)
+    pq.write_table(pa.Table.from_pylist([{"episode_index": 0}, {"episode_index": 1}]), episodes_path)
+    calls: list[dict[str, object]] = []
+
+    def snapshot_download(repo_id: str, **kwargs) -> str:
+        calls.append({"repo_id": repo_id, **kwargs})
+        return str(snapshot)
+
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.HF_LEROBOT_HOME", tmp_path / "empty-cache")
+    monkeypatch.setattr("lerobot.policies.smolvla_jax.data.snapshot_download", snapshot_download)
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
+        lambda **kwargs: pytest.fail(f"full metadata/global stats were accessed: {kwargs}"),
+    )
+
+    train, val = split_sources_train_val(
+        [DatasetSource(repo_id="org/remote", revision="commit-sha", action_key="actions")],
+        val_fraction=0.5,
+        seed=0,
+    )
+
+    assert sorted([*(train[0].episodes or []), *(val[0].episodes or [])]) == [0, 1]
+    assert calls[0]["allow_patterns"] == [
+        "meta/info.json",
+        "meta/episodes/*/*.parquet",
+    ]
+    assert "meta/stats.json" not in calls[0]["allow_patterns"]
 
 
 def test_fixed_stratified_subset_is_reproducible_and_covers_every_dataset() -> None:

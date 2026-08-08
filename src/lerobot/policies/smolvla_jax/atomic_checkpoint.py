@@ -65,6 +65,18 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
     raise RuntimeError(f"atomic no-replace rename is unsupported on {sys.platform}")
 
 
+def paths_overlap(first: str | Path, second: str | Path) -> bool:
+    """Return whether resolved paths are equal or one contains the other."""
+
+    first_resolved = Path(first).expanduser().resolve(strict=False)
+    second_resolved = Path(second).expanduser().resolve(strict=False)
+    return (
+        first_resolved == second_resolved
+        or first_resolved in second_resolved.parents
+        or second_resolved in first_resolved.parents
+    )
+
+
 def assemble_checkpoint_atomically(
     final_path: str | Path,
     writer: Callable[[Path], Any],

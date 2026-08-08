@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from lerobot.datasets.io_utils import load_nested_dataset as real_load_nested_dataset
 from lerobot.policies.smolvla_jax.data import DatasetSource
+from lerobot.policies.smolvla_jax import normalization_protocol as protocol_module
 from lerobot.policies.smolvla_jax.normalization_protocol import (
     NORMALIZATION_MANIFEST_FILENAME,
     PREPROCESSOR_STATS_FILENAME,
@@ -87,31 +90,6 @@ def _write_split(path: Path, sources: list[DatasetSource], *, val_ids: list[int]
     return path
 
 
-@pytest.fixture(autouse=True)
-def _local_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
-    class LocalMetadata:
-        def __init__(
-            self,
-            repo_id: str,
-            *,
-            root: str | Path | None,
-            revision: str | None,
-        ) -> None:
-            assert root is not None
-            self.repo_id = repo_id
-            self.root = Path(root)
-            self.revision = revision
-            self.features = {
-                "observation.state": {"dtype": "float32", "shape": [DIM]},
-                "actions": {"dtype": "float32", "shape": [DIM]},
-            }
-
-    monkeypatch.setattr(
-        "lerobot.policies.smolvla_jax.normalization_protocol.LeRobotDatasetMetadata",
-        LocalMetadata,
-    )
-
-
 def _four_sources(tmp_path: Path) -> tuple[list[DatasetSource], list[tuple[float, float, int]]]:
     sources: list[DatasetSource] = []
     selected: list[tuple[float, float, int]] = []
@@ -187,7 +165,7 @@ def test_local_protocol_does_not_eagerly_load_global_stats_or_all_episode_metada
     # unfiltered episode metadata. Local protocol creation must use info.json plus
     # the predicate-pushed stats read instead.
     monkeypatch.setattr(
-        "lerobot.policies.smolvla_jax.normalization_protocol.LeRobotDatasetMetadata",
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("eager metadata container must not be constructed")
         ),
@@ -210,6 +188,54 @@ def test_local_protocol_does_not_eagerly_load_global_stats_or_all_episode_metada
     )
 
     np.testing.assert_array_equal(result.stats["action"]["mean"], np.full(DIM, 2.0))
+
+
+def test_protocol_pushes_episode_and_stats_columns_into_parquet_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "dataset"
+    row = _episode_row(0, state_mean=1.0, action_mean=2.0, count=2)
+    row["tasks"] = [0]
+    row["videos/observation.images.camera1/chunk_index"] = 0
+    _write_episode_metadata(root, [row])
+    source = DatasetSource(
+        repo_id="org/dataset",
+        root=root,
+        revision="revision",
+        episodes=[0],
+        action_key="actions",
+    )
+    split_path = _write_split(tmp_path / "data_split.json", [source])
+    calls: list[dict[str, object]] = []
+
+    def capture_load(*args, **kwargs):
+        calls.append(dict(kwargs))
+        return real_load_nested_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(protocol_module, "load_nested_dataset", capture_load)
+
+    build_or_validate_normalization_protocol(
+        tmp_path / "protocol",
+        split_path=split_path,
+        sources=[source],
+        state_dim=DIM,
+        action_dim=DIM,
+    )
+
+    assert calls == [
+        {
+            "episodes": [0],
+            "columns": [
+                "episode_index",
+                *[
+                    f"stats/{feature}/{stat}"
+                    for feature in ("observation.state", "actions")
+                    for stat in ("min", "max", "mean", "std", "count")
+                ],
+            ],
+        }
+    ]
 
 
 def test_identical_protocol_is_reused_byte_for_byte(tmp_path: Path) -> None:
@@ -239,6 +265,63 @@ def test_identical_protocol_is_reused_byte_for_byte(tmp_path: Path) -> None:
     assert json.loads(first.manifest_path.read_text())["canonical_stats_sha256"] == json.loads(
         second.manifest_path.read_text()
     )["canonical_stats_sha256"]
+
+
+@pytest.mark.parametrize("winner_matches", [True, False])
+def test_concurrent_protocol_publish_validates_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    winner_matches: bool,
+) -> None:
+    root = tmp_path / "dataset"
+    _write_episode_metadata(
+        root,
+        [_episode_row(0, state_mean=1.0, action_mean=2.0, count=2)],
+    )
+    source = DatasetSource(
+        repo_id="org/dataset",
+        root=root,
+        revision="revision",
+        episodes=[0],
+        action_key="actions",
+    )
+    split_path = _write_split(tmp_path / "data_split.json", [source])
+    protocol_dir = tmp_path / "shared-protocol"
+
+    def concurrent_winner(staging: str | Path, destination: str | Path) -> None:
+        shutil.copytree(staging, destination)
+        if not winner_matches:
+            (Path(destination) / "data_split.json").write_text(
+                '{"version": 1, "datasets": []}\n', encoding="utf-8"
+            )
+        raise FileExistsError("another creator won")
+
+    monkeypatch.setattr(protocol_module, "_rename_noreplace", concurrent_winner)
+
+    if winner_matches:
+        result = build_or_validate_normalization_protocol(
+            protocol_dir,
+            split_path=split_path,
+            sources=[source],
+            state_dim=DIM,
+            action_dim=DIM,
+        )
+        assert result.manifest_path == protocol_dir / NORMALIZATION_MANIFEST_FILENAME
+        assert result.split_path.read_bytes() == split_path.read_bytes()
+    else:
+        with pytest.raises(ValueError, match="split.*mismatch"):
+            build_or_validate_normalization_protocol(
+                protocol_dir,
+                split_path=split_path,
+                sources=[source],
+                state_dim=DIM,
+                action_dim=DIM,
+            )
+        assert (protocol_dir / "data_split.json").read_text(encoding="utf-8").startswith(
+            '{"version": 1, "datasets": []}'
+        )
+
+    assert not list(tmp_path.glob(".shared-protocol.staging-*"))
 
 
 @pytest.mark.parametrize(

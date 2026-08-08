@@ -90,6 +90,7 @@ def _valid_config() -> dict:
             "tactile_token_repeat_factor": 8,
             "image_keys": ["camera1", "camera2"],
         },
+        "output": "/runs/k8",
         "normalization": {"protocol_dir": "/shared/protocol"},
         "tactile_embedding_cache": {"enabled": False},
     }
@@ -117,6 +118,40 @@ def test_paper_factors_require_explicit_normalization_protocol(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="normalization.*protocol_dir"):
         _validate_vt_config(_write(tmp_path / "missing-protocol.yaml", config))
+
+
+@pytest.mark.parametrize(
+    ("protocol_dir", "output"),
+    [
+        ("/runs/k8", "/runs/k8"),
+        ("/runs/k8/normalization", "/runs/k8"),
+        ("/runs", "/runs/k8"),
+    ],
+)
+def test_paper_factors_reject_protocol_output_ancestor_overlap(
+    tmp_path: Path,
+    protocol_dir: str,
+    output: str,
+) -> None:
+    config = _valid_config()
+    config["normalization"]["protocol_dir"] = protocol_dir
+    config["output"] = output
+
+    with pytest.raises(ValueError, match="独立|output"):
+        _validate_vt_config(_write(tmp_path / "overlap.yaml", config))
+
+
+def test_paper_factors_reject_symlinked_protocol_output_overlap(tmp_path: Path) -> None:
+    output = tmp_path / "runs" / "k8"
+    output.mkdir(parents=True)
+    alias = tmp_path / "output-alias"
+    alias.symlink_to(output, target_is_directory=True)
+    config = _valid_config()
+    config["normalization"]["protocol_dir"] = str(alias / "normalization")
+    config["output"] = str(output)
+
+    with pytest.raises(ValueError, match="独立|output"):
+        _validate_vt_config(_write(tmp_path / "symlink-overlap.yaml", config))
 
 
 @pytest.mark.parametrize("invalid", [0, -1, 1.5, True, "8"])

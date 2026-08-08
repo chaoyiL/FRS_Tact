@@ -10,9 +10,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+from huggingface_hub import snapshot_download
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, default_collate
 
-from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
+from lerobot.datasets import CODEBASE_VERSION, LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
+from lerobot.datasets.io_utils import load_info, load_nested_dataset
+from lerobot.datasets.utils import (
+    EPISODES_DIR,
+    INFO_PATH,
+    DatasetInfo,
+    check_version_compatibility,
+    get_safe_version,
+    has_legacy_hub_download_metadata,
+    is_valid_version,
+)
+from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
@@ -103,6 +115,77 @@ class DatasetSource:
     action_key: str | None = None
     rename_map: Mapping[str, str] | None = None
     weight: float = 1.0
+
+
+@dataclass(frozen=True)
+class DatasetMetadataView:
+    """Info and episode metadata location without tasks or global stats."""
+
+    root: Path
+    info: DatasetInfo
+    revision: str
+
+
+def resolve_source_metadata(source: DatasetSource) -> DatasetMetadataView:
+    """Resolve only info.json and episode Parquet metadata for a source."""
+
+    requested_root = None if source.root is None else Path(source.root).expanduser()
+    local_root = requested_root or (HF_LEROBOT_HOME / source.repo_id)
+    episodes_root = local_root / EPISODES_DIR
+    has_local_metadata = (
+        (local_root / INFO_PATH).is_file()
+        and any(episodes_root.glob("*/*.parquet"))
+        and not (requested_root is None and has_legacy_hub_download_metadata(local_root))
+    )
+    resolved_revision = source.revision or CODEBASE_VERSION
+    if not has_local_metadata:
+        if is_valid_version(resolved_revision):
+            resolved_revision = get_safe_version(source.repo_id, resolved_revision)
+        allow_patterns = [INFO_PATH, f"{EPISODES_DIR}/*/*.parquet"]
+        if requested_root is None:
+            local_root = Path(
+                snapshot_download(
+                    source.repo_id,
+                    repo_type="dataset",
+                    revision=resolved_revision,
+                    cache_dir=HF_LEROBOT_HUB_CACHE,
+                    allow_patterns=allow_patterns,
+                )
+            )
+        else:
+            requested_root.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                source.repo_id,
+                repo_type="dataset",
+                revision=resolved_revision,
+                local_dir=requested_root,
+                allow_patterns=allow_patterns,
+            )
+            local_root = requested_root
+
+    info = load_info(local_root)
+    check_version_compatibility(source.repo_id, info.codebase_version, CODEBASE_VERSION)
+    return DatasetMetadataView(root=local_root, info=info, revision=resolved_revision)
+
+
+def _source_episode_indices(source: DatasetSource) -> list[int]:
+    if source.episodes is not None:
+        episode_ids = [int(value) for value in source.episodes]
+    else:
+        metadata = resolve_source_metadata(source)
+        episodes = load_nested_dataset(
+            metadata.root / EPISODES_DIR,
+            columns=["episode_index"],
+        )
+        episode_ids = [int(value) for value in episodes["episode_index"]]
+        if metadata.info.total_episodes and len(episode_ids) != metadata.info.total_episodes:
+            raise ValueError(
+                f"dataset {source.repo_id!r} episode metadata coverage mismatch: "
+                f"info={metadata.info.total_episodes} loaded={len(episode_ids)}"
+            )
+    if len(episode_ids) != len(set(episode_ids)):
+        raise ValueError(f"dataset {source.repo_id!r} episode indices must be unique")
+    return episode_ids
 
 
 def resolve_action_key(features: Mapping[str, Any], action_key: str | None = None) -> str:
@@ -364,15 +447,7 @@ def split_sources_train_val(
     rng = np.random.default_rng(seed)
 
     for source in sources:
-        metadata = LeRobotDatasetMetadata(
-            repo_id=source.repo_id,
-            root=source.root,
-            revision=source.revision,
-        )
-        if source.episodes is not None:
-            episode_ids = np.asarray(list(source.episodes), dtype=np.int64)
-        else:
-            episode_ids = np.arange(metadata.total_episodes, dtype=np.int64)
+        episode_ids = np.asarray(_source_episode_indices(source), dtype=np.int64)
         if episode_ids.size == 0:
             raise ValueError(f"dataset {source.repo_id!r} has no episodes to split")
         if episode_ids.size == 1:

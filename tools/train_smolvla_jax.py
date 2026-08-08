@@ -16,7 +16,7 @@ import yaml
 
 from lerobot.datasets.transforms import build_image_transforms
 from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically
+from lerobot.policies.smolvla_jax.atomic_checkpoint import assemble_checkpoint_atomically, paths_overlap
 from lerobot.policies.smolvla_jax.checkpoint import (
     count_expert_layers,
     count_vlm_layers,
@@ -479,7 +479,6 @@ def main() -> None:
 
     allow_tokenizer_download = bool(cfg.get("allow_tokenizer_download", False))
     output = Path(require(cfg, "output"))
-    output.mkdir(parents=True, exist_ok=True)
     sources = parse_dataset_sources(cfg)
     normalization_cfg = cfg.get("normalization")
     if normalization_cfg is not None and not isinstance(normalization_cfg, dict):
@@ -490,6 +489,9 @@ def main() -> None:
         if not normalization_protocol_dir:
             raise ValueError("normalization.protocol_dir is required")
         normalization_protocol_dir = Path(normalization_protocol_dir).expanduser()
+        if paths_overlap(normalization_protocol_dir, output):
+            raise ValueError("normalization.protocol_dir must be independent from output")
+    output.mkdir(parents=True, exist_ok=True)
     val_cfg = dict(cfg.get("validation") or {})
     val_enabled = bool(val_cfg.get("enabled", True))
     if normalization_protocol_dir is not None and not val_enabled:

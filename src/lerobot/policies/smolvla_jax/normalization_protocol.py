@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
@@ -10,20 +9,23 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import numpy as np
+from datasets.exceptions import DatasetGenerationError
 from safetensors.numpy import load_file as load_safetensors_file
 from safetensors.numpy import save_file as save_safetensors_file
 
-from lerobot.datasets import LeRobotDatasetMetadata, aggregate_stats
-from lerobot.datasets.io_utils import cast_stats_to_numpy, load_info, load_nested_dataset
-from lerobot.datasets.utils import EPISODES_DIR, INFO_PATH
+from lerobot.datasets import aggregate_stats
+from lerobot.datasets.io_utils import cast_stats_to_numpy, load_nested_dataset
+from lerobot.datasets.utils import EPISODES_DIR
 from lerobot.utils.utils import unflatten_dict
 
+from .atomic_checkpoint import _path_exists, _rename_noreplace
 from .data import (
     CANONICAL_ACTION_KEY,
     DatasetSource,
     canonicalize_dataset_stats,
     rename_dataset_stats,
     resolve_action_key,
+    resolve_source_metadata,
 )
 
 DATA_SPLIT_FILENAME = "data_split.json"
@@ -184,36 +186,34 @@ def _selected_source_stats(
         raise ValueError(f"requested train episodes must be unique for {source.repo_id!r}")
     requested = sorted(requested)
 
-    requested_root = None if source.root is None else Path(source.root).expanduser()
-    if requested_root is not None and (requested_root / INFO_PATH).is_file():
-        info = load_info(requested_root)
-        metadata_root = requested_root
-        features = info.features
-        codebase_version = info.codebase_version
-        resolved_revision = source.revision or info.codebase_version
-    else:
-        metadata = LeRobotDatasetMetadata(
-            repo_id=source.repo_id,
-            root=source.root,
-            revision=source.revision,
-        )
-        metadata_root = Path(metadata.root)
-        features = metadata.features
-        codebase_version = getattr(getattr(metadata, "info", None), "codebase_version", None)
-        resolved_revision = getattr(metadata, "revision", source.revision)
+    metadata = resolve_source_metadata(source)
+    metadata_root = metadata.root
+    features = metadata.info.features
+    codebase_version = metadata.info.codebase_version
+    resolved_revision = metadata.revision
     if codebase_version is not None and not str(codebase_version).startswith("v3."):
         raise ValueError(
             f"dataset {source.repo_id!r} must use LeRobot v3 per-episode stats, got {codebase_version!r}"
         )
     resolved_action_key = resolve_action_key(features, source.action_key)
-    episodes = load_nested_dataset(metadata_root / EPISODES_DIR, episodes=requested)
-    column_names = list(episodes.column_names)
-    prefixes = ("stats/observation.state/", f"stats/{resolved_action_key}/")
     selected_columns = [
         "episode_index",
-        *(column for column in column_names if column.startswith(prefixes)),
+        *(
+            f"stats/{feature}/{stat}"
+            for feature in ("observation.state", resolved_action_key)
+            for stat in _REQUIRED_STATS
+        ),
     ]
-    episodes = episodes.select_columns(selected_columns)
+    try:
+        episodes = load_nested_dataset(
+            metadata_root / EPISODES_DIR,
+            episodes=requested,
+            columns=selected_columns,
+        )
+    except (DatasetGenerationError, KeyError, ValueError) as exc:
+        raise ValueError(
+            f"dataset {source.repo_id!r} episode metadata is missing required stats columns"
+        ) from exc
 
     loaded_ids = [int(value) for value in episodes["episode_index"]]
     if len(loaded_ids) != len(set(loaded_ids)):
@@ -327,6 +327,56 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
         file.write("\n")
 
 
+def _validate_existing_protocol(
+    protocol_dir: Path,
+    *,
+    split_path: Path,
+    dataset_manifests: list[dict[str, Any]],
+    canonical_stats: Mapping[str, Mapping[str, Any]],
+    state_dim: int,
+    action_dim: int,
+) -> NormalizationProtocolResult:
+    required_paths = {
+        DATA_SPLIT_FILENAME: protocol_dir / DATA_SPLIT_FILENAME,
+        PREPROCESSOR_STATS_FILENAME: protocol_dir / PREPROCESSOR_STATS_FILENAME,
+        POSTPROCESSOR_STATS_FILENAME: protocol_dir / POSTPROCESSOR_STATS_FILENAME,
+        NORMALIZATION_MANIFEST_FILENAME: protocol_dir / NORMALIZATION_MANIFEST_FILENAME,
+    }
+    if not protocol_dir.is_dir():
+        raise ValueError(f"normalization protocol artifact is not a directory: {protocol_dir}")
+    missing = [name for name, path in required_paths.items() if not path.is_file()]
+    if missing:
+        raise ValueError(f"normalization protocol artifact is missing files: {missing}")
+    try:
+        existing_manifest = json.loads(
+            required_paths[NORMALIZATION_MANIFEST_FILENAME].read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"corrupt normalization manifest: {exc}") from exc
+    if required_paths[DATA_SPLIT_FILENAME].read_bytes() != split_path.read_bytes():
+        raise ValueError("normalization protocol split content mismatch")
+    asset_hashes = {
+        name: _sha256_file(required_paths[name])
+        for name in (PREPROCESSOR_STATS_FILENAME, POSTPROCESSOR_STATS_FILENAME)
+    }
+    expected_manifest = _manifest(
+        split_sha256=_sha256_file(split_path),
+        datasets=dataset_manifests,
+        stats=canonical_stats,
+        state_dim=state_dim,
+        action_dim=action_dim,
+        asset_hashes=asset_hashes,
+    )
+    if existing_manifest != expected_manifest:
+        raise ValueError("normalization protocol manifest digest/source mismatch")
+    authoritative_stats = _load_and_validate_assets(protocol_dir, canonical_stats)
+    return NormalizationProtocolResult(
+        stats=authoritative_stats,
+        split_path=required_paths[DATA_SPLIT_FILENAME],
+        manifest_path=required_paths[NORMALIZATION_MANIFEST_FILENAME],
+    )
+
+
 def build_or_validate_normalization_protocol(
     protocol_dir: str | Path,
     *,
@@ -370,45 +420,14 @@ def build_or_validate_normalization_protocol(
         context="final canonical",
     )
 
-    required_paths = {
-        DATA_SPLIT_FILENAME: protocol_dir / DATA_SPLIT_FILENAME,
-        PREPROCESSOR_STATS_FILENAME: protocol_dir / PREPROCESSOR_STATS_FILENAME,
-        POSTPROCESSOR_STATS_FILENAME: protocol_dir / POSTPROCESSOR_STATS_FILENAME,
-        NORMALIZATION_MANIFEST_FILENAME: protocol_dir / NORMALIZATION_MANIFEST_FILENAME,
-    }
-    if protocol_dir.exists():
-        if not protocol_dir.is_dir():
-            raise ValueError(f"normalization protocol artifact is not a directory: {protocol_dir}")
-        missing = [name for name, path in required_paths.items() if not path.is_file()]
-        if missing:
-            raise ValueError(f"normalization protocol artifact is missing files: {missing}")
-        try:
-            existing_manifest = json.loads(
-                required_paths[NORMALIZATION_MANIFEST_FILENAME].read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"corrupt normalization manifest: {exc}") from exc
-        if required_paths[DATA_SPLIT_FILENAME].read_bytes() != split_path.read_bytes():
-            raise ValueError("normalization protocol split content mismatch")
-        asset_hashes = {
-            name: _sha256_file(required_paths[name])
-            for name in (PREPROCESSOR_STATS_FILENAME, POSTPROCESSOR_STATS_FILENAME)
-        }
-        expected_manifest = _manifest(
-            split_sha256=_sha256_file(split_path),
-            datasets=dataset_manifests,
-            stats=canonical_stats,
+    if _path_exists(protocol_dir):
+        return _validate_existing_protocol(
+            protocol_dir,
+            split_path=split_path,
+            dataset_manifests=dataset_manifests,
+            canonical_stats=canonical_stats,
             state_dim=state_dim,
             action_dim=action_dim,
-            asset_hashes=asset_hashes,
-        )
-        if existing_manifest != expected_manifest:
-            raise ValueError("normalization protocol manifest digest/source mismatch")
-        authoritative_stats = _load_and_validate_assets(protocol_dir, canonical_stats)
-        return NormalizationProtocolResult(
-            stats=authoritative_stats,
-            split_path=required_paths[DATA_SPLIT_FILENAME],
-            manifest_path=required_paths[NORMALIZATION_MANIFEST_FILENAME],
         )
 
     if not allow_create:
@@ -436,13 +455,29 @@ def build_or_validate_normalization_protocol(
         )
         _write_json(staging / NORMALIZATION_MANIFEST_FILENAME, manifest)
         _load_and_validate_assets(staging, canonical_stats)
-        if protocol_dir.exists():
-            raise ValueError(f"normalization protocol appeared during creation: {protocol_dir}")
-        os.replace(staging, protocol_dir)
-    except Exception:
+        if _path_exists(protocol_dir):
+            return _validate_existing_protocol(
+                protocol_dir,
+                split_path=split_path,
+                dataset_manifests=dataset_manifests,
+                canonical_stats=canonical_stats,
+                state_dim=state_dim,
+                action_dim=action_dim,
+            )
+        try:
+            _rename_noreplace(staging, protocol_dir)
+        except FileExistsError:
+            return _validate_existing_protocol(
+                protocol_dir,
+                split_path=split_path,
+                dataset_manifests=dataset_manifests,
+                canonical_stats=canonical_stats,
+                state_dim=state_dim,
+                action_dim=action_dim,
+            )
+    finally:
         if staging.exists():
             shutil.rmtree(staging)
-        raise
     return NormalizationProtocolResult(
         stats=canonical_stats,
         split_path=protocol_dir / DATA_SPLIT_FILENAME,
