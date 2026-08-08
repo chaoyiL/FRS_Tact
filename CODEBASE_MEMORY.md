@@ -141,3 +141,4 @@
 - 默认训练顺序固定为 K8 后 K21；K8 非零退出时不得启动 K21。两者共用 cache 和 train-only normalization protocol，但输出与日志独立。
 - 三脚本统一 source `.env.frs`，默认持久根 `/workspace`；正式 launcher 使用单个 JAX 进程看到恰好两张 H100，不使用 `torchrun`。
 - 当前仅完成并批准设计，尚未实施；书面 spec 为 `docs/superpowers/specs/2026-08-08-three-script-h100-workflow-design.md`。
+- 实施计划为 `docs/superpowers/plans/2026-08-08-three-script-h100-workflow.md`，按环境、数据+encoder、K8→K21 launcher、整体验证四个 TDD 任务执行。
