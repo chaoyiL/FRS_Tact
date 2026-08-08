@@ -262,6 +262,50 @@ def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> No
     assert reloaded.tactile_keys == config.tactile_keys
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        (
+            {
+                "use_tactile_encoder": True,
+                "tactile_keys": ["observation.images.touch"],
+                "tactile_num_tokens": 1,
+            },
+            "tactile_encoder_path is required",
+        ),
+        (
+            {
+                "use_tactile_encoder": True,
+                "tactile_encoder_path": "encoder",
+                "tactile_keys": [],
+                "tactile_num_tokens": 0,
+            },
+            "tactile_keys is required",
+        ),
+        (
+            {
+                "use_tactile_encoder": True,
+                "tactile_encoder_path": "encoder",
+                "tactile_keys": ["observation.images.touch"],
+                "tactile_num_tokens": 2,
+            },
+            "tactile_keys length must match",
+        ),
+    ],
+)
+def test_vt_config_rejects_invalid_persisted_tactile_contracts(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    from train_vtsmolvla.configuration import VTSmolVLAConfig
+
+    (tmp_path / "config.json").write_text(json.dumps(overrides), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        VTSmolVLAConfig.from_pretrained(tmp_path)
+
+
 def test_processor_configs_sync_rename_map_and_feature_shapes(tmp_path: Path) -> None:
     from safetensors.flax import save_file as save_safetensors_file
 

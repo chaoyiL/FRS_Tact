@@ -230,6 +230,15 @@ class _KeyMappedLeRobotDataset(Dataset):
     def __len__(self) -> int:
         return len(self.dataset)
 
+    def _enrich_mapped_sample(
+        self,
+        source_sample: Mapping[str, Any],
+        mapped: dict[str, Any],
+    ) -> None:
+        """Hook for extensions that attach non-visual per-frame inputs."""
+
+        del source_sample, mapped
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample = self.dataset[index]
         mapped: dict[str, Any] = {}
@@ -246,6 +255,7 @@ class _KeyMappedLeRobotDataset(Dataset):
             for key in self.image_transform_keys:
                 if key in mapped:
                     mapped[key] = self.image_transforms(mapped[key])
+        self._enrich_mapped_sample(sample, mapped)
         if CANONICAL_ACTION_KEY not in mapped:
             raise KeyError(f"sample is missing action feature {self.action_key!r}")
         return mapped
@@ -436,6 +446,59 @@ def fixed_stratified_subset_indices(
 class LeRobotJaxDataLoader:
     """JAX batch stream backed by one or more LeRobot datasets."""
 
+    def _source_visual_keys_and_context(
+        self,
+        config: JaxSmolVLAConfig,
+        source: DatasetSource,
+        metadata: LeRobotDatasetMetadata,
+        source_rename: Mapping[str, str],
+    ) -> tuple[list[str], dict[str, Any]]:
+        del source
+        visual_keys = resolve_source_visual_keys(
+            config.image_keys,
+            source_rename,
+            metadata.camera_keys,
+            allow_missing=len(config.image_keys),
+        )
+        return visual_keys, {}
+
+    def _make_mapped_dataset(
+        self,
+        dataset: LeRobotDataset,
+        *,
+        action_key: str,
+        rename_map: Mapping[str, str],
+        context: Mapping[str, Any],
+    ) -> _KeyMappedLeRobotDataset:
+        del context
+        return _KeyMappedLeRobotDataset(
+            dataset,
+            action_key=action_key,
+            rename_map=rename_map,
+            image_transforms=self.image_transforms,
+            image_transform_keys=self.config.image_keys,
+        )
+
+    def _make_preprocessor(
+        self,
+        checkpoint: str | Path,
+        config: JaxSmolVLAConfig,
+        *,
+        stats: Mapping[str, Mapping[str, Any]],
+        local_files_only: bool,
+    ) -> JaxSmolVLAPreprocessor:
+        return JaxSmolVLAPreprocessor(
+            checkpoint,
+            config,
+            rename_map={},
+            stats=stats,
+            local_files_only=local_files_only,
+        )
+
+    def _dataset_summary_extension(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        del context
+        return {}
+
     def __init__(
         self,
         checkpoint: str | Path,
@@ -490,14 +553,11 @@ class LeRobotJaxDataLoader:
                 metadata.fps,
             )
             source_rename = dict(source.rename_map or {})
-            visual_keys = resolve_source_visual_keys(
-                config.image_keys,
+            visual_keys, source_context = self._source_visual_keys_and_context(
+                config,
+                source,
+                metadata,
                 source_rename,
-                metadata.camera_keys,
-                # Match JaxSmolVLAPreprocessor: at least one RGB camera must
-                # resolve, while missing model/placeholder keys are handled
-                # by its empty-camera policy.
-                allow_missing=len(config.image_keys),
             )
             dataset = LeRobotDataset(
                 repo_id=source.repo_id,
@@ -522,12 +582,11 @@ class LeRobotJaxDataLoader:
                 source_rename,
                 repo_id=source.repo_id,
             )
-            mapped = _KeyMappedLeRobotDataset(
+            mapped = self._make_mapped_dataset(
                 dataset,
                 action_key=resolved_action_key,
                 rename_map=source_rename,
-                image_transforms=image_transforms,
-                image_transform_keys=config.image_keys,
+                context=source_context,
             )
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
@@ -546,6 +605,7 @@ class LeRobotJaxDataLoader:
                     "action_key": resolved_action_key,
                     "weight": source.weight,
                     "visual_keys": list(visual_keys),
+                    **self._dataset_summary_extension(source_context),
                 }
             )
 
@@ -600,10 +660,9 @@ class LeRobotJaxDataLoader:
         else:
             merged_stats = aggregate_stats(stats_list) if len(stats_list) > 1 else stats_list[0]
             # Sample keys are already remapped; keep preprocessor rename_map empty.
-            self.preprocessor = JaxSmolVLAPreprocessor(
+            self.preprocessor = self._make_preprocessor(
                 checkpoint,
                 config,
-                rename_map={},
                 stats=merged_stats,
                 local_files_only=local_files_only,
             )

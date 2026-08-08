@@ -17,6 +17,39 @@ Array = jax.Array
 class JaxSmolVLAPolicy:
     """User-facing stateful policy wrapper around the pure JAX model."""
 
+    def _load_config(self, checkpoint: Path):
+        return load_config(checkpoint)
+
+    def _make_model(self, config):
+        return JaxSmolVLA(config)
+
+    def _make_preprocessor(
+        self,
+        checkpoint: Path,
+        config,
+        *,
+        rename_map: Mapping[str, str] | None,
+        local_files_only: bool,
+    ):
+        return JaxSmolVLAPreprocessor(
+            checkpoint,
+            config,
+            rename_map=rename_map,
+            local_files_only=local_files_only,
+        )
+
+    def _sample_prepared_batch(self, params, batch, rng, **kwargs):
+        return self.model.sample_actions(
+            params,
+            batch["images"],
+            batch["image_masks"],
+            batch["language_tokens"],
+            batch["language_masks"],
+            batch["state"],
+            rng,
+            **kwargs,
+        )
+
     def __init__(
         self,
         checkpoint: str | Path,
@@ -26,10 +59,10 @@ class JaxSmolVLAPolicy:
         revision: str | None = None,
     ):
         self.checkpoint = resolve_checkpoint(checkpoint, revision=revision, local_files_only=local_files_only)
-        self.config = load_config(self.checkpoint)
+        self.config = self._load_config(self.checkpoint)
         self.params = load_params(self.checkpoint)
-        self.model = JaxSmolVLA(self.config)
-        self.preprocessor = JaxSmolVLAPreprocessor(
+        self.model = self._make_model(self.config)
+        self.preprocessor = self._make_preprocessor(
             self.checkpoint,
             self.config,
             rename_map=rename_map,
@@ -63,25 +96,15 @@ class JaxSmolVLAPolicy:
             has_previous_chunk,
         )
         if cache_key not in self._compiled_samples:
-            model = self.model
-
             def sample(
                 params,
-                images,
-                image_masks,
-                tokens,
-                language_masks,
-                state,
+                batch,
                 noise,
                 previous,
             ):
-                return model.sample_actions(
+                return self._sample_prepared_batch(
                     params,
-                    images,
-                    image_masks,
-                    tokens,
-                    language_masks,
-                    state,
+                    batch,
                     jax.random.key(0),
                     noise=noise,
                     num_steps=num_steps,
@@ -128,22 +151,14 @@ class JaxSmolVLAPolicy:
                 previous_chunk is not None,
             )(
                 self.params,
-                batch["images"],
-                batch["image_masks"],
-                batch["language_tokens"],
-                batch["language_masks"],
-                batch["state"],
+                batch,
                 noise,
                 previous_argument,
             )
         else:
-            actions = self.model.sample_actions(
+            actions = self._sample_prepared_batch(
                 self.params,
-                batch["images"],
-                batch["image_masks"],
-                batch["language_tokens"],
-                batch["language_masks"],
-                batch["state"],
+                batch,
                 jax.random.key(seed),
                 noise=noise,
                 num_steps=num_steps,

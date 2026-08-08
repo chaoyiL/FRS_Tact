@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import jax.numpy as jnp
@@ -31,6 +32,18 @@ class VTJaxSmolVLAPreprocessor(JaxSmolVLAPreprocessor):
     """Visual preprocessor extended with live or cached tactile tokens."""
 
     config: VTSmolVLAConfig
+
+    def __init__(
+        self,
+        checkpoint: str | Path,
+        config: VTSmolVLAConfig | None = None,
+        **kwargs: Any,
+    ):
+        super().__init__(
+            checkpoint,
+            config or VTSmolVLAConfig.from_pretrained(checkpoint),
+            **kwargs,
+        )
 
     def prepare(
         self,

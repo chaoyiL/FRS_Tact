@@ -588,6 +588,33 @@ def test_tactile_projection_shape_uses_model_hidden_size(vt_bundle: Path) -> Non
     )
 
 
+def test_tactile_projection_lora_requires_complete_adapter(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["module_modes"]["tactile_proj"] = "lora"
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle)
+
+    assert any("missing tactile_proj LoRA tensors" in issue for issue in report.issues)
+
+
+def test_tactile_projection_lora_accepts_complete_adapter(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["module_modes"]["tactile_proj"] = "lora"
+    _write_json(config_path, config)
+    tensors = _model_tensors()
+    tensors["model.tactile_proj.lora_a"] = np.zeros((16, 512), dtype=np.float16)
+    tensors["model.tactile_proj.lora_b"] = np.zeros((960, 16), dtype=np.float16)
+    tensors["model.tactile_proj.lora_scale"] = np.asarray(1.0, dtype=np.float32)
+    save_safetensors_file(tensors, vt_bundle / "model.safetensors")
+
+    report = validate_checkpoint(vt_bundle)
+
+    assert report.ok, report.format_errors()
+
+
 def test_diagnostics_are_aggregated_and_require_valid_raises(vt_bundle: Path) -> None:
     config_path = vt_bundle / "config.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))

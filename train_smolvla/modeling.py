@@ -147,6 +147,25 @@ class JaxSmolVLA:
         embedding = self._p(params, "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight")
         return embedding[tokens]
 
+    def _embed_prefix_extension(
+        self,
+        params: Params,
+        prefix_inputs: Mapping[str, Array] | None,
+    ) -> tuple[Sequence[Array], Sequence[Array], Sequence[Array]]:
+        """Return optional prefix tokens supplied by a modality extension."""
+
+        del params, prefix_inputs
+        return (), (), ()
+
+    def prefix_inputs_from_batch(
+        self,
+        batch: Mapping[str, Array],
+    ) -> Mapping[str, Array] | None:
+        """Select extension-owned prefix inputs from a prepared batch."""
+
+        del batch
+        return None
+
     def embed_prefix(
         self,
         params: Params,
@@ -156,6 +175,7 @@ class JaxSmolVLA:
         language_masks: Array,
         state: Array,
         state_mask: Array | None = None,
+        prefix_inputs: Mapping[str, Array] | None = None,
     ) -> tuple[Array, Array, Array]:
         if isinstance(images, jax.Array):
             if images.ndim != 5:
@@ -206,6 +226,18 @@ class JaxSmolVLA:
                 embeddings.append(end_embedding)
                 pad_masks.append(jnp.ones(end_embedding.shape[:2], dtype=jnp.bool_))
                 attention_segments.append(jnp.zeros(end_embedding.shape[1], dtype=jnp.bool_))
+
+        extra_embeddings, extra_masks, extra_segments = self._embed_prefix_extension(
+            params,
+            prefix_inputs,
+        )
+        if not (
+            len(extra_embeddings) == len(extra_masks) == len(extra_segments)
+        ):
+            raise ValueError("prefix extension embeddings, masks, and segments must align")
+        embeddings.extend(extra_embeddings)
+        pad_masks.extend(extra_masks)
+        attention_segments.extend(extra_segments)
 
         language_embedding = self.embed_language(params, language_tokens)
         language_embedding = language_embedding * jnp.sqrt(
@@ -514,6 +546,7 @@ class JaxSmolVLA:
         noisy_actions: Array,
         timestep: Array,
         state_mask: Array | None = None,
+        prefix_inputs: Mapping[str, Array] | None = None,
     ) -> Array:
         prefix, prefix_pad, prefix_ar = self.embed_prefix(
             params,
@@ -523,6 +556,7 @@ class JaxSmolVLA:
             language_masks,
             state,
             state_mask=state_mask,
+            prefix_inputs=prefix_inputs,
         )
         suffix, suffix_pad, suffix_ar = self.embed_suffix(params, noisy_actions, timestep)
         pad_mask = jnp.concatenate((prefix_pad, suffix_pad), axis=1)
@@ -565,6 +599,7 @@ class JaxSmolVLA:
             x_t,
             time,
             state_mask=batch.get("state_mask"),
+            prefix_inputs=self.prefix_inputs_from_batch(batch),
         )
         losses = jnp.square(target - velocity)[..., : self.config.action_dim]
         action_is_pad = batch.get("action_is_pad")
@@ -599,6 +634,7 @@ class JaxSmolVLA:
         language_masks: Array,
         state: Array,
         state_mask: Array | None = None,
+        prefix_inputs: Mapping[str, Array] | None = None,
     ) -> PrefixContext:
         prefix, pad_mask, attention_ar = self.embed_prefix(
             params,
@@ -608,6 +644,7 @@ class JaxSmolVLA:
             language_masks,
             state,
             state_mask=state_mask,
+            prefix_inputs=prefix_inputs,
         )
         attention_mask = make_att_2d_masks(pad_mask, attention_ar)
         position_ids = jnp.cumsum(pad_mask, axis=1) - 1
@@ -667,6 +704,7 @@ class JaxSmolVLA:
         previous_chunk: Array | None = None,
         inference_delay: int | None = None,
         execution_horizon: int | None = None,
+        prefix_inputs: Mapping[str, Array] | None = None,
     ) -> Array:
         batch = state.shape[0]
         if noise is None:
@@ -682,6 +720,7 @@ class JaxSmolVLA:
             language_tokens,
             language_masks,
             state,
+            prefix_inputs=prefix_inputs,
         )
         steps = self.config.num_steps if num_steps is None else num_steps
         dt = -1.0 / steps
@@ -716,3 +755,24 @@ class JaxSmolVLA:
 
         actions = jax.lax.fori_loop(0, steps, body, noise)
         return actions[..., : self.config.action_dim]
+
+    def sample_actions_from_batch(
+        self,
+        params: Params,
+        batch: Mapping[str, Array],
+        rng: Array,
+        **kwargs,
+    ) -> Array:
+        """Sample from a prepared batch while forwarding extension prefix inputs."""
+
+        return self.sample_actions(
+            params,
+            batch["images"],
+            batch["image_masks"],
+            batch["language_tokens"],
+            batch["language_masks"],
+            batch["state"],
+            rng,
+            prefix_inputs=self.prefix_inputs_from_batch(batch),
+            **kwargs,
+        )

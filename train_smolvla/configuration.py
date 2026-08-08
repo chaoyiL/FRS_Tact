@@ -166,7 +166,7 @@ class JaxSmolVLAConfig:
                 execution_horizon=int(rtc_raw.get("execution_horizon", 10)),
             )
 
-        return cls(
+        config = cls(
             chunk_size=int(raw.get("chunk_size", 50)),
             n_action_steps=int(raw.get("n_action_steps", 50)),
             max_state_dim=int(raw.get("max_state_dim", 32)),
@@ -213,6 +213,8 @@ class JaxSmolVLAConfig:
             expert_intermediate_size=expert_intermediate_size,
             **cls._pretrained_extension_fields(raw),
         )
+        config._validate_extension_overrides()
+        return config
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

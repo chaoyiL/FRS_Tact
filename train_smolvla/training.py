@@ -34,24 +34,31 @@ class TrainState:
     rng: Array
 
 
-def partition_params(params: Mapping[str, Array], config: JaxSmolVLAConfig) -> tuple[Params, Params]:
+def partition_params(
+    params: Mapping[str, Array],
+    config: JaxSmolVLAConfig,
+    *,
+    classifier=is_trainable_parameter,
+) -> tuple[Params, Params]:
     trainable: Params = {}
     frozen: Params = {}
     for name, value in params.items():
-        (trainable if is_trainable_parameter(name, config) else frozen)[name] = value
+        (trainable if classifier(name, config) else frozen)[name] = value
     return trainable, frozen
 
 
 def promote_trainable_params_to_fp32(
     params: Mapping[str, Array],
     config: JaxSmolVLAConfig,
+    *,
+    classifier=is_trainable_parameter,
 ) -> Params:
     """Keep FP32 master weights for every trainable floating-point parameter."""
 
     promoted: Params = {}
     for name, value in params.items():
         if (
-            is_trainable_parameter(name, config)
+            classifier(name, config)
             and jnp.issubdtype(value.dtype, jnp.inexact)
             and value.dtype != jnp.float32
         ):
@@ -161,6 +168,17 @@ def create_optimizer(config: JaxSmolVLAConfig, total_steps: int | None = None):
 class JaxSmolVLATrainer:
     """JIT-compiled single- or multi-device SmolVLA training state machine."""
 
+    def _prepare_parameter_partition(
+        self,
+        params: Mapping[str, Array],
+    ) -> tuple[Params, Params]:
+        params = initialize_lora_params(params, self.config, seed=self.seed)
+        params = promote_trainable_params_to_fp32(params, self.config)
+        return partition_params(params, self.config)
+
+    def _write_effective_config(self, destination: str | Path) -> Path:
+        return write_effective_config(destination, self.config)
+
     def __init__(
         self,
         model: JaxSmolVLA,
@@ -185,9 +203,7 @@ class JaxSmolVLATrainer:
             "modality": "none",
             "camera_index": -1,
         }
-        params = initialize_lora_params(params, self.config, seed=self.seed)
-        params = promote_trainable_params_to_fp32(params, self.config)
-        trainable, self.frozen_params = partition_params(params, self.config)
+        trainable, self.frozen_params = self._prepare_parameter_partition(params)
         self.optimizer, self.learning_rate = create_optimizer(self.config, self.total_steps)
         self.state = TrainState(
             step=jnp.asarray(0, dtype=jnp.int32),
@@ -302,13 +318,9 @@ class JaxSmolVLATrainer:
             metrics["action_mse"] = jnp.asarray(0.0, dtype=jnp.float32)
             return metrics
 
-        predicted = self.model.sample_actions(
+        predicted = self.model.sample_actions_from_batch(
             params,
-            batch["images"],
-            batch["image_masks"],
-            batch["language_tokens"],
-            batch["language_masks"],
-            batch["state"],
+            batch,
             sample_rng,
             num_steps=rollout_steps,
         )
@@ -493,7 +505,7 @@ class JaxSmolVLATrainer:
             source_dir=source_dir,
             overwrite=True,
         )
-        write_effective_config(destination, self.config)
+        self._write_effective_config(destination)
         training_state = {
             "step": self.state.step,
             "opt_state": self.state.opt_state,
@@ -519,9 +531,7 @@ class JaxSmolVLATrainer:
     def restore(self, checkpoint: str | Path) -> None:
         checkpoint = Path(checkpoint)
         params = load_params(checkpoint)
-        params = initialize_lora_params(params, self.config, seed=self.seed)
-        params = promote_trainable_params_to_fp32(params, self.config)
-        trainable, frozen = partition_params(params, self.config)
+        trainable, frozen = self._prepare_parameter_partition(params)
         resume_metadata = self._validate_resume_compatibility(checkpoint, trainable)
         target = {
             "step": self.state.step,

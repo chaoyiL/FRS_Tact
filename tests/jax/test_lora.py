@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from train_smolvla.configuration import JaxSmolVLAConfig
 from train_smolvla.lora import (
@@ -131,6 +132,56 @@ def test_legacy_tactile_projection_is_trainable_when_enabled() -> None:
 
     assert is_vt_trainable_parameter("model.tactile_proj.weight", config)
     assert is_vt_trainable_parameter("model.tactile_proj.bias", config)
+
+
+def test_vt_module_modes_reject_unknown_extension_module() -> None:
+    from train_vtsmolvla.configuration import VTSmolVLAConfig
+    from train_vtsmolvla.lora import resolve_module_modes as resolve_vt_module_modes
+
+    config = replace(
+        VTSmolVLAConfig(),
+        module_modes={**all_modes(), "tactile_projection": "full"},
+    )
+
+    with pytest.raises(ValueError, match="unknown module_modes keys"):
+        resolve_vt_module_modes(config)
+
+
+def test_vt_module_modes_require_mapping() -> None:
+    from train_vtsmolvla.configuration import VTSmolVLAConfig
+    from train_vtsmolvla.lora import resolve_module_modes as resolve_vt_module_modes
+
+    config = replace(VTSmolVLAConfig(), module_modes="invalid")
+
+    with pytest.raises(ValueError, match="module_modes must be a mapping"):
+        resolve_vt_module_modes(config)
+
+
+def test_tactile_projection_lora_initializes_and_partitions_adapter() -> None:
+    from train_vtsmolvla.configuration import VTSmolVLAConfig
+    from train_vtsmolvla.lora import (
+        initialize_lora_params as initialize_vt_lora_params,
+        is_trainable_parameter as is_vt_trainable_parameter,
+    )
+
+    config = replace(
+        VTSmolVLAConfig(),
+        use_tactile_encoder=True,
+        module_modes={**all_modes(), "tactile_proj": "lora"},
+        lora_rank=2,
+        lora_alpha=4.0,
+    )
+    params = {"model.tactile_proj.weight": jnp.ones((4, 3), dtype=jnp.float32)}
+
+    adapted = initialize_vt_lora_params(params, config, seed=0)
+
+    assert adapted["model.tactile_proj.lora_a"].shape == (2, 3)
+    assert adapted["model.tactile_proj.lora_b"].shape == (4, 2)
+    assert float(adapted["model.tactile_proj.lora_scale"]) == 2.0
+    assert not is_vt_trainable_parameter("model.tactile_proj.weight", config)
+    assert is_vt_trainable_parameter("model.tactile_proj.lora_a", config)
+    assert is_vt_trainable_parameter("model.tactile_proj.lora_b", config)
+    assert not is_vt_trainable_parameter("model.tactile_proj.lora_scale", config)
 
 
 def test_vlm_lora_targets_can_match_vb3_qv_only() -> None:
