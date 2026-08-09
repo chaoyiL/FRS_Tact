@@ -542,7 +542,7 @@ def _validate_model(
     contract: CheckpointContract | None,
     config: _ConfigView | None,
     issues: list[str],
-    extension: CheckpointValidationExtension,
+    extension: CheckpointValidationExtension = DEFAULT_VALIDATION_EXTENSION,
 ) -> None:
     if not path.is_file() or contract is None:
         return
@@ -653,7 +653,7 @@ def _check_base_sidecars(
     base: Path,
     effective: CheckpointContract | None,
     issues: list[str],
-    extension: CheckpointValidationExtension,
+    extension: CheckpointValidationExtension = DEFAULT_VALIDATION_EXTENSION,
 ) -> None:
     if not base.is_dir():
         issues.append(f"base sidecar directory does not exist: {base}")
