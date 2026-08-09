@@ -8,6 +8,32 @@ Remove the sustained CPU data bottleneck from VT-SmolVLA training by preparing e
 
 This remains a laboratory workflow. It does not add remote commit pinning, large-file hashes, publishing provenance, or deployment changes.
 
+## Filesystem layout
+
+Program files and large experiment assets are deliberately separated:
+
+```text
+repository:    /home/ljl/FRS_Tact
+virtualenv:    /home/ljl/.venvs/frs_tact
+storage root:  /DATA/ljl/substage
+```
+
+All large or frequently written assets live below the storage root:
+
+```text
+/DATA/ljl/substage/lerobot_v30
+/DATA/ljl/substage/checkpoints
+/DATA/ljl/substage/tactile_embeddings
+/DATA/ljl/substage/smolvla_training_cache
+/DATA/ljl/substage/normalization_protocols
+/DATA/ljl/substage/outputs
+/DATA/ljl/substage/logs
+/DATA/ljl/substage/huggingface
+/DATA/ljl/substage/tmp
+```
+
+`scripts/setup_env.sh` writes these resolved values to `/home/ljl/FRS_Tact/.env.frs`. The download, precompute, and training launchers source that file and must not reconstruct paths from the repository location or fall back to `/workspace`.
+
 ## Current bottleneck
 
 The tactile ResNet path is already offline through the existing `[N,4,512]` tactile embedding cache. The remaining training loader still performs expensive work for every sampled frame:
@@ -34,7 +60,7 @@ The rejected alternatives are:
 
 ## Offline cache schema
 
-Each dataset has an independent directory under `/workspace/smolvla_training_cache/<namespace>/<dataset>/`:
+Each dataset has an independent directory under `/DATA/ljl/substage/smolvla_training_cache/<namespace>/<dataset>/`:
 
 ```text
 metadata.json
@@ -123,7 +149,7 @@ Both K8 and K21 configurations use the same block:
 ```yaml
 offline_training_cache:
   enabled: true
-  root: /workspace/smolvla_training_cache
+  root: /DATA/ljl/substage/smolvla_training_cache
   dtype: bfloat16
   precompute_batch_size: 64
   precompute_num_workers: 8
@@ -132,6 +158,18 @@ offline_training_cache:
 ```
 
 Both configurations explicitly set `image_transforms.enable: false`. Offline mode fails before training when vision or connector is not frozen, augmentation is enabled, cache metadata is incompatible, or any dataset is incomplete.
+
+The related active paths are:
+
+```text
+datasets:       /DATA/ljl/substage/lerobot_v30/KaiyueChen/pick_tube_01..04
+encoder:        /DATA/ljl/substage/checkpoints/encoder_ckpt_05
+tactile cache:  /DATA/ljl/substage/tactile_embeddings
+normalization:  /DATA/ljl/substage/normalization_protocols/pick_tube_vt_k8_k21
+K8 output:      /DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat16
+K21 output:     /DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat32
+logs:           /DATA/ljl/substage/logs
+```
 
 K8 and K21 continue to use BF16 compute and share the tactile cache, offline training cache, source datasets, split, and normalization protocol. Their repeat factor and output identities remain distinct.
 

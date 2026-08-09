@@ -162,4 +162,5 @@
 - 新离线缓存按帧保存两路 connector 输出 `[N,2,64,960]` BF16、raw state/action chunk/padding、language token/mask 和 episode/frame identity；BF16 以 `uint16` 原始 bits 存储并 bit-exact 恢复。现有 tactile cache 单独复用。
 - 训练时跳过 RGB 解码、augmentation、resize、tokenizer、action-window 查询及 frozen vision/connector 前向；保留 train-only normalization、split、shuffle、weights、resume、flow noise 和 modality dropout。
 - 目标机器是 4 张 `NVIDIA RTX PRO 6000 Blackwell Server Edition`（约 96 GiB，driver 595.84）：K8 为单 JAX 进程使用 GPU 0/1，K21 为另一进程使用 GPU 2/3，并行训练且独立失败；cache 只生成一次并只读共享。
+- 新服务器的实际代码根为 `/home/ljl/FRS_Tact`，venv 为 `/home/ljl/.venvs/frs_tact`；所有大数据、HF cache、dataset、encoder、tactile/vision cache、normalization、output、log 和 tmp 必须位于 `/DATA/ljl/substage`，不得再从 repo 位置推导或回落 `/workspace`。
 - 设计文档：`docs/superpowers/specs/2026-08-09-offline-vision-cache-four-gpu-training-design.md`。当前仅完成设计，尚未修改生产代码或启动训练。
