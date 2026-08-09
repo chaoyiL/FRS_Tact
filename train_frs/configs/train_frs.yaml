@@ -56,7 +56,7 @@ action_cache:
   reverse_solver: slerpflow
   # H100 aggressive cache pipeline: 8 spawn workers decode/prefetch RGB while
   # the GPU processes a 64-sample SmolVLA + SlerpFlow batch.
-  batch_size: 128
+  batch_size: 64
   num_workers: 8
   prefetch_factor: 2
   video_backend: torchcodec

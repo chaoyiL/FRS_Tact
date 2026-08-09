@@ -5,10 +5,13 @@
 
 # ---- 数据集 / 输出 ----
 dataset_repo_ids:
-  - chaoyi/tactile_test_05
+  - KaiyueChen/pick_tube_01
+  - KaiyueChen/pick_tube_02
+  - KaiyueChen/pick_tube_03
+  - KaiyueChen/pick_tube_04
 # 可选：写入 checkpoint metadata 的 run 标签；null = 用 repo id
 config_name: null
-output_dir: checkpoints/encoder_ckpt_06
+output_dir: checkpoints/encoder_ckpt_0809
 
 # ---- CLIP / 数据键 ----
 clip_model_id: openai/clip-vit-base-patch16
@@ -59,7 +62,7 @@ memory_bank_size: 16384
 # bank 内 top-K hard neg；需 memory_bank_size>0。0 = 用全部跨 episode bank 负样本。可试 256
 hard_negatives_k: 31
 # 触觉历史 GRU 步数（回看步长 = frame_stride）；0 = 不用 GRU
-tactile_history: 2
+tactile_history: 0
 
 # ---- 验证 / 早停 / 恢复 ----
 eval_every: 2
