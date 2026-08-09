@@ -73,12 +73,14 @@ class _PrecomputeDataset:
         *,
         source: DatasetSource,
         action_key: str,
-        preprocessor: JaxSmolVLAPreprocessor,
+        image_keys: tuple[str, ...],
+        empty_cameras: int,
     ) -> None:
         self.dataset = dataset
         self.source = source
         self.action_key = action_key
-        self.preprocessor = preprocessor
+        self.image_keys = image_keys
+        self.empty_cameras = int(empty_cameras)
         self.rename_map = dict(source.rename_map or {})
 
     def __len__(self) -> int:
@@ -92,15 +94,15 @@ class _PrecomputeDataset:
             if key.startswith("observation.")
         }
         task = str(raw["task"])
-        present_keys = [key for key in self.preprocessor.config.image_keys if key in observation]
-        missing_keys = [key for key in self.preprocessor.config.image_keys if key not in observation]
+        present_keys = [key for key in self.image_keys if key in observation]
+        missing_keys = [key for key in self.image_keys if key not in observation]
         if not present_keys:
             raise ValueError(
                 f"none of the expected image keys are present: "
-                f"{self.preprocessor.config.image_keys}"
+                f"{self.image_keys}"
             )
         images = [_as_bchw(observation[key])[0] for key in present_keys]
-        for _ in missing_keys[: self.preprocessor.config.empty_cameras]:
+        for _ in missing_keys[: self.empty_cameras]:
             images.append(np.zeros_like(images[-1]))
         actions = np.asarray(raw[self.action_key], dtype=np.float32)
         padding_key = f"{self.action_key}_is_pad"
@@ -127,7 +129,7 @@ def _build_dataset(
     local_files_only: bool,
     video_backend: str | None,
     return_uint8: bool,
-) -> _PrecomputeDataset:
+) -> tuple[_PrecomputeDataset, JaxSmolVLAPreprocessor]:
     metadata = LeRobotDatasetMetadata(
         repo_id=source.repo_id,
         root=source.root,
@@ -164,11 +166,15 @@ def _build_dataset(
         stats=None,
         local_files_only=local_files_only,
     )
-    return _PrecomputeDataset(
-        dataset,
-        source=source,
-        action_key=action_key,
-        preprocessor=preprocessor,
+    return (
+        _PrecomputeDataset(
+            dataset,
+            source=source,
+            action_key=action_key,
+            image_keys=tuple(config.image_keys),
+            empty_cameras=config.empty_cameras,
+        ),
+        preprocessor,
     )
 
 
@@ -218,7 +224,7 @@ def main(argv: list[str] | None = None) -> None:
         return model.embed_image(params, images_bchw * 2.0 - 1.0)
 
     local_files_only = not (allow_download or bool(cfg.get("allow_tokenizer_download", False)))
-    dataset = _build_dataset(
+    dataset, preprocessor = _build_dataset(
         source,
         config=config,
         checkpoint=checkpoint,
@@ -260,9 +266,10 @@ def main(argv: list[str] | None = None) -> None:
         output_dir=output_dir,
         dataset=dataset,
         encode_vision=encode_cameras,
-        tokenize=lambda tasks: dataset.preprocessor.tokenize(tasks),
+        tokenize=preprocessor.tokenize,
         batch_size=int(cache_cfg.get("precompute_batch_size", 64)),
         num_workers=int(cache_cfg.get("precompute_num_workers", 0)),
+        prefetch_factor=int(cache_cfg.get("precompute_prefetch_factor", 2)),
     ).run()
     print(f"complete: {source.repo_id} -> {result}", flush=True)
 

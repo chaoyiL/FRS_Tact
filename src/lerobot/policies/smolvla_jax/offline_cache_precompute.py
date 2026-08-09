@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from torch.utils.data import DataLoader, Subset
 
 from .atomic_checkpoint import _path_exists, _rename_noreplace
 from .offline_training_cache import (
@@ -34,6 +34,38 @@ from .offline_training_cache import (
 
 class InjectedStop(RuntimeError):
     """Test-only interruption raised after durable progress reaches a boundary."""
+
+
+def _identity_collate(samples: list[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    return samples
+
+
+def _start_cpu_only_workers(loader: DataLoader, num_workers: int):
+    """Spawn cache readers without exposing the parent process GPU to them."""
+
+    if num_workers <= 0:
+        return iter(loader)
+    old_jax_platforms = os.environ.get("JAX_PLATFORMS")
+    old_cuda_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    old_skip_cuda_check = os.environ.get("JAX_SKIP_CUDA_CONSTRAINTS_CHECK")
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = "1"
+    try:
+        return iter(loader)
+    finally:
+        if old_jax_platforms is None:
+            os.environ.pop("JAX_PLATFORMS", None)
+        else:
+            os.environ["JAX_PLATFORMS"] = old_jax_platforms
+        if old_cuda_devices is None:
+            os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        else:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_cuda_devices
+        if old_skip_cuda_check is None:
+            os.environ.pop("JAX_SKIP_CUDA_CONSTRAINTS_CHECK", None)
+        else:
+            os.environ["JAX_SKIP_CUDA_CONSTRAINTS_CHECK"] = old_skip_cuda_check
 
 
 def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
@@ -121,6 +153,7 @@ class OfflineCachePrecomputer:
         tokenize: Callable[[list[str]], tuple[Any, Any]],
         batch_size: int,
         num_workers: int = 0,
+        prefetch_factor: int = 2,
     ) -> None:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -135,6 +168,7 @@ class OfflineCachePrecomputer:
         self.tokenize = tokenize
         self.batch_size = int(batch_size)
         self.num_workers = max(0, int(num_workers))
+        self.prefetch_factor = max(1, int(prefetch_factor))
 
     @property
     def staging_dir(self) -> Path:
@@ -225,13 +259,10 @@ class OfflineCachePrecomputer:
         *,
         start: int,
         end: int,
-        executor: ThreadPoolExecutor | None = None,
+        samples: list[Mapping[str, Any]] | None = None,
     ) -> None:
-        indices = range(start, end)
-        if executor is None:
-            samples = [self.dataset[index] for index in indices]
-        else:
-            samples = list(executor.map(self.dataset.__getitem__, indices))
+        if samples is None:
+            samples = [self.dataset[index] for index in range(start, end)]
         count = end - start
         images = np.stack([np.asarray(sample["images"]) for sample in samples], axis=0)
         vision = np.asarray(self.encode_vision(images))
@@ -326,30 +357,34 @@ class OfflineCachePrecomputer:
             raise InjectedStop(f"injected stop at frame {next_index}")
 
         target = self.spec.total_frames if stop_after is None else stop_after
-        executor = (
-            ThreadPoolExecutor(max_workers=self.num_workers)
-            if self.num_workers > 0
-            else None
-        )
-        try:
-            while next_index < target:
-                end = min(next_index + self.batch_size, target)
-                self._write_batch(arrays, start=next_index, end=end, executor=executor)
-                for array in arrays.values():
-                    array.flush()
-                next_index = end
-                _atomic_write_json(
-                    self.staging_dir / PROGRESS_NAME,
-                    _progress_payload(self.spec, next_index=next_index, status="incomplete"),
-                )
-                print(
-                    f"offline-cache {self.spec.repo_id}: "
-                    f"{next_index}/{self.spec.total_frames}",
-                    flush=True,
-                )
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=True)
+        remaining = Subset(self.dataset, range(next_index, target))
+        loader_kwargs: dict[str, Any] = {
+            "dataset": remaining,
+            "batch_size": self.batch_size,
+            "shuffle": False,
+            "num_workers": self.num_workers,
+            "persistent_workers": self.num_workers > 0,
+            "collate_fn": _identity_collate,
+        }
+        if self.num_workers > 0:
+            loader_kwargs["prefetch_factor"] = self.prefetch_factor
+            loader_kwargs["multiprocessing_context"] = "spawn"
+        loader = DataLoader(**loader_kwargs)
+        for samples in _start_cpu_only_workers(loader, self.num_workers):
+            end = next_index + len(samples)
+            self._write_batch(arrays, start=next_index, end=end, samples=samples)
+            for array in arrays.values():
+                array.flush()
+            next_index = end
+            _atomic_write_json(
+                self.staging_dir / PROGRESS_NAME,
+                _progress_payload(self.spec, next_index=next_index, status="incomplete"),
+            )
+            print(
+                f"offline-cache {self.spec.repo_id}: "
+                f"{next_index}/{self.spec.total_frames}",
+                flush=True,
+            )
 
         if next_index != self.spec.total_frames:
             raise InjectedStop(f"injected stop at frame {next_index}")

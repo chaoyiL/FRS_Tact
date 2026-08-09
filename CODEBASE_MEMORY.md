@@ -192,3 +192,7 @@
   rows are fetched concurrently using `precompute_num_workers`, then resize and
   frozen vision encoding run together as one batched JIT; progress is printed
   after every durable batch.
+- Thread workers plateaued at about 30 frames/s despite doubling from 8 to 16.
+  Offline vision precompute now uses the same CPU-only spawn DataLoader pattern
+  as tactile precompute, with ordered multi-process prefetch overlapping the
+  next host batch with current GPU encoding.
