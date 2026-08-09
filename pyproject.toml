@@ -120,6 +120,11 @@ dependencies = [
 #   uv pip install --force-reinstall torch torchvision \
 #       --index-url https://download.pytorch.org/whl/cu130
 [[tool.uv.index]]
+name = "tsinghua-pypi"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true

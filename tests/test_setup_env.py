@@ -4,6 +4,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -209,6 +210,9 @@ def _parse_environment_file(path: Path) -> dict[str, str]:
         "HF_DATASETS_CACHE",
         "HF_LEROBOT_HOME",
         "TMPDIR",
+        "UV_DEFAULT_INDEX",
+        "UV_HTTP_TIMEOUT",
+        "HF_ENDPOINT",
     )
     command = "source \"$1\"; printf '%s\\0' " + " ".join(f'\"${{{key}}}\"' for key in keys)
     result = subprocess.run(
@@ -230,10 +234,13 @@ def test_default_environment_contract_uses_server_storage_not_checkout_venv(tmp_
     setup_library.write_text(
         script.rsplit('\nmain "$@"', maxsplit=1)[0]
         + "\nexport UV_CACHE_DIR=\"${UV_CACHE_DIR_VALUE}\"\n"
+        + "export UV_DEFAULT_INDEX=\"${UV_DEFAULT_INDEX_VALUE}\"\n"
+        + "export UV_HTTP_TIMEOUT=\"${UV_HTTP_TIMEOUT_VALUE}\"\n"
         + "export HF_HOME=\"${HF_HOME_VALUE}\"\n"
         + "export HF_HUB_CACHE=\"${HF_HUB_CACHE_VALUE}\"\n"
         + "export HF_DATASETS_CACHE=\"${HF_DATASETS_CACHE_VALUE}\"\n"
         + "export HF_LEROBOT_HOME=\"${HF_LEROBOT_HOME_VALUE}\"\n"
+        + "export HF_ENDPOINT=\"${HF_ENDPOINT_VALUE}\"\n"
         + "export TMPDIR=\"${TMPDIR_VALUE}\"\n"
         + "write_environment_file\n",
         encoding="utf-8",
@@ -282,6 +289,9 @@ def test_setup_persists_authoritative_environment_atomically(tmp_path: Path) -> 
         "HF_DATASETS_CACHE": str(storage / "huggingface" / "datasets_arrow"),
         "HF_LEROBOT_HOME": str(storage / "huggingface" / "lerobot"),
         "TMPDIR": str(storage / "tmp"),
+        "UV_DEFAULT_INDEX": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "UV_HTTP_TIMEOUT": "300",
+        "HF_ENDPOINT": "https://hf-mirror.com",
     }
     calls = command_log.read_text(encoding="utf-8")
     assert f"mktemp --tmpdir={project} .env.frs.XXXXXX" in calls
@@ -299,6 +309,25 @@ def test_setup_uses_project_lock_instead_of_global_process_scan() -> None:
     assert 'command -v flock >/dev/null 2>&1 || fail "找不到 flock（util-linux）"' in script
     assert "ps -eo" not in script
     assert ".bashrc" not in script
+
+
+def test_dependency_mirror_contract_keeps_cuda_wheels_on_official_index() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    indexes = {item["name"]: item for item in project["tool"]["uv"]["index"]}
+
+    assert indexes["tsinghua-pypi"] == {
+        "name": "tsinghua-pypi",
+        "url": "https://pypi.tuna.tsinghua.edu.cn/simple",
+        "default": True,
+    }
+    assert indexes["pytorch-cu128"] == {
+        "name": "pytorch-cu128",
+        "url": "https://download.pytorch.org/whl/cu128",
+        "explicit": True,
+    }
+    lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
+    assert 'registry = "https://pypi.tuna.tsinghua.edu.cn/simple"' in lock
+    assert 'index = "https://download.pytorch.org/whl/cu128"' in lock
 
 
 @pytest.mark.parametrize(
