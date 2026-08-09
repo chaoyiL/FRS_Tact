@@ -14,7 +14,7 @@
 #        --config train_frs/configs/train_frs.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
-checkpoint: /workspace/checkpoints/pick_tube_02_3w_jax
+checkpoint: /workspace/checkpoints/model/pick_tube_02_3w_jax
 # checkpoint 本身是本地目录；true 只允许首次补齐 tokenizer 等公共资源。
 allow_download: true
 
@@ -22,7 +22,7 @@ allow_download: true
 checkpoint_merge:
   adapter: KaiyueChen/pick_tube_02_3w
   base: lerobot/smolvla_base
-  output: /workspace/checkpoints/pick_tube_02_3w_jax
+  output: /workspace/checkpoints/model/pick_tube_02_3w_jax
   allow_download: true
 
 datasets:

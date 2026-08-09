@@ -182,11 +182,14 @@ def plot_training_history(
 
     has_stratified = bool(high_gt_epochs or low_gt_epochs or high_pred_epochs or low_pred_epochs)
     has_overall_mse = bool(mse_gt_epochs or mse_pred_epochs)
-    has_val_mse = has_stratified or has_overall_mse
-    has_counts = bool(n_high_epochs or n_low_epochs)
-    has_repair = bool(high_gain_epochs or low_gain_epochs)
-    has_rank_stats = bool(rank_high_epochs or rank_low_epochs or repair_high_epochs)
-    has_gate_stats = bool(gate_p50_epochs or change_p50_epochs)
+    # Keep the pre-refactor five-panel dashboard stable from epoch 1 onward.
+    # Validation values are still plotted only after evaluation has actually run;
+    # before then their four panels remain visible as pending placeholders.
+    has_val_mse = True
+    has_counts = True
+    has_repair = True
+    has_rank_stats = False
+    has_gate_stats = True
 
     destination = output_path or history_path.with_name("training_curves.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -208,6 +211,18 @@ def plot_training_history(
     fig.subplots_adjust(left=0.09, right=0.97, top=0.90, bottom=0.08, hspace=0.32)
     if n_rows == 1:
         axes = [axes]
+
+    def _mark_pending(axis: Any) -> None:
+        axis.text(
+            0.5,
+            0.5,
+            "Waiting for the first validation epoch",
+            transform=axis.transAxes,
+            ha="center",
+            va="center",
+            color="#777777",
+            fontsize=9,
+        )
 
     row = 0
     axes[row].plot(
@@ -245,7 +260,7 @@ def plot_training_history(
             markersize=5,
         )
     axes[row].set_ylabel("loss")
-    axes[row].set_title("Training objective decomposition", pad=8)
+    axes[row].set_title("Flow matching loss", pad=8)
     axes[row].grid(True, alpha=0.3)
     axes[row].legend(loc="upper right", fontsize=9, framealpha=0.92)
     row += 1
@@ -332,10 +347,19 @@ def plot_training_history(
                     marker="s",
                     markersize=5,
                 )
-            axes[row].set_title("Validation decode MSE (gt vs predicted)", pad=8)
+            axes[row].set_title(
+                "Validation decode MSE (gt vs predicted)"
+                if has_overall_mse
+                else "Validation decode MSE by gate weight",
+                pad=8,
+            )
         axes[row].set_ylabel("action MSE")
         axes[row].grid(True, alpha=0.3)
-        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        handles, labels = axes[row].get_legend_handles_labels()
+        if handles:
+            axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        else:
+            _mark_pending(axes[row])
         row += 1
 
     if has_repair:
@@ -385,7 +409,15 @@ def plot_training_history(
         relative_axis.set_ylabel("FRS→GT / VLA→GT")
         handles, labels = repair_axis.get_legend_handles_labels()
         rel_handles, rel_labels = relative_axis.get_legend_handles_labels()
-        repair_axis.legend(handles + rel_handles, labels + rel_labels, loc="best", fontsize=8)
+        if handles or rel_handles:
+            repair_axis.legend(
+                handles + rel_handles,
+                labels + rel_labels,
+                loc="best",
+                fontsize=8,
+            )
+        else:
+            _mark_pending(repair_axis)
         row += 1
 
     if has_rank_stats:
@@ -455,13 +487,16 @@ def plot_training_history(
         change_axis.set_ylabel("tactile change")
         handles, labels = gate_axis.get_legend_handles_labels()
         change_handles, change_labels = change_axis.get_legend_handles_labels()
-        gate_axis.legend(
-            handles + change_handles,
-            labels + change_labels,
-            loc="best",
-            fontsize=8,
-            ncol=2,
-        )
+        if handles or change_handles:
+            gate_axis.legend(
+                handles + change_handles,
+                labels + change_labels,
+                loc="best",
+                fontsize=8,
+                ncol=2,
+            )
+        else:
+            _mark_pending(gate_axis)
         row += 1
 
     if has_counts:
@@ -488,7 +523,11 @@ def plot_training_history(
         axes[row].set_ylabel("# val samples")
         axes[row].set_title("Validation sample counts by gate weight", pad=8)
         axes[row].grid(True, alpha=0.3)
-        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        handles, labels = axes[row].get_legend_handles_labels()
+        if handles:
+            axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        else:
+            _mark_pending(axes[row])
         row += 1
 
     axes[-1].set_xlabel("epoch")

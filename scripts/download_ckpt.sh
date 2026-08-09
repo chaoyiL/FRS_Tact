@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+'''
+bash scripts/download_ckpt.sh \
+  --repo-id KaiyueChen/encoder_ckpt_0809 \
+  --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
+'''
 
 set -Eeuo pipefail
 

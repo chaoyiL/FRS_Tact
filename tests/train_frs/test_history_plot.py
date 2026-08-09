@@ -4,12 +4,45 @@ import csv
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
+import train_frs.utils.history_plot as history_plot_module
 from train_frs.utils.history_plot import HISTORY_FIELDS
 from train_frs.utils.history_plot import plot_training_history
 
 
 class HistoryPlotTest(unittest.TestCase):
+    def test_keeps_five_panels_before_first_validation_epoch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            history = pathlib.Path(directory) / "history.csv"
+            row = dict.fromkeys(HISTORY_FIELDS, "")
+            row.update(
+                {
+                    "epoch": 1,
+                    "train_loss_total": 0.3,
+                    "train_loss_gt_fm": 0.10,
+                    "train_loss_vla_fm": 0.05,
+                    "train_loss_decode": 0.06,
+                    "train_loss_rank": 0.04,
+                    "train_loss_repair": 0.05,
+                    "train_flow_loss": 0.3,
+                }
+            )
+            with history.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=HISTORY_FIELDS)
+                writer.writeheader()
+                writer.writerow(row)
+
+            with mock.patch.object(
+                history_plot_module.plt,
+                "subplots",
+                wraps=history_plot_module.plt.subplots,
+            ) as subplots:
+                output = plot_training_history(history)
+
+            self.assertEqual(subplots.call_args.args[:2], (5, 1))
+            self.assertTrue(output.is_file())
+
     def test_plots_vla_baseline_repair_and_gate_quantiles(self):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
