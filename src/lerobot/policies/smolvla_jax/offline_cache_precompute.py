@@ -154,6 +154,7 @@ class OfflineCachePrecomputer:
         batch_size: int,
         num_workers: int = 0,
         prefetch_factor: int = 2,
+        flush_every: int = 1,
     ) -> None:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -169,6 +170,7 @@ class OfflineCachePrecomputer:
         self.batch_size = int(batch_size)
         self.num_workers = max(0, int(num_workers))
         self.prefetch_factor = max(1, int(prefetch_factor))
+        self.flush_every = max(1, int(flush_every))
 
     @property
     def staging_dir(self) -> Path:
@@ -370,19 +372,25 @@ class OfflineCachePrecomputer:
             loader_kwargs["prefetch_factor"] = self.prefetch_factor
             loader_kwargs["multiprocessing_context"] = "spawn"
         loader = DataLoader(**loader_kwargs)
-        for samples in _start_cpu_only_workers(loader, self.num_workers):
+        for batch_number, samples in enumerate(
+            _start_cpu_only_workers(loader, self.num_workers),
+            start=1,
+        ):
             end = next_index + len(samples)
             self._write_batch(arrays, start=next_index, end=end, samples=samples)
-            for array in arrays.values():
-                array.flush()
             next_index = end
-            _atomic_write_json(
-                self.staging_dir / PROGRESS_NAME,
-                _progress_payload(self.spec, next_index=next_index, status="incomplete"),
-            )
+            should_flush = batch_number % self.flush_every == 0 or next_index >= target
+            if should_flush:
+                for array in arrays.values():
+                    array.flush()
+                _atomic_write_json(
+                    self.staging_dir / PROGRESS_NAME,
+                    _progress_payload(self.spec, next_index=next_index, status="incomplete"),
+                )
             print(
                 f"offline-cache {self.spec.repo_id}: "
-                f"{next_index}/{self.spec.total_frames}",
+                f"{next_index}/{self.spec.total_frames}"
+                f"{' durable' if should_flush else ''}",
                 flush=True,
             )
 

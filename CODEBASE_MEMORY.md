@@ -199,3 +199,7 @@
 - Offline-cache GPU scheduling uses independent round-robin queues instead of
   synchronized waves. A GPU that finishes its current dataset immediately
   starts its next assigned dataset rather than waiting for the other GPU.
+- Worker RGB payloads remain uint8 through multiprocessing IPC and are converted
+  to float32 only inside the batched GPU JIT. Offline cache durability defaults
+  to every four batches, so an interruption may recompute at most three batches
+  while reducing synchronous memmap flush stalls.

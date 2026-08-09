@@ -15,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
@@ -32,13 +33,30 @@ from lerobot.policies.smolvla_jax.offline_cache_precompute import OfflineCachePr
 from lerobot.policies.smolvla_jax.offline_training_cache import OfflineCacheSpec, offline_cache_dir
 from lerobot.policies.smolvla_jax.preprocessing import (
     JaxSmolVLAPreprocessor,
-    _as_bchw,
     resize_with_pad,
 )
 from tools.train_smolvla_jax import apply_model_overrides, load_yaml_config, require
 
 
 DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_vtsmolvla_jax_tactile16.yaml"
+
+
+def _as_chw_uint8(image: Any) -> np.ndarray:
+    """Keep RGB worker payloads compact until the batched GPU preprocessing step."""
+
+    values = np.asarray(image)
+    if values.ndim != 3:
+        raise ValueError(f"expected an HWC/CHW image, got {values.shape}")
+    if values.shape[-1] in (1, 3):
+        values = np.transpose(values, (2, 0, 1))
+    elif values.shape[0] not in (1, 3):
+        raise ValueError(f"cannot identify image channels in shape {values.shape}")
+    if values.dtype == np.uint8:
+        return np.ascontiguousarray(values)
+    values = values.astype(np.float32, copy=False)
+    if values.size and float(np.max(values)) <= 1.0:
+        values = values * 255.0
+    return np.rint(np.clip(values, 0.0, 255.0)).astype(np.uint8)
 
 
 def nonnegative_dataset_index(value: str) -> int:
@@ -101,7 +119,7 @@ class _PrecomputeDataset:
                 f"none of the expected image keys are present: "
                 f"{self.image_keys}"
             )
-        images = [_as_bchw(observation[key])[0] for key in present_keys]
+        images = [_as_chw_uint8(observation[key]) for key in present_keys]
         for _ in missing_keys[: self.empty_cameras]:
             images.append(np.zeros_like(images[-1]))
         actions = np.asarray(raw[self.action_key], dtype=np.float32)
@@ -215,6 +233,7 @@ def main(argv: list[str] | None = None) -> None:
 
     @jax.jit
     def encode(images_bchw):
+        images_bchw = images_bchw.astype(jnp.float32) * (1.0 / 255.0)
         images_bchw = resize_with_pad(
             images_bchw,
             config.resize_width,
@@ -270,6 +289,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=int(cache_cfg.get("precompute_batch_size", 64)),
         num_workers=int(cache_cfg.get("precompute_num_workers", 0)),
         prefetch_factor=int(cache_cfg.get("precompute_prefetch_factor", 2)),
+        flush_every=int(cache_cfg.get("precompute_flush_every", 4)),
     ).run()
     print(f"complete: {source.repo_id} -> {result}", flush=True)
 
