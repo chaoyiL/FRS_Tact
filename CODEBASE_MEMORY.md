@@ -203,3 +203,16 @@
   to float32 only inside the batched GPU JIT. Offline cache durability defaults
   to every four batches, so an interruption may recompute at most three batches
   while reducing synchronous memmap flush stalls.
+
+## 2026-08-09 - Low-token tactile paper baselines
+
+- 新增两份六数据集独立配置：`train_vtsmolvla_jax_tactile_k1.yaml` 使用
+  `tactile_token_repeat_factor: 1`，即四路触觉各 1 token、总 4/181=2.21%；
+  `train_vtsmolvla_jax_tactile_8pct.yaml` 使用 factor 4，即总 16/193=8.29%。
+- 两组都使用 BF16、相同数据/cache/normalization/seed/batch/model modes，训练
+  `80000` steps，`scheduler_decay_steps: 80000`，每 `10000` steps 保存一次。
+- 两卡顺序入口为
+  `bash scripts/start_vtsmolvla_low_token_train.sh --gpus 0,1`；它先完整训练 K1，
+  成功后再训练 K4，K1 失败时 K4 不会启动。输出分别位于
+  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat1` 与
+  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_8pct`。
