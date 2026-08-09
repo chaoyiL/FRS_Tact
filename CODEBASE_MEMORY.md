@@ -209,10 +209,12 @@
 - 新增两份六数据集独立配置：`train_vtsmolvla_jax_tactile_k1.yaml` 使用
   `tactile_token_repeat_factor: 1`，即四路触觉各 1 token、总 4/181=2.21%；
   `train_vtsmolvla_jax_tactile_8pct.yaml` 使用 factor 4，即总 16/193=8.29%。
-- 两组都使用 BF16、相同数据/cache/normalization/seed/batch/model modes，训练
-  `80000` steps，`scheduler_decay_steps: 80000`，每 `10000` steps 保存一次。
+- K1、K4 与 K21 都使用 BF16、相同数据/cache/normalization/seed/batch/model
+  modes，训练 `80000` steps，`scheduler_decay_steps: 80000`，每 `10000`
+  steps 保存一次；K21 为 factor 21，即总 84/261=32.18%。
 - 两卡顺序入口为
-  `bash scripts/start_vtsmolvla_low_token_train.sh --gpus 0,1`；它先完整训练 K1，
-  成功后再训练 K4，K1 失败时 K4 不会启动。输出分别位于
-  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat1` 与
-  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_8pct`。
+  `bash scripts/start_vtsmolvla_k1_k4_k21_train.sh --gpus 0,1`；它依次完整训练
+  K1、K4、K21，任一实验失败时后续实验不会启动。三个输出目录分别为
+  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat1`、
+  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_8pct` 和
+  `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat32`。

@@ -97,7 +97,7 @@ offline_training_cache:
 
 # ---- 输出与训练超参 ----
 output: /DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat32
-steps: 40000
+steps: 80000
 batch_size: 64
 # 8 核 RunPod：每个 worker 内还会并行解码六路视频，避免开过多进程。
 num_workers: 2
@@ -107,7 +107,7 @@ video_backend: torchcodec
 # worker 间传 uint8，避免六路图像提前膨胀为 4 倍大小的 float32。
 return_uint8: true
 log_freq: 10
-save_freq: 5000
+save_freq: 10000
 eval_freq: 500
 seed: 42
 resume: null
@@ -244,4 +244,4 @@ model:
   optimizer_weight_decay: 1.0e-4
   optimizer_grad_clip_norm: 10.0
   scheduler_warmup_steps: 1000
-  scheduler_decay_steps: 40000
+  scheduler_decay_steps: 80000

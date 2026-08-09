@@ -7,6 +7,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 BASE_LAUNCHER="${SCRIPT_DIR}/start_vtsmolvla_train.sh"
 K1_CONFIG="${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile_k1.yaml"
 K4_CONFIG="${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile_8pct.yaml"
+K21_CONFIG="${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile32.yaml"
 SCRIPT_PATH="${SCRIPT_DIR}/start_vtsmolvla_low_token_train.sh"
 GPUS="0,1"
 TMUX_SESSION="${FRS_TMUX_SESSION:-vtsmolvla_low_token}"
@@ -25,8 +26,8 @@ usage() {
     printf '%s\n' \
         "用法：scripts/start_vtsmolvla_low_token_train.sh [--gpus 0,1] [--foreground] [--session NAME]" \
         "" \
-        "在同一对 GPU 上先训练 K=1（4 tactile tokens，2.21%），完成后训练 K=4（16 tactile tokens，8.29%）。" \
-        "两组均训练 80000 steps，每 10000 steps 保存一次。"
+        "在同一对 GPU 上依次训练 K=1（2.21%）、K=4（8.29%）、K=21（32.18%）。" \
+        "三组均训练 80000 steps，每 10000 steps 保存一次。"
 }
 
 parse_arguments() {
@@ -107,4 +108,5 @@ start_tmux_if_needed
 cd "${PROJECT_ROOT}"
 run_experiment "K=1 / tactile 2.21%" "${K1_CONFIG}"
 run_experiment "K=4 / tactile 8.29%" "${K4_CONFIG}"
-log "K=1 与 K=4 训练均已完成"
+run_experiment "K=21 / tactile 32.18%" "${K21_CONFIG}"
+log "K=1、K=4 与 K=21 训练均已完成"
