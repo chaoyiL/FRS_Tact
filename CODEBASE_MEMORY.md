@@ -155,3 +155,11 @@
 - `start_vtsmolvla_train.sh` 无参数时使用单个 JAX 进程和 `CUDA_VISIBLE_DEVICES=0,1`，要求 JAX 恰好看到两张 H100；cache 只用 K8 配置预计算一次，随后同步训练 K8，再训练 K21。K8 失败会由 `set -Eeuo pipefail` 终止链路，不启动 K21。
 - 最小 CLI 支持 `--experiment both|k8|k21`、`--gpus`、`--foreground`、`--session`，并保留 `--config PATH` 单配置兼容模式；tmux 透传原始参数。
 - fresh 本机脚本验证：三脚本相关 pytest `53 passed in 29.43s`，launcher config pytest `15 passed`；四个 shell 文件 `bash -n`、`repair_v21_indexes.py` 编译及 `git diff --check` 均通过。真实四数据集在线下载/转换及双 H100 训练仍需在目标服务器执行。
+
+### 四卡 RTX PRO 6000 离线 vision cache 设计（2026-08-09）
+
+- 用户确认关闭在线 RGB augmentation，以最大化数据吞吐；`vision` 与 `connector` 继续 frozen。
+- 新离线缓存按帧保存两路 connector 输出 `[N,2,64,960]` BF16、raw state/action chunk/padding、language token/mask 和 episode/frame identity；BF16 以 `uint16` 原始 bits 存储并 bit-exact 恢复。现有 tactile cache 单独复用。
+- 训练时跳过 RGB 解码、augmentation、resize、tokenizer、action-window 查询及 frozen vision/connector 前向；保留 train-only normalization、split、shuffle、weights、resume、flow noise 和 modality dropout。
+- 目标机器是 4 张 `NVIDIA RTX PRO 6000 Blackwell Server Edition`（约 96 GiB，driver 595.84）：K8 为单 JAX 进程使用 GPU 0/1，K21 为另一进程使用 GPU 2/3，并行训练且独立失败；cache 只生成一次并只读共享。
+- 设计文档：`docs/superpowers/specs/2026-08-09-offline-vision-cache-four-gpu-training-design.md`。当前仅完成设计，尚未修改生产代码或启动训练。
