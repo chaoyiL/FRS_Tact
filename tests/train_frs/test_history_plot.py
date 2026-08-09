@@ -80,6 +80,8 @@ class HistoryPlotTest(unittest.TestCase):
                     "val_tactile_change_p90": 0.9,
                     "val_n_high_w": 40,
                     "val_n_low_w": 60,
+                    "checkpoint_selection_key": "1,0.0906691381335,-0.015307482332,0.184984356165",
+                    "checkpoint_selection_feasible": 0,
                 }
             )
             with history.open("w", newline="", encoding="utf-8") as file:

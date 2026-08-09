@@ -77,6 +77,10 @@ HISTORY_FIELDS = (
     "checkpoint_selection_feasible",
 )
 
+# Composite checkpoint keys are serialized as comma-separated text, for example
+# ``0,0.08,-0.01,0.12``.  They are useful metadata but are not numeric plot series.
+HISTORY_TEXT_FIELDS = frozenset({"checkpoint_selection_key"})
+
 
 def _parse_float(value: str | None) -> float:
     if value is None:
@@ -104,7 +108,11 @@ def _read_history_rows(history_path: pathlib.Path) -> list[dict[str, Any]]:
             by_epoch[epoch] = {
                 "epoch": epoch,
                 **{
-                    field: _parse_float(raw.get(field))
+                    field: (
+                        (raw.get(field) or "").strip()
+                        if field in HISTORY_TEXT_FIELDS
+                        else _parse_float(raw.get(field))
+                    )
                     for field in HISTORY_FIELDS
                     if field != "epoch"
                 },
