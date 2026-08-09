@@ -240,40 +240,36 @@ def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(
     assert events == ["resolve"]
 
 
-def test_default_deployment_config_pins_the_bimanual_vt_contract() -> None:
+def test_default_deployment_config_pins_a_self_consistent_visual_contract() -> None:
     config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
     contract = remote_client._checkpoint_contract(config, config["control"])
 
-    assert config["checkpoint"] == "KaiyueChen/vtsmolvla_01_4w"
-    assert config["revision"] == "0b5cc8208ef118f505b1f736b0ec604b598f9424"
-    assert config["allow_download"] is True
+    assert isinstance(config["checkpoint"], str) and config["checkpoint"]
+    assert config["revision"] is None
+    assert config["allow_download"] is False
     assert config["connection"]["token"] is None
     assert config["connection"]["token_env"] == "VB_ROBOT_TOKEN"
     assert config["connection"]["require_token"] is True
     assert contract.state_dim == 20
     assert contract.action_dim == 20
-    assert contract.chunk_size == 20
+    assert contract.chunk_size == 10
     assert contract.image_keys == (
         "observation.images.camera1",
         "observation.images.camera2",
     )
-    assert contract.tactile_keys == (
-        "observation.images.tactile_left_0",
-        "observation.images.tactile_right_0",
-        "observation.images.tactile_left_1",
-        "observation.images.tactile_right_1",
-    )
+    assert contract.tactile_keys == ()
     assert contract.tactile_embedding_dim == 512
-    assert contract.tactile_num_tokens == 4
-    assert contract.lora_rank == 16
-    assert contract.vlm_lora_target_modules == ("q_proj", "v_proj")
+    assert contract.tactile_num_tokens == 0
+    assert contract.tactile_proj_mode == "frozen"
+    assert contract.lora_rank == 0
+    assert contract.vlm_lora_target_modules == ()
     assert config["rename_map"] == {
         "observation.images.camera0": "observation.images.camera1",
         "observation.images.camera1": "observation.images.camera2",
     }
-    assert config["observation"]["data_type"] == "vitac"
+    assert config["observation"]["data_type"] == "vision"
     assert config["observation"]["single_arm_mode"] is False
-    assert config["control"]["action_horizon"] == 20
+    assert config["control"]["action_horizon"] == 10
     assert config["control"]["steps_per_inference"] == 10
 
 
