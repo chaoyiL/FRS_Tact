@@ -6,7 +6,12 @@ from __future__ import annotations
 import argparse
 from collections.abc import Mapping
 from pathlib import Path
+import sys
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import jax
 import numpy as np
@@ -28,7 +33,7 @@ from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
 from tools.train_smolvla_jax import apply_model_overrides, load_yaml_config, require
 
 
-DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_vtsmolvla_jax_tactile16.yaml"
+DEFAULT_CONFIG = PROJECT_ROOT / "configs" / "train_vtsmolvla_jax_tactile16.yaml"
 
 
 def nonnegative_dataset_index(value: str) -> int:

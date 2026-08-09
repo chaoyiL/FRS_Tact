@@ -177,3 +177,10 @@
 - 国内镜像契约：`setup_env.sh` 默认写入 `UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple`、`UV_HTTP_TIMEOUT=300`、`HF_ENDPOINT=https://hf-mirror.com`，可分别由 `FRS_PYPI_INDEX_URL`、`FRS_UV_HTTP_TIMEOUT`、`FRS_HF_ENDPOINT` 覆盖；`uv.lock` 的普通包 registry/file URL 已切到清华，Linux torch/torchvision 仍锁定官方 cu128 index。
 - 六数据集训练契约：K8/K21 YAML 与下载器覆盖 `KaiyueChen/pick_tube_01..06`，共享新的 `/DATA/ljl/substage/normalization_protocols/pick_tube_01_06_vt_k8_k21`；离线 vision cache CLI 接受任意非负 source index并按 YAML 长度校验，四卡预计算分两波执行 `0..3 -> GPU0..3`、`4..5 -> GPU0..1`，随后 K8/K21 训练仍分别占用 GPU0/1 与 GPU2/3。
 - 两张空闲卡模式：`start_vtsmolvla_train.sh --experiment both --gpus A,B` 使用同一 GPU pair，先通过 `precompute_smolvla_training_cache.sh --gpus A,B` 将六数据集分三波缓存，再顺序训练 K8、K21；K8 失败时不启动 K21。四卡 `start_vtsmolvla_dual_train.sh` 仍显式传 `--gpus 0,1,2,3`，保留原并行模式。
+## 2026-08-09 - Offline cache direct-script import compatibility
+
+- `tools/precompute_smolvla_training_cache.py` is launched as a file by
+  `scripts/precompute_smolvla_training_cache.sh`, so it must add the repository
+  root to `sys.path` before importing `tools.train_smolvla_jax`.
+- Without that bootstrap, server-side cache workers fail immediately with
+  `ModuleNotFoundError: No module named 'tools'`.
