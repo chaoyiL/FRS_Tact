@@ -178,6 +178,7 @@ fi
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "HOME": str(home),
         "FRS_STORAGE_ROOT": str(storage),
+        "FRS_VENV_DIR": str(storage / ".venvs" / "frs_tact"),
         "FRS_UV_CACHE_DIR": str(storage / ".cache" / "uv"),
         "FAKE_TORCH_DEVICE_COUNT": "2",
         "FAKE_JAX_DEVICE_COUNT": "2",
@@ -220,7 +221,7 @@ def _parse_environment_file(path: Path) -> dict[str, str]:
     return dict(zip(keys, values, strict=True))
 
 
-def test_default_environment_contract_uses_workspace_not_checkout_venv(tmp_path: Path) -> None:
+def test_default_environment_contract_uses_server_storage_not_checkout_venv(tmp_path: Path) -> None:
     project = tmp_path / "project"
     scripts = project / "scripts"
     scripts.mkdir(parents=True)
@@ -254,12 +255,12 @@ def test_default_environment_contract_uses_workspace_not_checkout_venv(tmp_path:
 
     assert result.returncode == 0, result.stderr
     parsed_env = _parse_environment_file(project / ".env.frs")
-    assert parsed_env["FRS_STORAGE_ROOT"] == "/workspace"
-    assert parsed_env["FRS_VENV_DIR"] == "/workspace/.venvs/frs_tact"
+    assert parsed_env["FRS_STORAGE_ROOT"] == "/DATA/ljl/substage"
+    assert parsed_env["FRS_VENV_DIR"] == "/home/ljl/.venvs/frs_tact"
     assert parsed_env["UV_PROJECT_ENVIRONMENT"] == parsed_env["FRS_VENV_DIR"]
-    assert parsed_env["UV_CACHE_DIR"] == "/workspace/.cache/uv"
-    assert parsed_env["HF_HOME"] == "/workspace/huggingface"
-    assert parsed_env["TMPDIR"] == "/workspace/tmp"
+    assert parsed_env["UV_CACHE_DIR"] == "/DATA/ljl/substage/.cache/uv"
+    assert parsed_env["HF_HOME"] == "/DATA/ljl/substage/huggingface"
+    assert parsed_env["TMPDIR"] == "/DATA/ljl/substage/tmp"
     assert parsed_env["FRS_VENV_DIR"] != str(project / ".venv")
 
 

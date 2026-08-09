@@ -16,10 +16,9 @@ def _load_repo_yaml(name: str) -> dict:
     return yaml.safe_load((ROOT / "configs" / name).read_text())
 
 
-def _scientific_config(config: dict) -> dict:
+def _same_experiment_config(config: dict) -> dict:
     normalized = deepcopy(config)
     normalized.pop("output", None)
-    normalized.pop("normalization", None)
     wandb = normalized.get("wandb") or {}
     wandb.pop("name", None)
     wandb.pop("tags", None)
@@ -29,35 +28,55 @@ def _scientific_config(config: dict) -> dict:
     return normalized
 
 
-def test_paper_ratio_configs_only_change_factor_and_output_identity() -> None:
-    base = _load_repo_yaml("train_vtsmolvla_jax.yaml")
+def _active_strings(value: object) -> list[str]:
+    if isinstance(value, dict):
+        return [item for nested in value.values() for item in _active_strings(nested)]
+    if isinstance(value, list):
+        return [item for nested in value for item in _active_strings(nested)]
+    return [value] if isinstance(value, str) else []
+
+
+def test_cache_experiment_configs_use_server_paths_and_only_change_identity() -> None:
     tactile16 = _load_repo_yaml("train_vtsmolvla_jax_tactile16.yaml")
     tactile32 = _load_repo_yaml("train_vtsmolvla_jax_tactile32.yaml")
 
-    assert base["model"]["tactile_token_repeat_factor"] == 1
     assert tactile16["model"]["tactile_token_repeat_factor"] == 8
     assert tactile32["model"]["tactile_token_repeat_factor"] == 21
-    assert _scientific_config(base) == _scientific_config(tactile16)
-    assert _scientific_config(base) == _scientific_config(tactile32)
-    assert len({base["output"], tactile16["output"], tactile32["output"]}) == 3
-    assert tactile16["normalization"] == tactile32["normalization"] == {
-        "protocol_dir": "/workspace/normalization_protocols/pick_tube_vt_k8_k21"
+    assert _same_experiment_config(tactile16) == _same_experiment_config(tactile32)
+    assert tactile16["offline_training_cache"] == {
+        "enabled": True,
+        "root": "/DATA/ljl/substage/smolvla_training_cache",
+        "dtype": "bfloat16",
+        "precompute_batch_size": 64,
+        "precompute_num_workers": 8,
+        "loader_num_workers": 2,
+        "host_prefetch_batches": 2,
     }
+    assert tactile16["model"]["tactile_encoder_path"] == \
+        "/DATA/ljl/substage/checkpoints/encoder_ckpt_05"
+    assert tactile16["image_transforms"]["enable"] is False
+    assert tactile16["num_workers"] == 2
+    assert tactile16["output"] == "/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat16"
+    assert tactile32["output"] == "/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat32"
     assert tactile16["normalization"]["protocol_dir"] not in {
         tactile16["output"],
         tactile32["output"],
     }
+    assert not any(
+        value.startswith("/workspace")
+        for config in (tactile16, tactile32)
+        for value in _active_strings(config)
+    )
 
 
-def test_all_vt_configs_use_identical_encoder_05_path() -> None:
+def test_cache_configs_use_identical_encoder_05_path() -> None:
     configs = [
-        _load_repo_yaml("train_vtsmolvla_jax.yaml"),
         _load_repo_yaml("train_vtsmolvla_jax_tactile16.yaml"),
         _load_repo_yaml("train_vtsmolvla_jax_tactile32.yaml"),
     ]
 
     assert {config["model"]["tactile_encoder_path"] for config in configs} == {
-        "/workspace/checkpoints/encoder_ckpt_05"
+        "/DATA/ljl/substage/checkpoints/encoder_ckpt_05"
     }
 
 
@@ -89,10 +108,21 @@ def _valid_config() -> dict:
             "tactile_num_tokens": 4,
             "tactile_token_repeat_factor": 8,
             "image_keys": ["camera1", "camera2"],
+            "module_modes": {"vision": "frozen", "connector": "frozen"},
         },
         "output": "/runs/k8",
         "normalization": {"protocol_dir": "/shared/protocol"},
         "tactile_embedding_cache": {"enabled": False},
+        "image_transforms": {"enable": False},
+        "offline_training_cache": {
+            "enabled": True,
+            "root": "/cache",
+            "dtype": "bfloat16",
+            "precompute_batch_size": 64,
+            "precompute_num_workers": 8,
+            "loader_num_workers": 2,
+            "host_prefetch_batches": 2,
+        },
     }
 
 
@@ -160,3 +190,27 @@ def test_vt_launcher_rejects_invalid_repeat_factor(tmp_path: Path, invalid: obje
     config["model"]["tactile_token_repeat_factor"] = invalid
     with pytest.raises(ValueError, match="tactile_token_repeat_factor"):
         _validate_vt_config(_write(tmp_path / "invalid.yaml", config))
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda config: config["model"]["module_modes"].update(vision="full"), "frozen vision"),
+        (lambda config: config["model"]["module_modes"].update(connector="lora"), "frozen vision"),
+        (lambda config: config["image_transforms"].update(enable=True), "image_transforms"),
+        (lambda config: config["offline_training_cache"].update(dtype="float16"), "bfloat16"),
+        (lambda config: config["offline_training_cache"].update(root=""), "root"),
+        (lambda config: config["offline_training_cache"].update(precompute_batch_size=0), "precompute_batch_size"),
+        (lambda config: config["offline_training_cache"].update(precompute_num_workers=0), "precompute_num_workers"),
+        (lambda config: config["offline_training_cache"].update(loader_num_workers=0), "loader_num_workers"),
+        (lambda config: config["offline_training_cache"].update(host_prefetch_batches=0), "host_prefetch_batches"),
+    ],
+)
+def test_offline_cache_rejects_incompatible_configuration(
+    tmp_path: Path, mutate: object, message: str
+) -> None:
+    config = _valid_config()
+    mutate(config)  # type: ignore[operator]
+
+    with pytest.raises(ValueError, match=message):
+        _validate_vt_config(_write(tmp_path / "offline-invalid.yaml", config))

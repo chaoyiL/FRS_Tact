@@ -108,6 +108,34 @@ def _validate_vt_config(path: Path) -> None:
             "tactile_embedding_cache.enabled=true 时必须配置 root"
         )
 
+    offline = cfg.get("offline_training_cache") or {}
+    if not isinstance(offline, dict):
+        raise ValueError("offline_training_cache 必须是 mapping")
+    if bool(offline.get("enabled", False)):
+        model_modes = model.get("module_modes") or {}
+        if not isinstance(model_modes, dict):
+            raise ValueError("offline training cache requires frozen vision and connector")
+        if (
+            model_modes.get("vision") != "frozen"
+            or model_modes.get("connector") != "frozen"
+        ):
+            raise ValueError("offline training cache requires frozen vision and connector")
+        if bool((cfg.get("image_transforms") or {}).get("enable", False)):
+            raise ValueError("offline training cache requires image_transforms.enable=false")
+        if offline.get("dtype") != "bfloat16":
+            raise ValueError("offline training cache dtype must be bfloat16")
+        if not isinstance(offline.get("root"), str) or not offline["root"].strip():
+            raise ValueError("offline training cache requires a nonempty root")
+        for field in (
+            "precompute_batch_size",
+            "precompute_num_workers",
+            "loader_num_workers",
+            "host_prefetch_batches",
+        ):
+            value = offline.get(field)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"offline training cache {field} must be positive")
+
 
 def main() -> None:
     argv = _argv_with_default_config(sys.argv[1:])

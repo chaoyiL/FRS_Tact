@@ -23,10 +23,11 @@ usage() {
         "  --force-download       强制重新下载"
 }
 
-if [[ -f "${ENV_FILE}" ]]; then
-    # shellcheck disable=SC1090
-    source "${ENV_FILE}"
-fi
+[[ -f "${ENV_FILE}" ]] || fail "缺少 ${ENV_FILE}；请先运行 scripts/setup_env.sh"
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+[[ -n "${FRS_STORAGE_ROOT:-}" ]] || fail ".env.frs 缺少 FRS_STORAGE_ROOT"
+[[ -n "${FRS_VENV_DIR:-}" ]] || fail ".env.frs 缺少 FRS_VENV_DIR"
 
 if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
@@ -65,5 +66,5 @@ command+=("${forwarded[@]}")
 
 log "下载 tactile encoder checkpoint"
 log "默认仓库：liuchaoyi/encoder_ckpt_05"
-log "默认目录：/workspace/checkpoints/encoder_ckpt_05"
+log "默认目录：/DATA/ljl/substage/checkpoints/encoder_ckpt_05"
 "${command[@]}"

@@ -7,8 +7,8 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_VERSION="3.12"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
-STORAGE_ROOT="${FRS_STORAGE_ROOT:-/workspace}"
-VENV_DIR="${FRS_VENV_DIR:-${STORAGE_ROOT}/.venvs/frs_tact}"
+STORAGE_ROOT="${FRS_STORAGE_ROOT:-/DATA/ljl/substage}"
+VENV_DIR="${FRS_VENV_DIR:-/home/ljl/.venvs/frs_tact}"
 UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
 UV_CACHE_DIR_VALUE="${FRS_UV_CACHE_DIR:-${STORAGE_ROOT}/.cache/uv}"
 HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
@@ -16,6 +16,8 @@ HF_HUB_CACHE_VALUE="${HF_HOME_VALUE}/hub"
 HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
 HF_LEROBOT_HOME_VALUE="${HF_HOME_VALUE}/lerobot"
 TMPDIR_VALUE="${STORAGE_ROOT}/tmp"
+FRS_LOG_DIR_VALUE="${STORAGE_ROOT}/logs"
+WANDB_DIR_VALUE="${FRS_LOG_DIR_VALUE}/wandb"
 UV_BIN=""
 
 log() {
@@ -108,12 +110,15 @@ configure_runtime_storage() {
         "${HF_HUB_CACHE_VALUE}" \
         "${HF_DATASETS_CACHE_VALUE}" \
         "${HF_LEROBOT_HOME_VALUE}" \
-        "${TMPDIR_VALUE}"
+        "${TMPDIR_VALUE}" \
+        "${WANDB_DIR_VALUE}"
     export HF_HOME="${HF_HOME_VALUE}"
     export HF_HUB_CACHE="${HF_HUB_CACHE_VALUE}"
     export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_VALUE}"
     export HF_LEROBOT_HOME="${HF_LEROBOT_HOME_VALUE}"
     export TMPDIR="${TMPDIR_VALUE}"
+    export FRS_LOG_DIR="${FRS_LOG_DIR_VALUE}"
+    export WANDB_DIR="${WANDB_DIR_VALUE}"
 }
 
 write_environment_file() {
@@ -131,6 +136,8 @@ write_environment_file() {
         printf 'export HF_DATASETS_CACHE=%q\n' "${HF_DATASETS_CACHE}"
         printf 'export HF_LEROBOT_HOME=%q\n' "${HF_LEROBOT_HOME}"
         printf 'export TMPDIR=%q\n' "${TMPDIR}"
+        printf 'export FRS_LOG_DIR=%q\n' "${FRS_LOG_DIR_VALUE}"
+        printf 'export WANDB_DIR=%q\n' "${WANDB_DIR_VALUE}"
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
         fi

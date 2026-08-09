@@ -12,9 +12,9 @@ from deploy_smolvla.src import download_ckpt
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_default_encoder_output_matches_vt_workspace_contract() -> None:
+def test_default_encoder_output_matches_vt_server_contract() -> None:
     assert download_ckpt.DEFAULT_REPO_ID == "liuchaoyi/encoder_ckpt_05"
-    assert download_ckpt.DEFAULT_OUTPUT_DIR == Path("/workspace/checkpoints/encoder_ckpt_05")
+    assert download_ckpt.DEFAULT_OUTPUT_DIR == Path("/DATA/ljl/substage/checkpoints/encoder_ckpt_05")
 
 
 def test_output_dir_override_is_preserved(tmp_path: Path) -> None:
@@ -36,6 +36,11 @@ def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -
     uv = fake_bin / "uv"
     uv.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
     uv.chmod(0o755)
+    (project / ".env.frs").write_text(
+        "export FRS_STORAGE_ROOT=/DATA/ljl/substage\n"
+        "export FRS_VENV_DIR=/home/ljl/.venvs/frs_tact\n",
+        encoding="utf-8",
+    )
     custom_output = tmp_path / "custom output"
     env = os.environ.copy()
     env["PATH"] = f"{fake_bin}:{env['PATH']}"
@@ -51,7 +56,7 @@ def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -
 
     assert result.returncode == 0, result.stderr
     assert "默认仓库：liuchaoyi/encoder_ckpt_05" in result.stdout
-    assert "默认目录：/workspace/checkpoints/encoder_ckpt_05" in result.stdout
+    assert "默认目录：/DATA/ljl/substage/checkpoints/encoder_ckpt_05" in result.stdout
     output_lines = result.stdout.splitlines()
     assert output_lines[-7:] == [
         "run",

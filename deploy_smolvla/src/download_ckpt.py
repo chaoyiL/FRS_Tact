@@ -19,7 +19,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 
 DEFAULT_REPO_ID = "liuchaoyi/encoder_ckpt_05"
-DEFAULT_OUTPUT_DIR = Path("/workspace/checkpoints/encoder_ckpt_05")
+DEFAULT_OUTPUT_DIR = Path("/DATA/ljl/substage/checkpoints/encoder_ckpt_05")
 MINIMAL_CHECKPOINT_PATTERNS = ("checkpoint.json", "params.npz", "params-*.npz")
 FULL_CHECKPOINT_PATTERNS = (
     "checkpoint.json",
