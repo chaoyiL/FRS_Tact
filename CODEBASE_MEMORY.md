@@ -164,3 +164,4 @@
 - 目标机器是 4 张 `NVIDIA RTX PRO 6000 Blackwell Server Edition`（约 96 GiB，driver 595.84）：K8 为单 JAX 进程使用 GPU 0/1，K21 为另一进程使用 GPU 2/3，并行训练且独立失败；cache 只生成一次并只读共享。
 - 新服务器的实际代码根为 `/home/ljl/FRS_Tact`，venv 为 `/home/ljl/.venvs/frs_tact`；所有大数据、HF cache、dataset、encoder、tactile/vision cache、normalization、output、log 和 tmp 必须位于 `/DATA/ljl/substage`，不得再从 repo 位置推导或回落 `/workspace`。
 - 设计文档：`docs/superpowers/specs/2026-08-09-offline-vision-cache-four-gpu-training-design.md`。当前仅完成设计，尚未修改生产代码或启动训练。
+- 已批准的实施计划：`docs/superpowers/plans/2026-08-09-offline-vision-cache-four-gpu-training.md`，分为 cache contract、模型 token 旁路、可恢复预计算、cache loader/prefetch、真实路径迁移、四卡双进程 launcher、整体验证 7 个 TDD 任务。
