@@ -13,6 +13,99 @@ DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
 
 
+def test_policy_loader_selects_vt_policy_for_a_tactile_contract(monkeypatch, tmp_path) -> None:
+    from deploy_smolvla import remote_client
+    from train_vtsmolvla.validation import CheckpointContract
+
+    selected = []
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        remote_client,
+        "validate_checkpoint",
+        lambda *args, **kwargs: type("Report", (), {"require_valid": lambda self: self})(),
+    )
+    monkeypatch.setattr(
+        remote_client.VTJaxSmolVLAPolicy,
+        "from_pretrained",
+        lambda *args, **kwargs: selected.append("vt") or object(),
+    )
+    monkeypatch.setattr(
+        remote_client.JaxSmolVLAPolicy,
+        "from_pretrained",
+        lambda *args, **kwargs: selected.append("visual") or object(),
+    )
+    expected = CheckpointContract(
+        state_dim=20,
+        action_dim=20,
+        chunk_size=20,
+        image_keys=("rgb",),
+        tactile_keys=("touch",),
+        tactile_num_tokens=1,
+    )
+
+    remote_client._load_validated_policy(
+        "checkpoint",
+        revision=None,
+        allow_download=False,
+        expected=expected,
+        rename_map=None,
+    )
+
+    assert selected == ["vt"]
+
+
+def test_visual_contract_loads_visual_policy_with_frozen_tactile_projection(
+    monkeypatch, tmp_path
+) -> None:
+    from deploy_smolvla import remote_client
+
+    config = {
+        "checkpoint_contract": {
+            "state_dim": 20,
+            "action_dim": 20,
+            "chunk_size": 20,
+            "image_keys": ["rgb"],
+            "tactile_keys": [],
+            "tactile_embedding_dim": 512,
+            "tactile_num_tokens": 0,
+            "lora_rank": 0,
+            "vlm_lora_target_modules": [],
+        }
+    }
+    expected = remote_client._checkpoint_contract(config, {"action_horizon": 20})
+    selected = []
+    validated = []
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
+    monkeypatch.setattr(
+        remote_client,
+        "validate_checkpoint",
+        lambda *args, **kwargs: validated.append(kwargs["expected"])
+        or type("Report", (), {"require_valid": lambda self: self})(),
+    )
+    monkeypatch.setattr(
+        remote_client.VTJaxSmolVLAPolicy,
+        "from_pretrained",
+        lambda *args, **kwargs: selected.append("vt") or object(),
+    )
+    monkeypatch.setattr(
+        remote_client.JaxSmolVLAPolicy,
+        "from_pretrained",
+        lambda *args, **kwargs: selected.append("visual") or object(),
+    )
+
+    remote_client._load_validated_policy(
+        "checkpoint",
+        revision=None,
+        allow_download=False,
+        expected=expected,
+        rename_map=None,
+    )
+
+    assert expected.tactile_proj_mode == "frozen"
+    assert validated == [expected]
+    assert selected == ["visual"]
+
+
 def _copy_deploy_entry_points(tmp_path: Path) -> Path:
     project = tmp_path / "project"
     deploy_dir = project / "deploy_smolvla"

@@ -6,44 +6,183 @@ import subprocess
 import pytest
 
 from train_vtsmolvla import launcher
-
+from train_vtsmolvla.launcher import load_launcher_settings, run_pipeline
 
 ROOT = Path(__file__).resolve().parents[2]
 
 
-class FixedDatetime:
-    @classmethod
-    def now(cls):
-        return datetime(2026, 8, 8, 14, 30, 0)
-
-
-def _settings(tmp_path, **overrides):
-    values = {
-        "project_root": tmp_path,
-        "config_path": tmp_path / "configs/train.yaml",
-        "output": tmp_path / "output",
-        "resume": None,
-        "tmux_session": "vtsmolvla_train",
-        "foreground": False,
-        "logs_dir": tmp_path / "logs",
-        "precompute": True,
-    }
-    values.update(overrides)
-    return launcher.LauncherSettings(**values)
-
-
-def test_default_yaml_controls_vt_launcher_and_timestamped_logs(monkeypatch):
-    settings = launcher.load_launcher_settings(
-        ROOT / "train_vtsmolvla/configs/train.yaml", ROOT
+def test_vt_launcher_reads_yaml_owned_settings():
+    settings, config = load_launcher_settings(
+        ROOT / "train_vtsmolvla/configs/train.yaml",
+        ROOT,
     )
     assert settings.tmux_session == "vtsmolvla_train"
     assert settings.foreground is False
     assert settings.logs_dir == ROOT / "train_vtsmolvla/outputs/logs"
-    assert settings.precompute is True
-    monkeypatch.setattr(launcher, "datetime", FixedDatetime)
-    precompute_log, train_log = launcher.timestamped_log_paths(settings)
-    assert precompute_log.name == "precompute_20260808_143000.log"
-    assert train_log.name == "train_20260808_143000.log"
+    assert config["tactile_embedding_cache"]["enabled"] is True
+
+
+def test_vt_preflight_rejects_missing_encoder_before_gpu_or_subprocess(monkeypatch, tmp_path):
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        "checkpoint: org/model\n"
+        "datasets: []\n"
+        "output: output\n"
+        "resume: null\n"
+        "launcher: {tmux_session: vt, foreground: true, logs_dir: logs}\n"
+        "tactile_embedding_cache: {enabled: true, root: cache}\n"
+        "model:\n"
+        "  use_tactile_encoder: true\n"
+        "  tactile_encoder_path: missing-encoder\n"
+        "  freeze_tactile_encoder: true\n"
+        "  tactile_keys: [left]\n"
+        "  tactile_embedding_dim: 512\n"
+        "  tactile_num_tokens: 1\n",
+        encoding="utf-8",
+    )
+    settings, config = load_launcher_settings(config_path, tmp_path)
+    monkeypatch.setattr(
+        launcher,
+        "shared_preflight",
+        lambda *args, **kwargs: pytest.fail("shared preflight must not run for a missing encoder"),
+    )
+
+    with pytest.raises(FileNotFoundError, match="missing-encoder"):
+        launcher.preflight(settings, config)
+
+
+def test_vt_preflight_delegates_with_the_vt_checkpoint_resolver(monkeypatch, tmp_path):
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    encoder = tmp_path / "encoder"
+    encoder.mkdir()
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        "checkpoint: org/model\n"
+        "datasets: [{root: dataset}]\n"
+        "output: output\n"
+        "resume: null\n"
+        "launcher: {tmux_session: vt, foreground: true, logs_dir: logs}\n"
+        "tactile_embedding_cache: {enabled: false, root: cache}\n"
+        "model:\n"
+        "  use_tactile_encoder: true\n"
+        "  tactile_encoder_path: encoder\n"
+        "  freeze_tactile_encoder: true\n"
+        "  tactile_keys: [left]\n"
+        "  tactile_embedding_dim: 512\n"
+        "  tactile_num_tokens: 1\n",
+        encoding="utf-8",
+    )
+    settings, config = load_launcher_settings(config_path, tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        launcher,
+        "resolve_checkpoint",
+        lambda checkpoint, **kwargs: calls.append((checkpoint, kwargs)) or tmp_path / "checkpoint",
+    )
+    monkeypatch.setattr(
+        launcher.shared_launcher,
+        "resolve_checkpoint",
+        lambda *args, **kwargs: pytest.fail("visual checkpoint resolver must not be used"),
+    )
+    monkeypatch.setattr(
+        launcher.shared_launcher.jax,
+        "devices",
+        lambda: [type("Device", (), {"platform": "gpu"})()],
+    )
+
+    assert launcher.preflight(settings, config) == tmp_path / "checkpoint"
+    assert calls == [("org/model", {"revision": None, "local_files_only": True})]
+
+
+def test_cache_precompute_succeeds_before_training_and_uses_distinct_logs(monkeypatch, tmp_path):
+    settings = launcher.LauncherSettings(
+        project_root=tmp_path,
+        config_path=tmp_path / "train.yaml",
+        output=tmp_path / "output",
+        resume=None,
+        tmux_session="vtsmolvla_train",
+        foreground=True,
+        logs_dir=tmp_path / "logs",
+    )
+    config = {"tactile_embedding_cache": {"enabled": True, "root": "cache"}}
+    calls = []
+    monkeypatch.setattr(
+        launcher,
+        "stream_command",
+        lambda command, *, cwd, log_path: calls.append((command, cwd, log_path.name)) or 0,
+    )
+
+    status = run_pipeline(
+        settings,
+        config,
+        uv_bin="/usr/bin/uv",
+        now=datetime(2026, 8, 8, 14, 30, 0),
+    )
+
+    assert status == 0
+    assert [name for _, _, name in calls] == [
+        "precompute_20260808_143000.log",
+        "train_20260808_143000.log",
+    ]
+    assert calls[0][0] == [
+        "/usr/bin/uv", "run", "--no-sync", "python",
+        "-m", "train_vtsmolvla.precompute",
+        "--config", str(settings.config_path),
+    ]
+    assert calls[1][0] == [
+        "/usr/bin/uv", "run", "--no-sync", "python", "-m",
+        "train_vtsmolvla.train", "--config", str(settings.config_path),
+    ]
+
+
+def test_precompute_failure_prevents_training(monkeypatch, tmp_path):
+    settings = launcher.LauncherSettings(
+        project_root=tmp_path,
+        config_path=tmp_path / "train.yaml",
+        output=tmp_path / "output",
+        resume=None,
+        tmux_session="vtsmolvla_train",
+        foreground=True,
+        logs_dir=tmp_path / "logs",
+    )
+    calls = []
+    monkeypatch.setattr(
+        launcher,
+        "stream_command",
+        lambda command, **kwargs: calls.append(command) or 7,
+    )
+
+    assert run_pipeline(
+        settings,
+        {"tactile_embedding_cache": {"enabled": True, "root": "cache"}},
+        uv_bin="uv",
+        now=datetime(2026, 8, 8, 14, 30, 0),
+    ) == 7
+    assert len(calls) == 1
+
+
+def test_vt_launcher_uses_the_shared_tmux_handoff(monkeypatch):
+    settings, _ = load_launcher_settings(
+        ROOT / "train_vtsmolvla/configs/train.yaml",
+        ROOT,
+    )
+    calls = []
+    monkeypatch.setattr(
+        launcher.shared_launcher,
+        "maybe_launch_tmux",
+        lambda actual, **kwargs: calls.append((actual, kwargs)) or True,
+    )
+
+    assert launcher.launch(settings, {"tactile_embedding_cache": {"enabled": False}}) == 0
+    assert calls == [(
+        settings,
+        {
+            "foreground_env": "VTSMOLVLA_FOREGROUND",
+            "launcher_module": "train_vtsmolvla.launcher",
+            "log_prefix": "vtsmolvla",
+        },
+    )]
 
 
 def test_shell_is_thin_and_discovers_root_from_foreign_cwd(tmp_path):
@@ -75,118 +214,6 @@ def test_shell_is_thin_and_discovers_root_from_foreign_cwd(tmp_path):
         "--config",
         str(ROOT / "train_vtsmolvla/configs/train.yaml"),
     ]
-
-
-def test_preflight_checks_dataset_encoder_checkpoint_gpu_resume_and_output(monkeypatch, tmp_path):
-    dataset = tmp_path / "dataset"
-    dataset.mkdir()
-    encoder = tmp_path / "encoder"
-    encoder.mkdir()
-    settings = _settings(tmp_path)
-    calls = []
-    monkeypatch.setattr(
-        launcher,
-        "resolve_checkpoint",
-        lambda checkpoint, **kwargs: calls.append((checkpoint, kwargs)) or tmp_path / "checkpoint",
-    )
-    monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "gpu"})()])
-    config = {
-        "checkpoint": "owner/model",
-        "datasets": [{"root": "dataset"}],
-        "model": {"tactile_encoder_path": "encoder"},
-    }
-
-    assert launcher.preflight(settings, config) == tmp_path / "checkpoint"
-    assert calls == [("owner/model", {"revision": None, "local_files_only": True})]
-
-    with pytest.raises(FileNotFoundError, match="missing-dataset"):
-        launcher.preflight(settings, {**config, "datasets": [{"root": "missing-dataset"}]})
-    with pytest.raises(FileNotFoundError, match="missing-encoder"):
-        launcher.preflight(
-            settings,
-            {**config, "model": {"tactile_encoder_path": "missing-encoder"}},
-        )
-
-    monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "cpu"})()])
-    with pytest.raises(RuntimeError, match="GPU"):
-        launcher.preflight(settings, config)
-    monkeypatch.setattr(launcher.jax, "devices", lambda: [type("Device", (), {"platform": "gpu"})()])
-
-    (settings.output / "checkpoint-1").mkdir(parents=True)
-    with pytest.raises(FileExistsError, match="resume"):
-        launcher.preflight(settings, config)
-    with pytest.raises(FileNotFoundError, match="missing-resume"):
-        launcher.preflight(
-            _settings(tmp_path, output=tmp_path / "fresh", resume=tmp_path / "missing-resume"),
-            config,
-        )
-
-
-def test_tmux_uses_yaml_session_and_reenters_vt_launcher(monkeypatch, tmp_path):
-    settings = _settings(tmp_path, tmux_session="from-yaml", precompute=False)
-    recorded = []
-    monkeypatch.delenv("VTSMOLVLA_FOREGROUND", raising=False)
-    monkeypatch.setattr(launcher.shutil, "which", lambda name: "/usr/bin/tmux")
-    monkeypatch.setattr(launcher, "tmux_session_exists", lambda name: False)
-    monkeypatch.setattr(launcher, "find_uv", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(launcher.subprocess, "run", lambda command, check: recorded.append(command))
-
-    assert launcher.launch(settings) == 0
-    command = recorded[0]
-    assert command[command.index("-s") + 1] == "from-yaml"
-    assert "VTSMOLVLA_FOREGROUND=1" in command
-    assert command[command.index("-m") + 1] == "train_vtsmolvla.launcher"
-
-
-def test_foreground_runs_precompute_before_training_with_yaml_logs(monkeypatch, tmp_path):
-    settings = _settings(tmp_path, foreground=True, logs_dir=tmp_path / "yaml-logs")
-    streamed = []
-    monkeypatch.setattr(launcher, "find_uv", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        launcher,
-        "stream_command",
-        lambda command, **kwargs: streamed.append((command, kwargs["log_path"])) or 0,
-    )
-    monkeypatch.setattr(launcher, "datetime", FixedDatetime)
-
-    assert launcher.launch(settings) == 0
-    assert [command[command.index("-m") + 1] for command, _ in streamed] == [
-        "tools.precompute_tactile_embeddings",
-        "train_vtsmolvla.train",
-    ]
-    assert [path.name for _, path in streamed] == [
-        "precompute_20260808_143000.log",
-        "train_20260808_143000.log",
-    ]
-    assert all(path.parent == tmp_path / "yaml-logs" for _, path in streamed)
-
-
-def test_precompute_failure_stops_before_training(monkeypatch, tmp_path):
-    settings = _settings(tmp_path, foreground=True)
-    calls = []
-    monkeypatch.setattr(launcher, "find_uv", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(
-        launcher,
-        "stream_command",
-        lambda command, **kwargs: calls.append(command) or 23,
-    )
-
-    assert launcher.launch(settings) == 23
-    assert len(calls) == 1
-    assert calls[0][calls[0].index("-m") + 1] == "tools.precompute_tactile_embeddings"
-
-
-def test_existing_tmux_environment_does_not_create_a_nested_session(monkeypatch, tmp_path):
-    settings = _settings(tmp_path, precompute=False)
-    streamed = []
-    monkeypatch.delenv("VTSMOLVLA_FOREGROUND", raising=False)
-    monkeypatch.setenv("TMUX", "/tmp/tmux-1000/default,1,0")
-    monkeypatch.setattr(launcher.shutil, "which", lambda name: pytest.fail("tmux must not be queried"))
-    monkeypatch.setattr(launcher, "find_uv", lambda: "/usr/bin/uv")
-    monkeypatch.setattr(launcher, "stream_command", lambda command, **kwargs: streamed.append(command) or 0)
-
-    assert launcher.launch(settings) == 0
-    assert streamed[0][streamed[0].index("-m") + 1] == "train_vtsmolvla.train"
 
 
 def test_legacy_entrypoints_are_replaced_by_package_readmes_and_setup_commands():

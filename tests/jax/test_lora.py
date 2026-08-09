@@ -184,10 +184,7 @@ def test_tactile_projection_lora_initializes_and_partitions_adapter() -> None:
     assert not is_vt_trainable_parameter("model.tactile_proj.lora_scale", config)
 
 
-def test_vt_lora_initialization_matches_legacy_parameter_order() -> None:
-    from lerobot.policies.smolvla_jax.lora import (
-        initialize_lora_params as initialize_legacy_lora_params,
-    )
+def test_vt_lora_initialization_keeps_the_established_parameter_order() -> None:
     from train_vtsmolvla.configuration import VTSmolVLAConfig
     from train_vtsmolvla.lora import initialize_lora_params as initialize_vt_lora_params
 
@@ -207,16 +204,34 @@ def test_vt_lora_initialization_matches_legacy_parameter_order() -> None:
         f"{visual_q_proj}.weight": jnp.ones((5, 4), dtype=jnp.float32),
     }
 
-    expected = initialize_legacy_lora_params(params, config, seed=17)
     actual = initialize_vt_lora_params(params, config, seed=17)
 
-    np.testing.assert_array_equal(
-        actual["model.tactile_proj.lora_a"],
-        expected["model.tactile_proj.lora_a"],
+    expected_tactile = np.asarray(
+        [
+            [0.6358142, 0.19539338, -0.3117527],
+            [-0.727601, -1.0938601, 0.01076082],
+        ],
+        dtype=np.float32,
     )
-    np.testing.assert_array_equal(
+    expected_visual = np.asarray(
+        [
+            [-0.40528354, -0.43607798, -0.11098475, -0.02592301],
+            [-1.1383914, 0.4625733, -1.0134228, 0.9298121],
+        ],
+        dtype=np.float32,
+    )
+
+    np.testing.assert_allclose(
+        actual["model.tactile_proj.lora_a"],
+        expected_tactile,
+        rtol=1e-6,
+        atol=1e-7,
+    )
+    np.testing.assert_allclose(
         actual[f"{visual_q_proj}.lora_a"],
-        expected[f"{visual_q_proj}.lora_a"],
+        expected_visual,
+        rtol=1e-6,
+        atol=1e-7,
     )
 
 

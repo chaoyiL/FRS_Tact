@@ -107,7 +107,7 @@ def test_invalid_checkpoint_fails_before_policy_or_robot_connection(
         calls.append("bridge")
         pytest.fail("robot bridge must not be constructed before checkpoint validation")
 
-    monkeypatch.setattr(remote_client.JaxSmolVLAPolicy, "from_pretrained", policy_loader)
+    monkeypatch.setattr(remote_client.VTJaxSmolVLAPolicy, "from_pretrained", policy_loader)
     monkeypatch.setattr(remote_client, "RobotBridgeClient", bridge_loader)
 
     with pytest.raises(ValueError, match="checkpoint validation failed"):
@@ -191,7 +191,7 @@ def test_checkpoint_steps_override_is_sent_to_robot_server_after_validation(
 
     monkeypatch.setattr(remote_client, "resolve_checkpoint", resolve_checkpoint, raising=False)
     monkeypatch.setattr(remote_client, "validate_checkpoint", validate_checkpoint, raising=False)
-    monkeypatch.setattr(remote_client.JaxSmolVLAPolicy, "from_pretrained", policy_loader)
+    monkeypatch.setattr(remote_client.VTJaxSmolVLAPolicy, "from_pretrained", policy_loader)
     monkeypatch.setattr(remote_client, "RobotBridgeClient", RecordingBridge)
 
     with pytest.raises(RuntimeError, match="stop after server config"):
@@ -224,7 +224,7 @@ def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(
 
     monkeypatch.setattr(remote_client, "resolve_checkpoint", resolve_checkpoint, raising=False)
     monkeypatch.setattr(
-        remote_client.JaxSmolVLAPolicy,
+        remote_client.VTJaxSmolVLAPolicy,
         "from_pretrained",
         lambda *args, **kwargs: pytest.fail("policy must not load"),
     )

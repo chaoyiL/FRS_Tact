@@ -13,16 +13,16 @@ import numpy as np
 from flax import struct
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.policies.smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig
-from lerobot.policies.smolvla_jax.checkpoint import load_params, resolve_checkpoint
-from lerobot.policies.smolvla_jax.data import (
+from train_smolvla import JaxSmolVLA, JaxSmolVLAConfig
+from train_smolvla.checkpoint import load_params, resolve_checkpoint
+from train_smolvla.data import (
     action_delta_timestamps,
     canonicalize_dataset_stats,
     lerobot_sample_to_observation,
     resolve_action_key,
 )
-from lerobot.policies.smolvla_jax.modeling import PrefixContext
-from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
+from train_smolvla.modeling import PrefixContext
+from train_smolvla.preprocessing import JaxSmolVLAPreprocessor
 
 Array = jax.Array
 

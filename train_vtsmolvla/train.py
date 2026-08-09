@@ -19,6 +19,7 @@ from train_vtsmolvla.checkpoint import (
     count_expert_layers,
     count_vlm_layers,
     extend_vlm_layers,
+    initialize_tactile_fusion_params,
     load_params,
     resolve_checkpoint,
 )
@@ -47,6 +48,8 @@ def _validate_vt_config(path: Path) -> None:
         raise ValueError(
             f"{path} 不是触觉融合配置：model.use_tactile_encoder 必须为 true"
         )
+    if model.get("freeze_tactile_encoder") is not True:
+        raise NotImplementedError("第一版 VT-SmolVLA 只支持 freeze_tactile_encoder=True")
 
     required = (
         "tactile_encoder_path",
@@ -109,13 +112,18 @@ VT_COMPONENTS = TrainingComponents(
     resolve_module_modes=resolve_module_modes,
     contract_from_config=contract_from_config,
     validate_checkpoint=validate_checkpoint,
+    prepare_params=initialize_tactile_fusion_params,
     extra_loader_kwargs=_extra_loader_kwargs,
     allowed_top_level_keys=VT_ALLOWED_TOP_LEVEL_KEYS,
 )
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    args = parse_args(argv, default_config=DEFAULT_CONFIG)
+    args = parse_args(
+        argv,
+        default_config=DEFAULT_CONFIG,
+        description=__doc__ or "VT-SmolVLA training",
+    )
     _validate_vt_config(args.config)
     run_training(args.config, components=VT_COMPONENTS)
 

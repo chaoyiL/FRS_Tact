@@ -74,6 +74,16 @@ def _no_extra_loader_kwargs(cfg: Mapping[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _identity_prepare_params(
+    params: Mapping[str, Any],
+    config: Any,
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    del config, seed
+    return dict(params)
+
+
 @dataclass(frozen=True)
 class TrainingComponents:
     """Concrete package components used by the shared training orchestration."""
@@ -90,6 +100,7 @@ class TrainingComponents:
     resolve_module_modes: Callable[[Any], Mapping[str, Any]]
     contract_from_config: Callable[[Any], Any]
     validate_checkpoint: Callable[..., Any]
+    prepare_params: Callable[..., dict[str, Any]] = _identity_prepare_params
     extra_loader_kwargs: Callable[[Mapping[str, Any]], dict[str, Any]] = _no_extra_loader_kwargs
     allowed_top_level_keys: frozenset[str] = ALLOWED_TOP_LEVEL_KEYS
 
@@ -114,8 +125,9 @@ def parse_args(
     argv: Sequence[str] | None = None,
     *,
     default_config: Path = DEFAULT_CONFIG,
+    description: str = __doc__ or "SmolVLA training",
 ) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--config",
         type=Path,
@@ -418,6 +430,11 @@ def run_training(
         )
         print(f"extended VLM parameters to {components.count_vlm_layers(params)} layers")
 
+    params = components.prepare_params(
+        params,
+        config,
+        seed=int(cfg.get("seed", 0)),
+    )
     model = components.model_type(config)
     modality_dropout_cfg = cfg.get("modality_dropout")
     trainer = components.trainer_type(

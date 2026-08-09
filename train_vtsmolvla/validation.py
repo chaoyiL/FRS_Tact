@@ -20,7 +20,15 @@ class CheckpointContract(VisualCheckpointContract):
     tactile_keys: tuple[str, ...] = ()
     tactile_embedding_dim: int = 512
     tactile_num_tokens: int = 0
-    tactile_proj_mode: str = "full"
+    tactile_proj_mode: str | None = None
+
+    def __post_init__(self) -> None:
+        mode = self.tactile_proj_mode
+        if mode is None or str(mode).lower() == "auto":
+            mode = "full" if self.tactile_keys or self.tactile_num_tokens else "frozen"
+        else:
+            mode = str(mode).lower()
+        object.__setattr__(self, "tactile_proj_mode", mode)
 
 
 def contract_from_config(config: Any) -> CheckpointContract:

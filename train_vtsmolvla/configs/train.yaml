@@ -46,9 +46,8 @@ datasets:
       observation.images.camera1: observation.images.camera2
 
 # ---- 触觉 embedding 缓存 ----
-# 首次训练前运行一次：
-#   uv run --no-sync python tools/precompute_tactile_embeddings.py \
-#     --config train_vtsmolvla/configs/train.yaml
+# `tactile_embedding_cache.enabled` 为 true 时，launcher 自动检查并执行缺失缓存的预计算：
+#   bash train_vtsmolvla/scripts/train.sh
 # 缓存覆盖数据集中的所有帧；训练时只解码两路 RGB，不再解码四路触觉视频或重复运行 ResNet18。
 # 每帧保存原始 [4, 512] ResNet 特征，当前 VT 使用当前帧，后续 FRS 可按帧索引组成 history。
 tactile_embedding_cache:

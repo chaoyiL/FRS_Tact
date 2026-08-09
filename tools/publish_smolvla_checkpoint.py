@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """Validate, assemble, repair, and safely publish SmolVLA inference bundles."""
 
+# ruff: noqa: E402, I001
+
 from __future__ import annotations
 
 import argparse
@@ -19,7 +21,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from lerobot.policies.smolvla_jax.validation import (
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from train_vtsmolvla.validation import (
     CheckpointContract,
     CheckpointValidationReport,
     validate_checkpoint,
@@ -73,6 +79,12 @@ def _contract_from_dict(value: Mapping[str, Any]) -> CheckpointContract:
     fields = dict(value)
     for key in ("image_keys", "tactile_keys", "vlm_lora_target_modules"):
         fields[key] = tuple(fields.get(key) or ())
+    if "tactile_proj_mode" not in fields:
+        fields["tactile_proj_mode"] = (
+            "full"
+            if fields.get("tactile_num_tokens", 0) or fields["tactile_keys"]
+            else "frozen"
+        )
     return CheckpointContract(**fields)
 
 
@@ -115,6 +127,25 @@ def contract_from_training_yaml(path: str | Path) -> CheckpointContract:
     overlap = sorted(set(image_keys) & set(tactile_keys))
     if overlap:
         raise ValueError(f"training RGB and tactile keys overlap: {overlap}")
+    raw_module_modes = model.get("module_modes")
+    if raw_module_modes is None:
+        module_modes: Mapping[str, Any] = {}
+    elif not isinstance(raw_module_modes, Mapping):
+        raise ValueError("training model.module_modes must be a mapping")
+    else:
+        module_modes = raw_module_modes
+    tactile_proj_mode = module_modes.get("tactile_proj")
+    if tactile_proj_mode is None:
+        tactile_proj_mode = "full" if use_tactile else "frozen"
+    if not isinstance(tactile_proj_mode, str) or tactile_proj_mode not in {
+        "frozen",
+        "full",
+        "lora",
+    }:
+        raise ValueError(
+            "training model.module_modes.tactile_proj must be one of "
+            "'frozen', 'full', or 'lora'"
+        )
     return CheckpointContract(
         state_dim=int(model["state_dim"]),
         action_dim=int(model["action_dim"]),
@@ -123,6 +154,7 @@ def contract_from_training_yaml(path: str | Path) -> CheckpointContract:
         tactile_keys=tactile_keys,
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_num_tokens=tactile_tokens,
+        tactile_proj_mode=tactile_proj_mode,
         lora_rank=int(model.get("lora_rank", 0)),
         vlm_lora_target_modules=tuple(model.get("vlm_lora_target_modules") or ()),
     )
@@ -654,7 +686,7 @@ def _metadata_stats(
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
     # These imports are deliberately delayed so validation/bundle/publish stay lightweight.
     from lerobot.datasets import aggregate_stats
-    from lerobot.policies.smolvla_jax.data import (
+    from train_smolvla.data import (
         canonicalize_dataset_stats,
         ensure_stats_counts,
         rename_dataset_stats,
@@ -753,13 +785,45 @@ def repair_sidecars(
         raise ValueError("downloaded model.safetensors does not match remote LFS SHA-256")
     _copy_payload(source_weight, staging / MODEL_FILENAME)
 
-    from lerobot.policies.smolvla_jax.checkpoint import write_effective_config
-    from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
-    from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
+    use_tactile = bool(model_overrides.get("use_tactile_encoder", False))
+    if use_tactile:
+        from train_vtsmolvla.checkpoint import write_effective_config
+        from train_vtsmolvla.configuration import VTSmolVLAConfig as ConfigType
+        from train_vtsmolvla.preprocessing import VTJaxSmolVLAPreprocessor as PreprocessorType
 
-    effective_config = JaxSmolVLAConfig.from_pretrained(staging).with_overrides(model_overrides)
+        # Older/incomplete bundles can omit extension-only fields that are authoritative
+        # in the training YAML. Seed those fields before strict VT config validation,
+        # then apply the complete override set through the public config API.
+        with (staging / "config.json").open(encoding="utf-8") as file:
+            checkpoint_config = json.load(file)
+        for field in (
+            "use_tactile_encoder",
+            "tactile_encoder_path",
+            "freeze_tactile_encoder",
+            "tactile_keys",
+            "tactile_embedding_dim",
+            "tactile_num_tokens",
+            "tactile_image_size",
+        ):
+            if field in model_overrides:
+                checkpoint_config[field] = model_overrides[field]
+        with tempfile.TemporaryDirectory(prefix="vtsmolvla-config-") as config_dir:
+            _write_json(Path(config_dir) / "config.json", checkpoint_config)
+            effective_config = ConfigType.from_pretrained(config_dir).with_overrides(
+                model_overrides
+            )
+    else:
+        from train_smolvla.checkpoint import write_effective_config
+        from train_smolvla.configuration import JaxSmolVLAConfig as ConfigType
+        from train_smolvla.preprocessing import JaxSmolVLAPreprocessor as PreprocessorType
+
+        visual_overrides = {
+            key: value for key, value in model_overrides.items() if key != "use_tactile_encoder"
+        }
+        effective_config = ConfigType.from_pretrained(staging).with_overrides(visual_overrides)
+
     write_effective_config(staging, effective_config)
-    preprocessor = JaxSmolVLAPreprocessor.__new__(JaxSmolVLAPreprocessor)
+    preprocessor = PreprocessorType.__new__(PreprocessorType)
     preprocessor.checkpoint = staging
     preprocessor.config = effective_config
     preprocessor.rename_map = {}

@@ -65,6 +65,39 @@ def test_contract_from_config_preserves_effective_vt_contract() -> None:
     assert contract_from_config(config) == VT_CONTRACT
 
 
+def test_direct_visual_contract_defaults_to_frozen_projection_and_validates_bundle(
+    tmp_path: Path,
+) -> None:
+    contract = CheckpointContract(
+        state_dim=6,
+        action_dim=6,
+        chunk_size=50,
+        image_keys=("observation.images.camera",),
+    )
+
+    assert contract.tactile_proj_mode == "frozen"
+    report = validate_checkpoint(_write_bundle(tmp_path / "visual-bundle", contract), expected=contract)
+    assert report.ok, report.format_errors()
+
+
+def test_direct_vt_contract_derives_full_projection_and_keeps_explicit_mode() -> None:
+    fields = dict(
+        state_dim=6,
+        action_dim=6,
+        chunk_size=50,
+        image_keys=("observation.images.camera",),
+    )
+    full = CheckpointContract(
+        **fields,
+        tactile_keys=("observation.images.tactile",),
+        tactile_num_tokens=1,
+    )
+    explicit = CheckpointContract(**fields, tactile_proj_mode="LoRa")
+
+    assert full.tactile_proj_mode == "full"
+    assert explicit.tactile_proj_mode == "lora"
+
+
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
@@ -613,6 +646,17 @@ def test_tactile_projection_lora_accepts_complete_adapter(vt_bundle: Path) -> No
     report = validate_checkpoint(vt_bundle)
 
     assert report.ok, report.format_errors()
+
+
+def test_tactile_projection_rejects_an_invalid_module_mode(vt_bundle: Path) -> None:
+    config_path = vt_bundle / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["module_modes"]["tactile_proj"] = "adapter"
+    _write_json(config_path, config)
+
+    report = validate_checkpoint(vt_bundle)
+
+    assert "config module_modes has invalid modes: {'tactile_proj': 'adapter'}" in report.issues
 
 
 def test_diagnostics_are_aggregated_and_require_valid_raises(vt_bundle: Path) -> None:

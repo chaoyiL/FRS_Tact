@@ -18,14 +18,16 @@ import jax
 import numpy as np
 import yaml
 
-from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
-from lerobot.policies.smolvla_jax.checkpoint import resolve_checkpoint
-from lerobot.policies.smolvla_jax.validation import CheckpointContract, validate_checkpoint
+from train_smolvla import JaxSmolVLAPolicy
+from train_smolvla.checkpoint import resolve_checkpoint
+from train_vtsmolvla import VTJaxSmolVLAPolicy
+from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
 
 from .bridge_client import RobotBridgeClient
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
+Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
 
 
 class ObservationSaver:
@@ -240,6 +242,19 @@ def _checkpoint_contract(
             raise ValueError(f"checkpoint_contract.{key} must be {qualifier} of strings")
         return tuple(value)
 
+    tactile_num_tokens = integer("tactile_num_tokens", allow_zero=True)
+    tactile_proj_mode = raw.get("tactile_proj_mode")
+    if tactile_proj_mode is None:
+        tactile_proj_mode = "full" if tactile_num_tokens else "frozen"
+    if not isinstance(tactile_proj_mode, str) or tactile_proj_mode not in {
+        "frozen",
+        "full",
+        "lora",
+    }:
+        raise ValueError(
+            "checkpoint_contract.tactile_proj_mode must be one of "
+            "'frozen', 'full', or 'lora'"
+        )
     contract = CheckpointContract(
         state_dim=integer("state_dim"),
         action_dim=integer("action_dim"),
@@ -247,7 +262,8 @@ def _checkpoint_contract(
         image_keys=string_tuple("image_keys"),
         tactile_keys=string_tuple("tactile_keys", allow_empty=True),
         tactile_embedding_dim=integer("tactile_embedding_dim"),
-        tactile_num_tokens=integer("tactile_num_tokens", allow_zero=True),
+        tactile_num_tokens=tactile_num_tokens,
+        tactile_proj_mode=tactile_proj_mode,
         lora_rank=integer("lora_rank", allow_zero=True),
         vlm_lora_target_modules=string_tuple("vlm_lora_target_modules", allow_empty=True),
     )
@@ -272,7 +288,7 @@ def _load_validated_policy(
     expected: CheckpointContract,
     rename_map: Mapping[str, str] | None,
     base_sidecars: str | Path | None = None,
-) -> JaxSmolVLAPolicy:
+) -> Policy:
     """Resolve and validate a snapshot before materializing any model tensors."""
 
     snapshot = resolve_checkpoint(
@@ -286,7 +302,8 @@ def _load_validated_policy(
         base_sidecars=base_sidecars,
         require_weight=True,
     ).require_valid()
-    return JaxSmolVLAPolicy.from_pretrained(
+    policy_type = VTJaxSmolVLAPolicy if expected.tactile_num_tokens else JaxSmolVLAPolicy
+    return policy_type.from_pretrained(
         snapshot,
         rename_map=rename_map,
         revision=None,
@@ -334,23 +351,24 @@ def _validate_observation_mode(data_type: str, *, use_tactile_encoder: bool) -> 
         )
 
 
-def _robot_image_keys(policy: JaxSmolVLAPolicy, rename_map: Mapping[str, str] | None) -> tuple[str, ...]:
+def _robot_image_keys(policy: Policy, rename_map: Mapping[str, str] | None) -> tuple[str, ...]:
     """Map checkpoint image keys back to keys expected on the robot observation dict."""
     reverse = {value: key for key, value in (rename_map or {}).items()}
     model_keys = list(policy.config.image_keys)
-    if policy.config.use_tactile_encoder:
-        model_keys.extend(policy.config.tactile_keys)
+    use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
+    tactile_keys = tuple(getattr(policy.config, "tactile_keys", ())) if use_tactile else ()
+    model_keys.extend(tactile_keys)
     return tuple(reverse.get(key, key) for key in model_keys)
 
 
 def _robot_tactile_keys(
-    policy: JaxSmolVLAPolicy,
+    policy: Policy,
     rename_map: Mapping[str, str] | None,
 ) -> tuple[str, ...]:
-    if not policy.config.use_tactile_encoder:
-        return ()
+    use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
+    tactile_keys = tuple(getattr(policy.config, "tactile_keys", ())) if use_tactile else ()
     reverse = {value: key for key, value in (rename_map or {}).items()}
-    return tuple(reverse.get(key, key) for key in policy.config.tactile_keys)
+    return tuple(reverse.get(key, key) for key in tactile_keys)
 
 
 def _validate_observation(
@@ -413,7 +431,7 @@ def _prepare_observation(
 
 
 def _predict_chunk(
-    policy: JaxSmolVLAPolicy,
+    policy: Policy,
     observation: Mapping[str, Any],
     task: str,
     *,
@@ -450,7 +468,7 @@ def _predict_chunk(
     return action, action_norm
 
 
-def _rtc_enabled(policy: JaxSmolVLAPolicy) -> bool:
+def _rtc_enabled(policy: Policy) -> bool:
     rtc = policy.config.rtc_config
     return rtc is not None and bool(rtc.enabled)
 
@@ -502,9 +520,10 @@ def run(
     )
     print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
+    use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
     _validate_observation_mode(
         str(observation_config["data_type"]),
-        use_tactile_encoder=bool(policy.config.use_tactile_encoder),
+        use_tactile_encoder=use_tactile,
     )
 
     configured_horizon = int(control["action_horizon"])

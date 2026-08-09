@@ -1,19 +1,36 @@
 #!/usr/bin/env python
 """Run JAX SmolVLA on one frame from a LeRobotDataset."""
 
+# ruff: noqa: E402, I001
+
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 import jax
 import numpy as np
 
 from lerobot.datasets import LeRobotDataset
-from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
-from lerobot.policies.smolvla_jax.data import lerobot_sample_to_observation
+from train_smolvla import JaxSmolVLAPolicy
+from train_smolvla.checkpoint import resolve_checkpoint
+from train_smolvla.data import lerobot_sample_to_observation
+from train_vtsmolvla import VTJaxSmolVLAPolicy
+
+
+def _policy_type_from_snapshot(snapshot: Path):
+    with (snapshot / "config.json").open(encoding="utf-8") as file:
+        config = json.load(file)
+    if bool(config.get("use_tactile_encoder", False)):
+        return VTJaxSmolVLAPolicy
+    return JaxSmolVLAPolicy
 
 
 def parse_args() -> argparse.Namespace:
@@ -44,6 +61,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     rename_map = json.loads(args.rename_map) if args.rename_map else None
+    snapshot = resolve_checkpoint(
+        args.checkpoint,
+        revision=args.revision,
+        local_files_only=not args.allow_download,
+    )
+    policy_type = _policy_type_from_snapshot(snapshot)
+    policy = policy_type.from_pretrained(
+        snapshot,
+        rename_map=rename_map,
+        revision=None,
+        local_files_only=True,
+    )
     dataset = LeRobotDataset(
         repo_id=args.dataset_repo_id,
         root=args.dataset_root,
@@ -60,12 +89,6 @@ def main() -> None:
     task = args.task if args.task is not None else str(sample["task"])
     noise = np.load(args.noise) if args.noise else None
     previous_chunk = np.load(args.previous_chunk) if args.previous_chunk else None
-    policy = JaxSmolVLAPolicy.from_pretrained(
-        args.checkpoint,
-        rename_map=rename_map,
-        revision=args.revision,
-        local_files_only=not args.allow_download,
-    )
     start = time.perf_counter()
     actions = policy.predict_action_chunk(
         observation,

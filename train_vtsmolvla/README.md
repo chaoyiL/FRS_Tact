@@ -43,3 +43,15 @@ ignored by Git.
 Set the YAML `resume` field to an existing checkpoint directory to continue a run.
 When `resume` is empty, the launcher refuses to use an output directory that already
 contains `checkpoint-*`, preventing accidental overwrite.
+
+## Build a release wheel safely
+
+Build an sdist into a clean temporary directory first, then build the wheel from
+that archive. This prevents an ignored local `build/lib` tree from contributing
+stale modules to a release artifact.
+
+```bash
+release_dir="$(mktemp -d)"
+uv build --sdist --out-dir "$release_dir/sdist" .
+uv build --wheel --out-dir "$release_dir/wheel" "$release_dir"/sdist/*.tar.gz
+```

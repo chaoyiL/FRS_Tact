@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -100,6 +101,59 @@ def test_unknown_top_level_training_key_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="eval_frqe"):
         load_yaml_config(config)
+
+
+def test_shared_orchestration_prepares_component_params_before_model_construction(
+    monkeypatch, tmp_path
+):
+    events = []
+
+    class FakeConfig:
+        action_dim = 1
+        state_dim = 1
+        image_keys = ("image",)
+        num_vlm_layers = 1
+        num_expert_layers = 1
+        expert_width_multiplier = 1.0
+        text_hidden_size = 4
+        expert_hidden_size = 4
+
+        @classmethod
+        def from_pretrained(cls, checkpoint):
+            events.append("config")
+            return cls()
+
+        def with_overrides(self, overrides):
+            return self
+
+    class StopAfterPreparation(RuntimeError):
+        pass
+
+    def prepare(params, config, *, seed):
+        events.append(("prepare", seed, tuple(params)))
+        return {**params, "prepared": np.zeros((1,), dtype=np.float32)}
+
+    def construct_model(config):
+        events.append("model")
+        raise StopAfterPreparation
+
+    components = replace(
+        TRAIN_SCRIPT.VISUAL_COMPONENTS,
+        config_type=FakeConfig,
+        model_type=construct_model,
+        resolve_checkpoint=lambda *args, **kwargs: tmp_path / "checkpoint",
+        load_params=lambda path: {"base": np.zeros((1,), dtype=np.float32)},
+        count_vlm_layers=lambda params: 1,
+        count_expert_layers=lambda params: 1,
+        prepare_params=prepare,
+    )
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text("checkpoint: local\nsteps: 1\n", encoding="utf-8")
+
+    with pytest.raises(StopAfterPreparation):
+        TRAIN_SCRIPT.run_training(config_path, components=components)
+
+    assert events[-2:] == [("prepare", 0, ("base",)), "model"]
 
 
 def test_validation_without_rollout_does_not_log_nan(capsys) -> None:

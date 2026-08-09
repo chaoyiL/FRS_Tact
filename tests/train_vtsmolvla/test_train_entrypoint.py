@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import argparse
 import ast
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
+
+from train_vtsmolvla import train as vt_train
+from train_vtsmolvla.checkpoint import initialize_tactile_fusion_params
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -76,3 +81,50 @@ def test_vt_entrypoint_uses_explicit_components_without_argv_mutation() -> None:
         "train_vtsmolvla.validation",
     ):
         assert module in imported_modules
+
+
+def test_vt_main_passes_the_complete_vt_component_bundle(monkeypatch, tmp_path):
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        "model:\n"
+        "  use_tactile_encoder: true\n"
+        "  tactile_encoder_path: /encoder\n"
+        "  freeze_tactile_encoder: true\n"
+        "  tactile_keys: [left]\n"
+        "  tactile_embedding_dim: 512\n"
+        "  tactile_num_tokens: 1\n",
+        encoding="utf-8",
+    )
+    recorded = []
+    monkeypatch.setattr(
+        vt_train,
+        "parse_args",
+        lambda argv, **kwargs: argparse.Namespace(config=config_path),
+    )
+    monkeypatch.setattr(
+        vt_train,
+        "run_training",
+        lambda path, *, components: recorded.append((path, components)),
+    )
+
+    vt_train.main([])
+
+    assert recorded == [(config_path, vt_train.VT_COMPONENTS)]
+    assert vt_train.VT_COMPONENTS.prepare_params is initialize_tactile_fusion_params
+
+
+def test_vt_config_rejects_unfrozen_tactile_encoder_before_training(tmp_path):
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(
+        "model:\n"
+        "  use_tactile_encoder: true\n"
+        "  tactile_encoder_path: /encoder\n"
+        "  freeze_tactile_encoder: false\n"
+        "  tactile_keys: [left]\n"
+        "  tactile_embedding_dim: 512\n"
+        "  tactile_num_tokens: 1\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(NotImplementedError, match="freeze_tactile_encoder=True"):
+        vt_train._validate_vt_config(config_path)

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from safetensors.numpy import save_file as save_safetensors_file
 
-from lerobot.policies.smolvla_jax.validation import CheckpointContract
+from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
 from tools.publish_smolvla_checkpoint import (
     INFERENCE_FILENAMES,
     SIDECAR_FILENAMES,
@@ -84,6 +84,7 @@ def _valid_checkpoint(path: Path) -> Path:
             "tactile_keys": list(VT_CONTRACT.tactile_keys),
             "tactile_embedding_dim": 512,
             "tactile_num_tokens": 4,
+            "tactile_proj_mode": "full",
             "lora_rank": 16,
             "vlm_lora_target_modules": ["q_proj", "v_proj"],
             "module_modes": {
@@ -174,6 +175,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         "tactile_keys": list(VT_CONTRACT.tactile_keys),
         "tactile_embedding_dim": 512,
         "tactile_num_tokens": 4,
+        "tactile_proj_mode": "full",
         "lora_rank": 16,
         "vlm_lora_target_modules": ["q_proj", "v_proj"],
     }
@@ -567,6 +569,8 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
   tactile_num_tokens: 4
   lora_rank: 16
   vlm_lora_target_modules: [q_proj, v_proj]
+  module_modes:
+    tactile_proj: lora
 """,
         encoding="utf-8",
     )
@@ -575,6 +579,130 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
     assert contract.action_dim == 20
     assert contract.chunk_size == 20
     assert contract.tactile_num_tokens == 4
+    assert contract.tactile_proj_mode == "lora"
+
+
+def test_legacy_visual_manifest_contract_defaults_tactile_projection_to_frozen() -> None:
+    from tools.publish_smolvla_checkpoint import _contract_from_dict
+
+    contract = _contract_from_dict(
+        {
+            "state_dim": 20,
+            "action_dim": 20,
+            "chunk_size": 20,
+            "image_keys": ["rgb"],
+            "tactile_keys": [],
+            "tactile_embedding_dim": 512,
+            "tactile_num_tokens": 0,
+            "lora_rank": 0,
+            "vlm_lora_target_modules": [],
+        }
+    )
+
+    assert contract.tactile_proj_mode == "frozen"
+
+    explicit = _contract_from_dict(
+        {
+            "state_dim": 20,
+            "action_dim": 20,
+            "chunk_size": 20,
+            "image_keys": ["rgb"],
+            "tactile_keys": [],
+            "tactile_embedding_dim": 512,
+            "tactile_num_tokens": 0,
+            "tactile_proj_mode": "lora",
+            "lora_rank": 16,
+            "vlm_lora_target_modules": [],
+        }
+    )
+
+    assert explicit.tactile_proj_mode == "lora"
+
+
+def test_training_yaml_rejects_non_mapping_module_modes(tmp_path: Path) -> None:
+    yaml_path = tmp_path / "train.yaml"
+    yaml_path.write_text(
+        """model:
+  state_dim: 20
+  action_dim: 20
+  chunk_size: 20
+  image_keys: [rgb]
+  module_modes: []
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="model.module_modes must be a mapping"):
+        contract_from_training_yaml(yaml_path)
+
+
+def test_visual_training_yaml_contract_and_repaired_sidecars_validate(tmp_path: Path) -> None:
+    snapshot = _valid_checkpoint(tmp_path / "snapshot")
+    config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
+    for field in (
+        "use_tactile_encoder",
+        "tactile_keys",
+        "tactile_embedding_dim",
+        "tactile_num_tokens",
+        "tactile_proj_mode",
+    ):
+        config.pop(field, None)
+    config["module_modes"].pop("tactile_proj", None)
+    _json(snapshot / "config.json", config)
+
+    training = tmp_path / "visual-train.yaml"
+    training.write_text(
+        """datasets:
+  - repo_id: owner/data
+    action_key: actions
+model:
+  state_dim: 20
+  action_dim: 20
+  chunk_size: 20
+  image_keys: [observation.images.camera1, observation.images.camera2]
+  lora_rank: 16
+  vlm_lora_target_modules: [q_proj, v_proj]
+  module_modes:
+    vision: frozen
+    connector: frozen
+    vlm_text: lora
+    expert: full
+    action: full
+    state_proj: full
+""",
+        encoding="utf-8",
+    )
+    expected = contract_from_training_yaml(training)
+    weight_sha = _sha256(snapshot / "model.safetensors")
+    weight_time = datetime(2026, 1, 2, tzinfo=UTC)
+    api = RepairApi(weight_sha=weight_sha, weight_time=weight_time, dataset_sha="d" * 40)
+    metadata = SimpleNamespace(
+        total_frames=17,
+        features={"observation.state": {}, "actions": {}},
+        stats={
+            "observation.state": {
+                "mean": np.arange(20, dtype=np.float32),
+                "std": np.ones(20, dtype=np.float32),
+            },
+            "actions": {
+                "mean": np.arange(20, dtype=np.float32) + 10,
+                "std": np.ones(20, dtype=np.float32),
+            },
+        },
+    )
+
+    output = repair_sidecars(
+        repo_id="owner/model",
+        training_config=training,
+        output=tmp_path / "repair",
+        expected_weight_sha256=weight_sha,
+        api=api,
+        snapshot_resolver=lambda repo_id, revision: snapshot,
+        metadata_loader=lambda repo_id, revision: metadata,
+    )
+
+    assert expected.tactile_proj_mode == "frozen"
+    assert validate_checkpoint(output, expected=expected, require_weight=True).ok
 
 
 def test_repair_uses_metadata_only_stats_and_records_immutable_provenance(tmp_path: Path) -> None:
