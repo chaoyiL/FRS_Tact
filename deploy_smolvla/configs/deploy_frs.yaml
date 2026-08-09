@@ -1,0 +1,102 @@
+# FRS 真机部署配置。
+# 启动（默认不会自动给机器人发 START）：
+#   bash ./deploy_smolvla/scripts/start_frs.sh
+# 仅检查配置路径与认证信息：
+#   bash ./deploy_smolvla/scripts/start_frs.sh --check
+
+# FRS 训练 action cache 时使用的同一份“合并后的”视觉 SmolVLA JAX checkpoint。
+checkpoint: /home/typhon/models/pick_tube_02_3w_jax
+revision: null
+allow_download: false
+seed: 0
+jit: true
+# 必须与 train_frs/configs/train_frs.yaml 的 action_cache.model_sample_steps 一致。
+num_steps: 10
+
+# 这里描述的是基础 SmolVLA，而不是单独的 FRS 触觉输入。
+checkpoint_contract:
+  state_dim: 20
+  action_dim: 20
+  chunk_size: 10
+  image_keys:
+    - observation.images.camera1
+    - observation.images.camera2
+  tactile_keys: []
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 0
+  lora_rank: 0
+  vlm_lora_target_modules: []
+
+# 机器人观测 key -> 基础 SmolVLA checkpoint 的模型 key。
+rename_map:
+  observation.images.camera0: observation.images.camera1
+  observation.images.camera1: observation.images.camera2
+
+# FRS 会严格校验 decoder、触觉编码器和训练 cache 契约，然后执行：
+# VLA normalized action -> source reverse -> x_base -> tactile FRS decode -> action。
+frs:
+  enabled: true
+  checkpoint: /home/typhon/models/frs_pick_tube/run_gated_slerpflow_rankw10_repairw20_tau020_k20/best
+  tactile_encoder_checkpoint: /home/typhon/models/encoder_ckpt_06
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+
+  # 必须与训练 checkpoint metadata 一致。
+  history_stride: 3
+  gate_tau: 0.2
+  gate_temperature: 0.1
+  reverse_steps: 20
+  reverse_solver: slerpflow
+  decode_steps: 10
+  decode_solver: euler
+
+  # 防止误用另一份基础 SmolVLA。复制 checkpoint 时需保留文件 mtime（如 rsync -a）。
+  verify_source_checkpoint_fingerprint: true
+  # 超限会立即停止，不会静默退回未经 FRS 校验的 VLA action。
+  max_normalized_action_abs: 8.0
+  max_normalized_delta_rms: 4.0
+
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  action_ack_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+observation:
+  # 基础 checkpoint 是 vision，但 FRS 还需要四路原始触觉图像，因此服务端必须发 vitac。
+  data_type: vitac
+  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  single_arm_mode: false
+  no_state_obs_mode: false
+
+control:
+  # 训练数据是 30 Hz；每次只执行 1 步，才能让 history_stride=3 保持训练时约 0.9 s 的窗口。
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  action_horizon: 10
+  steps_per_inference: 1
+  # 当前 FRS reverse 不支持 RTC 拼接；基础 checkpoint 必须关闭 RTC。
+  inference_delay: null
+  execution_horizon: null
+
+runtime:
+  auto_start: false
+  warmup_runs: 2
+  status_interval_s: 2.0
+  max_iterations: 0
+
+logging:
+  save_observations: true
+  output_dir: outputs/frs_remote_observations
+  save_every: 1
+  queue_size: 32

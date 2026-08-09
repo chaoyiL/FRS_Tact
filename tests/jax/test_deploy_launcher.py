@@ -7,8 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER = ROOT / "deploy_smolvla" / "start_vtsmolvla.sh"
-CLIENT = ROOT / "deploy_smolvla" / "scripts" / "run_client.sh"
+LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_vtsmolvla.sh"
 DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
 
@@ -113,8 +112,7 @@ def _copy_deploy_entry_points(tmp_path: Path) -> Path:
     config_dir = deploy_dir / "configs"
     scripts_dir.mkdir(parents=True)
     config_dir.mkdir()
-    shutil.copy2(LAUNCHER, deploy_dir / LAUNCHER.name)
-    shutil.copy2(CLIENT, scripts_dir / CLIENT.name)
+    shutil.copy2(LAUNCHER, scripts_dir / LAUNCHER.name)
     shutil.copy2(DEFAULT_CONFIG, config_dir / DEFAULT_CONFIG.name)
     return project
 
@@ -134,7 +132,7 @@ def _fake_python(tmp_path: Path) -> Path:
     return python
 
 
-def _run_client(
+def _run_launcher(
     project: Path,
     python: Path,
     *,
@@ -143,6 +141,7 @@ def _run_client(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["FRS_PYTHON"] = str(python)
+    env["VB_ROBOT_TOKEN"] = "test-token"
     env.pop("HF_HUB_CACHE", None)
     env.pop("HUGGINGFACE_HUB_CACHE", None)
     if hub_cache is not None:
@@ -150,7 +149,7 @@ def _run_client(
     if marker is not None:
         env["FAKE_PYTHON_MARKER"] = str(marker)
     return subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / "scripts" / CLIENT.name)],
+        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name)],
         cwd=project,
         env=env,
         text=True,
@@ -231,9 +230,9 @@ def test_launcher_preserves_explicit_hf_hub_cache(tmp_path: Path) -> None:
     assert cache.is_dir()
 
 
-def test_run_client_uses_project_model_cache_by_default(tmp_path: Path) -> None:
+def test_launcher_exec_uses_project_model_cache_by_default(tmp_path: Path) -> None:
     project = _copy_deploy_entry_points(tmp_path)
-    result = _run_client(project, _fake_python(tmp_path))
+    result = _run_launcher(project, _fake_python(tmp_path))
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{project / 'checkpoints' / 'model'}\n"
@@ -249,7 +248,7 @@ def test_launcher_creates_checkpoint_directories_in_fresh_project(tmp_path: Path
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / LAUNCHER.name), "--check"],
+        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--check"],
         cwd=project,
         env=env,
         text=True,
@@ -276,7 +275,7 @@ def test_launcher_keeps_existing_checkpoint_files_unchanged(tmp_path: Path) -> N
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / LAUNCHER.name), "--check"],
+        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--check"],
         cwd=project,
         env=env,
         text=True,
@@ -289,18 +288,18 @@ def test_launcher_keeps_existing_checkpoint_files_unchanged(tmp_path: Path) -> N
     assert encoder_sentinel.read_text(encoding="utf-8") == "existing encoder checkpoint\n"
 
 
-def test_run_client_preserves_explicit_hf_hub_cache(tmp_path: Path) -> None:
+def test_launcher_exec_preserves_explicit_hf_hub_cache(tmp_path: Path) -> None:
     project = _copy_deploy_entry_points(tmp_path)
     cache = tmp_path / "custom-cache" / "hub"
 
-    result = _run_client(project, _fake_python(tmp_path), hub_cache=cache)
+    result = _run_launcher(project, _fake_python(tmp_path), hub_cache=cache)
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{cache}\n"
     assert cache.is_dir()
 
 
-def test_run_client_fails_before_python_when_hf_hub_cache_is_a_file(
+def test_launcher_fails_before_python_when_hf_hub_cache_is_a_file(
     tmp_path: Path,
 ) -> None:
     project = _copy_deploy_entry_points(tmp_path)
@@ -308,7 +307,7 @@ def test_run_client_fails_before_python_when_hf_hub_cache_is_a_file(
     marker = tmp_path / "python-started"
     cache.write_text("not a directory\n", encoding="utf-8")
 
-    result = _run_client(
+    result = _run_launcher(
         project,
         _fake_python(tmp_path),
         hub_cache=cache,
@@ -326,7 +325,7 @@ def test_launcher_help_documents_project_local_hf_hub_cache(tmp_path: Path) -> N
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / LAUNCHER.name), "--help"],
+        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--help"],
         cwd=project,
         env=env,
         text=True,

@@ -24,6 +24,7 @@ from train_vtsmolvla import VTJaxSmolVLAPolicy
 from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
 
 from .bridge_client import RobotBridgeClient
+from .frs_runtime import FRSRuntime, validate_frs_config_section
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
@@ -203,6 +204,7 @@ def load_config(path: Path) -> dict[str, Any]:
     rename_map = config.get("rename_map", {}) or {}
     if not isinstance(rename_map, dict):
         raise ValueError("rename_map must be a mapping of string to string")
+    validate_frs_config_section(config)
     return config
 
 
@@ -441,6 +443,8 @@ def _predict_chunk(
     previous_chunk: np.ndarray | None,
     inference_delay: int | None,
     execution_horizon: int | None,
+    frs_runtime: FRSRuntime | None = None,
+    update_frs_history: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(robot_action, model_space_action)`` each shaped ``[horizon, action_dim]``."""
     actions_norm = policy.predict_action_chunk(
@@ -455,6 +459,15 @@ def _predict_chunk(
         execution_horizon=execution_horizon,
     )
     jax.block_until_ready(actions_norm)
+    if frs_runtime is not None:
+        actions_norm = frs_runtime.steer(
+            policy,
+            observation,
+            task,
+            actions_norm,
+            update_history=update_frs_history,
+        )
+        jax.block_until_ready(actions_norm)
     actions = policy.preprocessor.unnormalize_actions(actions_norm)
     expected_shape = (1, policy.config.chunk_size, policy.config.action_dim)
     action = np.asarray(actions)
@@ -521,9 +534,21 @@ def run(
     print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
     use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
+    frs_config = config.get("frs")
+    frs_enabled = isinstance(frs_config, Mapping) and bool(frs_config.get("enabled", True))
+    if frs_enabled:
+        source_sample_steps = int(policy.config.num_steps if num_steps is None else num_steps)
+        frs_runtime = FRSRuntime(
+            frs_config,
+            config_path=config_path,
+            policy=policy,
+            source_sample_steps=source_sample_steps,
+        )
+    else:
+        frs_runtime = None
     _validate_observation_mode(
         str(observation_config["data_type"]),
-        use_tactile_encoder=use_tactile,
+        use_tactile_encoder=use_tactile or frs_runtime is not None,
     )
 
     configured_horizon = int(control["action_horizon"])
@@ -540,6 +565,9 @@ def run(
 
     robot_image_keys = _robot_image_keys(policy, rename_map)
     robot_tactile_keys = _robot_tactile_keys(policy, rename_map)
+    if frs_runtime is not None:
+        robot_tactile_keys = frs_runtime.tactile_keys
+        robot_image_keys = tuple(dict.fromkeys((*robot_image_keys, *robot_tactile_keys)))
     state_dim = int(policy.config.state_dim)
     empty_cameras = int(policy.config.empty_cameras)
     print(
@@ -550,6 +578,8 @@ def run(
 
     steps_per_inference = configured_steps
     rtc_on = _rtc_enabled(policy)
+    if frs_runtime is not None and rtc_on:
+        raise ValueError("FRS deployment does not support RTC action stitching")
     configured_inference_delay = control.get("inference_delay")
     if rtc_on:
         inference_delay = (
@@ -619,6 +649,14 @@ def run(
             empty_cameras=empty_cameras,
             required_image_keys=robot_tactile_keys,
         )
+        if frs_runtime is not None:
+            frs_runtime.reset(warmup_frame)
+            print(
+                "[client] FRS enabled: "
+                f"checkpoint={frs_runtime.config.checkpoint} "
+                f"window={frs_runtime.model.config.tactile_window} "
+                f"stride={frs_runtime.config.history_stride}"
+            )
         for warmup_index in range(warmup_runs):
             start = time.perf_counter()
             _predict_chunk(
@@ -631,6 +669,8 @@ def run(
                 previous_chunk=None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
+                frs_runtime=frs_runtime,
+                update_frs_history=False,
             )
             warmup_ms = (time.perf_counter() - start) * 1000.0
             print(f"[client] Warmup {warmup_index + 1}/{warmup_runs}: {warmup_ms:.1f}ms")
@@ -663,6 +703,7 @@ def run(
                 previous_chunk=previous_chunk if rtc_on else None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
+                frs_runtime=frs_runtime,
             )
             inference_ms = (time.perf_counter() - start) * 1000.0
             bridge.send_action(action, obs_seq)
@@ -673,9 +714,18 @@ def run(
 
             now = time.monotonic()
             if now - last_status_time >= status_interval_s:
+                frs_status = ""
+                if frs_runtime is not None and frs_runtime.last_diagnostics is not None:
+                    diag = frs_runtime.last_diagnostics
+                    frs_status = (
+                        f" tactile_change={diag.tactile_change:.4f}"
+                        f" gate={diag.gate_weight:.4f}"
+                        f" frs_delta_rms={diag.delta_rms:.4f}"
+                    )
                 print(
                     f"[client] iter={iteration} obs_seq={obs_seq} "
                     f"inference_ms={inference_ms:.1f} action_shape={action.shape}"
+                    f"{frs_status}"
                 )
                 last_status_time = now
     except KeyboardInterrupt:

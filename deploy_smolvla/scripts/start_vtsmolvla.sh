@@ -1,22 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CHECKPOINTS_DIR="${ROOT}/checkpoints"
 export HF_HUB_CACHE="${HF_HUB_CACHE:-${CHECKPOINTS_DIR}/model}"
 mkdir -p "${HF_HUB_CACHE}" "${CHECKPOINTS_DIR}/encoder"
 CONFIG="${FRS_DEPLOY_CONFIG:-${ROOT}/deploy_smolvla/configs/deploy_smolvla_jax.yaml}"
 TOKEN_FILE="${VB3_TOKEN_FILE:-/home/typhon/vb3_robot_server/token_list.txt}"
 CHECK_ONLY=false
+if [[ -n "${FRS_PYTHON:-}" ]]; then
+    PYTHON_BIN="${FRS_PYTHON}"
+elif [[ -n "${VB3_PYTHON:-}" ]]; then
+    PYTHON_BIN="${VB3_PYTHON}"
+elif [[ -x "${ROOT}/.venv/bin/python" ]]; then
+    PYTHON_BIN="${ROOT}/.venv/bin/python"
+else
+    PYTHON_BIN="python3"
+fi
 
 usage() {
     cat <<'EOF'
-Usage: ./deploy_smolvla/start_vtsmolvla.sh [--check] [--config PATH]
+Usage: bash ./deploy_smolvla/scripts/start_vtsmolvla.sh [--check] [--config PATH]
 
 Environment overrides:
   VB_ROBOT_TOKEN    Robot authentication token (preferred when already set)
   VB3_TOKEN_FILE    Token file used when VB_ROBOT_TOKEN is unset
   FRS_DEPLOY_CONFIG Deployment YAML path
+  FRS_PYTHON        Python executable (highest priority)
+  VB3_PYTHON        Python executable fallback
   HF_HUB_CACHE      Hugging Face Hub cache (default: <project>/checkpoints/model)
 EOF
 }
@@ -77,8 +88,11 @@ if [[ "${CHECK_ONLY}" == true ]]; then
     echo "config=${CONFIG}"
     echo "token_source=${token_source}"
     echo "model_cache=${HF_HUB_CACHE}"
-    echo "launcher=${ROOT}/deploy_smolvla/scripts/run_client.sh"
+    echo "python=${PYTHON_BIN}"
+    echo "entrypoint=deploy_smolvla.remote_client"
     exit 0
 fi
 
-exec "${ROOT}/deploy_smolvla/scripts/run_client.sh" "${CONFIG}"
+export PYTHONUNBUFFERED=1
+export PYTHONPATH="${ROOT}/src:${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+exec "${PYTHON_BIN}" -m deploy_smolvla.remote_client --config "${CONFIG}"
