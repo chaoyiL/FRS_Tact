@@ -184,3 +184,7 @@
   root to `sys.path` before importing `tools.train_smolvla_jax`.
 - Without that bootstrap, server-side cache workers fail immediately with
   `ModuleNotFoundError: No module named 'tools'`.
+- The offline vision cache reads only the configured RGB keys. Its dedicated
+  preprocessor must use a copy of the model config with tactile input disabled;
+  otherwise VT configs incorrectly require four raw tactile images even though
+  tactile embeddings are prepared by the separate tactile cache.

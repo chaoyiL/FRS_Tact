@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 import sys
 from typing import Any
@@ -138,9 +139,14 @@ def _build_dataset(
         download_videos=True,
         visual_keys=visual_keys,
     )
+    vision_only_config = replace(
+        config,
+        use_tactile_encoder=False,
+        tactile_keys=(),
+    )
     preprocessor = JaxSmolVLAPreprocessor(
         checkpoint,
-        config,
+        vision_only_config,
         rename_map={},
         stats=None,
         local_files_only=local_files_only,
