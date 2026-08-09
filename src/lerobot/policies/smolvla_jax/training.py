@@ -322,7 +322,7 @@ class JaxSmolVLATrainer:
 
         predicted = self.model.sample_actions(
             params,
-            batch["images"],
+            batch.get("images"),
             batch["image_masks"],
             batch["language_tokens"],
             batch["language_masks"],
@@ -331,6 +331,7 @@ class JaxSmolVLATrainer:
             tactile_images=batch.get("tactile_images"),
             tactile_embeddings=batch.get("tactile_embeddings"),
             tactile_masks=batch.get("tactile_masks"),
+            vision_embeddings=batch.get("vision_embeddings"),
             num_steps=rollout_steps,
         )
         target = batch["actions"][..., : self.config.action_dim]
