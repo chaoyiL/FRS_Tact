@@ -14,6 +14,12 @@ import matplotlib.pyplot as plt
 
 HISTORY_FIELDS = (
     "epoch",
+    "train_loss_total",
+    "train_loss_gt_fm",
+    "train_loss_vla_fm",
+    "train_loss_decode",
+    "train_loss_rank",
+    "train_loss_repair",
     "train_flow_loss",
     "val_flow_loss",
     "val_mse",
@@ -65,6 +71,10 @@ HISTORY_FIELDS = (
     "val_tactile_change_p90",
     "val_n_high_w",
     "val_n_low_w",
+    "val_worst_dataset_mse_pred_low_w",
+    "val_min_dataset_gt_gain_high_w",
+    "checkpoint_selection_key",
+    "checkpoint_selection_feasible",
 )
 
 
@@ -127,7 +137,13 @@ def plot_training_history(
     """Plot flow loss, gate-stratified val MSE, and high/low-w sample counts."""
 
     rows = _read_history_rows(history_path)
-    train_epochs, train_flow_loss = _finite_series(rows, "train_flow_loss")
+    train_epochs, train_total_loss = _finite_series(rows, "train_loss_total")
+    if not train_epochs:
+        train_epochs, train_total_loss = _finite_series(rows, "train_flow_loss")
+    train_component_series = {
+        name: _finite_series(rows, f"train_loss_{name}")
+        for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
+    }
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
     high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
     low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
@@ -196,11 +212,28 @@ def plot_training_history(
     row = 0
     axes[row].plot(
         train_epochs,
-        train_flow_loss,
-        label="train_flow_loss",
+        train_total_loss,
+        label="train_loss_total",
         linewidth=2.0,
         color="#4C72B0",
     )
+    component_colors = {
+        "gt_fm": "#8172B2",
+        "vla_fm": "#CCB974",
+        "decode": "#64B5CD",
+        "rank": "#C44E52",
+        "repair": "#937860",
+    }
+    for name, (epochs_component, values_component) in train_component_series.items():
+        if epochs_component:
+            axes[row].plot(
+                epochs_component,
+                values_component,
+                label=f"train_loss_{name}",
+                linewidth=1.3,
+                alpha=0.85,
+                color=component_colors[name],
+            )
     if val_loss_epochs:
         axes[row].plot(
             val_loss_epochs,
@@ -211,8 +244,8 @@ def plot_training_history(
             marker="o",
             markersize=5,
         )
-    axes[row].set_ylabel("flow loss")
-    axes[row].set_title("Flow matching loss", pad=8)
+    axes[row].set_ylabel("loss")
+    axes[row].set_title("Training objective decomposition", pad=8)
     axes[row].grid(True, alpha=0.3)
     axes[row].legend(loc="upper right", fontsize=9, framealpha=0.92)
     row += 1

@@ -16,7 +16,11 @@ from train_frs.prepare import (
     _prepare_observation_batch,
     _require_finite_cache_batch,
 )
-from train_frs.train import _existing_run_artifacts, _validate_resume_cache
+from train_frs.train import (
+    _existing_run_artifacts,
+    _validate_resume_cache,
+    checkpoint_selection_key,
+)
 from train_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
 
@@ -48,10 +52,44 @@ class _FakeBatchModel:
         max_action_dim=4,
     )
     preprocessor = _FakeBatchPreprocessor()
-
     def image_keys_for_sample(self, sample):
         assert "observation.images.camera1" in sample
         return ("observation.images.camera1",)
+
+
+def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() -> None:
+    feasible = checkpoint_selection_key(
+        {
+            "val_mse": 0.2,
+            "val_mse_pred_low_w": 0.005,
+            "val_gt_gain_high_w": 0.03,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+    )
+    destructive = checkpoint_selection_key(
+        {
+            "val_mse": 0.1,
+            "val_mse_pred_low_w": 0.02,
+            "val_gt_gain_high_w": 0.05,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+    )
+    higher_gain = checkpoint_selection_key(
+        {
+            "val_mse": 0.25,
+            "val_mse_pred_low_w": 0.008,
+            "val_gt_gain_high_w": 0.04,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+    )
+    assert feasible < destructive
+    assert higher_gain < feasible
 
 
 class _SpawnFakeDataset:

@@ -21,6 +21,7 @@ from train_frs.utils.model import decode_mse_per_sample
 from train_frs.utils.model import flow_matching_loss_per_sample
 from train_frs.utils.model import gate_preference_ranking_loss_per_sample
 from train_frs.utils.model import gated_flow_matching_loss_per_sample
+from train_frs.utils.model import gated_loss_components_per_sample
 from train_frs.utils.model import gt_supervised_loss_per_sample
 from train_frs.utils.model import high_gate_repair_loss_per_sample
 from train_frs.utils.model import make_optimizer
@@ -70,7 +71,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(decoded_fireflow))))
         optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
         gate = jnp.ones((4,), dtype=jnp.float32)
-        step_loss = train_step(
+        step_loss, step_components = train_step(
             model,
             optimizer,
             x_base,
@@ -85,7 +86,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_steps=4,
         )
         self.assertTrue(bool(jnp.isfinite(step_loss)))
-        pred_step_loss = train_step(
+        self.assertTrue(bool(jnp.allclose(step_loss, sum(step_components.values()))))
+        pred_step_loss, pred_components = train_step(
             model,
             optimizer,
             x_base,
@@ -99,6 +101,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_weight=1.0,
             aux_decode_steps=4,
         )
+        self.assertTrue(bool(jnp.allclose(pred_step_loss, sum(pred_components.values()))))
         self.assertTrue(bool(jnp.isfinite(pred_step_loss)))
 
     def test_gate_stratified_decode_metrics(self):
@@ -143,7 +146,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.61, 0.61]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([0.549, 0.549]), atol=1e-6)
 
         correctly_ordered = jnp.asarray([[[0.2]], [[0.8]]], dtype=jnp.float32)
         zero_penalty = gate_preference_ranking_loss_per_sample(
@@ -153,7 +156,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(zero_penalty, np.zeros((2,)), atol=1e-6)
+        np.testing.assert_allclose(zero_penalty, np.asarray([0.061, 0.061]), atol=1e-6)
 
     def test_high_gate_repair_loss_requires_absolute_gt_gain(self):
         gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
@@ -167,7 +170,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.22, 0.0]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([0.198, 0.301]), atol=1e-6)
 
         improved = high_gate_repair_loss_per_sample(
             jnp.asarray([[[0.8]], [[2.0]]], dtype=jnp.float32),
@@ -176,7 +179,50 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(improved, np.zeros((2,)), atol=1e-6)
+        np.testing.assert_allclose(improved, np.asarray([0.0, 0.301]), atol=1e-6)
+
+    def test_gated_loss_components_sum_to_total(self):
+        model = self.make_model()
+        x_base = jax.random.normal(jax.random.key(50), (3, 6, 3))
+        gt = x_base + 1.0
+        predicted = x_base + 0.1
+        tactile = self._tactile_seq(jax.random.key(51), 3)
+        t = jnp.asarray([0.2, 0.5, 0.8], dtype=jnp.float32)
+        gate = jnp.asarray([0.1, 0.5, 0.9], dtype=jnp.float32)
+        components = gated_loss_components_per_sample(
+            model,
+            x_base,
+            gt,
+            predicted,
+            t,
+            tactile,
+            gate,
+            gate_lambda=1.2,
+            aux_decode_weight=0.7,
+            aux_decode_steps=3,
+            rank_weight=0.5,
+            rank_margin=0.01,
+            repair_weight=0.75,
+            repair_margin=0.01,
+        )
+        total = gated_flow_matching_loss_per_sample(
+            model,
+            x_base,
+            gt,
+            predicted,
+            t,
+            tactile,
+            gate,
+            gate_lambda=1.2,
+            aux_decode_weight=0.7,
+            aux_decode_steps=3,
+            rank_weight=0.5,
+            rank_margin=0.01,
+            repair_weight=0.75,
+            repair_margin=0.01,
+        )
+        self.assertEqual(set(components), {"gt_fm", "vla_fm", "decode", "rank", "repair"})
+        self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
     def test_explicit_gate_condition_changes_output(self):
         model = self.make_model(gate_conditioning=True)

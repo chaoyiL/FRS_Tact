@@ -3,11 +3,13 @@ from __future__ import annotations
 import argparse
 import csv
 import pathlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 import numpy as np
 
 from train_frs.utils.checkpoint import load_checkpoint
+from train_frs.utils.data import CachedTactileEmbeddingBatches
 from train_frs.utils.data import TactileConditionedBatches
 from train_frs.utils.data import resolve_tactile_window
 from train_frs.utils.metrics import EvalTarget
@@ -15,12 +17,13 @@ from train_frs.utils.metrics import evaluate_split
 from train_frs.utils.model import FlowSolver
 from train_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs
+from utils.cache import MultiCachedPairs
 from utils.cache import atomic_write_json
 
 
 def evaluate_decoder(
     *,
-    cache_dir: pathlib.Path,
+    cache_dir: pathlib.Path | None,
     tactile_encoder_dir: pathlib.Path,
     checkpoint_dir: pathlib.Path,
     output_dir: pathlib.Path,
@@ -41,8 +44,28 @@ def evaluate_decoder(
     load_threads: int,
     pipeline_prefetch: int,
     image_cache_size: int,
-) -> dict[str, float | int | str]:
-    pairs = CachedPairs(cache_dir)
+    encode_batch_size: int = 256,
+    cache_dirs: Sequence[pathlib.Path] | None = None,
+    dataset_sources: Sequence[Mapping[str, Any]] | None = None,
+    tactile_embedding_cache_root: pathlib.Path | None = None,
+    tactile_keys: Sequence[str] | None = None,
+    tactile_embedding_dim: int = 512,
+    tactile_image_size: int = 224,
+) -> dict[str, Any]:
+    multi_source = cache_dirs is not None
+    if multi_source:
+        if not cache_dirs:
+            raise ValueError("cache_dirs must be non-empty when provided")
+        if dataset_sources is None or len(dataset_sources) != len(cache_dirs):
+            raise ValueError("dataset_sources must have one entry per cache directory")
+        source_names = [str(source["repo_id"]) for source in dataset_sources]
+        pairs: CachedPairs | MultiCachedPairs = MultiCachedPairs(
+            cache_dirs, source_names=source_names
+        )
+    else:
+        if cache_dir is None:
+            raise ValueError("cache_dir is required for single-dataset evaluation")
+        pairs = CachedPairs(cache_dir)
     model, checkpoint_metadata = load_checkpoint(checkpoint_dir)
     checkpoint_cache_digest = checkpoint_metadata.get("extra_metadata", {}).get("cache_records_sha256")
     if checkpoint_cache_digest is not None and checkpoint_cache_digest != pairs.manifest["records_sha256"]:
@@ -76,20 +99,42 @@ def evaluate_decoder(
             f"checkpoint tactile_window={model.config.tactile_window}."
         )
 
-    conditioner = TactileConditionedBatches(
-        pairs,
-        tactile_encoder_dir=tactile_encoder_dir,
-        tactile_window=tactile_window,
-        dataset_repo_id=dataset_repo_id,
-        dataset_root=dataset_root,
-        history_stride=history_stride,
-        build_episode_baselines=track_gate,
-        num_workers=num_workers,
-        prefetch_batches=prefetch_batches,
-        load_threads=load_threads,
-        pipeline_prefetch=pipeline_prefetch,
-        image_cache_size=image_cache_size,
-    )
+    if multi_source:
+        if tactile_embedding_cache_root is None or not tactile_keys:
+            raise ValueError(
+                "multi-dataset evaluation requires tactile embedding cache root and tactile keys"
+            )
+        assert isinstance(pairs, MultiCachedPairs)
+        assert dataset_sources is not None
+        conditioner = CachedTactileEmbeddingBatches(
+            pairs,
+            sources=dataset_sources,
+            tactile_cache_root=tactile_embedding_cache_root,
+            tactile_encoder_dir=tactile_encoder_dir,
+            tactile_keys=tactile_keys,
+            tactile_window=tactile_window,
+            history_stride=history_stride,
+            embedding_dim=tactile_embedding_dim,
+            image_size=tactile_image_size,
+            build_episode_baselines=track_gate,
+        )
+    else:
+        assert isinstance(pairs, CachedPairs)
+        conditioner = TactileConditionedBatches(
+            pairs,
+            tactile_encoder_dir=tactile_encoder_dir,
+            tactile_window=tactile_window,
+            dataset_repo_id=dataset_repo_id,
+            dataset_root=dataset_root,
+            history_stride=history_stride,
+            build_episode_baselines=track_gate,
+            num_workers=num_workers,
+            prefetch_batches=prefetch_batches,
+            load_threads=load_threads,
+            pipeline_prefetch=pipeline_prefetch,
+            image_cache_size=image_cache_size,
+            encode_batch_size=encode_batch_size,
+        )
     try:
         if conditioner.resnet_embedding_dim != model.config.resnet_embedding_dim:
             raise ValueError(
@@ -177,14 +222,70 @@ def evaluate_decoder(
                     "n_low_w": int(result.n_low_w),
                 }
             )
+        if isinstance(pairs, MultiCachedPairs):
+            source_indices, local_indices = pairs.source_and_local_indices(
+                result.cache_indices
+            )
+            dataset_indices = pairs.metadata_values(result.cache_indices, "dataset_index")
+            episode_indices = pairs.metadata_values(result.cache_indices, "episode_index")
+            per_dataset: dict[str, dict[str, float | int]] = {}
+            for source_index, source_name in enumerate(pairs.source_names):
+                mask = source_indices == source_index
+                if not np.any(mask):
+                    continue
+                source_mse_gt = result.sample_mse_gt[mask]
+                source_mse_pred = result.sample_mse_pred[mask]
+                source_vla_gt = result.sample_mse_vla_gt[mask]
+                source_metrics: dict[str, float | int] = {
+                    "sample_count": int(np.sum(mask)),
+                    "mse_gt": float(np.mean(source_mse_gt)),
+                    "mse_pred": float(np.mean(source_mse_pred)),
+                    "mse_vla_gt": float(np.mean(source_vla_gt)),
+                    "gt_gain": float(np.mean(source_vla_gt - source_mse_gt)),
+                    "relative_gt_error": float(
+                        np.mean(source_mse_gt) / max(float(np.mean(source_vla_gt)), 1e-8)
+                    ),
+                }
+                if result.sample_gate_w is not None:
+                    source_gate = result.sample_gate_w[mask]
+                    source_high = source_gate > 0.5
+                    source_low = ~source_high
+                    source_metrics["n_high_w"] = int(np.sum(source_high))
+                    source_metrics["n_low_w"] = int(np.sum(source_low))
+                    if np.any(source_high):
+                        source_metrics["mse_gt_high_w"] = float(
+                            np.mean(source_mse_gt[source_high])
+                        )
+                        source_metrics["gt_gain_high_w"] = float(
+                            np.mean((source_vla_gt - source_mse_gt)[source_high])
+                        )
+                    if np.any(source_low):
+                        source_metrics["mse_pred_low_w"] = float(
+                            np.mean(source_mse_pred[source_low])
+                        )
+                        source_metrics["gt_gain_low_w"] = float(
+                            np.mean((source_vla_gt - source_mse_gt)[source_low])
+                        )
+                per_dataset[source_name] = source_metrics
+            metrics["per_dataset"] = per_dataset
+        else:
+            source_indices = np.zeros(len(result.cache_indices), dtype=np.int32)
+            local_indices = result.cache_indices
+            dataset_indices = np.asarray(
+                pairs.arrays["dataset_index"][result.cache_indices], dtype=np.int64
+            )
+            episode_indices = np.asarray(
+                pairs.arrays["episode_index"][result.cache_indices], dtype=np.int64
+            )
         atomic_write_json(output_dir / "metrics.json", metrics)
 
-        arrays = pairs.arrays
         with (output_dir / "per_sample.csv").open("w", newline="", encoding="utf-8") as file:
             writer = csv.DictWriter(
                 file,
                 fieldnames=[
                     "cache_index",
+                    "source",
+                    "source_cache_index",
                     "dataset_index",
                     "episode_index",
                     "flow_loss",
@@ -207,8 +308,14 @@ def evaluate_decoder(
                 writer.writerow(
                     {
                         "cache_index": int(cache_index),
-                        "dataset_index": int(arrays["dataset_index"][cache_index]),
-                        "episode_index": int(arrays["episode_index"][cache_index]),
+                        "source": (
+                            pairs.source_names[int(source_indices[position])]
+                            if isinstance(pairs, MultiCachedPairs)
+                            else str(dataset_repo_id or "single")
+                        ),
+                        "source_cache_index": int(local_indices[position]),
+                        "dataset_index": int(dataset_indices[position]),
+                        "episode_index": int(episode_indices[position]),
                         "flow_loss": float(result.sample_flow_loss[position]),
                         "mse": float(result.sample_mse[position]),
                         "rmse": float(result.sample_rmse[position]),
@@ -276,10 +383,18 @@ def build_parser() -> argparse.ArgumentParser:
             "Primary metrics follow --target; mse_gt and mse_pred are always reported."
         )
     )
-    parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--tactile-encoder-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--checkpoint-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+    parser.add_argument(
+        "--config",
+        type=pathlib.Path,
+        help=(
+            "FRS training YAML. When set, evaluates all configured datasets with the "
+            "same action/embedding caches; checkpoint defaults to <frs_training.output>/best."
+        ),
+    )
+    parser.add_argument("--cache-dir", type=pathlib.Path)
+    parser.add_argument("--tactile-encoder-dir", type=pathlib.Path)
+    parser.add_argument("--checkpoint-dir", type=pathlib.Path)
+    parser.add_argument("--output-dir", type=pathlib.Path)
     parser.add_argument("--dataset-repo-id", type=str, default=None)
     parser.add_argument("--dataset-root", type=pathlib.Path, default=None)
     parser.add_argument(
@@ -295,7 +410,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override history stride (default: value stored in checkpoint metadata).",
     )
     parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--num-steps", type=int, default=5)
+    parser.add_argument(
+        "--num-steps",
+        type=int,
+        default=None,
+        help="Decode steps (config mode defaults to frs_training.validation_steps; otherwise 10).",
+    )
     parser.add_argument(
         "--target",
         choices=("gt", "predicted"),
@@ -310,7 +430,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--solver",
         "--decoder-solver",
         choices=("euler", "fireflow"),
-        default="fireflow",
+        default=None,
+        help="Decoder solver (default: training protocol, currently euler).",
     )
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
@@ -327,6 +448,94 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if args.config is not None:
+        from train_frs.train_frs import load_config, source_cache_dir
+
+        config = load_config(args.config)
+        datasets = config.get("datasets") or []
+        action_cache = config.get("action_cache") or {}
+        tactile_cache = config.get("tactile_embedding_cache") or {}
+        model_config = config.get("model") or {}
+        training = config.get("frs_training") or {}
+        if not isinstance(datasets, list) or not datasets:
+            raise ValueError("config.datasets must be a non-empty list")
+        for name, value in (
+            ("action_cache", action_cache),
+            ("tactile_embedding_cache", tactile_cache),
+            ("model", model_config),
+            ("frs_training", training),
+        ):
+            if not isinstance(value, Mapping):
+                raise ValueError(f"config.{name} must be a mapping")
+        if not action_cache.get("root") or not tactile_cache.get("root"):
+            raise ValueError("config action and tactile cache roots are required")
+        training_output = pathlib.Path(str(training["output"])).expanduser()
+        cache_dirs = [
+            source_cache_dir(action_cache["root"], str(source["repo_id"]))
+            for source in datasets
+        ]
+        tactile_encoder_dir = args.tactile_encoder_dir or pathlib.Path(
+            str(model_config["tactile_encoder_path"])
+        ).expanduser()
+        checkpoint_dir = args.checkpoint_dir or training_output / "best"
+        output_dir = args.output_dir or training_output / "evaluation"
+        tactile_keys = tuple(str(key) for key in model_config["tactile_keys"])
+        evaluate_decoder(
+            cache_dir=None,
+            cache_dirs=cache_dirs,
+            dataset_sources=datasets,
+            tactile_embedding_cache_root=pathlib.Path(str(tactile_cache["root"])).expanduser(),
+            tactile_keys=tactile_keys,
+            tactile_embedding_dim=int(model_config.get("tactile_embedding_dim", 512)),
+            tactile_image_size=int(model_config.get("tactile_image_size", 224)),
+            tactile_encoder_dir=tactile_encoder_dir,
+            checkpoint_dir=checkpoint_dir,
+            output_dir=output_dir,
+            dataset_repo_id=None,
+            dataset_root=None,
+            tactile_window_divisor=(
+                int(training.get("tactile_window_divisor", 1))
+                if args.tactile_window_divisor is None
+                else args.tactile_window_divisor
+            ),
+            history_stride=(
+                int(training.get("history_stride", 3))
+                if args.history_stride is None
+                else args.history_stride
+            ),
+            batch_size=args.batch_size,
+            num_steps=(
+                int(training.get("validation_steps", 10))
+                if args.num_steps is None
+                else args.num_steps
+            ),
+            solver=args.solver or "euler",
+            target=args.target,
+            save_predictions=args.save_predictions,
+            write_plots=not args.no_plots,
+            num_trajectory_samples=args.num_trajectory_samples,
+            num_episode_strips=args.num_episode_strips,
+            num_workers=args.num_workers,
+            prefetch_batches=args.prefetch_batches,
+            load_threads=args.load_threads,
+            pipeline_prefetch=args.pipeline_prefetch,
+            image_cache_size=args.image_cache_size,
+            encode_batch_size=args.encode_batch_size,
+        )
+        return
+
+    missing = [
+        name
+        for name, value in (
+            ("--cache-dir", args.cache_dir),
+            ("--tactile-encoder-dir", args.tactile_encoder_dir),
+            ("--checkpoint-dir", args.checkpoint_dir),
+            ("--output-dir", args.output_dir),
+        )
+        if value is None
+    ]
+    if missing:
+        raise ValueError(f"legacy single-dataset evaluation requires: {', '.join(missing)}")
     evaluate_decoder(
         cache_dir=args.cache_dir,
         tactile_encoder_dir=args.tactile_encoder_dir,
@@ -337,8 +546,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         tactile_window_divisor=args.tactile_window_divisor,
         history_stride=args.history_stride,
         batch_size=args.batch_size,
-        num_steps=args.num_steps,
-        solver=args.solver,
+        num_steps=10 if args.num_steps is None else args.num_steps,
+        solver=args.solver or "euler",
         target=args.target,
         save_predictions=args.save_predictions,
         write_plots=not args.no_plots,
@@ -349,6 +558,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         load_threads=args.load_threads,
         pipeline_prefetch=args.pipeline_prefetch,
         image_cache_size=args.image_cache_size,
+        encode_batch_size=args.encode_batch_size,
     )
 
 

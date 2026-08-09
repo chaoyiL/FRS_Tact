@@ -18,6 +18,12 @@ class HistoryPlotTest(unittest.TestCase):
             row.update(
                 {
                     "epoch": 5,
+                    "train_loss_total": 0.3,
+                    "train_loss_gt_fm": 0.10,
+                    "train_loss_vla_fm": 0.05,
+                    "train_loss_decode": 0.06,
+                    "train_loss_rank": 0.04,
+                    "train_loss_repair": 0.05,
                     "train_flow_loss": 0.3,
                     "val_flow_loss": 0.2,
                     "val_mse_gt_high_w": 0.15,

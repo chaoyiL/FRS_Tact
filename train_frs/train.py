@@ -8,11 +8,52 @@ there causes ``CUDA_ERROR_NO_DEVICE`` spam and fails the light-import guard.
 from __future__ import annotations
 
 import argparse
+import math
 import pathlib
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 LossMode = Literal["gt", "predicted", "gated"]
+
+
+def checkpoint_selection_key(
+    metrics: Mapping[str, Any],
+    *,
+    loss_mode: LossMode,
+    low_gate_max_mse_pred: float,
+    min_high_gate_gain: float,
+) -> tuple[float, float, float, float]:
+    """Return a lower-is-better key for best-checkpoint selection.
+
+    Gated runs first enforce preservation of the frozen VLA on low-gate
+    samples and positive repair on high-gate samples. Among feasible models,
+    larger high-gate gain wins. Non-gated or unstratified evaluations retain
+    the legacy aggregate-MSE behavior.
+    """
+
+    aggregate_mse = float(metrics.get("val_mse", float("inf")))
+    if loss_mode != "gated":
+        return (0.0, aggregate_mse, 0.0, aggregate_mse)
+    low_mse = float(
+        metrics.get(
+            "val_worst_dataset_mse_pred_low_w",
+            metrics.get("val_mse_pred_low_w", float("nan")),
+        )
+    )
+    high_gain = float(
+        metrics.get(
+            "val_min_dataset_gt_gain_high_w",
+            metrics.get("val_gt_gain_high_w", float("nan")),
+        )
+    )
+    if not math.isfinite(low_mse) or not math.isfinite(high_gain):
+        return (2.0, aggregate_mse, 0.0, aggregate_mse)
+    low_violation = max(0.0, low_mse - float(low_gate_max_mse_pred))
+    gain_violation = max(0.0, float(min_high_gate_gain) - high_gain)
+    total_violation = low_violation + gain_violation
+    if total_violation == 0.0:
+        return (0.0, -high_gain, low_mse, aggregate_mse)
+    return (1.0, total_violation, -high_gain, aggregate_mse)
 
 
 def _existing_run_artifacts(output_dir: pathlib.Path) -> tuple[pathlib.Path, ...]:
@@ -108,6 +149,8 @@ def train_decoder(
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
     tactile_num_tokens: int = 4,
+    best_low_gate_max_mse_pred: float = 0.01,
+    best_min_high_gate_gain: float = 0.0,
 ) -> None:
     import csv
     import json
@@ -144,6 +187,13 @@ def train_decoder(
 
     history_fields = [
         "epoch",
+        "train_loss_total",
+        "train_loss_gt_fm",
+        "train_loss_vla_fm",
+        "train_loss_decode",
+        "train_loss_rank",
+        "train_loss_repair",
+        # Backward-compatible alias for readers of pre-refactor histories.
         "train_flow_loss",
         "val_flow_loss",
         "val_mse",
@@ -196,6 +246,10 @@ def train_decoder(
         "val_tactile_change_p90",
         "val_n_high_w",
         "val_n_low_w",
+        "val_worst_dataset_mse_pred_low_w",
+        "val_min_dataset_gt_gain_high_w",
+        "checkpoint_selection_key",
+        "checkpoint_selection_feasible",
     ]
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
@@ -225,6 +279,8 @@ def train_decoder(
         raise ValueError(f"repair_weight must be non-negative, got {repair_weight}.")
     if repair_margin < 0:
         raise ValueError(f"repair_margin must be non-negative, got {repair_margin}.")
+    if best_low_gate_max_mse_pred < 0:
+        raise ValueError("best_low_gate_max_mse_pred must be non-negative.")
     if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
         raise ValueError(
             "rank_weight and repair_weight are only supported with loss_mode='gated'."
@@ -295,20 +351,34 @@ def train_decoder(
         stored_rank_margin = float(resume_extra.get("rank_margin", 0.0))
         stored_repair_weight = float(resume_extra.get("repair_weight", 0.0))
         stored_repair_margin = float(resume_extra.get("repair_margin", 0.0))
+        stored_weighting_version = int(resume_extra.get("loss_weighting_version", 1))
+        stored_low_gate_limit = float(
+            resume_extra.get("best_low_gate_max_mse_pred", best_low_gate_max_mse_pred)
+        )
+        stored_min_high_gain = float(
+            resume_extra.get("best_min_high_gate_gain", best_min_high_gate_gain)
+        )
         if (
-            stored_rank_weight != rank_weight
+            stored_weighting_version != 2
+            or stored_rank_weight != rank_weight
             or stored_rank_margin != rank_margin
             or stored_repair_weight != repair_weight
             or stored_repair_margin != repair_margin
+            or stored_low_gate_limit != best_low_gate_max_mse_pred
+            or stored_min_high_gain != best_min_high_gate_gain
         ):
             raise ValueError(
                 "Resume checkpoint constraint objective differs from this run: "
                 "checkpoint="
                 f"(rank_weight={stored_rank_weight:g}, rank_margin={stored_rank_margin:g}, "
                 f"repair_weight={stored_repair_weight:g}, "
-                f"repair_margin={stored_repair_margin:g}) requested="
+                f"repair_margin={stored_repair_margin:g}, weighting_v={stored_weighting_version}, "
+                f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}) "
+                "requested="
                 f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
-                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}). "
+                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=2, "
+                f"low_gate_limit={best_low_gate_max_mse_pred:g}, "
+                f"min_high_gain={best_min_high_gate_gain:g}). "
                 "Start a fresh run in a new frs_training.output directory."
             )
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -447,7 +517,8 @@ def train_decoder(
     else:
         print(
             f"loss_mode=gated L=w*(FM(gt)+aux*MSE(decode,gt))+lambda*(1-w)*FM(pred) "
-            "+rank_weight*preference_margin_loss+repair_weight*absolute_repair_loss "
+            "+rank_weight*[w*rank_gt+(1-w)*rank_vla] "
+            "+repair_weight*w*absolute_repair_loss "
             f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g} "
             f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
             f"rank_weight={rank_weight:g} rank_margin={rank_margin:g} "
@@ -465,13 +536,18 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
-    best_mse = float("inf")
+    best_key = (float("inf"),) * 4
     best_path = output_dir / "best" / CHECKPOINT_NAME
     if resume_dir is not None and best_path.exists():
         with best_path.open(encoding="utf-8") as file:
             best_meta = json.load(file)
         _validate_resume_cache(best_meta, pairs.manifest)
-        best_mse = float(best_meta.get("metrics", {}).get("val_mse", best_mse))
+        best_key = checkpoint_selection_key(
+            best_meta.get("metrics", {}),
+            loss_mode=loss_mode,
+            low_gate_max_mse_pred=best_low_gate_max_mse_pred,
+            min_high_gate_gain=best_min_high_gate_gain,
+        )
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0
     history_mode = "a" if resume_dir is not None and history_exists else "w"
@@ -495,6 +571,9 @@ def train_decoder(
 
             for epoch in range(start_epoch, epochs + 1):
                 losses: list[float] = []
+                component_losses: dict[str, list[float]] = {
+                    name: [] for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
+                }
                 weights: list[int] = []
                 for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
                     conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
@@ -511,7 +590,7 @@ def train_decoder(
                     else:
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
-                    loss = train_step(
+                    loss, loss_components = train_step(
                         model,
                         optimizer,
                         jnp.asarray(x_base_np),
@@ -530,15 +609,37 @@ def train_decoder(
                         repair_margin=repair_margin,
                     )
                     losses.append(float(jax.device_get(loss)))
+                    for name in component_losses:
+                        component_losses[name].append(
+                            float(jax.device_get(loss_components[name]))
+                        )
                     weights.append(batch_n)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
                         extra = f" gate_w={batch_gate_w:.4f}" if loss_mode == "gated" else ""
                         print(
                             f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
-                            f"flow_loss={losses[-1]:.6f}{extra}",
+                            f"loss_total={losses[-1]:.6f} "
+                            f"gt_fm={component_losses['gt_fm'][-1]:.6f} "
+                            f"vla_fm={component_losses['vla_fm'][-1]:.6f} "
+                            f"decode={component_losses['decode'][-1]:.6f} "
+                            f"rank={component_losses['rank'][-1]:.6f} "
+                            f"repair={component_losses['repair'][-1]:.6f}{extra}",
                             flush=True,
                         )
                 train_loss = float(np.average(losses, weights=weights))
+                train_components = {
+                    name: float(np.average(values, weights=weights))
+                    for name, values in component_losses.items()
+                }
+                train_metrics: dict[str, float] = {
+                    "train_loss_total": train_loss,
+                    "train_loss_gt_fm": train_components["gt_fm"],
+                    "train_loss_vla_fm": train_components["vla_fm"],
+                    "train_loss_decode": train_components["decode"],
+                    "train_loss_rank": train_components["rank"],
+                    "train_loss_repair": train_components["repair"],
+                    "train_flow_loss": train_loss,
+                }
                 run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
@@ -560,6 +661,11 @@ def train_decoder(
                     "rank_margin": rank_margin,
                     "repair_weight": repair_weight,
                     "repair_margin": repair_margin,
+                    "loss_weighting_version": 2,
+                    "validation_steps": validation_steps,
+                    "validation_solver": "euler",
+                    "best_low_gate_max_mse_pred": best_low_gate_max_mse_pred,
+                    "best_min_high_gate_gain": best_min_high_gate_gain,
                     "eval_every": eval_every,
                 }
                 if run_eval:
@@ -577,7 +683,7 @@ def train_decoder(
                         repair_margin=repair_margin if loss_mode == "gated" else 0.0,
                     )
                     metrics: dict[str, float | str | int] = {
-                        "train_flow_loss": train_loss,
+                        **train_metrics,
                         "val_flow_loss": validation.flow_loss,
                         "val_mse": validation.mse,
                         "val_rmse": validation.rmse,
@@ -655,6 +761,52 @@ def train_decoder(
                                 "val_n_low_w": int(validation.n_low_w),
                             }
                         )
+                    if (
+                        isinstance(pairs, MultiCachedPairs)
+                        and validation.sample_gate_w is not None
+                    ):
+                        source_indices, _ = pairs.source_and_local_indices(
+                            validation.cache_indices
+                        )
+                        low_preservation: list[float] = []
+                        high_gains: list[float] = []
+                        for source_index in range(len(pairs.sources)):
+                            source_mask = source_indices == source_index
+                            source_gate = validation.sample_gate_w[source_mask]
+                            source_low = source_gate <= 0.5
+                            source_high = source_gate > 0.5
+                            if np.any(source_low):
+                                low_preservation.append(
+                                    float(
+                                        np.mean(
+                                            validation.sample_mse_pred[source_mask][source_low]
+                                        )
+                                    )
+                                )
+                            if np.any(source_high):
+                                high_gains.append(
+                                    float(
+                                        np.mean(
+                                            validation.sample_gt_gain[source_mask][source_high]
+                                        )
+                                    )
+                                )
+                        if low_preservation:
+                            metrics["val_worst_dataset_mse_pred_low_w"] = max(
+                                low_preservation
+                            )
+                        if high_gains:
+                            metrics["val_min_dataset_gt_gain_high_w"] = min(high_gains)
+                    selection_key = checkpoint_selection_key(
+                        metrics,
+                        loss_mode=loss_mode,
+                        low_gate_max_mse_pred=best_low_gate_max_mse_pred,
+                        min_high_gate_gain=best_min_high_gate_gain,
+                    )
+                    metrics["checkpoint_selection_key"] = ",".join(
+                        f"{value:.12g}" for value in selection_key
+                    )
+                    metrics["checkpoint_selection_feasible"] = int(selection_key[0] == 0.0)
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
@@ -666,8 +818,8 @@ def train_decoder(
                         extra_metadata=checkpoint_extra,
                         optimizer=optimizer,
                     )
-                    if validation.mse < best_mse:
-                        best_mse = validation.mse
+                    if selection_key < best_key:
+                        best_key = selection_key
                         save_checkpoint(
                             output_dir / "best",
                             model,
@@ -693,19 +845,23 @@ def train_decoder(
                             f" w_mean_lo={validation.gate_w_low_mean:.3f}"
                             f" n_high={validation.n_high_w} n_low={validation.n_low_w}"
                         )
+                    selection_msg = (
+                        f" best_feasible={int(selection_key[0] == 0.0)}"
+                        f" selection_key={metrics['checkpoint_selection_key']}"
+                    )
                     print(
-                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
+                        f"epoch={epoch}/{epochs} train_loss_total={train_loss:.8f} "
                         f"val_flow_loss={validation.flow_loss:.8f} "
                         f"val_mse={validation.mse:.8f} (target={validation.target}) "
                         f"val_mse_gt={validation.mse_gt:.8f} val_mse_pred={validation.mse_pred:.8f} "
                         f"vla_mse_gt={validation.mse_vla_gt:.8f} "
                         f"gt_gain={validation.gt_gain:.8f} "
                         f"relative_gt_error={validation.relative_gt_error:.4f}"
-                        f"{stratified_msg}",
+                        f"{stratified_msg}{selection_msg}",
                         flush=True,
                     )
                 else:
-                    metrics = {"train_flow_loss": train_loss}
+                    metrics = dict(train_metrics)
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
@@ -718,11 +874,11 @@ def train_decoder(
                         optimizer=optimizer,
                     )
                     print(
-                        f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} (skip val)",
+                        f"epoch={epoch}/{epochs} train_loss_total={train_loss:.8f} (skip val)",
                         flush=True,
                     )
 
-        print(f"best_val_mse={best_mse:.8f}")
+        print(f"best_checkpoint_selection_key={best_key}")
         print(f"checkpoints={output_dir}")
         _refresh_training_plot(announce=True)
     finally:
@@ -847,6 +1003,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Required high-gate GT MSE improvement over the VLA baseline.",
     )
+    parser.add_argument(
+        "--best-low-gate-max-mse-pred",
+        type=float,
+        default=0.01,
+        help="Maximum low-gate FRS-to-VLA MSE for a feasible best checkpoint.",
+    )
+    parser.add_argument(
+        "--best-min-high-gate-gain",
+        type=float,
+        default=0.0,
+        help="Minimum high-gate GT gain for a feasible best checkpoint.",
+    )
 
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--depth", type=int, default=6)
@@ -968,6 +1136,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         encode_batch_size=args.encode_batch_size,
         resume=args.resume,
         resume_from=args.resume_from,
+        best_low_gate_max_mse_pred=args.best_low_gate_max_mse_pred,
+        best_min_high_gate_gain=args.best_min_high_gate_gain,
     )
 
 

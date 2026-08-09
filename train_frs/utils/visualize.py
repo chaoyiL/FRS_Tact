@@ -16,6 +16,7 @@ from train_frs.utils.model import FlowSolver
 from train_frs.utils.model import TactileConditionedFlowDecoder
 from train_frs.utils.model import decode_actions
 from utils.cache import CachedPairs
+from utils.cache import MultiCachedPairs
 
 
 def _select_ranked_positions(values: np.ndarray, count: int) -> list[int]:
@@ -34,7 +35,7 @@ def write_evaluation_plots(
     *,
     output_dir: pathlib.Path,
     result: EvaluationResult,
-    pairs: CachedPairs,
+    pairs: CachedPairs | MultiCachedPairs,
     model: TactileConditionedFlowDecoder,
     conditioner: TactileConditionedBatches,
     num_steps: int,
@@ -46,6 +47,11 @@ def write_evaluation_plots(
     written: list[pathlib.Path] = []
     written.append(_plot_metric_histograms(output_dir / "metrics_histogram.png", result))
     written.append(_plot_metric_scatter(output_dir / "metrics_scatter.png", result))
+    if isinstance(pairs, MultiCachedPairs):
+        # Episode ids and cache-local indices overlap across sources. Overall
+        # distribution plots remain valid; source-aware trajectory plots are
+        # intentionally omitted instead of silently mixing episodes.
+        return written
     written.append(_plot_per_episode_mse(output_dir / "per_episode_mse.png", result, pairs))
     if num_trajectory_samples > 0:
         written.append(

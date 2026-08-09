@@ -128,6 +128,9 @@ frs_training:
   # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
   repair_weight: 2.0
   repair_margin: 0.01
+  # best checkpoint：低 gate 区域须贴近 frozen VLA，高 gate 区域须取得正向 GT gain。
+  best_low_gate_max_mse_pred: 0.01
+  best_min_high_gate_gain: 0.0
 
   model_dim: 256
   depth: 6

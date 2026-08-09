@@ -16,6 +16,13 @@ from train_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]
+LOSS_COMPONENT_NAMES = (
+    "gt_fm",
+    "vla_fm",
+    "decode",
+    "rank",
+    "repair",
+)
 DEFAULT_GRU_HIDDEN_DIM = 256
 DEFAULT_RESNET_EMBEDDING_DIM = 512
 
@@ -320,10 +327,11 @@ def gate_preference_ranking_loss_per_sample(
         raise ValueError(f"ranking margin must be non-negative, got {margin}.")
     mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
     mse_pred = jnp.mean(jnp.square(decoded_action - predicted_action), axis=(1, 2))
-    weights = jax.lax.stop_gradient(gate_weights)
+    weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     high_penalty = jax.nn.relu(mse_gt - mse_pred + float(margin))
     low_penalty = jax.nn.relu(mse_pred - mse_gt + float(margin))
-    return jnp.where(weights > float(threshold), high_penalty, low_penalty)
+    del threshold  # Kept for checkpoint/API compatibility; weighting is now continuous.
+    return weights * high_penalty + (1.0 - weights) * low_penalty
 
 
 def high_gate_repair_loss_per_sample(
@@ -341,9 +349,89 @@ def high_gate_repair_loss_per_sample(
         raise ValueError(f"repair margin must be non-negative, got {margin}.")
     mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
     mse_vla_gt = jnp.mean(jnp.square(predicted_action - gt_action), axis=(1, 2))
-    weights = jax.lax.stop_gradient(gate_weights)
+    weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     penalty = jax.nn.relu(mse_gt - mse_vla_gt + float(margin))
-    return jnp.where(weights > float(threshold), penalty, 0.0)
+    del threshold  # Kept for checkpoint/API compatibility; weighting is now continuous.
+    return weights * penalty
+
+
+def gated_loss_components_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    t: Array,
+    tactile_seq: Array,
+    gate_weights: Array,
+    *,
+    gate_lambda: float,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
+) -> dict[str, Array]:
+    """Return the five weighted terms whose per-sample sum is the gated loss."""
+
+    if rank_weight < 0:
+        raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
+    if repair_weight < 0:
+        raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
+
+    flow_gt = flow_matching_loss_per_sample(
+        model, x_base, gt_action, t, tactile_seq, gate_weights
+    )
+    flow_vla = flow_matching_loss_per_sample(
+        model, x_base, predicted_action, t, tactile_seq, gate_weights
+    )
+    weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+    zeros = jnp.zeros_like(flow_gt)
+    decode_term = zeros
+    rank_term = zeros
+    repair_term = zeros
+
+    decoded = None
+    if aux_decode_weight != 0.0 or rank_weight != 0.0 or repair_weight != 0.0:
+        decoded = decode_actions(
+            model,
+            x_base,
+            tactile_seq,
+            gate_weights,
+            num_steps=aux_decode_steps,
+            solver=aux_decode_solver,
+        )
+    if aux_decode_weight != 0.0:
+        assert decoded is not None
+        decode_mse = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
+        decode_term = weights * float(aux_decode_weight) * decode_mse
+    if rank_weight != 0.0:
+        assert decoded is not None
+        rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(
+            decoded,
+            gt_action,
+            predicted_action,
+            gate_weights,
+            margin=rank_margin,
+        )
+    if repair_weight != 0.0:
+        assert decoded is not None
+        repair_term = float(repair_weight) * high_gate_repair_loss_per_sample(
+            decoded,
+            gt_action,
+            predicted_action,
+            gate_weights,
+            margin=repair_margin,
+        )
+
+    return {
+        "gt_fm": weights * flow_gt,
+        "vla_fm": float(gate_lambda) * (1.0 - weights) * flow_vla,
+        "decode": decode_term,
+        "rank": rank_term,
+        "repair": repair_term,
+    }
 
 
 def gated_flow_matching_loss_per_sample(
@@ -366,55 +454,24 @@ def gated_flow_matching_loss_per_sample(
 ) -> Array:
     """Gated endpoint loss plus preference and absolute-repair constraints."""
 
-    if rank_weight < 0:
-        raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
-    if repair_weight < 0:
-        raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
-
-    loss_star = flow_matching_loss_per_sample(
-        model, x_base, gt_action, t, tactile_seq, gate_weights
+    components = gated_loss_components_per_sample(
+        model,
+        x_base,
+        gt_action,
+        predicted_action,
+        t,
+        tactile_seq,
+        gate_weights,
+        gate_lambda=gate_lambda,
+        aux_decode_weight=aux_decode_weight,
+        aux_decode_steps=aux_decode_steps,
+        aux_decode_solver=aux_decode_solver,
+        rank_weight=rank_weight,
+        rank_margin=rank_margin,
+        repair_weight=repair_weight,
+        repair_margin=repair_margin,
     )
-    loss_stop = flow_matching_loss_per_sample(
-        model, x_base, predicted_action, t, tactile_seq, gate_weights
-    )
-    decoded = None
-    if aux_decode_weight != 0.0 or rank_weight != 0.0 or repair_weight != 0.0:
-        decoded = decode_actions(
-            model,
-            x_base,
-            tactile_seq,
-            gate_weights,
-            num_steps=aux_decode_steps,
-            solver=aux_decode_solver,
-        )
-    if aux_decode_weight != 0.0:
-        assert decoded is not None
-        mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
-        loss_star = loss_star + float(aux_decode_weight) * mse_gt
-    weights = jax.lax.stop_gradient(gate_weights)
-    loss = weights * loss_star + float(gate_lambda) * (1.0 - weights) * loss_stop
-    if rank_weight == 0.0 and repair_weight == 0.0:
-        return loss
-    assert decoded is not None
-    if rank_weight != 0.0:
-        rank_loss = gate_preference_ranking_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
-            gate_weights,
-            margin=rank_margin,
-        )
-        loss = loss + float(rank_weight) * rank_loss
-    if repair_weight != 0.0:
-        repair_loss = high_gate_repair_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
-            gate_weights,
-            margin=repair_margin,
-        )
-        loss = loss + float(repair_weight) * repair_loss
-    return loss
+    return sum(components.values())
 
 
 @partial(
@@ -450,55 +507,74 @@ def train_step(
     rank_margin: float = 0.0,
     repair_weight: float = 0.0,
     repair_margin: float = 0.0,
-) -> Array:
+) -> tuple[Array, dict[str, Array]]:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
-    def loss_fn(candidate: TactileConditionedFlowDecoder) -> Array:
+    def loss_fn(
+        candidate: TactileConditionedFlowDecoder,
+    ) -> tuple[Array, dict[str, Array]]:
         if loss_mode == "gt":
-            return jnp.mean(
-                gt_supervised_loss_per_sample(
+            flow = flow_matching_loss_per_sample(
+                candidate, x_base, gt_action, t, tactile_seq, gate_weights
+            )
+            decode = jnp.zeros_like(flow)
+            if aux_decode_weight != 0.0:
+                decode = float(aux_decode_weight) * decode_mse_per_sample(
                     candidate,
                     x_base,
                     gt_action,
-                    t,
                     tactile_seq,
                     gate_weights,
-                    aux_decode_weight=aux_decode_weight,
-                    aux_decode_steps=aux_decode_steps,
-                    aux_decode_solver=aux_decode_solver,
+                    num_steps=aux_decode_steps,
+                    solver=aux_decode_solver,
                 )
+            components = {
+                "gt_fm": jnp.mean(flow),
+                "vla_fm": jnp.asarray(0.0, dtype=flow.dtype),
+                "decode": jnp.mean(decode),
+                "rank": jnp.asarray(0.0, dtype=flow.dtype),
+                "repair": jnp.asarray(0.0, dtype=flow.dtype),
+            }
+        elif loss_mode == "predicted":
+            flow = flow_matching_loss_per_sample(
+                candidate, x_base, predicted_action, t, tactile_seq, gate_weights
             )
-        if loss_mode == "predicted":
-            return jnp.mean(
-                flow_matching_loss_per_sample(
-                    candidate, x_base, predicted_action, t, tactile_seq, gate_weights
-                )
+            components = {
+                "gt_fm": jnp.asarray(0.0, dtype=flow.dtype),
+                "vla_fm": jnp.mean(flow),
+                "decode": jnp.asarray(0.0, dtype=flow.dtype),
+                "rank": jnp.asarray(0.0, dtype=flow.dtype),
+                "repair": jnp.asarray(0.0, dtype=flow.dtype),
+            }
+        elif loss_mode == "gated":
+            per_sample = gated_loss_components_per_sample(
+                candidate,
+                x_base,
+                gt_action,
+                predicted_action,
+                t,
+                tactile_seq,
+                gate_weights,
+                gate_lambda=gate_lambda,
+                aux_decode_weight=aux_decode_weight,
+                aux_decode_steps=aux_decode_steps,
+                aux_decode_solver=aux_decode_solver,
+                rank_weight=rank_weight,
+                rank_margin=rank_margin,
+                repair_weight=repair_weight,
+                repair_margin=repair_margin,
             )
-        if loss_mode == "gated":
-            return jnp.mean(
-                gated_flow_matching_loss_per_sample(
-                    candidate,
-                    x_base,
-                    gt_action,
-                    predicted_action,
-                    t,
-                    tactile_seq,
-                    gate_weights,
-                    gate_lambda=gate_lambda,
-                    aux_decode_weight=aux_decode_weight,
-                    aux_decode_steps=aux_decode_steps,
-                    aux_decode_solver=aux_decode_solver,
-                    rank_weight=rank_weight,
-                    rank_margin=rank_margin,
-                    repair_weight=repair_weight,
-                    repair_margin=repair_margin,
-                )
+            components = {name: jnp.mean(per_sample[name]) for name in LOSS_COMPONENT_NAMES}
+        else:
+            raise ValueError(
+                f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}."
             )
-        raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
+        total = sum(components.values())
+        return total, components
 
-    loss, gradients = nnx.value_and_grad(loss_fn)(model)
+    (loss, components), gradients = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, gradients)
-    return loss
+    return loss, components
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))
