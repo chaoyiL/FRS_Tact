@@ -43,7 +43,7 @@ class Device:
 
 
 def devices():
-    return [Device() for _ in range(int(os.environ.get("FAKE_JAX_DEVICE_COUNT", "2")))]
+    return [Device() for _ in range(int(os.environ.get("FAKE_JAX_DEVICE_COUNT", "4")))]
 
 
 def _record(name):
@@ -125,7 +125,7 @@ class _Cuda:
 
     @staticmethod
     def device_count():
-        return int(os.environ.get("FAKE_TORCH_DEVICE_COUNT", "2"))
+        return int(os.environ.get("FAKE_TORCH_DEVICE_COUNT", "4"))
 
 
 cuda = _Cuda()
@@ -158,9 +158,9 @@ exit 0
         f"""
 printf 'nvidia-smi %s\\n' "$*" >> {command_log}
 if [[ "$*" == *'name,driver_version'* ]]; then
-    printf '%b' "${{FAKE_GPU_ROWS:-NVIDIA H100 80GB HBM3, 570.86\\nNVIDIA H100 80GB HBM3, 570.86\\n}}"
+    printf '%b' "${{FAKE_GPU_ROWS:-NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\n}}"
 else
-    printf '%b' "${{FAKE_GPU_ROWS:-NVIDIA H100 80GB HBM3, 570.86\\nNVIDIA H100 80GB HBM3, 570.86\\n}}"
+    printf '%b' "${{FAKE_GPU_ROWS:-NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\nNVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\\n}}"
 fi
 """,
     )
@@ -180,8 +180,8 @@ fi
         "FRS_STORAGE_ROOT": str(storage),
         "FRS_VENV_DIR": str(storage / ".venvs" / "frs_tact"),
         "FRS_UV_CACHE_DIR": str(storage / ".cache" / "uv"),
-        "FAKE_TORCH_DEVICE_COUNT": "2",
-        "FAKE_JAX_DEVICE_COUNT": "2",
+        "FAKE_TORCH_DEVICE_COUNT": "4",
+        "FAKE_JAX_DEVICE_COUNT": "4",
         "FAKE_DEVICE_OPERATION_LOG": str(operation_log),
     }
     return project, env, command_log, program_log
@@ -304,13 +304,13 @@ def test_setup_uses_project_lock_instead_of_global_process_scan() -> None:
 @pytest.mark.parametrize(
     ("gpu_rows", "should_pass"),
     [
-        ("NVIDIA H100 80GB HBM3, 570.86\nNVIDIA H100 80GB HBM3, 570.86\n", True),
-        ("NVIDIA H100 80GB HBM3, 570.85\nNVIDIA H100 80GB HBM3, 570.86\n", False),
-        ("NVIDIA H100 80GB HBM3, 570.86\n", False),
-        ("NVIDIA H100 80GB HBM3, 570.86\nNVIDIA L40S, 570.86\n", False),
+        (("NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\n") * 4, True),
+        (("NVIDIA RTX PRO 6000 Blackwell Server Edition, 570.85\n") + ("NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\n") * 3, False),
+        (("NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\n") * 3, False),
+        (("NVIDIA RTX PRO 6000 Blackwell Server Edition, 595.84\n") * 3 + "NVIDIA H100 80GB HBM3, 595.84\n", False),
     ],
 )
-def test_setup_requires_exactly_two_h100s_and_minimum_driver(
+def test_setup_requires_exactly_four_rtx_pro_6000s_and_minimum_driver(
     tmp_path: Path, gpu_rows: str, should_pass: bool
 ) -> None:
     project, env, _, _ = _prepare_setup_project(tmp_path)
@@ -322,7 +322,7 @@ def test_setup_requires_exactly_two_h100s_and_minimum_driver(
 
 
 @pytest.mark.parametrize("count_variable", ["FAKE_TORCH_DEVICE_COUNT", "FAKE_JAX_DEVICE_COUNT"])
-def test_setup_rejects_non_two_device_framework_runtime(
+def test_setup_rejects_non_four_device_framework_runtime(
     tmp_path: Path, count_variable: str
 ) -> None:
     project, env, _, _ = _prepare_setup_project(tmp_path)

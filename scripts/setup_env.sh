@@ -187,13 +187,13 @@ PY
 
 check_gpu() {
     cd "${PROJECT_ROOT}"
-    log "检查双 H100、CUDA 运行库、PyTorch 和 JAX 设备"
-    command -v nvidia-smi >/dev/null 2>&1 || fail "找不到 nvidia-smi，无法验证双 H100 环境"
+    log "检查四张 RTX PRO 6000 Blackwell、CUDA 运行库、PyTorch 和 JAX 设备"
+    command -v nvidia-smi >/dev/null 2>&1 || fail "找不到 nvidia-smi，无法验证四卡环境"
     local -a gpu_rows
     mapfile -t gpu_rows < <(
         nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits
     )
-    ((${#gpu_rows[@]} == 2)) || fail "需要恰好两张 H100，nvidia-smi 报告 ${#gpu_rows[@]} 张 GPU"
+    ((${#gpu_rows[@]} == 4)) || fail "需要恰好四张 RTX PRO 6000 Blackwell，nvidia-smi 报告 ${#gpu_rows[@]} 张 GPU"
     local row name driver oldest
     for row in "${gpu_rows[@]}"; do
         name="${row%,*}"
@@ -202,7 +202,8 @@ check_gpu() {
         name="${name%"${name##*[![:space:]]}"}"
         driver="${driver#"${driver%%[![:space:]]*}"}"
         driver="${driver%"${driver##*[![:space:]]}"}"
-        [[ "${name}" == *H100* ]] || fail "GPU 不是 H100：${name}"
+        [[ "${name}" == *"RTX PRO 6000 Blackwell Server Edition"* ]] || \
+            fail "GPU 不是 RTX PRO 6000 Blackwell Server Edition：${name}"
         [[ "${driver}" =~ ^[0-9]+([.][0-9]+)*$ ]] || fail "无法解析 NVIDIA driver 版本：${driver}"
         oldest="$(printf '%s\n' "570.86" "${driver}" | sort -V | head -n 1)"
         [[ "${oldest}" == "570.86" ]] || fail "NVIDIA driver ${driver} 低于最低要求 570.86"
@@ -255,15 +256,15 @@ if not any(path.is_file() for path in libdevice_paths):
 
 if not torch.cuda.is_available():
     raise RuntimeError("PyTorch 没有识别到 CUDA")
-if torch.cuda.device_count() != 2:
-    raise RuntimeError(f"PyTorch 必须识别两张 GPU，当前为 {torch.cuda.device_count()}")
+if torch.cuda.device_count() != 4:
+    raise RuntimeError(f"PyTorch 必须识别四张 GPU，当前为 {torch.cuda.device_count()}")
 
 gpu_devices = [device for device in jax.devices() if device.platform == "gpu"]
 print(f"JAX devices: {gpu_devices}")
-if len(gpu_devices) != 2:
-    raise RuntimeError(f"JAX 必须识别两张 GPU，当前为 {len(gpu_devices)}")
+if len(gpu_devices) != 4:
+    raise RuntimeError(f"JAX 必须识别四张 GPU，当前为 {len(gpu_devices)}")
 
-host = np.arange(8, dtype=np.float32).reshape(2, 4)
+host = np.arange(16, dtype=np.float32).reshape(4, 4)
 mesh = Mesh(np.asarray(gpu_devices), ("data",))
 sharding = NamedSharding(mesh, PartitionSpec("data", None))
 sharded = jax.device_put(host, sharding)
@@ -273,7 +274,7 @@ print(
     f"CUDA={cuda_version} cuDNN={cudnn_version} NCCL={nccl_version_value.value} "
     f"libdevice={next(path for path in libdevice_paths if path.is_file())}"
 )
-print(f"two-device sharded sum={actual.tolist()}")
+print(f"four-device sharded sum={actual.tolist()}")
 PY
 }
 
@@ -301,8 +302,10 @@ main() {
     echo "  ${UV_BIN} run --no-sync hf auth login"
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
-    echo "一键启动 VT-SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/scripts/start_vtsmolvla_train.sh"
+    echo "先生成共享离线缓存："
+    echo "  bash ${PROJECT_ROOT}/scripts/precompute_smolvla_training_cache.sh"
+    echo "并行启动 K8(0,1) 与 K21(2,3)："
+    echo "  bash ${PROJECT_ROOT}/scripts/start_vtsmolvla_dual_train.sh"
 }
 
 main "$@"

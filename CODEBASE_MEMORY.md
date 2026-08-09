@@ -170,7 +170,7 @@
 
 - 已在 `Lee` 实现完整离线训练链路：`OfflineTrainingCache` 用 NPY memmap 保存 `[N,2,64,960]` vision tokens，BF16 以 uint16 bits 无损存储；可恢复 writer 在 `.incomplete` 中逐 batch flush/progress，完成校验后原子发布。
 - `JaxSmolVLA` 的实时 RGB 与 `vision_embeddings` 为严格二选一；cache loader 按既有 episode split 映射绝对行，在线只做 state/action normalization，并保留 tactile cache、deterministic sampler、resume 和有界 host prefetch。checkpoint 参数/schema 与实时 policy 路径未改变。
-- K8/K21 配置统一使用 `/home/ljl/FRS_Tact`、`/home/ljl/.venvs/frs_tact` 与 `/DATA/ljl/substage`，关闭在线 image augmentation，共用 `/DATA/ljl/substage/smolvla_training_cache` 和 tactile/normalization cache，输出独立。
+- K8/K21 配置统一使用 `/home/ljl/FRS_Tact`、`/home/ljl/.venvs/frs_tact` 与 `/DATA/ljl/substage`，关闭在线 image augmentation，共用 `/DATA/ljl/substage/smolvla_training_cache` 和 tactile/normalization cache，输出独立；`setup_env.sh` 要求四张 RTX PRO 6000 Blackwell，并验证 PyTorch/JAX 都看见四卡。
 - 新服务器入口：`scripts/precompute_smolvla_training_cache.sh` 先在 GPU0 生成 tactile cache，再用 GPU0/1/2/3 各预计算一个数据集；`scripts/start_vtsmolvla_dual_train.sh` 随后并发启动 K8(`CUDA_VISIBLE_DEVICES=0,1`) 与 K21(`2,3`) 两个独立 JAX 进程，并分别报告退出状态。
 - fresh 合并验证：离线 cache/model/precompute/loader、配置、环境、下载器与双训练脚本共 `114 passed in 6.82s`；active tactile integration `28 passed, 1 deselected`（deselect 为既有默认部署 checkpoint identity 漂移）；相关 Python `py_compile`、4 个 shell `bash -n` 和 `git diff --check` 均通过。未在本机执行真实 4 卡 cache 或训练。
 - 实现提交：`d7afad3` cache contract，`865f35c` server paths/config，`942467e` model cached-token path，`575893e` four-GPU launcher，`d38d40f` resumable precompute，`4de97f9` cache-backed loader/prefetch。
