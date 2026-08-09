@@ -196,3 +196,6 @@
   Offline vision precompute now uses the same CPU-only spawn DataLoader pattern
   as tactile precompute, with ordered multi-process prefetch overlapping the
   next host batch with current GPU encoding.
+- Offline-cache GPU scheduling uses independent round-robin queues instead of
+  synchronized waves. A GPU that finishes its current dataset immediately
+  starts its next assigned dataset rather than waiting for the other GPU.

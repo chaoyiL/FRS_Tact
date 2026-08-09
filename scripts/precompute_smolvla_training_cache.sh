@@ -71,46 +71,40 @@ echo "[vtsmolvla-precompute] tactile cache on GPU ${GPU_IDS[0]}"
 CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py \
     --config "${K8_CONFIG}" 2>&1 | tee -a "${LOG_ROOT}/tactile.log"
 
-run_cache_wave() {
-    local -a dataset_indices=("$@")
-    local -a cache_pids=()
-    local dataset_index gpu_index pid_index status wave_failed=0
-    for dataset_index in "${dataset_indices[@]}"; do
-        gpu_index="${GPU_IDS[${#cache_pids[@]}]}"
-        echo "[vtsmolvla-precompute] offline dataset ${dataset_index} on GPU ${gpu_index}"
-        CUDA_VISIBLE_DEVICES="${gpu_index}" \
-            "${UV_BIN}" run --no-sync python tools/precompute_smolvla_training_cache.py \
-            --config "${K8_CONFIG}" --dataset-index "${dataset_index}" \
-            > >(tee -a "${LOG_ROOT}/offline_dataset_${dataset_index}.log") 2>&1 &
-        cache_pids+=("$!")
-    done
-
-    for pid_index in "${!cache_pids[@]}"; do
-        dataset_index="${dataset_indices[pid_index]}"
-        if wait "${cache_pids[pid_index]}"; then
-            status=0
-        else
-            status=$?
-        fi
-        if ((status != 0)); then
-            echo "[vtsmolvla-precompute] offline dataset ${dataset_index} failed with status ${status}" >&2
-            wave_failed=1
-        fi
-    done
-    ((wave_failed == 0))
-}
-
 dataset_count=6
 gpu_count="${#GPU_IDS[@]}"
-wave_start=0
-while ((wave_start < dataset_count)); do
-    wave_indices=()
-    for ((gpu_slot = 0; gpu_slot < gpu_count; gpu_slot++)); do
-        dataset_index=$((wave_start + gpu_slot))
-        ((dataset_index < dataset_count)) || break
-        wave_indices+=("${dataset_index}")
+
+run_gpu_queue() {
+    local gpu_slot="$1"
+    local gpu_index="${GPU_IDS[gpu_slot]}"
+    local dataset_index status
+    for ((dataset_index = gpu_slot; dataset_index < dataset_count; dataset_index += gpu_count)); do
+        echo "[vtsmolvla-precompute] offline dataset ${dataset_index} on GPU ${gpu_index}"
+        if CUDA_VISIBLE_DEVICES="${gpu_index}" \
+            "${UV_BIN}" run --no-sync python tools/precompute_smolvla_training_cache.py \
+            --config "${K8_CONFIG}" --dataset-index "${dataset_index}" \
+            > >(tee -a "${LOG_ROOT}/offline_dataset_${dataset_index}.log") 2>&1
+        then
+            continue
+        else
+            status=$?
+            echo "[vtsmolvla-precompute] offline dataset ${dataset_index} failed with status ${status}" >&2
+            return "${status}"
+        fi
     done
-    run_cache_wave "${wave_indices[@]}" || exit 1
-    wave_start=$((wave_start + gpu_count))
+}
+
+queue_pids=()
+for ((gpu_slot = 0; gpu_slot < gpu_count; gpu_slot++)); do
+    run_gpu_queue "${gpu_slot}" &
+    queue_pids+=("$!")
 done
+
+queue_failed=0
+for queue_pid in "${queue_pids[@]}"; do
+    if ! wait "${queue_pid}"; then
+        queue_failed=1
+    fi
+done
+((queue_failed == 0)) || exit 1
 echo "[vtsmolvla-precompute] all six offline datasets are complete"
