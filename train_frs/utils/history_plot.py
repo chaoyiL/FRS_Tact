@@ -73,6 +73,7 @@ HISTORY_FIELDS = (
     "val_n_low_w",
     "val_worst_dataset_mse_pred_low_w",
     "val_min_dataset_gt_gain_high_w",
+    "val_worst_dataset_rank_violation_high_w",
     "checkpoint_selection_key",
     "checkpoint_selection_feasible",
 )

@@ -221,7 +221,21 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             repair_weight=0.75,
             repair_margin=0.01,
         )
+        decoded = decode_actions(
+            model,
+            x_base,
+            tactile,
+            gate,
+            num_steps=3,
+            solver="euler",
+        )
+        mse_gt = jnp.mean(jnp.square(decoded - gt), axis=(1, 2))
+        mse_vla = jnp.mean(jnp.square(decoded - predicted), axis=(1, 2))
+        expected_decode = 0.7 * (gate * mse_gt + (1.0 - gate) * mse_vla)
         self.assertEqual(set(components), {"gt_fm", "vla_fm", "decode", "rank", "repair"})
+        self.assertTrue(
+            bool(jnp.allclose(components["decode"], expected_decode, atol=1e-6))
+        )
         self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
     def test_explicit_gate_condition_changes_output(self):

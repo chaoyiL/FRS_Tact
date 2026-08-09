@@ -63,32 +63,56 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
             "val_mse": 0.2,
             "val_mse_pred_low_w": 0.005,
             "val_gt_gain_high_w": 0.03,
+            "val_mse_gt_high_w": 0.08,
+            "val_mse_pred_high_w": 0.12,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
         min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
     )
     destructive = checkpoint_selection_key(
         {
             "val_mse": 0.1,
             "val_mse_pred_low_w": 0.02,
             "val_gt_gain_high_w": 0.05,
+            "val_mse_gt_high_w": 0.08,
+            "val_mse_pred_high_w": 0.12,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
         min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
     )
     higher_gain = checkpoint_selection_key(
         {
             "val_mse": 0.25,
             "val_mse_pred_low_w": 0.008,
             "val_gt_gain_high_w": 0.04,
+            "val_mse_gt_high_w": 0.08,
+            "val_mse_pred_high_w": 0.12,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
         min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
+    )
+    wrong_high_gate_preference = checkpoint_selection_key(
+        {
+            "val_mse": 0.1,
+            "val_mse_pred_low_w": 0.005,
+            "val_gt_gain_high_w": 0.05,
+            "val_mse_gt_high_w": 0.13,
+            "val_mse_pred_high_w": 0.12,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
     )
     assert feasible < destructive
+    assert feasible < wrong_high_gate_preference
+    assert wrong_high_gate_preference[0] == 1.0
     assert higher_gain < feasible
 
 

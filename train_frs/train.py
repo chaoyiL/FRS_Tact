@@ -22,13 +22,15 @@ def checkpoint_selection_key(
     loss_mode: LossMode,
     low_gate_max_mse_pred: float,
     min_high_gate_gain: float,
+    high_gate_rank_margin: float = 0.0,
 ) -> tuple[float, float, float, float]:
     """Return a lower-is-better key for best-checkpoint selection.
 
     Gated runs first enforce preservation of the frozen VLA on low-gate
-    samples and positive repair on high-gate samples. Among feasible models,
-    larger high-gate gain wins. Non-gated or unstratified evaluations retain
-    the legacy aggregate-MSE behavior.
+    samples, positive repair on high-gate samples, and the high-gate preference
+    ``MSE(FRS, GT) + margin <= MSE(FRS, VLA)``. Among feasible models, larger
+    high-gate gain wins. Non-gated or unstratified evaluations retain the legacy
+    aggregate-MSE behavior.
     """
 
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
@@ -46,11 +48,20 @@ def checkpoint_selection_key(
             metrics.get("val_gt_gain_high_w", float("nan")),
         )
     )
-    if not math.isfinite(low_mse) or not math.isfinite(high_gain):
+    if "val_worst_dataset_rank_violation_high_w" in metrics:
+        rank_violation = float(metrics["val_worst_dataset_rank_violation_high_w"])
+    else:
+        high_mse_gt = float(metrics.get("val_mse_gt_high_w", float("nan")))
+        high_mse_pred = float(metrics.get("val_mse_pred_high_w", float("nan")))
+        rank_violation = max(
+            0.0,
+            high_mse_gt - high_mse_pred + float(high_gate_rank_margin),
+        )
+    if not all(math.isfinite(value) for value in (low_mse, high_gain, rank_violation)):
         return (2.0, aggregate_mse, 0.0, aggregate_mse)
     low_violation = max(0.0, low_mse - float(low_gate_max_mse_pred))
     gain_violation = max(0.0, float(min_high_gate_gain) - high_gain)
-    total_violation = low_violation + gain_violation
+    total_violation = low_violation + gain_violation + rank_violation
     if total_violation == 0.0:
         return (0.0, -high_gain, low_mse, aggregate_mse)
     return (1.0, total_violation, -high_gain, aggregate_mse)
@@ -248,6 +259,7 @@ def train_decoder(
         "val_n_low_w",
         "val_worst_dataset_mse_pred_low_w",
         "val_min_dataset_gt_gain_high_w",
+        "val_worst_dataset_rank_violation_high_w",
         "checkpoint_selection_key",
         "checkpoint_selection_feasible",
     ]
@@ -359,7 +371,7 @@ def train_decoder(
             resume_extra.get("best_min_high_gate_gain", best_min_high_gate_gain)
         )
         if (
-            stored_weighting_version != 2
+            stored_weighting_version != 3
             or stored_rank_weight != rank_weight
             or stored_rank_margin != rank_margin
             or stored_repair_weight != repair_weight
@@ -376,7 +388,7 @@ def train_decoder(
                 f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}) "
                 "requested="
                 f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
-                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=2, "
+                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=3, "
                 f"low_gate_limit={best_low_gate_max_mse_pred:g}, "
                 f"min_high_gain={best_min_high_gate_gain:g}). "
                 "Start a fresh run in a new frs_training.output directory."
@@ -516,7 +528,8 @@ def train_decoder(
         )
     else:
         print(
-            f"loss_mode=gated L=w*(FM(gt)+aux*MSE(decode,gt))+lambda*(1-w)*FM(pred) "
+            "loss_mode=gated L=w*FM(gt)+lambda*(1-w)*FM(pred) "
+            "+aux*[w*MSE(decode,gt)+(1-w)*MSE(decode,pred)] "
             "+rank_weight*[w*rank_gt+(1-w)*rank_vla] "
             "+repair_weight*w*absolute_repair_loss "
             f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g} "
@@ -547,6 +560,7 @@ def train_decoder(
             loss_mode=loss_mode,
             low_gate_max_mse_pred=best_low_gate_max_mse_pred,
             min_high_gate_gain=best_min_high_gate_gain,
+            high_gate_rank_margin=rank_margin,
         )
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0
@@ -661,7 +675,7 @@ def train_decoder(
                     "rank_margin": rank_margin,
                     "repair_weight": repair_weight,
                     "repair_margin": repair_margin,
-                    "loss_weighting_version": 2,
+                    "loss_weighting_version": 3,
                     "validation_steps": validation_steps,
                     "validation_solver": "euler",
                     "best_low_gate_max_mse_pred": best_low_gate_max_mse_pred,
@@ -770,6 +784,7 @@ def train_decoder(
                         )
                         low_preservation: list[float] = []
                         high_gains: list[float] = []
+                        high_rank_violations: list[float] = []
                         for source_index in range(len(pairs.sources)):
                             source_mask = source_indices == source_index
                             source_gate = validation.sample_gate_w[source_mask]
@@ -791,17 +806,40 @@ def train_decoder(
                                         )
                                     )
                                 )
+                                source_mse_gt_high = float(
+                                    np.mean(
+                                        validation.sample_mse_gt[source_mask][source_high]
+                                    )
+                                )
+                                source_mse_pred_high = float(
+                                    np.mean(
+                                        validation.sample_mse_pred[source_mask][source_high]
+                                    )
+                                )
+                                high_rank_violations.append(
+                                    max(
+                                        0.0,
+                                        source_mse_gt_high
+                                        - source_mse_pred_high
+                                        + rank_margin,
+                                    )
+                                )
                         if low_preservation:
                             metrics["val_worst_dataset_mse_pred_low_w"] = max(
                                 low_preservation
                             )
                         if high_gains:
                             metrics["val_min_dataset_gt_gain_high_w"] = min(high_gains)
+                        if high_rank_violations:
+                            metrics["val_worst_dataset_rank_violation_high_w"] = max(
+                                high_rank_violations
+                            )
                     selection_key = checkpoint_selection_key(
                         metrics,
                         loss_mode=loss_mode,
                         low_gate_max_mse_pred=best_low_gate_max_mse_pred,
                         min_high_gate_gain=best_min_high_gate_gain,
+                        high_gate_rank_margin=rank_margin,
                     )
                     metrics["checkpoint_selection_key"] = ",".join(
                         f"{value:.12g}" for value in selection_key

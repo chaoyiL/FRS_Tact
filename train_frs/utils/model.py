@@ -404,8 +404,19 @@ def gated_loss_components_per_sample(
         )
     if aux_decode_weight != 0.0:
         assert decoded is not None
-        decode_mse = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
-        decode_term = weights * float(aux_decode_weight) * decode_mse
+        decode_mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
+        decode_mse_vla = jnp.mean(
+            jnp.square(decoded - predicted_action), axis=(1, 2)
+        )
+        # Match the endpoint supervision to the same soft gate used by flow
+        # matching: high-w samples decode toward GT, while low-w samples are
+        # explicitly anchored to the frozen VLA action.  The old objective only
+        # contained w*MSE(decoded, GT), so low-w endpoint preservation was left
+        # to an indirect flow/ranking signal and could violate the checkpoint
+        # preservation threshold even while total loss decreased.
+        decode_term = float(aux_decode_weight) * (
+            weights * decode_mse_gt + (1.0 - weights) * decode_mse_vla
+        )
     if rank_weight != 0.0:
         assert decoded is not None
         rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(

@@ -115,7 +115,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube/frs_0809_01
+  output: /workspace/frs_pick_tube/frs_0809_02
   # checkpoint chunk_size=10，因此 tactile_window=10/2=5。
   tactile_window_divisor: 2
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -123,13 +123,15 @@ frs_training:
 
   # 正式目标：接触变化明显时向 GT steering，未接触时保持 SmolVLA。
   loss_mode: gated
-  gate_tau: 0.2
+  # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
+  gate_tau: 0.4
   gate_temperature: 0.1
   gate_lambda: 1.0
   aux_decode_weight: 1.0
   aux_decode_steps: 10
-  # 高 w 强制 decode 更靠近 GT；低 w 强制 decode 更靠近原始 VLA。
-  rank_weight: 1.0
+  # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
+  # decode loss 本身也同时包含 w*MSE(FRS,GT)+(1-w)*MSE(FRS,VLA)。
+  rank_weight: 3.0
   rank_margin: 0.01
   # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
   repair_weight: 2.0
