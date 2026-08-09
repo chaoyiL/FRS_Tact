@@ -153,7 +153,7 @@ if ((FOREGROUND == 0 && COORDINATOR == 0)); then
 fi
 
 require_four_approved_gpus
-if ! bash "${PRECOMPUTE_SCRIPT}" --config "${K8_CONFIG}" --log-root "${LOG_ROOT}"; then
+if ! bash "${PRECOMPUTE_SCRIPT}" --config "${K8_CONFIG}" --gpus 0,1,2,3 --log-root "${LOG_ROOT}"; then
     fail "preparation failed; K8 and K21 were not started"
 fi
 

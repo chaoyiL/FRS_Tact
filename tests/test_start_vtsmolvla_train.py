@@ -46,7 +46,11 @@ def _prepare_launcher_project(tmp_path: Path) -> tuple[Path, Path, Path]:
     scripts.mkdir(parents=True)
     configs.mkdir()
     fake_bin.mkdir()
-    shutil.copy2(ROOT / "scripts" / "start_vtsmolvla_train.sh", scripts)
+    for script_name in (
+        "start_vtsmolvla_train.sh",
+        "precompute_smolvla_training_cache.sh",
+    ):
+        shutil.copy2(ROOT / "scripts" / script_name, scripts)
     storage = project / ".cache"
     (project / ".env.frs").write_text(
         "\n".join(

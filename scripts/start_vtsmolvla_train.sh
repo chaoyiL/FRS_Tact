@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 K8_CONFIG="${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile16.yaml"
 K21_CONFIG="${PROJECT_ROOT}/configs/train_vtsmolvla_jax_tactile32.yaml"
+PRECOMPUTE_SCRIPT="${SCRIPT_DIR}/precompute_smolvla_training_cache.sh"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 SCRIPT_PATH="${SCRIPT_DIR}/start_vtsmolvla_train.sh"
 TMUX_SESSION="${FRS_TMUX_SESSION:-vtsmolvla_train}"
@@ -146,12 +147,13 @@ load_environment() {
     else
         fail "找不到 uv。请先运行：bash ${PROJECT_ROOT}/scripts/setup_env.sh"
     fi
+    STORAGE_ROOT="${FRS_STORAGE_ROOT:-${STORAGE_ROOT}}"
     export PATH="${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
-    export HF_HOME="${STORAGE_ROOT}/huggingface"
-    export HF_HUB_CACHE="${HF_HOME}/hub"
-    export HF_DATASETS_CACHE="${HF_HOME}/datasets_arrow"
-    export HF_LEROBOT_HOME="${HF_HOME}/lerobot"
-    export TMPDIR="${STORAGE_ROOT}/tmp"
+    export HF_HOME="${HF_HOME:-${STORAGE_ROOT}/huggingface}"
+    export HF_HUB_CACHE="${HF_HUB_CACHE:-${HF_HOME}/hub}"
+    export HF_DATASETS_CACHE="${HF_DATASETS_CACHE:-${HF_HOME}/datasets_arrow}"
+    export HF_LEROBOT_HOME="${HF_LEROBOT_HOME:-${HF_HOME}/lerobot}"
+    export TMPDIR="${TMPDIR:-${STORAGE_ROOT}/tmp}"
     mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
 }
 
@@ -226,14 +228,22 @@ if missing:
     raise FileNotFoundError("缺少训练输入：\n  " + "\n  ".join(missing))
 devices = jax.devices()
 if len(devices) != 2:
-    raise RuntimeError(f"需要恰好两张 H100，JAX 看到 {len(devices)} 张设备：{devices}")
-if any(device.platform != "gpu" or "H100" not in device.device_kind.upper() for device in devices):
-    raise RuntimeError(f"需要两张 H100，JAX devices={devices}")
+    raise RuntimeError(f"需要恰好两张 GPU，JAX 看到 {len(devices)} 张设备：{devices}")
+approved = "NVIDIA RTX PRO 6000 BLACKWELL SERVER EDITION"
+if any(device.platform != "gpu" or approved not in device.device_kind.upper() for device in devices):
+    raise RuntimeError(f"需要两张 RTX PRO 6000 Blackwell，JAX devices={devices}")
 print(f"JAX devices={devices}")
 PY
     if compgen -G "${OUTPUT_DIR}/checkpoint-*" >/dev/null && [[ -z "${RESUME_PATH}" ]]; then
         fail "${OUTPUT_DIR} 已有 checkpoint，但 YAML 的 resume 为空。请设置新 output 或在 YAML 配置 resume。"
     fi
+}
+
+prepare_caches() {
+    local config_path="$1"
+    log "使用 GPU ${GPUS} 依次准备六个数据集的 tactile/vision cache"
+    bash "${PRECOMPUTE_SCRIPT}" --config "${config_path}" --gpus "${GPUS}" \
+        --log-root "${STORAGE_ROOT}/logs/vtsmolvla-precompute"
 }
 
 run_config() {
@@ -262,16 +272,24 @@ run_config() {
 
 run_pipeline() {
     if [[ -n "${CONFIG_PATH}" ]]; then
-        run_config "${CONFIG_PATH}" 1
+        prepare_caches "${CONFIG_PATH}"
+        run_config "${CONFIG_PATH}" 0
         return
     fi
     case "${EXPERIMENT}" in
         both)
-            run_config "${K8_CONFIG}" 1
+            prepare_caches "${K8_CONFIG}"
+            run_config "${K8_CONFIG}" 0
             run_config "${K21_CONFIG}" 0
             ;;
-        k8) run_config "${K8_CONFIG}" 1 ;;
-        k21) run_config "${K21_CONFIG}" 1 ;;
+        k8)
+            prepare_caches "${K8_CONFIG}"
+            run_config "${K8_CONFIG}" 0
+            ;;
+        k21)
+            prepare_caches "${K21_CONFIG}"
+            run_config "${K21_CONFIG}" 0
+            ;;
     esac
 }
 
