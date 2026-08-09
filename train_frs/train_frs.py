@@ -20,6 +20,7 @@ if str(ROOT) not in sys.path:
 from train_frs.train import train_decoder
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_frs.yaml"
+RUN_CONFIG_NAME = "train_config.yaml"
 
 
 def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -59,6 +60,35 @@ def resolve_resume_mode(value: Any, *, output_dir: Path) -> bool:
     raise ValueError("frs_training.resume must be false, true, or auto")
 
 
+def save_run_config(config: Mapping[str, Any], *, output_dir: Path) -> Path:
+    """Persist the effective YAML config once and reject mixed-config runs."""
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / RUN_CONFIG_NAME
+    config_dict = dict(config)
+    if destination.exists():
+        existing = load_config(destination)
+        if existing != config_dict:
+            raise ValueError(
+                f"FRS output directory already contains a different {RUN_CONFIG_NAME}: "
+                f"{destination}. Use a new frs_training.output directory for the new "
+                "parameter set, or restore the original config before resuming."
+            )
+        print(f"run_config={destination} (existing, matched)", flush=True)
+        return destination
+
+    serialized = yaml.safe_dump(
+        config_dict,
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    temporary = destination.with_suffix(destination.suffix + ".tmp")
+    temporary.write_text(serialized, encoding="utf-8")
+    temporary.replace(destination)
+    print(f"run_config={destination}", flush=True)
+    return destination
+
+
 def train_from_config(config: Mapping[str, Any]) -> None:
     datasets = config.get("datasets") or []
     if not isinstance(datasets, list) or not datasets:
@@ -95,6 +125,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
             "model.tactile_num_tokens must match model.tactile_keys length: "
             f"{tactile_num_tokens} != {len(tactile_keys)}"
         )
+    save_run_config(config, output_dir=output_dir)
     train_decoder(
         cache_dir=None,
         tactile_encoder_dir=encoder_dir,

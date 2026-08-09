@@ -115,10 +115,10 @@ log "合并/检查 SmolVLA PEFT checkpoint"
 log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
 "${UV_BIN}" run --no-sync python -m train_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
 
-log "预计算/补齐四数据集 tactile embeddings"
+log "预计算/补齐全部配置数据集的 tactile embeddings"
 "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}"
 
-log "生成/补齐四数据集 SmolVLA action caches"
+log "生成/补齐全部配置数据集的 SmolVLA action caches"
 # JAX/XLA 0.8.3's generic Triton GEMM emitter cannot tile one SmolVLA prefix
 # projection on H100.  Use the cuBLAS GEMM path for cache preparation only.
 # Training starts as a separate command below with its normal XLA configuration.

@@ -1,4 +1,4 @@
-# 四个 pick_tube 数据集上的触觉 Flow Steering 训练配置。
+# 五个 pick_tube 数据集上的触觉 Flow Steering 训练配置。
 # 完整管线：
 #   1) uv run --no-sync python tools/merge_smolvla_peft_to_jax.py \
 #        --adapter KaiyueChen/pick_tube_02_3w \
@@ -48,6 +48,11 @@ datasets:
     action_key: actions
     rename_map: *camera_rename
 
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    rename_map: *camera_rename
+
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
   root: /workspace/frs_pick_tube/action_cache_slerpflow
@@ -84,7 +89,8 @@ reverse_solver_ab:
 # 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
 tactile_embedding_cache:
   enabled: true
-  root: /workspace/tactile_embeddings
+  # Encoder-specific cache root: do not reuse embeddings produced by encoder_ckpt_06.
+  root: /workspace/frs_pick_tube/tactile_embeddings_encoder0809
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -95,7 +101,7 @@ tactile_embedding_cache:
 # 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
 model:
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_06
+  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_left_0
@@ -109,10 +115,10 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube/run_gated_slerpflow_rankw10_repairw20_tau020_k20
-  # checkpoint chunk_size=10，因此 tactile_window=10/1=10。
-  tactile_window_divisor: 1
-  # 10 个 token 每隔 3 帧回看一次，在 30Hz 下覆盖约 0.9 秒。
+  output: /workspace/frs_pick_tube/frs_0809_01
+  # checkpoint chunk_size=10，因此 tactile_window=10/2=5。
+  tactile_window_divisor: 2
+  # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
   history_stride: 3
 
   # 正式目标：接触变化明显时向 GT steering，未接触时保持 SmolVLA。
