@@ -68,7 +68,7 @@ def _run(project: Path, fake_bin: Path, *args: str, **extra_env: str) -> subproc
     )
 
 
-def test_foreground_prepares_four_datasets_before_starting_independent_gpu_pairs(tmp_path: Path) -> None:
+def test_foreground_prepares_six_datasets_before_starting_independent_gpu_pairs(tmp_path: Path) -> None:
     project, fake_bin, event_log = _project(tmp_path)
     _write_fake_commands(fake_bin, event_log)
 
@@ -78,7 +78,7 @@ def test_foreground_prepares_four_datasets_before_starting_independent_gpu_pairs
     events = event_log.read_text(encoding="utf-8").splitlines()
     assert events[0] == "tactile gpu=0"
     assert {event for event in events if event.startswith("offline")} == {
-        f"offline index={index} gpu={index}" for index in range(4)
+        f"offline index={index} gpu={index % 4}" for index in range(6)
     }
     train_events = [event for event in events if event.startswith("train")]
     assert set(train_events) == {"train name=k8 gpu=0,1", "train name=k21 gpu=2,3"}

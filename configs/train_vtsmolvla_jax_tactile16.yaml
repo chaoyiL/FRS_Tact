@@ -46,10 +46,26 @@ datasets:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
 
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /DATA/ljl/substage/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    weight: 1.0
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+  - repo_id: KaiyueChen/pick_tube_06
+    root: /DATA/ljl/substage/lerobot_v30/KaiyueChen/pick_tube_06
+    action_key: actions
+    weight: 1.0
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
 # ---- 共享的 train-only normalization 协议 ----
 # K8/K21 必须复用同一个非 output 目录；已有内容只能严格校验，不能覆盖。
 normalization:
-  protocol_dir: /DATA/ljl/substage/normalization_protocols/pick_tube_vt_k8_k21
+  protocol_dir: /DATA/ljl/substage/normalization_protocols/pick_tube_01_06_vt_k8_k21
 
 # ---- 触觉 embedding 缓存 ----
 # 首次训练前运行一次：
@@ -60,7 +76,7 @@ normalization:
 tactile_embedding_cache:
   enabled: true
   root: /DATA/ljl/substage/tactile_embeddings
-  # float16 总计约 1.3 GiB；模型投影前会转回 float32 并做 RMS normalization。
+  # 容量随六个数据集的总帧数增长；模型投影前会转回 float32 并做 RMS normalization。
   dtype: float16
   # 以下参数只控制首次预计算，不影响正式训练超参。
   precompute_batch_size: 128

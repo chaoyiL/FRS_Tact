@@ -192,15 +192,14 @@ def test_non_finite_numeric_data_is_not_published(tmp_path: Path) -> None:
     assert cache_dir.with_name(cache_dir.name + ".incomplete").is_dir()
 
 
-@pytest.mark.parametrize("value", ["-1", "4"])
-def test_cli_rejects_dataset_indices_outside_zero_through_three(value: str) -> None:
+def test_cli_rejects_negative_dataset_index() -> None:
     with pytest.raises(SystemExit):
-        PRECOMPUTE_SCRIPT.parse_args(["--config", "train.yaml", "--dataset-index", value])
+        PRECOMPUTE_SCRIPT.parse_args(["--config", "train.yaml", "--dataset-index", "-1"])
 
 
-def test_dataset_index_two_selects_only_the_third_yaml_source() -> None:
-    config = {"datasets": [{"repo_id": f"org/dataset-{index}"} for index in range(4)]}
+def test_dataset_index_five_selects_only_the_sixth_yaml_source() -> None:
+    config = {"datasets": [{"repo_id": f"org/dataset-{index}"} for index in range(6)]}
 
-    selected = PRECOMPUTE_SCRIPT.select_dataset_source(config, 2)
+    selected = PRECOMPUTE_SCRIPT.select_dataset_source(config, 5)
 
-    assert selected.repo_id == "org/dataset-2"
+    assert selected.repo_id == "org/dataset-5"

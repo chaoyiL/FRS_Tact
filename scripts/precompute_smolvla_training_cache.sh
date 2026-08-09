@@ -56,28 +56,35 @@ echo "[vtsmolvla-precompute] tactile cache on GPU 0"
 CUDA_VISIBLE_DEVICES=0 "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py \
     --config "${K8_CONFIG}" 2>&1 | tee -a "${LOG_ROOT}/tactile.log"
 
-declare -a cache_pids=()
-for dataset_index in 0 1 2 3; do
-    echo "[vtsmolvla-precompute] offline dataset ${dataset_index} on GPU ${dataset_index}"
-    CUDA_VISIBLE_DEVICES="${dataset_index}" \
-        "${UV_BIN}" run --no-sync python tools/precompute_smolvla_training_cache.py \
-        --config "${K8_CONFIG}" --dataset-index "${dataset_index}" \
-        > >(tee -a "${LOG_ROOT}/offline_dataset_${dataset_index}.log") 2>&1 &
-    cache_pids+=("$!")
-done
+run_cache_wave() {
+    local -a dataset_indices=("$@")
+    local -a cache_pids=()
+    local dataset_index gpu_index pid_index status wave_failed=0
+    for dataset_index in "${dataset_indices[@]}"; do
+        gpu_index=$((dataset_index % 4))
+        echo "[vtsmolvla-precompute] offline dataset ${dataset_index} on GPU ${gpu_index}"
+        CUDA_VISIBLE_DEVICES="${gpu_index}" \
+            "${UV_BIN}" run --no-sync python tools/precompute_smolvla_training_cache.py \
+            --config "${K8_CONFIG}" --dataset-index "${dataset_index}" \
+            > >(tee -a "${LOG_ROOT}/offline_dataset_${dataset_index}.log") 2>&1 &
+        cache_pids+=("$!")
+    done
 
-cache_failed=0
-for dataset_index in 0 1 2 3; do
-    if wait "${cache_pids[dataset_index]}"; then
-        status=0
-    else
-        status=$?
-    fi
-    if ((status != 0)); then
-        echo "[vtsmolvla-precompute] offline dataset ${dataset_index} failed with status ${status}" >&2
-        cache_failed=1
-    fi
-done
+    for pid_index in "${!cache_pids[@]}"; do
+        dataset_index="${dataset_indices[pid_index]}"
+        if wait "${cache_pids[pid_index]}"; then
+            status=0
+        else
+            status=$?
+        fi
+        if ((status != 0)); then
+            echo "[vtsmolvla-precompute] offline dataset ${dataset_index} failed with status ${status}" >&2
+            wave_failed=1
+        fi
+    done
+    ((wave_failed == 0))
+}
 
-((cache_failed == 0)) || exit 1
-echo "[vtsmolvla-precompute] all four offline datasets are complete"
+run_cache_wave 0 1 2 3 || exit 1
+run_cache_wave 4 5 || exit 1
+echo "[vtsmolvla-precompute] all six offline datasets are complete"

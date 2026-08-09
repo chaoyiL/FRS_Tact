@@ -31,16 +31,23 @@ from tools.train_smolvla_jax import apply_model_overrides, load_yaml_config, req
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "train_vtsmolvla_jax_tactile16.yaml"
 
 
+def nonnegative_dataset_index(value: str) -> int:
+    index = int(value)
+    if index < 0:
+        raise argparse.ArgumentTypeError("dataset index must be non-negative")
+    return index
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--dataset-index", type=int, choices=range(4), required=True)
+    parser.add_argument("--dataset-index", type=nonnegative_dataset_index, required=True)
     return parser.parse_args(argv)
 
 
 def select_dataset_source(config: Mapping[str, Any], dataset_index: int) -> DatasetSource:
-    if dataset_index not in range(4):
-        raise ValueError(f"dataset index must be one of 0,1,2,3, got {dataset_index}")
+    if dataset_index < 0:
+        raise ValueError(f"dataset index must be non-negative, got {dataset_index}")
     sources = parse_dataset_sources(config)
     if dataset_index >= len(sources):
         raise ValueError(

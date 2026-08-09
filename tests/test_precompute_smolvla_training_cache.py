@@ -58,7 +58,7 @@ def _run(project: Path, fake_bin: Path, **extra_env: str) -> subprocess.Complete
     )
 
 
-def test_precompute_runs_one_tactile_then_four_overlapping_offline_jobs(tmp_path: Path) -> None:
+def test_precompute_runs_six_datasets_in_two_four_gpu_waves(tmp_path: Path) -> None:
     project, fake_bin, event_log = _project(tmp_path)
     _write_fake_uv(fake_bin / "uv", event_log)
 
@@ -68,14 +68,14 @@ def test_precompute_runs_one_tactile_then_four_overlapping_offline_jobs(tmp_path
     events = event_log.read_text(encoding="utf-8").splitlines()
     assert events[0] == "tactile gpu=0"
     assert {event for event in events if event.startswith("offline-start")} == {
-        f"offline-start index={index} gpu={index}" for index in range(4)
+        f"offline-start index={index} gpu={index % 4}" for index in range(6)
     }
     assert {event for event in events if event.startswith("offline-end")} == {
-        f"offline-end index={index} gpu={index}" for index in range(4)
+        f"offline-end index={index} gpu={index % 4}" for index in range(6)
     }
-    assert max(index for index, event in enumerate(events) if event.startswith("offline-start")) < min(
-        index for index, event in enumerate(events) if event.startswith("offline-end")
-    )
+    first_wave_end = max(events.index(f"offline-end index={index} gpu={index}") for index in range(4))
+    second_wave_start = min(events.index(f"offline-start index={index} gpu={index % 4}") for index in (4, 5))
+    assert first_wave_end < second_wave_start
 
 
 def test_precompute_waits_for_every_job_and_fails_when_any_dataset_fails(tmp_path: Path) -> None:
@@ -90,3 +90,4 @@ def test_precompute_waits_for_every_job_and_fails_when_any_dataset_fails(tmp_pat
     assert {event for event in events if event.startswith("offline-end")} == {
         f"offline-end index={index} gpu={index}" for index in range(4)
     }
+    assert not any("index=4" in event or "index=5" in event for event in events)

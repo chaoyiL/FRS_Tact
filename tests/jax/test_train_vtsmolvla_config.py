@@ -62,6 +62,15 @@ def test_cache_experiment_configs_use_server_paths_and_only_change_identity() ->
         tactile16["output"],
         tactile32["output"],
     }
+    assert tactile16["normalization"]["protocol_dir"] == \
+        "/DATA/ljl/substage/normalization_protocols/pick_tube_01_06_vt_k8_k21"
+    assert [source["repo_id"] for source in tactile16["datasets"]] == [
+        f"KaiyueChen/pick_tube_{index:02d}" for index in range(1, 7)
+    ]
+    assert [source["root"] for source in tactile16["datasets"]] == [
+        f"/DATA/ljl/substage/lerobot_v30/KaiyueChen/pick_tube_{index:02d}"
+        for index in range(1, 7)
+    ]
     assert not any(
         value.startswith("/workspace")
         for config in (tactile16, tactile32)

@@ -7,7 +7,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
 HF_NAMESPACE="KaiyueChen"
-DATASETS=(pick_tube_01 pick_tube_02 pick_tube_03 pick_tube_04)
+DATASETS=(pick_tube_01 pick_tube_02 pick_tube_03 pick_tube_04 pick_tube_05 pick_tube_06)
 CLEANUP_SOURCE=0
 PROJECT_PYTHON=""
 UV_BIN=""
@@ -28,8 +28,8 @@ usage() {
     printf '%s\n' \
         "用法：scripts/download_data.sh [--cleanup-source]" \
         "" \
-        "下载并验证四个 pick_tube v3 数据集，然后准备最小 encoder_05。" \
-        "  --cleanup-source    全部验证成功后删除四个源 snapshot cache 和转换残留" \
+        "下载并验证六个 pick_tube v3 数据集，然后准备最小 encoder_05。" \
+        "  --cleanup-source    全部验证成功后删除六个源 snapshot cache 和转换残留" \
         "  --help              显示本帮助"
 }
 
@@ -652,7 +652,7 @@ cleanup_successful_sources() {
         safe_remove_tree "${work_namespace_root}" "${work_root}_old"
         safe_remove_tree "${work_namespace_root}" "${work_root}_v30"
     done
-    log "已清理四个已验证数据集的源 snapshot cache 和转换残留"
+    log "已清理六个已验证数据集的源 snapshot cache 和转换残留"
 }
 
 main() {
@@ -682,7 +682,7 @@ main() {
     if ((CLEANUP_SOURCE)); then
         cleanup_successful_sources
     fi
-    log "四个 v3 数据集与 encoder_05 均已准备完成"
+    log "六个 v3 数据集与 encoder_05 均已准备完成"
 }
 
 main "$@"

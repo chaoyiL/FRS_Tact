@@ -16,7 +16,7 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DATASETS = [f"pick_tube_{index:02d}" for index in range(1, 5)]
+DATASETS = [f"pick_tube_{index:02d}" for index in range(1, 7)]
 REPO_IDS = [f"KaiyueChen/{name}" for name in DATASETS]
 TACTILE_KEYS = [
     "observation.images.tactile_left_0",
@@ -678,7 +678,9 @@ def test_orchestrates_fixed_datasets_loader_validation_and_minimal_encoder(
     loader_events = _read_events(harness.loader_log)
     assert [event["repo_id"] for event in loader_events if event["kind"] == "metadata"] == REPO_IDS
     assert [event["repo_id"] for event in loader_events if event["kind"] == "dataset"] == REPO_IDS
-    assert [event["index"] for event in loader_events if event["kind"] == "sample"] == [0] * 4
+    assert [event["index"] for event in loader_events if event["kind"] == "sample"] == [
+        0
+    ] * len(DATASETS)
     for event in [event for event in harness.events if event["kind"] == "uv"]:
         assert event["HF_HOME"] == str(harness.hf_home)
         assert event["HF_HUB_CACHE"] == str(tmp_path / "custom-hub-cache")
@@ -765,7 +767,9 @@ def test_existing_valid_v3_destinations_skip_download_and_rerun_idempotently(
     assert _uv_download_repos(harness.events) == []
     assert _converter_events(harness.events) == []
     assert len([event for event in harness.events if event["kind"] == "encoder"]) == 2
-    assert len([event for event in _read_events(harness.loader_log) if event["kind"] == "sample"]) == 8
+    assert len(
+        [event for event in _read_events(harness.loader_log) if event["kind"] == "sample"]
+    ) == 2 * len(DATASETS)
 
 
 def test_existing_v3_with_invalid_schema_is_rebuilt_from_source(tmp_path: Path) -> None:
@@ -833,7 +837,7 @@ def test_v21_sources_are_copied_converted_and_preserved_by_default(tmp_path: Pat
 
     assert result.returncode == 0, result.stderr
     converters = _converter_events(harness.events)
-    assert len(converters) == 4
+    assert len(converters) == 6
     for name, event in zip(DATASETS, converters, strict=True):
         args = event["args"]
         assert f"--repo-id=KaiyueChen/{name}" in args
