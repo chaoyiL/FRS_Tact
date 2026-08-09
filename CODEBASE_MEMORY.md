@@ -188,3 +188,7 @@
   preprocessor must use a copy of the model config with tactile input disabled;
   otherwise VT configs incorrectly require four raw tactile images even though
   tactile embeddings are prepared by the separate tactile cache.
+- Offline vision precompute must not call JAX resize once per frame. Raw RGB
+  rows are fetched concurrently using `precompute_num_workers`, then resize and
+  frozen vision encoding run together as one batched JIT; progress is printed
+  after every durable batch.

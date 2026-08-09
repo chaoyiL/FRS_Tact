@@ -30,7 +30,11 @@ from lerobot.policies.smolvla_jax.data import (
 from lerobot.policies.smolvla_jax.lora import resolve_module_modes
 from lerobot.policies.smolvla_jax.offline_cache_precompute import OfflineCachePrecomputer
 from lerobot.policies.smolvla_jax.offline_training_cache import OfflineCacheSpec, offline_cache_dir
-from lerobot.policies.smolvla_jax.preprocessing import JaxSmolVLAPreprocessor
+from lerobot.policies.smolvla_jax.preprocessing import (
+    JaxSmolVLAPreprocessor,
+    _as_bchw,
+    resize_with_pad,
+)
 from tools.train_smolvla_jax import apply_model_overrides, load_yaml_config, require
 
 
@@ -88,7 +92,16 @@ class _PrecomputeDataset:
             if key.startswith("observation.")
         }
         task = str(raw["task"])
-        prepared = self.preprocessor.prepare(observation, task)
+        present_keys = [key for key in self.preprocessor.config.image_keys if key in observation]
+        missing_keys = [key for key in self.preprocessor.config.image_keys if key not in observation]
+        if not present_keys:
+            raise ValueError(
+                f"none of the expected image keys are present: "
+                f"{self.preprocessor.config.image_keys}"
+            )
+        images = [_as_bchw(observation[key])[0] for key in present_keys]
+        for _ in missing_keys[: self.preprocessor.config.empty_cameras]:
+            images.append(np.zeros_like(images[-1]))
         actions = np.asarray(raw[self.action_key], dtype=np.float32)
         padding_key = f"{self.action_key}_is_pad"
         action_is_pad = np.asarray(
@@ -96,7 +109,7 @@ class _PrecomputeDataset:
             dtype=np.bool_,
         )
         return {
-            "images": np.asarray(prepared["images"])[0],
+            "images": np.stack(images, axis=0),
             "state": np.asarray(observation["observation.state"], dtype=np.float32),
             "actions": actions,
             "action_is_pad": action_is_pad,
@@ -196,7 +209,13 @@ def main(argv: list[str] | None = None) -> None:
 
     @jax.jit
     def encode(images_bchw):
-        return model.embed_image(params, images_bchw)
+        images_bchw = resize_with_pad(
+            images_bchw,
+            config.resize_width,
+            config.resize_height,
+            pad_value=0.0,
+        )
+        return model.embed_image(params, images_bchw * 2.0 - 1.0)
 
     local_files_only = not (allow_download or bool(cfg.get("allow_tokenizer_download", False)))
     dataset = _build_dataset(
@@ -243,6 +262,7 @@ def main(argv: list[str] | None = None) -> None:
         encode_vision=encode_cameras,
         tokenize=lambda tasks: dataset.preprocessor.tokenize(tasks),
         batch_size=int(cache_cfg.get("precompute_batch_size", 64)),
+        num_workers=int(cache_cfg.get("precompute_num_workers", 0)),
     ).run()
     print(f"complete: {source.repo_id} -> {result}", flush=True)
 

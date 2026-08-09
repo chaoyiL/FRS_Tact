@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -119,6 +120,7 @@ class OfflineCachePrecomputer:
         encode_vision: Callable[[np.ndarray], Any],
         tokenize: Callable[[list[str]], tuple[Any, Any]],
         batch_size: int,
+        num_workers: int = 0,
     ) -> None:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}")
@@ -132,6 +134,7 @@ class OfflineCachePrecomputer:
         self.encode_vision = encode_vision
         self.tokenize = tokenize
         self.batch_size = int(batch_size)
+        self.num_workers = max(0, int(num_workers))
 
     @property
     def staging_dir(self) -> Path:
@@ -222,8 +225,13 @@ class OfflineCachePrecomputer:
         *,
         start: int,
         end: int,
+        executor: ThreadPoolExecutor | None = None,
     ) -> None:
-        samples = [self.dataset[index] for index in range(start, end)]
+        indices = range(start, end)
+        if executor is None:
+            samples = [self.dataset[index] for index in indices]
+        else:
+            samples = list(executor.map(self.dataset.__getitem__, indices))
         count = end - start
         images = np.stack([np.asarray(sample["images"]) for sample in samples], axis=0)
         vision = np.asarray(self.encode_vision(images))
@@ -318,16 +326,30 @@ class OfflineCachePrecomputer:
             raise InjectedStop(f"injected stop at frame {next_index}")
 
         target = self.spec.total_frames if stop_after is None else stop_after
-        while next_index < target:
-            end = min(next_index + self.batch_size, target)
-            self._write_batch(arrays, start=next_index, end=end)
-            for array in arrays.values():
-                array.flush()
-            next_index = end
-            _atomic_write_json(
-                self.staging_dir / PROGRESS_NAME,
-                _progress_payload(self.spec, next_index=next_index, status="incomplete"),
-            )
+        executor = (
+            ThreadPoolExecutor(max_workers=self.num_workers)
+            if self.num_workers > 0
+            else None
+        )
+        try:
+            while next_index < target:
+                end = min(next_index + self.batch_size, target)
+                self._write_batch(arrays, start=next_index, end=end, executor=executor)
+                for array in arrays.values():
+                    array.flush()
+                next_index = end
+                _atomic_write_json(
+                    self.staging_dir / PROGRESS_NAME,
+                    _progress_payload(self.spec, next_index=next_index, status="incomplete"),
+                )
+                print(
+                    f"offline-cache {self.spec.repo_id}: "
+                    f"{next_index}/{self.spec.total_frames}",
+                    flush=True,
+                )
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         if next_index != self.spec.total_frames:
             raise InjectedStop(f"injected stop at frame {next_index}")
