@@ -121,6 +121,19 @@ def test_unknown_top_level_training_key_is_rejected(tmp_path: Path) -> None:
         load_yaml_config(config)
 
 
+def test_offline_cache_config_and_data_wait_metric_are_supported(tmp_path: Path) -> None:
+    config = tmp_path / "train.yaml"
+    config.write_text(
+        "checkpoint: model\nsteps: 10\noffline_training_cache:\n"
+        "  enabled: true\n  root: /cache\n  loader_num_workers: 2\n"
+        "  host_prefetch_batches: 3\n",
+        encoding="utf-8",
+    )
+
+    assert load_yaml_config(config)["offline_training_cache"]["root"] == "/cache"
+    assert TRAIN_SCRIPT._data_wait_ms(0.025, 5) == pytest.approx(5.0)
+
+
 def test_normalization_protocol_is_an_allowed_training_config(tmp_path: Path) -> None:
     config = tmp_path / "train.yaml"
     config.write_text(

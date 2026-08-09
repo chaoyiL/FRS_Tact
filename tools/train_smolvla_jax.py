@@ -59,6 +59,7 @@ ALLOWED_TOP_LEVEL_KEYS = frozenset(
         "model",
         "normalization",
         "num_workers",
+        "offline_training_cache",
         "output",
         "prefetch_factor",
         "resume",
@@ -145,6 +146,12 @@ def require(cfg: dict[str, Any], key: str) -> Any:
     if key not in cfg or cfg[key] in (None, ""):
         raise ValueError(f"missing required config field: {key}")
     return cfg[key]
+
+
+def _data_wait_ms(wait_seconds: float, window_steps: int) -> float:
+    if window_steps <= 0:
+        raise ValueError(f"window_steps must be positive, got {window_steps}")
+    return 1000.0 * float(wait_seconds) / int(window_steps)
 
 
 def apply_model_overrides(config: JaxSmolVLAConfig, overrides: dict[str, Any] | None) -> JaxSmolVLAConfig:
@@ -353,6 +360,7 @@ def init_wandb(
             "resolved_data_split": data_split,
             "image_transforms": cfg.get("image_transforms"),
             "tactile_embedding_cache": cfg.get("tactile_embedding_cache"),
+            "offline_training_cache": cfg.get("offline_training_cache"),
             "modality_dropout": cfg.get("modality_dropout"),
             "model": model.to_dict(),
             "wandb": {k: v for k, v in wandb_cfg.items() if k != "api_key"},
@@ -586,13 +594,34 @@ def main() -> None:
     if tactile_cache_enabled and not tactile_cache_root:
         raise ValueError("tactile_embedding_cache.enabled=true requires tactile_embedding_cache.root")
     common_loader_kwargs["tactile_embedding_cache_root"] = tactile_cache_root
+    offline_cache_cfg = cfg.get("offline_training_cache") or {}
+    if not isinstance(offline_cache_cfg, dict):
+        raise ValueError("offline_training_cache must be a mapping")
+    offline_cache_enabled = bool(offline_cache_cfg.get("enabled", False))
+    offline_cache_root = offline_cache_cfg.get("root") if offline_cache_enabled else None
+    if offline_cache_enabled and not offline_cache_root:
+        raise ValueError("offline_training_cache.enabled=true requires offline_training_cache.root")
+    if offline_cache_enabled:
+        common_loader_kwargs["num_workers"] = int(
+            offline_cache_cfg.get("loader_num_workers", common_loader_kwargs["num_workers"])
+        )
+    common_loader_kwargs["offline_training_cache_root"] = offline_cache_root
+    common_loader_kwargs["host_prefetch_batches"] = int(
+        offline_cache_cfg.get("host_prefetch_batches", 0)
+        if offline_cache_enabled
+        else 0
+    )
     train_image_transforms = build_image_transforms(cfg.get("image_transforms"))
+    if offline_cache_enabled and train_image_transforms is not None:
+        raise ValueError("offline training cache requires image transforms to be disabled")
     print(
         f"data_loader: video_backend={cfg.get('video_backend') or 'auto'} "
         f"return_uint8={common_loader_kwargs['return_uint8']} "
         f"num_workers={common_loader_kwargs['num_workers']} "
         f"prefetch_factor={common_loader_kwargs['prefetch_factor']} "
-        f"tactile_embedding_cache={tactile_cache_root or 'disabled'}"
+        f"tactile_embedding_cache={tactile_cache_root or 'disabled'} "
+        f"offline_training_cache={offline_cache_root or 'disabled'} "
+        f"host_prefetch_batches={common_loader_kwargs['host_prefetch_batches']}"
     )
     print(
         "image_transforms="
@@ -704,9 +733,13 @@ def main() -> None:
     start = time.perf_counter()
     last_log_time = start
     last_log_step = trainer.step_count
+    data_wait_seconds = 0.0
     try:
         while trainer.step_count < steps:
-            metrics = trainer.step(next(batches))
+            data_started = time.perf_counter()
+            batch = next(batches)
+            data_wait_seconds += time.perf_counter() - data_started
+            metrics = trainer.step(batch)
             step = trainer.step_count
             drop_info = trainer.last_dropout_info
             drop_applied = bool(drop_info["applied"])
@@ -721,8 +754,10 @@ def main() -> None:
                 window_seconds = max(now - last_log_time, 1e-9)
                 steps_per_s = window_steps / window_seconds
                 samples_per_s = steps_per_s * int(cfg.get("batch_size", 8))
+                data_wait_ms = _data_wait_ms(data_wait_seconds, window_steps)
                 last_log_time = now
                 last_log_step = step
+                data_wait_seconds = 0.0
                 loss = float(metrics["loss"])
                 grad_norm = float(metrics["grad_norm"])
                 lr = float(metrics["learning_rate"])
@@ -730,7 +765,8 @@ def main() -> None:
                     f"step={step} loss={loss:.6f} "
                     f"grad_norm={grad_norm:.4f} "
                     f"lr={lr:.3e} steps_per_s={steps_per_s:.3f} "
-                    f"samples_per_s={samples_per_s:.1f} elapsed={elapsed:.1f}s"
+                    f"samples_per_s={samples_per_s:.1f} data_wait_ms={data_wait_ms:.3f} "
+                    f"elapsed={elapsed:.1f}s"
                     + (f" drop={drop_name}" if drop_applied else "")
                 )
                 if wandb_run is not None:
@@ -743,6 +779,7 @@ def main() -> None:
                             "train/learning_rate": lr,
                             "train/steps_per_s": steps_per_s,
                             "train/samples_per_s": samples_per_s,
+                            "train/data_wait_ms": data_wait_ms,
                             "train/elapsed_s": elapsed,
                         },
                         step=step,

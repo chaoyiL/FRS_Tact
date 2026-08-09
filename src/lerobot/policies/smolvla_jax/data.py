@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import queue
+import threading
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
@@ -27,6 +29,12 @@ from lerobot.datasets.utils import (
 from lerobot.utils.constants import HF_LEROBOT_HOME, HF_LEROBOT_HUB_CACHE
 
 from .configuration import JaxSmolVLAConfig
+from .lora import resolve_module_modes
+from .offline_training_cache import (
+    OfflineCacheSpec,
+    OfflineTrainingCache,
+    offline_cache_dir,
+)
 from .preprocessing import JaxSmolVLAPreprocessor
 from .tactile_cache import (
     TACTILE_EMBEDDING_OBSERVATION_KEY,
@@ -296,6 +304,119 @@ def prepare_lerobot_batch(
     return prepared
 
 
+def prepare_offline_cached_batch(
+    raw_batch: Mapping[str, Any],
+    preprocessor: JaxSmolVLAPreprocessor,
+    config: JaxSmolVLAConfig,
+) -> dict[str, Any]:
+    """Normalize only numeric train fields; cached tokens are already prepared."""
+
+    state = jnp.asarray(_to_numpy(raw_batch["state"]), dtype=jnp.float32)
+    state = preprocessor.normalize_state(state)
+    if config.adapt_to_pi_aloha:
+        from .preprocessing import aloha_decode_state
+
+        state = aloha_decode_state(state)
+    actions = jnp.asarray(_to_numpy(raw_batch["actions"]), dtype=jnp.float32)
+    actions = preprocessor.normalize_actions(actions)
+    prepared: dict[str, Any] = {
+        "vision_embeddings": np.asarray(_to_numpy(raw_batch["vision_tokens"])),
+        "image_masks": np.asarray(_to_numpy(raw_batch["image_masks"]), dtype=np.bool_),
+        "language_tokens": np.asarray(_to_numpy(raw_batch["language_tokens"]), dtype=np.int32),
+        "language_masks": np.asarray(_to_numpy(raw_batch["language_masks"]), dtype=np.bool_),
+        "state": np.asarray(jax.device_get(state), dtype=np.float32),
+        "actions": np.asarray(jax.device_get(actions), dtype=np.float32),
+        "action_is_pad": np.asarray(_to_numpy(raw_batch["action_is_pad"]), dtype=np.bool_),
+    }
+    if "tactile_embeddings" in raw_batch:
+        prepared["tactile_embeddings"] = np.asarray(
+            _to_numpy(raw_batch["tactile_embeddings"])
+        )
+        prepared["tactile_masks"] = np.asarray(
+            _to_numpy(raw_batch["tactile_masks"]), dtype=np.bool_
+        )
+    return prepared
+
+
+def _host_prefetch(iterator: Iterator[Any], depth: int) -> Iterator[Any]:
+    """Prefetch host values on one bounded daemon thread and preserve failures."""
+
+    if depth < 0:
+        raise ValueError(f"host prefetch depth must be non-negative, got {depth}")
+    if depth == 0:
+        return iterator
+
+    def prefetched() -> Iterator[Any]:
+        values: queue.Queue[tuple[str, Any]] = queue.Queue(maxsize=depth)
+
+        def worker() -> None:
+            try:
+                for value in iterator:
+                    values.put(("value", value))
+            except BaseException as error:
+                values.put(("error", error))
+            else:
+                values.put(("stop", None))
+
+        threading.Thread(target=worker, name="smolvla-host-prefetch", daemon=True).start()
+        while True:
+            tag, value = values.get()
+            if tag == "value":
+                yield value
+            elif tag == "error":
+                raise value
+            else:
+                return
+
+    return prefetched()
+
+
+def _collate_offline_samples(samples: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+    return {
+        key: np.stack([np.asarray(sample[key]) for sample in samples], axis=0)
+        for key in samples[0]
+    }
+
+
+class _OfflineCachedDataset(Dataset):
+    """Map episode-filtered relative indices to absolute cache rows."""
+
+    def __init__(
+        self,
+        cache: OfflineTrainingCache,
+        episode_rows: Sequence[int] | np.ndarray,
+        tactile_cache: TactileEmbeddingCache | None,
+    ) -> None:
+        self.cache = cache
+        self._cache_dir = getattr(cache, "cache_dir", None)
+        self._cache_spec = cache.spec
+        self.rows = np.asarray(episode_rows, dtype=np.int64)
+        self.tactile_cache = tactile_cache
+
+    def __len__(self) -> int:
+        return int(self.rows.size)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        if self.cache is None:
+            self.cache = OfflineTrainingCache(self._cache_dir, self._cache_spec)
+        absolute = int(self.rows[index])
+        sample = dict(self.cache[absolute])
+        sample["image_masks"] = np.ones(
+            (len(self._cache_spec.camera_keys),), dtype=np.bool_
+        )
+        if self.tactile_cache is not None:
+            sample["tactile_embeddings"] = self.tactile_cache[absolute]
+            token_count = int(self.tactile_cache.metadata["num_tactile_tokens"])
+            sample["tactile_masks"] = np.ones((token_count,), dtype=np.bool_)
+        return sample
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = dict(self.__dict__)
+        if self._cache_dir is not None:
+            state["cache"] = None
+        return state
+
+
 class _KeyMappedLeRobotDataset(Dataset):
     """Normalize keys and apply RGB-only augmentation before concatenation."""
 
@@ -552,6 +673,8 @@ class LeRobotJaxDataLoader:
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
         tactile_embedding_cache_root: str | Path | None = None,
+        offline_training_cache_root: str | Path | None = None,
+        host_prefetch_batches: int = 0,
         fixed_subset_size: int | None = None,
         fixed_subset_seed: int = 0,
         subset_indices: Sequence[int] | None = None,
@@ -560,6 +683,10 @@ class LeRobotJaxDataLoader:
             raise ValueError(f"batch size must be positive, got {batch_size}")
         if num_workers < 0:
             raise ValueError(f"number of workers cannot be negative, got {num_workers}")
+        if host_prefetch_batches < 0:
+            raise ValueError(
+                f"host_prefetch_batches must be non-negative, got {host_prefetch_batches}"
+            )
         if not sources:
             raise ValueError("at least one dataset source is required")
 
@@ -569,6 +696,14 @@ class LeRobotJaxDataLoader:
         self.infinite = bool(infinite)
         self.shuffle = bool(shuffle)
         self.image_transforms = image_transforms
+        self.host_prefetch_batches = int(host_prefetch_batches)
+        self.offline_training_cache_root = (
+            None
+            if offline_training_cache_root is None
+            else Path(offline_training_cache_root).expanduser()
+        )
+        if self.offline_training_cache_root is not None and image_transforms is not None:
+            raise ValueError("offline training cache requires image_transforms=None")
         self.tactile_embedding_cache_root = (
             None
             if tactile_embedding_cache_root is None
@@ -577,7 +712,7 @@ class LeRobotJaxDataLoader:
         if self.tactile_embedding_cache_root is not None and not config.use_tactile_encoder:
             raise ValueError("tactile embedding cache requires use_tactile_encoder=True")
 
-        mapped_datasets: list[_KeyMappedLeRobotDataset] = []
+        mapped_datasets: list[Dataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
         sample_weights: list[float] = []
         self.dataset_summaries: list[dict[str, Any]] = []
@@ -631,41 +766,103 @@ class LeRobotJaxDataLoader:
                 # by its empty-camera policy.
                 allow_missing=len(config.image_keys),
             )
-            if config.use_tactile_encoder and tactile_embedding_cache is None:
-                visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
-            dataset = LeRobotDataset(
-                repo_id=source.repo_id,
-                root=metadata.root,
-                revision=metadata.revision,
-                episodes=list(source.episodes) if source.episodes is not None else None,
-                delta_timestamps=delta_timestamps,
-                # Apply transforms after key mapping so tactile images can stay untouched.
-                image_transforms=None,
-                video_backend=video_backend,
-                # Keep decoded frames compact across worker boundaries. The RGB and
-                # tactile preprocessors perform the same uint8 -> float conversion.
-                return_uint8=return_uint8,
-                download_videos=True,
-                visual_keys=visual_keys,
-            )
-            if len(dataset) == 0:
-                raise ValueError(f"dataset {source.repo_id!r} contains no frames")
-
             self._validate_features(
                 config,
-                dataset.features,
+                metadata.features,
                 resolved_action_key,
                 source_rename,
                 repo_id=source.repo_id,
             )
-            mapped = _KeyMappedLeRobotDataset(
-                dataset,
-                action_key=resolved_action_key,
-                rename_map=source_rename,
-                image_transforms=image_transforms,
-                image_transform_keys=config.image_keys,
-                tactile_embedding_cache=tactile_embedding_cache,
-            )
+            if self.offline_training_cache_root is None:
+                if config.use_tactile_encoder and tactile_embedding_cache is None:
+                    visual_keys = list(dict.fromkeys([*visual_keys, *source_tactile_keys]))
+                dataset = LeRobotDataset(
+                    repo_id=source.repo_id,
+                    root=metadata.root,
+                    revision=metadata.revision,
+                    episodes=list(source.episodes) if source.episodes is not None else None,
+                    delta_timestamps=delta_timestamps,
+                    # Apply transforms after key mapping so tactile images can stay untouched.
+                    image_transforms=None,
+                    video_backend=video_backend,
+                    # Keep decoded frames compact across worker boundaries. The RGB and
+                    # tactile preprocessors perform the same uint8 -> float conversion.
+                    return_uint8=return_uint8,
+                    download_videos=True,
+                    visual_keys=visual_keys,
+                )
+                if len(dataset) == 0:
+                    raise ValueError(f"dataset {source.repo_id!r} contains no frames")
+                mapped = _KeyMappedLeRobotDataset(
+                    dataset,
+                    action_key=resolved_action_key,
+                    rename_map=source_rename,
+                    image_transforms=image_transforms,
+                    image_transform_keys=config.image_keys,
+                    tactile_embedding_cache=tactile_embedding_cache,
+                )
+                episode_count = dataset.num_episodes
+                stats = dataset.meta.stats if preprocessor is None else None
+                fps = dataset.fps
+            else:
+                if config.use_tactile_encoder and tactile_embedding_cache is None:
+                    raise ValueError(
+                        "offline training cache with tactile encoder requires "
+                        "tactile_embedding_cache_root"
+                    )
+                modes = resolve_module_modes(config)
+                patch_rows = config.resize_height // config.vision_patch_size
+                patch_cols = config.resize_width // config.vision_patch_size
+                spec = OfflineCacheSpec(
+                    repo_id=source.repo_id,
+                    total_frames=int(metadata.total_frames),
+                    camera_keys=tuple(config.image_keys),
+                    vision_tokens_per_camera=(patch_rows * patch_cols)
+                    // (config.connector_scale_factor**2),
+                    vision_hidden_size=config.text_hidden_size,
+                    state_dim=config.state_dim,
+                    action_dim=config.action_dim,
+                    chunk_size=config.chunk_size,
+                    tokenizer_max_length=config.tokenizer_max_length,
+                    checkpoint_source=str(checkpoint),
+                    vision_mode=modes["vision"],
+                    connector_mode=modes["connector"],
+                )
+                offline_cache = OfflineTrainingCache(
+                    offline_cache_dir(self.offline_training_cache_root, source.repo_id),
+                    spec,
+                )
+                requested_episodes = (
+                    list(range(int(metadata.total_episodes)))
+                    if source.episodes is None
+                    else [int(value) for value in source.episodes]
+                )
+                if not requested_episodes:
+                    raise ValueError(f"dataset {source.repo_id!r} has no selected episodes")
+                ranges = []
+                for episode_index in requested_episodes:
+                    episode = metadata.episodes[episode_index]
+                    start = int(episode["dataset_from_index"])
+                    stop = int(episode["dataset_to_index"])
+                    if not 0 <= start < stop <= len(offline_cache):
+                        raise ValueError(
+                            f"dataset {source.repo_id!r} episode {episode_index} has invalid "
+                            f"cache range [{start}, {stop}) for {len(offline_cache)} rows"
+                        )
+                    ranges.append((start, stop))
+                episode_rows = np.concatenate(
+                    [np.arange(start, stop, dtype=np.int64) for start, stop in sorted(ranges)]
+                )
+                if episode_rows.size == 0:
+                    raise ValueError(f"dataset {source.repo_id!r} contains no selected cache rows")
+                mapped = _OfflineCachedDataset(
+                    offline_cache,
+                    episode_rows,
+                    tactile_embedding_cache,
+                )
+                episode_count = len(requested_episodes)
+                stats = metadata.stats if preprocessor is None else None
+                fps = metadata.fps
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
 
@@ -675,23 +872,23 @@ class LeRobotJaxDataLoader:
             # there and must never influence normalization.
             if preprocessor is None:
                 canonical_stats = rename_dataset_stats(
-                    canonicalize_dataset_stats(dataset.meta.stats, resolved_action_key),
+                    canonicalize_dataset_stats(stats, resolved_action_key),
                     source_rename,
                 )
-                stats_list.append(ensure_stats_counts(canonical_stats, frame_count=len(dataset)))
+                stats_list.append(ensure_stats_counts(canonical_stats, frame_count=len(mapped)))
             self.dataset_summaries.append(
                 {
                     "repo_id": source.repo_id,
-                    "frames": len(dataset),
-                    "episodes": dataset.num_episodes,
-                    "fps": dataset.fps,
+                    "frames": len(mapped),
+                    "episodes": episode_count,
+                    "fps": fps,
                     "action_key": resolved_action_key,
                     "weight": source.weight,
                     "visual_keys": list(visual_keys),
                     "tactile_embedding_cache": (
                         None
                         if tactile_embedding_cache is None
-                        else str(tactile_embedding_cache.cache_dir)
+                        else str(getattr(tactile_embedding_cache, "cache_dir", cache_dir))
                     ),
                 }
             )
@@ -774,7 +971,11 @@ class LeRobotJaxDataLoader:
             "batch_sampler": batch_sampler,
             "num_workers": num_workers,
             "persistent_workers": num_workers > 0 and self.infinite,
-            "collate_fn": _collate_lerobot_samples,
+            "collate_fn": (
+                _collate_offline_samples
+                if self.offline_training_cache_root is not None
+                else _collate_lerobot_samples
+            ),
             "generator": self._worker_generator,
         }
         if num_workers > 0:
@@ -833,17 +1034,29 @@ class LeRobotJaxDataLoader:
         if batches_per_epoch <= 0:
             raise ValueError("data loader produces no complete batches")
         epoch, batch_in_epoch = divmod(int(start_batch), batches_per_epoch)
-        while True:
-            self._batch_sampler.set_position(epoch=epoch, start_batch=batch_in_epoch)
-            self._worker_generator.manual_seed(self._batch_sampler.seed + epoch)
-            for raw_batch in self.loader:
-                yield prepare_lerobot_batch(
-                    raw_batch,
-                    self.preprocessor,
-                    self.config,
-                    self.action_key,
-                )
-            if not self.infinite:
-                break
-            epoch += 1
-            batch_in_epoch = 0
+
+        def prepared_batches() -> Iterator[dict[str, Array]]:
+            nonlocal epoch, batch_in_epoch
+            while True:
+                self._batch_sampler.set_position(epoch=epoch, start_batch=batch_in_epoch)
+                self._worker_generator.manual_seed(self._batch_sampler.seed + epoch)
+                for raw_batch in self.loader:
+                    if self.offline_training_cache_root is not None:
+                        yield prepare_offline_cached_batch(
+                            raw_batch,
+                            self.preprocessor,
+                            self.config,
+                        )
+                    else:
+                        yield prepare_lerobot_batch(
+                            raw_batch,
+                            self.preprocessor,
+                            self.config,
+                            self.action_key,
+                        )
+                if not self.infinite:
+                    break
+                epoch += 1
+                batch_in_epoch = 0
+
+        yield from _host_prefetch(prepared_batches(), self.host_prefetch_batches)

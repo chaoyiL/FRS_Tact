@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import jax.numpy as jnp
 import numpy as np
@@ -16,6 +17,7 @@ from lerobot.policies.smolvla_jax.configuration import JaxSmolVLAConfig
 from lerobot.policies.smolvla_jax.data import (
     DeterministicEpochBatchSampler,
     DatasetSource,
+    LeRobotJaxDataLoader,
     _KeyMappedLeRobotDataset,
     action_delta_timestamps,
     canonicalize_dataset_stats,
@@ -585,3 +587,156 @@ def test_resolve_model_visual_keys_includes_tactile_when_enabled() -> None:
         "observation.images.camera1",
         "observation.images.camera2",
     )
+
+
+def test_offline_loader_filters_episode_rows_and_resumes_without_rgb_or_tokenizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    episodes = np.asarray([0, 0, 1, 1, 2, 2], dtype=np.int64)
+
+    class FakeMetadata:
+        def __init__(self, **kwargs):
+            del kwargs
+            self.root = tmp_path / "dataset"
+            self.revision = "revision"
+            self.total_frames = 6
+            self.total_episodes = 3
+            self.episodes = {
+                index: {
+                    "dataset_from_index": 2 * index,
+                    "dataset_to_index": 2 * index + 2,
+                }
+                for index in range(3)
+            }
+            self.fps = 30
+            self.camera_keys = ["cam0", "cam1", "touch0", "touch1"]
+            self.features = {
+                "observation.state": {"dtype": "float32", "shape": [3]},
+                "actions": {"dtype": "float32", "shape": [2]},
+                "cam0": {"dtype": "video", "shape": [3, 8, 8]},
+                "cam1": {"dtype": "video", "shape": [3, 8, 8]},
+                "touch0": {"dtype": "video", "shape": [3, 8, 8]},
+                "touch1": {"dtype": "video", "shape": [3, 8, 8]},
+            }
+
+    class FakeOfflineCache:
+        metadata = {"status": "complete"}
+        spec = SimpleNamespace(camera_keys=("rgb0", "rgb1"))
+
+        def __len__(self):
+            return len(episodes)
+
+        def __getitem__(self, index):
+            index = int(index)
+            return {
+                "vision_tokens": np.full((2, 4, 960), index, dtype=jnp.bfloat16),
+                "state": np.full((3,), index, dtype=np.float32),
+                "actions": np.full((2, 2), index, dtype=np.float32),
+                "action_is_pad": np.asarray([False, index % 2 == 1]),
+                "language_tokens": np.asarray([index, index + 1, 0], dtype=np.int32),
+                "language_masks": np.asarray([True, True, False]),
+                "episode_index": episodes[index],
+                "frame_index": np.asarray(index % 2, dtype=np.int64),
+            }
+
+    class FakeTactileCache:
+        metadata = {"num_tactile_tokens": 2}
+
+        def __getitem__(self, index):
+            return np.full((2, 5), int(index), dtype=np.float16)
+
+    class CacheOnlyPreprocessor:
+        def prepare(self, *args, **kwargs):
+            pytest.fail(f"cache mode decoded RGB: {args}, {kwargs}")
+
+        def tokenize(self, *args, **kwargs):
+            pytest.fail(f"cache mode invoked tokenizer: {args}, {kwargs}")
+
+        def normalize_state(self, state):
+            return state + 10
+
+        def normalize_actions(self, actions):
+            return actions * 2
+
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDatasetMetadata", FakeMetadata
+    )
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.LeRobotDataset",
+        lambda **kwargs: pytest.fail(f"cache mode constructed RGB dataset: {kwargs}"),
+    )
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.OfflineTrainingCache",
+        lambda *args, **kwargs: FakeOfflineCache(),
+    )
+    monkeypatch.setattr(
+        "lerobot.policies.smolvla_jax.data.TactileEmbeddingCache",
+        lambda *args, **kwargs: FakeTactileCache(),
+    )
+    config = dataclasses.replace(
+        JaxSmolVLAConfig(),
+        state_dim=3,
+        action_dim=2,
+        max_state_dim=3,
+        max_action_dim=2,
+        chunk_size=2,
+        resize_height=128,
+        resize_width=128,
+        image_keys=("rgb0", "rgb1"),
+        use_tactile_encoder=True,
+        tactile_encoder_path="unused",
+        tactile_keys=("touch0", "touch1"),
+        tactile_num_tokens=2,
+        tactile_embedding_dim=5,
+    )
+    loader = LeRobotJaxDataLoader(
+        "checkpoint",
+        config,
+        sources=[
+            DatasetSource(
+                repo_id="org/data",
+                episodes=[0, 2],
+                action_key="actions",
+                rename_map={"cam0": "rgb0", "cam1": "rgb1"},
+            )
+        ],
+        batch_size=2,
+        num_workers=0,
+        shuffle=False,
+        infinite=False,
+        drop_last=False,
+        preprocessor=CacheOnlyPreprocessor(),
+        tactile_embedding_cache_root=tmp_path / "tactile",
+        offline_training_cache_root=tmp_path / "offline",
+        host_prefetch_batches=2,
+    )
+
+    batch = next(loader.batches(start_batch=1))
+
+    assert loader.full_dataset_size == 4
+    assert "images" not in batch
+    assert batch["vision_embeddings"].shape == (2, 2, 4, 960)
+    assert batch["vision_embeddings"].dtype == jnp.bfloat16
+    np.testing.assert_array_equal(
+        batch["state"],
+        np.asarray([[14, 14, 14], [15, 15, 15]], dtype=np.float32),
+    )
+    np.testing.assert_array_equal(batch["actions"][:, 0, 0], [8.0, 10.0])
+    np.testing.assert_array_equal(batch["language_tokens"][:, 0], [4, 5])
+    np.testing.assert_array_equal(batch["tactile_embeddings"][:, 0, 0], [4, 5])
+    np.testing.assert_array_equal(batch["image_masks"], np.ones((2, 2), dtype=bool))
+    np.testing.assert_array_equal(batch["tactile_masks"], np.ones((2, 2), dtype=bool))
+
+
+def test_host_prefetch_surfaces_backing_iterator_failure() -> None:
+    from lerobot.policies.smolvla_jax.data import _host_prefetch
+
+    def backing():
+        yield 1
+        raise RuntimeError("prefetch exploded")
+
+    batches = _host_prefetch(backing(), depth=1)
+    assert next(batches) == 1
+    with pytest.raises(RuntimeError, match="prefetch exploded"):
+        next(batches)
