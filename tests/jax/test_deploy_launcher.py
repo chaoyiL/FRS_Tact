@@ -5,6 +5,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_remote_client.sh"
@@ -191,11 +193,16 @@ def _run_check(
 
 
 def _run_wrapper_check(
-    wrapper: Path, *, extra_args: tuple[str, ...] = ()
+    wrapper: Path,
+    *,
+    extra_args: tuple[str, ...] = (),
+    config_override: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["VB_ROBOT_TOKEN"] = "test-token"
     env["HF_HUB_CACHE"] = str(ROOT / "checkpoints" / "model")
+    if config_override is not None:
+        env["FRS_DEPLOY_CONFIG"] = str(config_override)
     return subprocess.run(
         ["bash", str(wrapper), "--check", *extra_args],
         cwd=ROOT,
@@ -224,14 +231,57 @@ def test_vt_wrapper_uses_vt_config_without_executable_nested_script() -> None:
     assert f"config={DEFAULT_CONFIG}" in result.stdout
 
 
-def test_wrapper_allows_later_explicit_config_override() -> None:
+@pytest.mark.parametrize(
+    ("wrapper", "explicit_config"),
+    (
+        (FRS_LAUNCHER, DEFAULT_CONFIG),
+        (VT_LAUNCHER, FRS_CONFIG),
+    ),
+)
+def test_wrapper_allows_later_explicit_config_override(
+    wrapper: Path, explicit_config: Path
+) -> None:
     result = _run_wrapper_check(
-        FRS_LAUNCHER,
-        extra_args=("--config", str(DEFAULT_CONFIG)),
+        wrapper,
+        extra_args=("--config", str(explicit_config)),
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"config={DEFAULT_CONFIG}" in result.stdout
+    assert f"config={explicit_config}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "config_override"),
+    (
+        (FRS_LAUNCHER, DEFAULT_CONFIG),
+        (VT_LAUNCHER, FRS_CONFIG),
+    ),
+)
+def test_public_wrapper_preserves_frs_deploy_config_override(
+    wrapper: Path, config_override: Path
+) -> None:
+    result = _run_wrapper_check(wrapper, config_override=config_override)
+
+    assert result.returncode == 0, result.stderr
+    assert f"config={config_override}" in result.stdout
+
+
+def test_shared_launcher_requires_explicit_config(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env["VB_ROBOT_TOKEN"] = "test-token"
+    env["HF_HUB_CACHE"] = str(tmp_path / "hub")
+
+    result = subprocess.run(
+        ["bash", str(SHARED_LAUNCHER), "--check"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--config is required" in result.stderr
 
 
 def test_launcher_reads_token_file_without_printing_secret(tmp_path: Path) -> None:
@@ -405,6 +455,7 @@ def test_launcher_help_documents_project_local_hf_hub_cache(tmp_path: Path) -> N
     assert result.returncode == 0, result.stderr
     assert "HF_HUB_CACHE" in result.stdout
     assert "<project>/checkpoints/model" in result.stdout
+    assert "FRS_DEPLOY_CONFIG" not in result.stdout
 
 
 def test_checkpoint_gitignore_is_root_anchored() -> None:

@@ -25,7 +25,6 @@ Usage: bash ./deploy_smolvla/scripts/start_remote_client.sh --config PATH [--che
 Environment overrides:
   VB_ROBOT_TOKEN    Robot authentication token (preferred when already set)
   VB3_TOKEN_FILE    Token file used when VB_ROBOT_TOKEN is unset
-  FRS_DEPLOY_CONFIG Deployment YAML path
   FRS_PYTHON        Python executable (highest priority)
   VB3_PYTHON        Python executable fallback
   HF_HUB_CACHE      Hugging Face Hub cache (default: <project>/checkpoints/model)
