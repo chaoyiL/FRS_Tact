@@ -28,6 +28,22 @@ FRS_REPO = "KaiyueChen/frs_0809_02"
 FRS_REVISION = "7e23f3e8c308dc5ba3a4df7634c68dac28572897"
 ENCODER_REPO = "KaiyueChen/encoder_ckpt_0809"
 ENCODER_REVISION = "450aa60963cde9540bd6c8047bf2529eff1def37"
+TOKENIZER_REPO = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+TOKENIZER_REVISION = "7b375e1b73b11138ff12fe22c8f2822d8fe03467"
+TOKENIZER_FILES = (
+    "config.json",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "special_tokens_map.json",
+    "added_tokens.json",
+    "chat_template.json",
+    "merges.txt",
+    "vocab.json",
+)
+TOKENIZER_CACHE_ROOT = Path("checkpoints/model")
+TOKENIZER_REPO_CACHE = (
+    TOKENIZER_CACHE_ROOT / "models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
+)
 BASE_SIDECARS = (
     "config.json",
     "train_config.json",
@@ -51,6 +67,34 @@ def make_project(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
         ROOT / "deploy_smolvla/src/download_ckpt.py",
         project / "deploy_smolvla/src/download_ckpt.py",
     )
+    transformers = project / "transformers"
+    transformers.mkdir()
+    (transformers / "__init__.py").write_text(
+        '''from __future__ import annotations
+
+import os
+from pathlib import Path
+
+
+class AutoTokenizer:
+    @classmethod
+    def from_pretrained(cls, repo_id: str, *, local_files_only: bool):
+        if not local_files_only:
+            raise OSError("tokenizer must be offline")
+        if os.environ.get("HF_HUB_OFFLINE") != "1":
+            raise OSError("HF_HUB_OFFLINE must be 1")
+        if os.environ.get("TRANSFORMERS_OFFLINE") != "1":
+            raise OSError("TRANSFORMERS_OFFLINE must be 1")
+        cache_root = Path(os.environ["HF_HUB_CACHE"])
+        repo_cache = cache_root / "models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
+        revision = (repo_cache / "refs/main").read_text(encoding="utf-8").strip()
+        tokenizer_json = repo_cache / "snapshots" / revision / "tokenizer.json"
+        if tokenizer_json.read_text(encoding="utf-8") == "broken":
+            raise OSError("invalid tokenizer")
+        return cls()
+''',
+        encoding="utf-8",
+    )
 
     bin_dir = project / "bin"
     bin_dir.mkdir()
@@ -71,7 +115,7 @@ PY
 
 output=""
 for ((index = 1; index <= $#; index++)); do
-    if [[ "${!index}" == "--output" || "${!index}" == "--local-dir" || "${!index}" == "--output-dir" ]]; then
+    if [[ "${!index}" == "--output" || "${!index}" == "--local-dir" || "${!index}" == "--output-dir" || "${!index}" == "--cache-dir" ]]; then
         next=$((index + 1))
         output="${!next}"
     fi
@@ -82,6 +126,8 @@ if [[ "$*" == *"merge_smolvla_peft_to_jax.py"* ]]; then
     asset="base"
 elif [[ "$*" == *"hf download KaiyueChen/frs_0809_02"* ]]; then
     asset="frs"
+elif [[ "$*" == *"hf download HuggingFaceTB/SmolVLM2-500M-Video-Instruct"* ]]; then
+    asset="tokenizer"
 elif [[ "$*" == *"download_ckpt.py"* ]]; then
     asset="encoder"
 fi
@@ -105,6 +151,12 @@ import numpy as np
 import sys
 np.savez(sys.argv[1], value=np.array([1]))
 PY
+elif [[ "$asset" == "tokenizer" ]]; then
+    snapshot="$output/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct/snapshots/7b375e1b73b11138ff12fe22c8f2822d8fe03467"
+    mkdir -p "$snapshot"
+    for filename in config.json tokenizer_config.json tokenizer.json special_tokens_map.json added_tokens.json chat_template.json merges.txt vocab.json; do
+        printf 'tokenizer' > "$snapshot/$filename"
+    done
 elif [[ "$asset" == "encoder" ]]; then
     mkdir -p "$output"
     printf '%s' '{"params_file":"params.npz","parameter_paths":["tactile_resnet/kernel"],"tactile_clip_config":{"embedding_dim":32,"tactile_image_size":224,"tactile_history":1}}' > "$output/checkpoint.json"
@@ -171,6 +223,19 @@ def expected_calls(project: Path) -> list[list[str]]:
             "--no-sync",
             "hf",
             "download",
+            TOKENIZER_REPO,
+            "--revision",
+            TOKENIZER_REVISION,
+            "--include",
+            *TOKENIZER_FILES,
+            "--cache-dir",
+            str(project / TOKENIZER_CACHE_ROOT),
+        ],
+        [
+            "run",
+            "--no-sync",
+            "hf",
+            "download",
             FRS_REPO,
             "--revision",
             FRS_REVISION,
@@ -222,6 +287,25 @@ def write_complete_base(project: Path) -> None:
     )
 
 
+def write_complete_tokenizer(
+    project: Path,
+    *,
+    revision: str = TOKENIZER_REVISION,
+    broken: bool = False,
+) -> None:
+    repo_cache = project / TOKENIZER_REPO_CACHE
+    snapshot = repo_cache / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    for filename in TOKENIZER_FILES:
+        (snapshot / filename).write_text(
+            "broken" if broken and filename == "tokenizer.json" else "tokenizer",
+            encoding="utf-8",
+        )
+    refs = repo_cache / "refs"
+    refs.mkdir()
+    (refs / "main").write_text(f"{revision}\n", encoding="utf-8")
+
+
 def write_complete_frs(project: Path, *, provenance: bool = True) -> None:
     directory = project / FRS_DIR
     directory.mkdir(parents=True)
@@ -267,6 +351,18 @@ def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path)
     assert result.returncode == 0, result.stderr
     assert read_calls(log_path) == expected_calls(project)
     assert (project / BASE_DIR / "model.safetensors").is_file()
+    tokenizer_snapshot = (
+        project / TOKENIZER_REPO_CACHE / "snapshots" / TOKENIZER_REVISION
+    )
+    assert (
+        (project / TOKENIZER_REPO_CACHE / "refs/main").read_text().strip()
+        == TOKENIZER_REVISION
+    )
+    assert all(
+        (tokenizer_snapshot / filename).is_file()
+        and (tokenizer_snapshot / filename).stat().st_size > 0
+        for filename in TOKENIZER_FILES
+    )
     assert (project / FRS_DIR / "checkpoint.json").is_file()
     assert (project / ENCODER_DIR / "checkpoint.json").is_file()
     assert json.loads((project / FRS_DIR / PROVENANCE_FILE).read_text()) == {
@@ -284,27 +380,30 @@ def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path)
 def test_skips_complete_assets_and_downloads_missing_frs(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_encoder(project)
     result = run_download(project, env)
 
     assert result.returncode == 0, result.stderr
-    assert read_calls(log_path) == [expected_calls(project)[1]]
+    assert read_calls(log_path) == [expected_calls(project)[2]]
 
 
 def test_repairs_frs_metadata_with_missing_params(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_incomplete_frs(project)
     write_complete_encoder(project)
     result = run_download(project, env)
 
     assert result.returncode == 0, result.stderr
-    assert read_calls(log_path) == [expected_calls(project)[1]]
+    assert read_calls(log_path) == [expected_calls(project)[2]]
 
 
 def test_repairs_malformed_frs_archive(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_frs(project)
     (project / FRS_DIR / "params.npz").write_bytes(b"not an npz")
     write_complete_encoder(project)
@@ -312,12 +411,13 @@ def test_repairs_malformed_frs_archive(tmp_path: Path) -> None:
     result = run_download(project, env)
 
     assert result.returncode == 0, result.stderr
-    assert read_calls(log_path) == [expected_calls(project)[1]]
+    assert read_calls(log_path) == [expected_calls(project)[2]]
 
 
 def test_incompatible_encoder_is_refreshed_with_project_verifier(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_frs(project)
     directory = project / ENCODER_DIR
     directory.mkdir(parents=True)
@@ -330,13 +430,14 @@ def test_incompatible_encoder_is_refreshed_with_project_verifier(tmp_path: Path)
     result = run_download(project, env)
 
     assert result.returncode == 0, result.stderr
-    assert read_calls(log_path) == [expected_calls(project)[2]]
+    assert read_calls(log_path) == [expected_calls(project)[3]]
 
 
 @pytest.mark.parametrize("asset", ["frs", "encoder"])
 def test_source_mismatch_refreshes_asset(tmp_path: Path, asset: str) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_frs(project)
     write_complete_encoder(project)
     directory = project / (FRS_DIR if asset == "frs" else ENCODER_DIR)
@@ -346,7 +447,7 @@ def test_source_mismatch_refreshes_asset(tmp_path: Path, asset: str) -> None:
     result = run_download(project, env)
 
     assert result.returncode == 0, result.stderr
-    expected_index = 1 if asset == "frs" else 2
+    expected_index = 2 if asset == "frs" else 3
     assert read_calls(log_path) == [expected_calls(project)[expected_index]]
 
 
@@ -356,13 +457,14 @@ def test_legacy_asset_without_provenance_is_refreshed_once(
 ) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_frs(project, provenance=asset != "frs")
     write_complete_encoder(project, provenance=asset != "encoder")
 
     first = run_download(project, env)
 
     assert first.returncode == 0, first.stderr
-    expected_index = 1 if asset == "frs" else 2
+    expected_index = 2 if asset == "frs" else 3
     assert read_calls(log_path) == [expected_calls(project)[expected_index]]
     log_path.write_text("", encoding="utf-8")
 
@@ -375,6 +477,7 @@ def test_legacy_asset_without_provenance_is_refreshed_once(
 def test_skips_all_complete_assets_with_explicit_messages_and_summary(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
     write_complete_base(project)
+    write_complete_tokenizer(project)
     write_complete_frs(project)
     write_complete_encoder(project)
     result = run_download(project, env)
@@ -382,6 +485,7 @@ def test_skips_all_complete_assets_with_explicit_messages_and_summary(tmp_path: 
     assert result.returncode == 0, result.stderr
     assert read_calls(log_path) == []
     assert f"skip: base checkpoint: {project / BASE_DIR}" in result.stdout
+    assert f"skip: tokenizer cache: {project / TOKENIZER_CACHE_ROOT}" in result.stdout
     assert f"skip: FRS checkpoint: {project / FRS_DIR}" in result.stdout
     assert f"skip: tactile encoder checkpoint: {project / ENCODER_DIR}" in result.stdout
     assert f"checkpoint: {project / BASE_DIR}" in result.stdout
@@ -389,12 +493,60 @@ def test_skips_all_complete_assets_with_explicit_messages_and_summary(tmp_path: 
     assert (
         f"frs.tactile_encoder_checkpoint: {project / ENCODER_DIR}" in result.stdout
     )
+    assert f"HF_HUB_CACHE: {project / TOKENIZER_CACHE_ROOT}" in result.stdout
+
+
+def test_wrong_tokenizer_ref_refreshes_only_tokenizer(tmp_path: Path) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_tokenizer(project, revision="wrong-revision")
+    write_complete_frs(project)
+    write_complete_encoder(project)
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == [expected_calls(project)[1]]
+
+
+def test_missing_tokenizer_file_refreshes_only_tokenizer(tmp_path: Path) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_tokenizer(project)
+    (
+        project
+        / TOKENIZER_REPO_CACHE
+        / "snapshots"
+        / TOKENIZER_REVISION
+        / "vocab.json"
+    ).unlink()
+    write_complete_frs(project)
+    write_complete_encoder(project)
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == [expected_calls(project)[1]]
+
+
+def test_broken_tokenizer_refreshes_only_tokenizer(tmp_path: Path) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_tokenizer(project, broken=True)
+    write_complete_frs(project)
+    write_complete_encoder(project)
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == [expected_calls(project)[1]]
 
 
 @pytest.mark.parametrize(
     ("asset", "label", "directory"),
     [
         ("base", "base checkpoint merge", BASE_DIR),
+        ("tokenizer", "tokenizer download", TOKENIZER_CACHE_ROOT),
         ("frs", "FRS checkpoint download", FRS_DIR),
         ("encoder", "tactile encoder download", ENCODER_DIR),
     ],
@@ -405,6 +557,8 @@ def test_delegated_failure_names_asset_and_destination(
     project, log_path, env = make_project(tmp_path)
     if asset != "base":
         write_complete_base(project)
+    if asset in {"frs", "encoder"}:
+        write_complete_tokenizer(project)
     if asset == "encoder":
         write_complete_frs(project)
     env["FRS_TEST_FAIL_ASSET"] = asset
@@ -412,7 +566,11 @@ def test_delegated_failure_names_asset_and_destination(
     result = run_download(project, env)
 
     assert result.returncode != 0
-    assert f"{label} failed: {project / directory}" in result.stderr
+    if asset == "tokenizer":
+        assert TOKENIZER_REPO in result.stderr
+        assert f"{label} failed: {TOKENIZER_REPO} -> {project / directory}" in result.stderr
+    else:
+        assert f"{label} failed: {project / directory}" in result.stderr
     assert len(read_calls(log_path)) == 1
 
 

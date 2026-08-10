@@ -13,9 +13,23 @@ FRS_REPO="KaiyueChen/frs_0809_02"
 FRS_REVISION="7e23f3e8c308dc5ba3a4df7634c68dac28572897"
 ENCODER_REPO="KaiyueChen/encoder_ckpt_0809"
 ENCODER_REVISION="450aa60963cde9540bd6c8047bf2529eff1def37"
+TOKENIZER_REPO="HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+TOKENIZER_REVISION="7b375e1b73b11138ff12fe22c8f2822d8fe03467"
+TOKENIZER_FILES=(
+    config.json
+    tokenizer_config.json
+    tokenizer.json
+    special_tokens_map.json
+    added_tokens.json
+    chat_template.json
+    merges.txt
+    vocab.json
+)
 BASE_DIR="${CHECKPOINT_ROOT}/model/pick_tube_02_3w_jax"
 FRS_DIR="${CHECKPOINT_ROOT}/frs/frs_0809_02"
 ENCODER_DIR="${CHECKPOINT_ROOT}/encoder/encoder_ckpt_0809"
+TOKENIZER_CACHE_ROOT="${CHECKPOINT_ROOT}/model"
+TOKENIZER_REPO_CACHE="${TOKENIZER_CACHE_ROOT}/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
 
 if [[ -n "${FRS_DOWNLOAD_UV:-}" ]]; then
     UV_BIN="${FRS_DOWNLOAD_UV}"
@@ -65,7 +79,40 @@ expected = {
     "source_adapter": adapter_repo,
     "adapter_revision": adapter_revision,
 }
+
 if not isinstance(manifest, dict) or any(manifest.get(key) != value for key, value in expected.items()):
+    raise SystemExit(1)
+PY
+}
+
+tokenizer_complete() {
+    "${PYTHON_CMD[@]}" - "${TOKENIZER_CACHE_ROOT}" "${TOKENIZER_REPO_CACHE}" \
+        "${TOKENIZER_REPO}" "${TOKENIZER_REVISION}" "${TOKENIZER_FILES[@]}" <<'PY'
+import os
+from pathlib import Path
+import sys
+
+cache_root = Path(sys.argv[1]).resolve()
+repo_cache = Path(sys.argv[2]).resolve()
+repo_id = sys.argv[3]
+revision = sys.argv[4]
+required = tuple(sys.argv[5:])
+try:
+    if (repo_cache / "refs/main").read_text(encoding="utf-8").strip() != revision:
+        raise ValueError("tokenizer revision mismatch")
+    snapshot = repo_cache / "snapshots" / revision
+    if any(
+        not (snapshot / name).is_file() or (snapshot / name).stat().st_size == 0
+        for name in required
+    ):
+        raise ValueError("tokenizer cache is incomplete")
+    os.environ["HF_HUB_CACHE"] = str(cache_root)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+    from transformers import AutoTokenizer
+
+    AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
+except (ImportError, OSError, ValueError, TypeError):
     raise SystemExit(1)
 PY
 }
@@ -145,6 +192,22 @@ temporary.replace(destination)
 PY
 }
 
+write_tokenizer_ref() {
+    "${PYTHON_CMD[@]}" - "${TOKENIZER_REPO_CACHE}" "${TOKENIZER_REVISION}" <<'PY'
+from pathlib import Path
+import sys
+
+repo_cache = Path(sys.argv[1])
+revision = sys.argv[2]
+refs = repo_cache / "refs"
+refs.mkdir(parents=True, exist_ok=True)
+destination = refs / "main"
+temporary = refs / "main.tmp"
+temporary.write_text(revision + "\n", encoding="utf-8")
+temporary.replace(destination)
+PY
+}
+
 if base_complete; then
     echo "skip: base checkpoint: ${BASE_DIR}"
 else
@@ -164,6 +227,22 @@ else
     fi
     base_complete || {
         echo "base checkpoint failed validation after merge: ${BASE_DIR}" >&2
+        exit 1
+    }
+fi
+
+if tokenizer_complete; then
+    echo "skip: tokenizer cache: ${TOKENIZER_CACHE_ROOT}"
+else
+    if ! "${UV_BIN}" run --no-sync hf download "${TOKENIZER_REPO}" \
+        --revision "${TOKENIZER_REVISION}" --include "${TOKENIZER_FILES[@]}" \
+        --cache-dir "${TOKENIZER_CACHE_ROOT}"; then
+        echo "tokenizer download failed: ${TOKENIZER_REPO} -> ${TOKENIZER_CACHE_ROOT}" >&2
+        exit 1
+    fi
+    write_tokenizer_ref
+    tokenizer_complete || {
+        echo "tokenizer cache failed validation after download: ${TOKENIZER_CACHE_ROOT}" >&2
         exit 1
     }
 fi
@@ -204,3 +283,4 @@ echo "deployment checkpoints ready:"
 echo "  checkpoint: ${BASE_DIR}"
 echo "  frs.checkpoint: ${FRS_DIR}"
 echo "  frs.tactile_encoder_checkpoint: ${ENCODER_DIR}"
+echo "  HF_HUB_CACHE: ${TOKENIZER_CACHE_ROOT}"
