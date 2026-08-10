@@ -7,7 +7,10 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_vtsmolvla.sh"
+SHARED_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_remote_client.sh"
+FRS_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_frs.sh"
+VT_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_vtsmolvla.sh"
+FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
 
@@ -112,7 +115,8 @@ def _copy_deploy_entry_points(tmp_path: Path) -> Path:
     config_dir = deploy_dir / "configs"
     scripts_dir.mkdir(parents=True)
     config_dir.mkdir()
-    shutil.copy2(LAUNCHER, scripts_dir / LAUNCHER.name)
+    shutil.copy2(SHARED_LAUNCHER, scripts_dir / SHARED_LAUNCHER.name)
+    (scripts_dir / SHARED_LAUNCHER.name).chmod(0o644)
     shutil.copy2(DEFAULT_CONFIG, config_dir / DEFAULT_CONFIG.name)
     return project
 
@@ -149,7 +153,12 @@ def _run_launcher(
     if marker is not None:
         env["FAKE_PYTHON_MARKER"] = str(marker)
     return subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name)],
+        [
+            "bash",
+            str(project / "deploy_smolvla" / "scripts" / SHARED_LAUNCHER.name),
+            "--config",
+            str(project / "deploy_smolvla" / "configs" / DEFAULT_CONFIG.name),
+        ],
         cwd=project,
         env=env,
         text=True,
@@ -172,13 +181,57 @@ def _run_check(
     if hub_cache is not None:
         env["HF_HUB_CACHE"] = str(hub_cache)
     return subprocess.run(
-        ["bash", str(LAUNCHER), "--check"],
+        ["bash", str(SHARED_LAUNCHER), "--config", str(DEFAULT_CONFIG), "--check"],
         cwd=ROOT,
         env=env,
         text=True,
         capture_output=True,
         check=False,
     )
+
+
+def _run_wrapper_check(
+    wrapper: Path, *, extra_args: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["VB_ROBOT_TOKEN"] = "test-token"
+    env["HF_HUB_CACHE"] = str(ROOT / "checkpoints" / "model")
+    return subprocess.run(
+        ["bash", str(wrapper), "--check", *extra_args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def test_frs_wrapper_uses_frs_config_without_executable_nested_script() -> None:
+    assert SHARED_LAUNCHER.stat().st_mode & 0o111 == 0
+
+    result = _run_wrapper_check(FRS_LAUNCHER)
+
+    assert result.returncode == 0, result.stderr
+    assert f"config={FRS_CONFIG}" in result.stdout
+
+
+def test_vt_wrapper_uses_vt_config_without_executable_nested_script() -> None:
+    assert SHARED_LAUNCHER.stat().st_mode & 0o111 == 0
+
+    result = _run_wrapper_check(VT_LAUNCHER)
+
+    assert result.returncode == 0, result.stderr
+    assert f"config={DEFAULT_CONFIG}" in result.stdout
+
+
+def test_wrapper_allows_later_explicit_config_override() -> None:
+    result = _run_wrapper_check(
+        FRS_LAUNCHER,
+        extra_args=("--config", str(DEFAULT_CONFIG)),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"config={DEFAULT_CONFIG}" in result.stdout
 
 
 def test_launcher_reads_token_file_without_printing_secret(tmp_path: Path) -> None:
@@ -248,7 +301,13 @@ def test_launcher_creates_checkpoint_directories_in_fresh_project(tmp_path: Path
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--check"],
+        [
+            "bash",
+            str(project / "deploy_smolvla" / "scripts" / SHARED_LAUNCHER.name),
+            "--config",
+            str(project / "deploy_smolvla" / "configs" / DEFAULT_CONFIG.name),
+            "--check",
+        ],
         cwd=project,
         env=env,
         text=True,
@@ -275,7 +334,13 @@ def test_launcher_keeps_existing_checkpoint_files_unchanged(tmp_path: Path) -> N
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--check"],
+        [
+            "bash",
+            str(project / "deploy_smolvla" / "scripts" / SHARED_LAUNCHER.name),
+            "--config",
+            str(project / "deploy_smolvla" / "configs" / DEFAULT_CONFIG.name),
+            "--check",
+        ],
         cwd=project,
         env=env,
         text=True,
@@ -325,7 +390,11 @@ def test_launcher_help_documents_project_local_hf_hub_cache(tmp_path: Path) -> N
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
     result = subprocess.run(
-        ["bash", str(project / "deploy_smolvla" / "scripts" / LAUNCHER.name), "--help"],
+        [
+            "bash",
+            str(project / "deploy_smolvla" / "scripts" / SHARED_LAUNCHER.name),
+            "--help",
+        ],
         cwd=project,
         env=env,
         text=True,
