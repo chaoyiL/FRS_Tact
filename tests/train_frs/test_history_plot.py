@@ -7,8 +7,7 @@ import unittest
 from unittest import mock
 
 import train_frs.utils.history_plot as history_plot_module
-from train_frs.utils.history_plot import HISTORY_FIELDS
-from train_frs.utils.history_plot import plot_training_history
+from train_frs.utils.history_plot import HISTORY_FIELDS, plot_training_history
 
 
 class HistoryPlotTest(unittest.TestCase):
@@ -84,12 +83,22 @@ class HistoryPlotTest(unittest.TestCase):
                     "checkpoint_selection_feasible": 0,
                 }
             )
+            for index, bin_id in enumerate(("00_01", "01_03", "03_05", "05_07", "07_09", "09_10")):
+                row[f"val_gate_bin_{bin_id}_n"] = 10 + index
+                row[f"val_gate_bin_{bin_id}_mse_gt"] = 0.20 - 0.01 * index
+                row[f"val_gate_bin_{bin_id}_mse_pred"] = 0.05 + 0.02 * index
             with history.open("w", newline="", encoding="utf-8") as file:
                 writer = csv.DictWriter(file, fieldnames=HISTORY_FIELDS)
                 writer.writeheader()
                 writer.writerow(row)
 
-            output = plot_training_history(history)
+            with mock.patch.object(
+                history_plot_module.plt,
+                "subplots",
+                wraps=history_plot_module.plt.subplots,
+            ) as subplots:
+                output = plot_training_history(history)
+            self.assertEqual(subplots.call_args.args[:2], (6, 1))
             self.assertTrue(output.is_file())
             self.assertGreater(output.stat().st_size, 0)
 

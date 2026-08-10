@@ -9,16 +9,20 @@ from typing import Any
 import numpy as np
 
 from train_frs.utils.checkpoint import load_checkpoint
-from train_frs.utils.data import CachedTactileEmbeddingBatches
-from train_frs.utils.data import TactileConditionedBatches
-from train_frs.utils.data import resolve_tactile_window
-from train_frs.utils.metrics import EvalTarget
-from train_frs.utils.metrics import evaluate_split
+from train_frs.utils.data import (
+    CachedTactileEmbeddingBatches,
+    TactileConditionedBatches,
+    resolve_tactile_window,
+)
+from train_frs.utils.gate_regions import GATE_BIN_SPECS
+from train_frs.utils.metrics import (
+    EvalTarget,
+    evaluate_split,
+    gate_binned_decode_metrics,
+)
 from train_frs.utils.model import FlowSolver
 from train_frs.utils.visualize import write_evaluation_plots
-from utils.cache import CachedPairs
-from utils.cache import MultiCachedPairs
-from utils.cache import atomic_write_json
+from utils.cache import CachedPairs, MultiCachedPairs, atomic_write_json
 
 
 def evaluate_decoder(
@@ -59,9 +63,7 @@ def evaluate_decoder(
         if dataset_sources is None or len(dataset_sources) != len(cache_dirs):
             raise ValueError("dataset_sources must have one entry per cache directory")
         source_names = [str(source["repo_id"]) for source in dataset_sources]
-        pairs: CachedPairs | MultiCachedPairs = MultiCachedPairs(
-            cache_dirs, source_names=source_names
-        )
+        pairs: CachedPairs | MultiCachedPairs = MultiCachedPairs(cache_dirs, source_names=source_names)
     else:
         if cache_dir is None:
             raise ValueError("cache_dir is required for single-dataset evaluation")
@@ -70,7 +72,10 @@ def evaluate_decoder(
     checkpoint_cache_digest = checkpoint_metadata.get("extra_metadata", {}).get("cache_records_sha256")
     if checkpoint_cache_digest is not None and checkpoint_cache_digest != pairs.manifest["records_sha256"]:
         raise ValueError("Checkpoint was trained from a different cache sample set.")
-    expected_shape = (int(pairs.manifest["action_horizon"]), int(pairs.manifest["action_dim"]))
+    expected_shape = (
+        int(pairs.manifest["action_horizon"]),
+        int(pairs.manifest["action_dim"]),
+    )
     actual_shape = (model.config.action_horizon, model.config.action_dim)
     if actual_shape != expected_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_shape} != {expected_shape}.")
@@ -88,6 +93,8 @@ def evaluate_decoder(
     gate_temperature = float(extra["gate_temperature"]) if track_gate else None
     rank_margin = float(extra.get("rank_margin", 0.0)) if track_gate else 0.0
     repair_margin = float(extra.get("repair_margin", 0.0)) if track_gate else 0.0
+    rank_low_gate_threshold = float(extra.get("rank_low_gate_threshold", 0.3))
+    rank_high_gate_threshold = float(extra.get("rank_high_gate_threshold", 0.7))
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -101,9 +108,7 @@ def evaluate_decoder(
 
     if multi_source:
         if tactile_embedding_cache_root is None or not tactile_keys:
-            raise ValueError(
-                "multi-dataset evaluation requires tactile embedding cache root and tactile keys"
-            )
+            raise ValueError("multi-dataset evaluation requires tactile embedding cache root and tactile keys")
         assert isinstance(pairs, MultiCachedPairs)
         assert dataset_sources is not None
         conditioner = CachedTactileEmbeddingBatches(
@@ -155,9 +160,11 @@ def evaluate_decoder(
             gate_temperature=gate_temperature,
             rank_margin=rank_margin,
             repair_margin=repair_margin,
+            rank_low_gate_threshold=rank_low_gate_threshold,
+            rank_high_gate_threshold=rank_high_gate_threshold,
         )
         output_dir.mkdir(parents=True, exist_ok=True)
-        metrics: dict[str, float | int | str] = {
+        metrics: dict[str, Any] = {
             "checkpoint": str(checkpoint_dir.resolve()),
             "checkpoint_epoch": int(checkpoint_metadata["epoch"]),
             "sample_count": len(result.cache_indices),
@@ -200,9 +207,7 @@ def evaluate_decoder(
                     "rank_satisfied_high_frac": float(result.rank_satisfied_high_frac),
                     "rank_satisfied_low_frac": float(result.rank_satisfied_low_frac),
                     "repair_penalty_high_w": float(result.repair_penalty_high_w),
-                    "repair_satisfied_high_frac": float(
-                        result.repair_satisfied_high_frac
-                    ),
+                    "repair_satisfied_high_frac": float(result.repair_satisfied_high_frac),
                     "gate_w_mean": float(result.gate_w),
                     "gate_active_frac": float(result.gate_active_frac),
                     "gate_w_high_mean": float(result.gate_w_high_mean),
@@ -220,12 +225,14 @@ def evaluate_decoder(
                     "tactile_change_p90": float(result.tactile_change_p90),
                     "n_high_w": int(result.n_high_w),
                     "n_low_w": int(result.n_low_w),
+                    "n_mid_w": int(result.n_mid_w),
+                    "rank_low_gate_threshold": rank_low_gate_threshold,
+                    "rank_high_gate_threshold": rank_high_gate_threshold,
                 }
             )
+            metrics["gate_bins"] = result.gate_bin_metrics
         if isinstance(pairs, MultiCachedPairs):
-            source_indices, local_indices = pairs.source_and_local_indices(
-                result.cache_indices
-            )
+            source_indices, local_indices = pairs.source_and_local_indices(result.cache_indices)
             dataset_indices = pairs.metadata_values(result.cache_indices, "dataset_index")
             episode_indices = pairs.metadata_values(result.cache_indices, "episode_index")
             per_dataset: dict[str, dict[str, float | int]] = {}
@@ -236,47 +243,42 @@ def evaluate_decoder(
                 source_mse_gt = result.sample_mse_gt[mask]
                 source_mse_pred = result.sample_mse_pred[mask]
                 source_vla_gt = result.sample_mse_vla_gt[mask]
-                source_metrics: dict[str, float | int] = {
+                source_metrics: dict[str, Any] = {
                     "sample_count": int(np.sum(mask)),
                     "mse_gt": float(np.mean(source_mse_gt)),
                     "mse_pred": float(np.mean(source_mse_pred)),
                     "mse_vla_gt": float(np.mean(source_vla_gt)),
                     "gt_gain": float(np.mean(source_vla_gt - source_mse_gt)),
-                    "relative_gt_error": float(
-                        np.mean(source_mse_gt) / max(float(np.mean(source_vla_gt)), 1e-8)
-                    ),
+                    "relative_gt_error": float(np.mean(source_mse_gt) / max(float(np.mean(source_vla_gt)), 1e-8)),
                 }
                 if result.sample_gate_w is not None:
                     source_gate = result.sample_gate_w[mask]
-                    source_high = source_gate > 0.5
-                    source_low = ~source_high
+                    source_high = source_gate >= rank_high_gate_threshold
+                    source_low = source_gate <= rank_low_gate_threshold
+                    source_mid = ~(source_high | source_low)
                     source_metrics["n_high_w"] = int(np.sum(source_high))
                     source_metrics["n_low_w"] = int(np.sum(source_low))
+                    source_metrics["n_mid_w"] = int(np.sum(source_mid))
                     if np.any(source_high):
-                        source_metrics["mse_gt_high_w"] = float(
-                            np.mean(source_mse_gt[source_high])
-                        )
-                        source_metrics["gt_gain_high_w"] = float(
-                            np.mean((source_vla_gt - source_mse_gt)[source_high])
-                        )
+                        source_metrics["mse_gt_high_w"] = float(np.mean(source_mse_gt[source_high]))
+                        source_metrics["gt_gain_high_w"] = float(np.mean((source_vla_gt - source_mse_gt)[source_high]))
                     if np.any(source_low):
-                        source_metrics["mse_pred_low_w"] = float(
-                            np.mean(source_mse_pred[source_low])
-                        )
-                        source_metrics["gt_gain_low_w"] = float(
-                            np.mean((source_vla_gt - source_mse_gt)[source_low])
-                        )
+                        source_metrics["mse_pred_low_w"] = float(np.mean(source_mse_pred[source_low]))
+                        source_metrics["gt_gain_low_w"] = float(np.mean((source_vla_gt - source_mse_gt)[source_low]))
+                    source_metrics["gate_bins"] = gate_binned_decode_metrics(
+                        source_mse_gt,
+                        source_mse_pred,
+                        source_vla_gt,
+                        source_gate,
+                        ranking_margin=rank_margin,
+                    )
                 per_dataset[source_name] = source_metrics
             metrics["per_dataset"] = per_dataset
         else:
             source_indices = np.zeros(len(result.cache_indices), dtype=np.int32)
             local_indices = result.cache_indices
-            dataset_indices = np.asarray(
-                pairs.arrays["dataset_index"][result.cache_indices], dtype=np.int64
-            )
-            episode_indices = np.asarray(
-                pairs.arrays["episode_index"][result.cache_indices], dtype=np.int64
-            )
+            dataset_indices = np.asarray(pairs.arrays["dataset_index"][result.cache_indices], dtype=np.int64)
+            episode_indices = np.asarray(pairs.arrays["episode_index"][result.cache_indices], dtype=np.int64)
         atomic_write_json(output_dir / "metrics.json", metrics)
 
         with (output_dir / "per_sample.csv").open("w", newline="", encoding="utf-8") as file:
@@ -301,6 +303,8 @@ def evaluate_decoder(
                     "relative_gt_error",
                     "tactile_change",
                     "gate_w",
+                    "gate_region",
+                    "gate_bin",
                 ],
             )
             writer.writeheader()
@@ -326,18 +330,40 @@ def evaluate_decoder(
                         "mae_pred": float(result.sample_mae_pred[position]),
                         "mse_vla_gt": float(result.sample_mse_vla_gt[position]),
                         "gt_gain": float(result.sample_gt_gain[position]),
-                        "relative_gt_error": float(
-                            result.sample_relative_gt_error[position]
-                        ),
+                        "relative_gt_error": float(result.sample_relative_gt_error[position]),
                         "tactile_change": (
                             ""
                             if result.sample_tactile_change is None
                             else float(result.sample_tactile_change[position])
                         ),
-                        "gate_w": (
+                        "gate_w": ("" if result.sample_gate_w is None else float(result.sample_gate_w[position])),
+                        "gate_region": (
                             ""
                             if result.sample_gate_w is None
-                            else float(result.sample_gate_w[position])
+                            else (
+                                "low"
+                                if result.sample_gate_w[position] <= rank_low_gate_threshold
+                                else (
+                                    "high"
+                                    if result.sample_gate_w[position] >= rank_high_gate_threshold
+                                    else "transition"
+                                )
+                            )
+                        ),
+                        "gate_bin": (
+                            ""
+                            if result.sample_gate_w is None
+                            else next(
+                                bin_id
+                                for bin_index, (bin_id, lower, upper) in enumerate(GATE_BIN_SPECS)
+                                if result.sample_gate_w[position] >= lower
+                                and (
+                                    result.sample_gate_w[position] < upper
+                                    or (
+                                        bin_index == len(GATE_BIN_SPECS) - 1 and result.sample_gate_w[position] <= upper
+                                    )
+                                )
+                            )
                         ),
                     }
                 )
@@ -470,13 +496,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not action_cache.get("root") or not tactile_cache.get("root"):
             raise ValueError("config action and tactile cache roots are required")
         training_output = pathlib.Path(str(training["output"])).expanduser()
-        cache_dirs = [
-            source_cache_dir(action_cache["root"], str(source["repo_id"]))
-            for source in datasets
-        ]
-        tactile_encoder_dir = args.tactile_encoder_dir or pathlib.Path(
-            str(model_config["tactile_encoder_path"])
-        ).expanduser()
+        cache_dirs = [source_cache_dir(action_cache["root"], str(source["repo_id"])) for source in datasets]
+        tactile_encoder_dir = (
+            args.tactile_encoder_dir or pathlib.Path(str(model_config["tactile_encoder_path"])).expanduser()
+        )
         checkpoint_dir = args.checkpoint_dir or training_output / "best"
         output_dir = args.output_dir or training_output / "evaluation"
         tactile_keys = tuple(str(key) for key in model_config["tactile_keys"])
@@ -499,16 +522,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 else args.tactile_window_divisor
             ),
             history_stride=(
-                int(training.get("history_stride", 3))
-                if args.history_stride is None
-                else args.history_stride
+                int(training.get("history_stride", 3)) if args.history_stride is None else args.history_stride
             ),
             batch_size=args.batch_size,
-            num_steps=(
-                int(training.get("validation_steps", 10))
-                if args.num_steps is None
-                else args.num_steps
-            ),
+            num_steps=(int(training.get("validation_steps", 10)) if args.num_steps is None else args.num_steps),
             solver=args.solver or "euler",
             target=args.target,
             save_predictions=args.save_predictions,

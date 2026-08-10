@@ -8,10 +8,13 @@ import jax.numpy as jnp
 import numpy as np
 
 from train_frs.utils.data import TactileConditionedBatches
-from train_frs.utils.model import FlowSolver
-from train_frs.utils.model import TactileConditionedFlowDecoder
-from train_frs.utils.model import decode_actions
-from train_frs.utils.model import flow_matching_loss_per_sample
+from train_frs.utils.gate_regions import GATE_BIN_SPECS
+from train_frs.utils.model import (
+    FlowSolver,
+    TactileConditionedFlowDecoder,
+    decode_actions,
+    flow_matching_loss_per_sample,
+)
 
 EvalTarget = Literal["gt", "predicted"]
 
@@ -79,6 +82,8 @@ class EvaluationResult:
     tactile_change_low_mean: float | None = None
     n_high_w: int | None = None
     n_low_w: int | None = None
+    n_mid_w: int | None = None
+    gate_bin_metrics: dict[str, dict[str, float | int]] | None = None
     gate_w_p10: float | None = None
     gate_w_p25: float | None = None
     gate_w_p50: float | None = None
@@ -112,10 +117,7 @@ def _ratio_of_means(numerator: np.ndarray, denominator: np.ndarray) -> float:
 
 def _quantiles(values: np.ndarray) -> tuple[float, float, float, float, float]:
     levels = [0.1, 0.25, 0.5, 0.75, 0.9]
-    return tuple(
-        float(value)
-        for value in np.quantile(np.asarray(values, dtype=np.float64), levels)
-    )  # type: ignore[return-value]
+    return tuple(float(value) for value in np.quantile(np.asarray(values, dtype=np.float64), levels))  # type: ignore[return-value]
 
 
 def gate_stratified_decode_metrics(
@@ -125,16 +127,21 @@ def gate_stratified_decode_metrics(
     gate_weights: np.ndarray,
     tactile_changes: np.ndarray | None = None,
     *,
-    high_w_threshold: float = 0.5,
+    low_w_threshold: float = 0.3,
+    high_w_threshold: float = 0.7,
     ranking_margin: float = 0.0,
     repair_margin: float = 0.0,
 ) -> dict[str, float | int]:
-    """Split decode metrics and gate-preference satisfaction by gate group."""
+    """Summarize confident low/high groups; the transition region is excluded."""
 
     if ranking_margin < 0:
         raise ValueError(f"ranking_margin must be non-negative, got {ranking_margin}.")
     if repair_margin < 0:
         raise ValueError(f"repair_margin must be non-negative, got {repair_margin}.")
+    if not 0.0 <= low_w_threshold < high_w_threshold <= 1.0:
+        raise ValueError(
+            "gate thresholds must satisfy 0 <= low < high <= 1, got " f"{low_w_threshold}, {high_w_threshold}."
+        )
 
     mse_gt = np.asarray(sample_mse_gt, dtype=np.float64)
     mse_pred = np.asarray(sample_mse_pred, dtype=np.float64)
@@ -147,18 +154,15 @@ def gate_stratified_decode_metrics(
         )
     changes = None if tactile_changes is None else np.asarray(tactile_changes, dtype=np.float64)
     if changes is not None and changes.shape != weights.shape:
-        raise ValueError(
-            f"Shape mismatch: tactile_change={changes.shape}, gate_w={weights.shape}."
-        )
-    high = weights > float(high_w_threshold)
-    low = ~high
+        raise ValueError(f"Shape mismatch: tactile_change={changes.shape}, gate_w={weights.shape}.")
+    high = weights >= float(high_w_threshold)
+    low = weights <= float(low_w_threshold)
+    middle = ~(high | low)
     high_rank_penalty = np.maximum(mse_gt - mse_pred + float(ranking_margin), 0.0)
     low_rank_penalty = np.maximum(mse_pred - mse_gt + float(ranking_margin), 0.0)
     high_rank_satisfied = mse_gt + float(ranking_margin) <= mse_pred
     low_rank_satisfied = mse_pred + float(ranking_margin) <= mse_gt
-    high_repair_penalty = np.maximum(
-        mse_gt - mse_vla_gt + float(repair_margin), 0.0
-    )
+    high_repair_penalty = np.maximum(mse_gt - mse_vla_gt + float(repair_margin), 0.0)
     high_repair_satisfied = mse_gt + float(repair_margin) <= mse_vla_gt
     result: dict[str, float | int] = {
         "mse_gt_high_w": _mean_or_nan(mse_gt[high]),
@@ -181,6 +185,7 @@ def gate_stratified_decode_metrics(
         "gate_w_low_mean": _mean_or_nan(weights[low]),
         "n_high_w": int(np.count_nonzero(high)),
         "n_low_w": int(np.count_nonzero(low)),
+        "n_mid_w": int(np.count_nonzero(middle)),
     }
     if changes is not None:
         result.update(
@@ -199,6 +204,53 @@ def gate_stratified_decode_metrics(
     return result
 
 
+def gate_binned_decode_metrics(
+    sample_mse_gt: np.ndarray,
+    sample_mse_pred: np.ndarray,
+    sample_mse_vla_gt: np.ndarray,
+    gate_weights: np.ndarray,
+    *,
+    ranking_margin: float = 0.0,
+) -> dict[str, dict[str, float | int]]:
+    """Return six fixed gate bins for diagnostics without changing soft training."""
+
+    if ranking_margin < 0:
+        raise ValueError(f"ranking_margin must be non-negative, got {ranking_margin}.")
+    mse_gt = np.asarray(sample_mse_gt, dtype=np.float64)
+    mse_pred = np.asarray(sample_mse_pred, dtype=np.float64)
+    mse_vla_gt = np.asarray(sample_mse_vla_gt, dtype=np.float64)
+    weights = np.asarray(gate_weights, dtype=np.float64)
+    if not (mse_gt.shape == mse_pred.shape == mse_vla_gt.shape == weights.shape):
+        raise ValueError(
+            f"Shape mismatch: mse_gt={mse_gt.shape}, mse_pred={mse_pred.shape}, "
+            f"mse_vla_gt={mse_vla_gt.shape}, gate_w={weights.shape}."
+        )
+    if np.any(~np.isfinite(weights)) or np.any((weights < 0.0) | (weights > 1.0)):
+        raise ValueError("gate weights must be finite and in [0, 1].")
+
+    high_rank_satisfied = mse_gt + float(ranking_margin) <= mse_pred
+    low_rank_satisfied = mse_pred + float(ranking_margin) <= mse_gt
+    result: dict[str, dict[str, float | int]] = {}
+    for index, (bin_id, lower, upper) in enumerate(GATE_BIN_SPECS):
+        if index == len(GATE_BIN_SPECS) - 1:
+            mask = (weights >= lower) & (weights <= upper)
+        else:
+            mask = (weights >= lower) & (weights < upper)
+        preferred_satisfied = high_rank_satisfied if lower >= 0.5 else low_rank_satisfied
+        result[bin_id] = {
+            "lower": lower,
+            "upper": upper,
+            "n": int(np.count_nonzero(mask)),
+            "mse_gt": _mean_or_nan(mse_gt[mask]),
+            "mse_pred": _mean_or_nan(mse_pred[mask]),
+            "mse_vla_gt": _mean_or_nan(mse_vla_gt[mask]),
+            "gt_gain": _mean_or_nan((mse_vla_gt - mse_gt)[mask]),
+            "relative_gt_error": _ratio_of_means(mse_gt[mask], mse_vla_gt[mask]),
+            "rank_satisfied_frac": _mean_or_nan(preferred_satisfied[mask]),
+        }
+    return result
+
+
 def evaluate_split(
     model: TactileConditionedFlowDecoder,
     conditioner: TactileConditionedBatches,
@@ -213,6 +265,8 @@ def evaluate_split(
     gate_temperature: float | None = None,
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
+    rank_low_gate_threshold: float = 0.3,
+    rank_high_gate_threshold: float = 0.7,
 ) -> EvaluationResult:
     from train_frs.utils.data import gate_weights_from_change
 
@@ -230,20 +284,20 @@ def evaluate_split(
     predictions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
-    track_tactile = (
-        gate_tau is not None
-        and gate_temperature is not None
-        and bool(conditioner.episode_baselines)
-    )
+    track_tactile = gate_tau is not None and gate_temperature is not None and bool(conditioner.episode_baselines)
     if model.config.gate_conditioning and not track_tactile:
         raise ValueError(
             "Gate-conditioned checkpoint evaluation requires gate_tau, gate_temperature, "
             "and episode baseline embeddings."
         )
 
-    for indices, x_base_np, predicted_np, gt_action_np, tactile_seq in conditioner.batches(
-        split, batch_size=batch_size, shuffle=False, seed=0
-    ):
+    for (
+        indices,
+        x_base_np,
+        predicted_np,
+        gt_action_np,
+        tactile_seq,
+    ) in conditioner.batches(split, batch_size=batch_size, shuffle=False, seed=0):
         x_base = jnp.asarray(x_base_np)
         gt_action = jnp.asarray(gt_action_np)
         predicted_action = jnp.asarray(predicted_np)
@@ -251,20 +305,14 @@ def evaluate_split(
         if track_tactile:
             current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
             change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
-            gate_w = gate_weights_from_change(
-                change, tau=float(gate_tau), temperature=float(gate_temperature)
-            )
+            gate_w = gate_weights_from_change(change, tau=float(gate_tau), temperature=float(gate_temperature))
             model_gate = jnp.asarray(gate_w)
         else:
             change = None
             gate_w = None
             model_gate = None
-        flow_gt = flow_matching_loss_per_sample(
-            model, x_base, gt_action, t, tactile_seq, model_gate
-        )
-        flow_pred = flow_matching_loss_per_sample(
-            model, x_base, predicted_action, t, tactile_seq, model_gate
-        )
+        flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, model_gate)
+        flow_pred = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, model_gate)
         prediction = decode_actions(
             model,
             x_base,
@@ -307,7 +355,11 @@ def evaluate_split(
     if target == "gt":
         primary_flow, primary_mse, primary_mae = all_flow_gt, all_mse_gt, all_mae_gt
     else:
-        primary_flow, primary_mse, primary_mae = all_flow_pred, all_mse_pred, all_mae_pred
+        primary_flow, primary_mse, primary_mae = (
+            all_flow_pred,
+            all_mse_pred,
+            all_mae_pred,
+        )
     primary_rmse = np.sqrt(primary_mse)
 
     if tactile_changes:
@@ -323,8 +375,17 @@ def evaluate_split(
             all_mse_vla_gt,
             all_gate,
             all_change,
+            low_w_threshold=rank_low_gate_threshold,
+            high_w_threshold=rank_high_gate_threshold,
             ranking_margin=rank_margin,
             repair_margin=repair_margin,
+        )
+        gate_bins = gate_binned_decode_metrics(
+            all_mse_gt,
+            all_mse_pred,
+            all_mse_vla_gt,
+            all_gate,
+            ranking_margin=rank_margin,
         )
         gate_quantiles = _quantiles(all_gate)
         change_quantiles = _quantiles(all_change)
@@ -358,7 +419,9 @@ def evaluate_split(
             "tactile_change_low_mean": None,
             "n_high_w": None,
             "n_low_w": None,
+            "n_mid_w": None,
         }
+        gate_bins = None
         gate_quantiles = (None, None, None, None, None)
         change_quantiles = (None, None, None, None, None)
 
@@ -420,6 +483,8 @@ def evaluate_split(
         tactile_change_low_mean=stratified["tactile_change_low_mean"],  # type: ignore[arg-type]
         n_high_w=stratified["n_high_w"],  # type: ignore[arg-type]
         n_low_w=stratified["n_low_w"],  # type: ignore[arg-type]
+        n_mid_w=stratified["n_mid_w"],  # type: ignore[arg-type]
+        gate_bin_metrics=gate_bins,
         gate_w_p10=gate_quantiles[0],
         gate_w_p25=gate_quantiles[1],
         gate_w_p50=gate_quantiles[2],

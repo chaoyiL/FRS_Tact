@@ -115,7 +115,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube/frs_0809_02
+  output: /workspace/frs_pick_tube/frs_0809_03
   # checkpoint chunk_size=10，因此 tactile_window=10/2=5。
   tactile_window_divisor: 2
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -131,12 +131,17 @@ frs_training:
   aux_decode_steps: 10
   # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
   # decode loss 本身也同时包含 w*MSE(FRS,GT)+(1-w)*MSE(FRS,VLA)。
-  rank_weight: 3.0
+  # 三段式 Gate：低区只做 VLA 排序，高区只做 GT 排序与 repair，中间区不施加排序。
+  # FM 和 decode 在三个区域内仍然使用连续软权重 w，不做硬切换。
+  rank_low_gate_threshold: 0.3
+  rank_high_gate_threshold: 0.7
+  rank_weight: 6.0
   rank_margin: 0.01
   # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
   repair_weight: 2.0
   repair_margin: 0.01
-  # best checkpoint：低 gate 区域须贴近 frozen VLA，高 gate 区域须取得正向 GT gain。
+  # best checkpoint：只在可信低区 w<=0.3 检查 VLA 保持、可信高区 w>=0.7 检查 GT gain/rank。
+  # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
   best_low_gate_max_mse_pred: 0.01
   best_min_high_gate_gain: 0.0
 

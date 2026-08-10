@@ -144,6 +144,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         rank_margin=float(training.get("rank_margin", 0.0)),
         repair_weight=float(training.get("repair_weight", 0.0)),
         repair_margin=float(training.get("repair_margin", 0.0)),
+        rank_low_gate_threshold=float(training.get("rank_low_gate_threshold", 0.3)),
+        rank_high_gate_threshold=float(training.get("rank_high_gate_threshold", 0.7)),
         model_dim=_positive_int(training, "model_dim", 256),
         depth=_positive_int(training, "depth", 6),
         num_heads=_positive_int(training, "num_heads", 4),
@@ -169,9 +171,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         encode_batch_size=1,
         resume=resolve_resume_mode(training.get("resume", False), output_dir=output_dir),
         resume_from=(
-            None
-            if training.get("resume_from") in (None, "")
-            else Path(str(training["resume_from"])).expanduser()
+            None if training.get("resume_from") in (None, "") else Path(str(training["resume_from"])).expanduser()
         ),
         cache_dirs=cache_dirs,
         dataset_sources=datasets,
@@ -180,9 +180,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
         tactile_num_tokens=tactile_num_tokens,
-        best_low_gate_max_mse_pred=float(
-            training.get("best_low_gate_max_mse_pred", 0.01)
-        ),
+        best_low_gate_max_mse_pred=float(training.get("best_low_gate_max_mse_pred", 0.01)),
         best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
     )
 

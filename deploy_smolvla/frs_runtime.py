@@ -109,9 +109,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         raise ValueError("frs.decode_solver must be euler or fireflow")
 
     return FRSConfig(
-        checkpoint=_local_directory(
-            raw["checkpoint"], config_path=config_path, name="FRS checkpoint"
-        ),
+        checkpoint=_local_directory(raw["checkpoint"], config_path=config_path, name="FRS checkpoint"),
         tactile_encoder_checkpoint=_local_directory(
             raw["tactile_encoder_checkpoint"],
             config_path=config_path,
@@ -125,9 +123,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         reverse_solver=reverse_solver,
         decode_steps=decode_steps,
         decode_solver=decode_solver,
-        verify_source_checkpoint_fingerprint=bool(
-            raw.get("verify_source_checkpoint_fingerprint", True)
-        ),
+        verify_source_checkpoint_fingerprint=bool(raw.get("verify_source_checkpoint_fingerprint", True)),
         max_normalized_action_abs=max_action_abs,
         max_normalized_delta_rms=max_delta_rms,
     )
@@ -158,15 +154,18 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         if key not in raw:
             raise ValueError(f"Missing config value frs.{key}")
     keys = raw["tactile_keys"]
-    if (
-        not isinstance(keys, list | tuple)
-        or not keys
-        or any(not isinstance(key, str) or not key for key in keys)
-    ):
+    if not isinstance(keys, list | tuple) or not keys or any(not isinstance(key, str) or not key for key in keys):
         raise ValueError("frs.tactile_keys must be a non-empty list of strings")
     if len(set(keys)) != len(keys):
         raise ValueError("frs.tactile_keys must not contain duplicates")
-    if min(int(raw["history_stride"]), int(raw["reverse_steps"]), int(raw["decode_steps"])) <= 0:
+    if (
+        min(
+            int(raw["history_stride"]),
+            int(raw["reverse_steps"]),
+            int(raw["decode_steps"]),
+        )
+        <= 0
+    ):
         raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
     if float(raw["gate_temperature"]) <= 0:
         raise ValueError("frs.gate_temperature must be positive")
@@ -287,9 +286,7 @@ class FRSRuntime:
 
         self.model, self.metadata = load_frs_checkpoint(self.config.checkpoint)
         self.encoder = load_tactile_encoder(self.config.tactile_encoder_checkpoint)
-        encoder_config = tactile_clip_config_from_dict(
-            self.encoder.metadata["tactile_clip_config"]
-        )
+        encoder_config = tactile_clip_config_from_dict(self.encoder.metadata["tactile_clip_config"])
         self.embedding_dim = int(encoder_config.embedding_dim)
         self.image_size = int(encoder_config.tactile_image_size)
         if "tactile_resnet" not in self.encoder.params:
@@ -319,7 +316,11 @@ class FRSRuntime:
         decoder = self.model.config
         _require_equal(decoder.action_dim, int(policy.config.action_dim), "action_dim")
         _require_equal(decoder.action_horizon, int(policy.config.chunk_size), "action_horizon")
-        _require_equal(decoder.num_tactile_tokens, len(self.config.tactile_keys), "num_tactile_tokens")
+        _require_equal(
+            decoder.num_tactile_tokens,
+            len(self.config.tactile_keys),
+            "num_tactile_tokens",
+        )
         _require_equal(decoder.resnet_embedding_dim, self.embedding_dim, "resnet_embedding_dim")
         if not bool(decoder.gate_conditioning):
             raise ValueError("FRS checkpoint must have explicit gate conditioning enabled")
@@ -328,9 +329,28 @@ class FRSRuntime:
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
         _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
-        _require_equal(int(extra.get("loss_weighting_version", 0)), 2, "loss_weighting_version")
-        _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
-        _require_equal(int(extra.get("tactile_window", 0)), decoder.tactile_window, "tactile_window")
+        loss_weighting_version = int(extra.get("loss_weighting_version", 0))
+        if loss_weighting_version not in {2, 3, 4}:
+            raise ValueError(
+                "unsupported FRS loss_weighting_version: " f"{loss_weighting_version}; expected one of 2, 3, 4"
+            )
+        if loss_weighting_version >= 4:
+            low_threshold = float(extra.get("rank_low_gate_threshold", -1.0))
+            high_threshold = float(extra.get("rank_high_gate_threshold", -1.0))
+            if not 0.0 <= low_threshold < 0.5 < high_threshold <= 1.0:
+                raise ValueError(
+                    "invalid v4 three-region gate thresholds: " f"low={low_threshold}, high={high_threshold}"
+                )
+        _require_equal(
+            int(extra.get("history_stride", 0)),
+            self.config.history_stride,
+            "history_stride",
+        )
+        _require_equal(
+            int(extra.get("tactile_window", 0)),
+            decoder.tactile_window,
+            "tactile_window",
+        )
         _require_equal(bool(extra.get("gate_conditioning", False)), True, "gate_conditioning")
         _require_equal(float(extra.get("gate_tau")), self.config.gate_tau, "gate_tau")
         _require_equal(
@@ -338,7 +358,11 @@ class FRSRuntime:
             self.config.gate_temperature,
             "gate_temperature",
         )
-        _require_equal(int(extra.get("validation_steps", 0)), self.config.decode_steps, "decode_steps")
+        _require_equal(
+            int(extra.get("validation_steps", 0)),
+            self.config.decode_steps,
+            "decode_steps",
+        )
         _require_equal(extra.get("validation_solver"), self.config.decode_solver, "decode_solver")
 
         source_configs = _source_cache_configurations(extra)
@@ -347,11 +371,25 @@ class FRSRuntime:
             deployed_fingerprint = _checkpoint_fingerprint(Path(policy.checkpoint))
         for index, source in enumerate(source_configs):
             prefix = f"cache source {index}"
-            _require_equal(int(source.get("model_sample_steps", 0)), source_sample_steps, f"{prefix} sample_steps")
-            _require_equal(int(source.get("reverse_steps", 0)), self.config.reverse_steps, f"{prefix} reverse_steps")
-            _require_equal(source.get("reverse_solver"), self.config.reverse_solver, f"{prefix} reverse_solver")
             _require_equal(
-                source.get("normalization_source"), "checkpoint", f"{prefix} normalization_source"
+                int(source.get("model_sample_steps", 0)),
+                source_sample_steps,
+                f"{prefix} sample_steps",
+            )
+            _require_equal(
+                int(source.get("reverse_steps", 0)),
+                self.config.reverse_steps,
+                f"{prefix} reverse_steps",
+            )
+            _require_equal(
+                source.get("reverse_solver"),
+                self.config.reverse_solver,
+                f"{prefix} reverse_solver",
+            )
+            _require_equal(
+                source.get("normalization_source"),
+                "checkpoint",
+                f"{prefix} normalization_source",
             )
             _require_equal(
                 int(source.get("reverse_integration_version", 0)),
@@ -378,7 +416,8 @@ class FRSRuntime:
             axis=0,
         )
         embeddings = self._encode_tactile(
-            self.encoder.params["tactile_resnet"], jnp.asarray(images, dtype=jnp.float32)
+            self.encoder.params["tactile_resnet"],
+            jnp.asarray(images, dtype=jnp.float32),
         )
         return np.asarray(jax.device_get(embeddings), dtype=np.float32)
 
@@ -416,9 +455,7 @@ class FRSRuntime:
             self.history.append(current)
         tactile_seq = self.history.window_tokens()[None, ...]
         change = tactile_change_from_tokens(current[None, ...], self.baseline[None, ...])
-        gate = gate_weights_from_change(
-            change, tau=self.config.gate_tau, temperature=self.config.gate_temperature
-        )
+        gate = gate_weights_from_change(change, tau=self.config.gate_tau, temperature=self.config.gate_temperature)
         eval_observation = self._eval_observation(policy, observation, task)
         x_base = reverse_integrate_actions(
             policy,

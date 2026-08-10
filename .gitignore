@@ -112,3 +112,6 @@ tensorboard/
 /datasets/
 *.parquet
 *.arrow
+
+
+docs

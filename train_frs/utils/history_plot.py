@@ -12,6 +12,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from train_frs.utils.gate_regions import GATE_BIN_SPECS
+
+GATE_BIN_HISTORY_METRICS = (
+    "n",
+    "mse_gt",
+    "mse_pred",
+    "mse_vla_gt",
+    "gt_gain",
+    "relative_gt_error",
+    "rank_satisfied_frac",
+)
+
 HISTORY_FIELDS = (
     "epoch",
     "train_loss_total",
@@ -71,11 +83,16 @@ HISTORY_FIELDS = (
     "val_tactile_change_p90",
     "val_n_high_w",
     "val_n_low_w",
+    "val_n_mid_w",
     "val_worst_dataset_mse_pred_low_w",
     "val_min_dataset_gt_gain_high_w",
     "val_worst_dataset_rank_violation_high_w",
     "checkpoint_selection_key",
     "checkpoint_selection_feasible",
+) + tuple(
+    f"val_gate_bin_{bin_id}_{metric_name}"
+    for bin_id, _, _ in GATE_BIN_SPECS
+    for metric_name in GATE_BIN_HISTORY_METRICS
 )
 
 # Composite checkpoint keys are serialized as comma-separated text, for example
@@ -110,9 +127,7 @@ def _read_history_rows(history_path: pathlib.Path) -> list[dict[str, Any]]:
                 "epoch": epoch,
                 **{
                     field: (
-                        (raw.get(field) or "").strip()
-                        if field in HISTORY_TEXT_FIELDS
-                        else _parse_float(raw.get(field))
+                        (raw.get(field) or "").strip() if field in HISTORY_TEXT_FIELDS else _parse_float(raw.get(field))
                     )
                     for field in HISTORY_FIELDS
                     if field != "epoch"
@@ -138,6 +153,23 @@ def _finite_series(
     return epochs, values
 
 
+def _finite_difference_series(
+    rows: list[dict[str, Any]],
+    left_field: str,
+    right_field: str,
+) -> tuple[list[int], list[float]]:
+    epochs: list[int] = []
+    values: list[float] = []
+    for row in rows:
+        left = float(row.get(left_field, math.nan))
+        right = float(row.get(right_field, math.nan))
+        if math.isnan(left) or math.isnan(right):
+            continue
+        epochs.append(int(row["epoch"]))
+        values.append(left - right)
+    return epochs, values
+
+
 def plot_training_history(
     history_path: pathlib.Path,
     *,
@@ -150,8 +182,7 @@ def plot_training_history(
     if not train_epochs:
         train_epochs, train_total_loss = _finite_series(rows, "train_flow_loss")
     train_component_series = {
-        name: _finite_series(rows, f"train_loss_{name}")
-        for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
+        name: _finite_series(rows, f"train_loss_{name}") for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
     }
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
     high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
@@ -162,21 +193,11 @@ def plot_training_history(
     low_vla_epochs, mse_vla_low = _finite_series(rows, "val_mse_vla_gt_low_w")
     high_gain_epochs, gt_gain_high = _finite_series(rows, "val_gt_gain_high_w")
     low_gain_epochs, gt_gain_low = _finite_series(rows, "val_gt_gain_low_w")
-    high_relative_epochs, relative_high = _finite_series(
-        rows, "val_relative_gt_error_high_w"
-    )
-    low_relative_epochs, relative_low = _finite_series(
-        rows, "val_relative_gt_error_low_w"
-    )
-    rank_high_epochs, rank_satisfied_high = _finite_series(
-        rows, "val_rank_satisfied_high_frac"
-    )
-    rank_low_epochs, rank_satisfied_low = _finite_series(
-        rows, "val_rank_satisfied_low_frac"
-    )
-    repair_high_epochs, repair_satisfied_high = _finite_series(
-        rows, "val_repair_satisfied_high_frac"
-    )
+    high_relative_epochs, relative_high = _finite_series(rows, "val_relative_gt_error_high_w")
+    low_relative_epochs, relative_low = _finite_series(rows, "val_relative_gt_error_low_w")
+    rank_high_epochs, rank_satisfied_high = _finite_series(rows, "val_rank_satisfied_high_frac")
+    rank_low_epochs, rank_satisfied_low = _finite_series(rows, "val_rank_satisfied_low_frac")
+    repair_high_epochs, repair_satisfied_high = _finite_series(rows, "val_repair_satisfied_high_frac")
     gate_p10_epochs, gate_p10 = _finite_series(rows, "val_gate_w_p10")
     gate_p50_epochs, gate_p50 = _finite_series(rows, "val_gate_w_p50")
     gate_p90_epochs, gate_p90 = _finite_series(rows, "val_gate_w_p90")
@@ -188,6 +209,23 @@ def plot_training_history(
     mse_pred_epochs, val_mse_pred = _finite_series(rows, "val_mse_pred")
     n_high_epochs, n_high_w = _finite_series(rows, "val_n_high_w")
     n_low_epochs, n_low_w = _finite_series(rows, "val_n_low_w")
+    n_mid_epochs, n_mid_w = _finite_series(rows, "val_n_mid_w")
+    gate_bin_series = {
+        bin_id: {
+            metric_name: _finite_series(rows, f"val_gate_bin_{bin_id}_{metric_name}")
+            for metric_name in GATE_BIN_HISTORY_METRICS
+        }
+        for bin_id, _, _ in GATE_BIN_SPECS
+    }
+    gate_bin_gap_series = {
+        bin_id: _finite_difference_series(
+            rows,
+            f"val_gate_bin_{bin_id}_mse_gt",
+            f"val_gate_bin_{bin_id}_mse_pred",
+        )
+        for bin_id, _, _ in GATE_BIN_SPECS
+    }
+    has_gate_bins = any(gate_bin_series[bin_id]["n"][0] for bin_id, _, _ in GATE_BIN_SPECS)
 
     has_stratified = bool(high_gt_epochs or low_gt_epochs or high_pred_epochs or low_pred_epochs)
     has_overall_mse = bool(mse_gt_epochs or mse_pred_epochs)
@@ -209,6 +247,7 @@ def plot_training_history(
         + int(has_repair)
         + int(has_rank_stats)
         + int(has_gate_stats)
+        + int(has_gate_bins)
         + int(has_counts)
     )
     fig, axes = plt.subplots(
@@ -280,7 +319,7 @@ def plot_training_history(
                 axes[row].plot(
                     high_gt_epochs,
                     mse_gt_high,
-                    label="val_mse_gt (w>0.5)",
+                    label="val_mse_gt (w>=0.7)",
                     linewidth=2.0,
                     color="#C44E52",
                     marker="o",
@@ -290,7 +329,7 @@ def plot_training_history(
                 axes[row].plot(
                     low_gt_epochs,
                     mse_gt_low,
-                    label="val_mse_gt (w≤0.5)",
+                    label="val_mse_gt (w<=0.3)",
                     linewidth=2.0,
                     color="#DD8452",
                     marker="^",
@@ -300,7 +339,7 @@ def plot_training_history(
                 axes[row].plot(
                     high_pred_epochs,
                     mse_pred_high,
-                    label="val_mse_pred (w>0.5)",
+                    label="val_mse_pred (w>=0.7)",
                     linewidth=2.0,
                     color="#4C72B0",
                     marker="s",
@@ -310,7 +349,7 @@ def plot_training_history(
                 axes[row].plot(
                     low_pred_epochs,
                     mse_pred_low,
-                    label="val_mse_pred (w≤0.5)",
+                    label="val_mse_pred (w<=0.3)",
                     linewidth=2.0,
                     color="#64B5CD",
                     marker="D",
@@ -320,7 +359,7 @@ def plot_training_history(
                 axes[row].plot(
                     high_vla_epochs,
                     mse_vla_high,
-                    label="VLA→GT baseline (w>0.5)",
+                    label="VLA→GT baseline (w>=0.7)",
                     linewidth=1.8,
                     color="#8C2D2D",
                     linestyle="--",
@@ -329,7 +368,7 @@ def plot_training_history(
                 axes[row].plot(
                     low_vla_epochs,
                     mse_vla_low,
-                    label="VLA→GT baseline (w≤0.5)",
+                    label="VLA→GT baseline (w<=0.3)",
                     linewidth=1.8,
                     color="#A65F2A",
                     linestyle="--",
@@ -357,9 +396,11 @@ def plot_training_history(
                     markersize=5,
                 )
             axes[row].set_title(
-                "Validation decode MSE (gt vs predicted)"
-                if has_overall_mse
-                else "Validation decode MSE by gate weight",
+                (
+                    "Validation decode MSE (gt vs predicted)"
+                    if has_overall_mse
+                    else "Validation decode MSE by gate weight"
+                ),
                 pad=8,
             )
         axes[row].set_ylabel("action MSE")
@@ -377,7 +418,7 @@ def plot_training_history(
             repair_axis.plot(
                 high_gain_epochs,
                 gt_gain_high,
-                label="GT gain (w>0.5)",
+                label="GT gain (w>=0.7)",
                 color="#55A868",
                 marker="o",
                 linewidth=2.0,
@@ -386,7 +427,7 @@ def plot_training_history(
             repair_axis.plot(
                 low_gain_epochs,
                 gt_gain_low,
-                label="GT gain (w≤0.5)",
+                label="GT gain (w<=0.3)",
                 color="#C7A24B",
                 marker="^",
                 linewidth=2.0,
@@ -400,7 +441,7 @@ def plot_training_history(
             relative_axis.plot(
                 high_relative_epochs,
                 relative_high,
-                label="relative GT error (w>0.5)",
+                label="relative GT error (w>=0.7)",
                 color="#4C72B0",
                 linestyle="--",
                 linewidth=1.8,
@@ -409,7 +450,7 @@ def plot_training_history(
             relative_axis.plot(
                 low_relative_epochs,
                 relative_low,
-                label="relative GT error (w≤0.5)",
+                label="relative GT error (w<=0.3)",
                 color="#8172B2",
                 linestyle="--",
                 linewidth=1.8,
@@ -429,12 +470,37 @@ def plot_training_history(
             _mark_pending(repair_axis)
         row += 1
 
+    if has_gate_bins:
+        colors = ("#4C72B0", "#64B5CD", "#8172B2", "#DD8452", "#C44E52", "#937860")
+        for (bin_id, lower, upper), color in zip(GATE_BIN_SPECS, colors, strict=True):
+            epochs, gaps = gate_bin_gap_series[bin_id]
+            if epochs:
+                closing = "]" if upper == 1.0 else ")"
+                axes[row].plot(
+                    epochs,
+                    gaps,
+                    label=f"w in [{lower:g},{upper:g}{closing}",
+                    color=color,
+                    marker="o",
+                    markersize=4,
+                    linewidth=1.8,
+                )
+        axes[row].axhline(0.0, color="#555555", linestyle="--", linewidth=1.2)
+        axes[row].set_ylabel("MSE(GT) - MSE(VLA)")
+        axes[row].set_title(
+            "Six-bin endpoint preference gap (low: >0 desired; high: <0 desired)",
+            pad=8,
+        )
+        axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=7, ncol=2)
+        row += 1
+
     if has_rank_stats:
         if rank_high_epochs:
             axes[row].plot(
                 rank_high_epochs,
                 rank_satisfied_high,
-                label="preference satisfied (w>0.5)",
+                label="preference satisfied (w>=0.7)",
                 color="#55A868",
                 marker="o",
                 linewidth=2.0,
@@ -443,7 +509,7 @@ def plot_training_history(
             axes[row].plot(
                 rank_low_epochs,
                 rank_satisfied_low,
-                label="preference satisfied (w≤0.5)",
+                label="preference satisfied (w<=0.3)",
                 color="#4C72B0",
                 marker="s",
                 linewidth=2.0,
@@ -452,7 +518,7 @@ def plot_training_history(
             axes[row].plot(
                 repair_high_epochs,
                 repair_satisfied_high,
-                label="absolute repair satisfied (w>0.5)",
+                label="absolute repair satisfied (w>=0.7)",
                 color="#C44E52",
                 marker="^",
                 linewidth=2.0,
@@ -509,32 +575,61 @@ def plot_training_history(
         row += 1
 
     if has_counts:
-        if n_high_epochs:
-            axes[row].plot(
-                n_high_epochs,
-                n_high_w,
-                label="val count (w>0.5)",
-                linewidth=2.0,
-                color="#55A868",
-                marker="o",
-                markersize=5,
-            )
-        if n_low_epochs:
-            axes[row].plot(
-                n_low_epochs,
-                n_low_w,
-                label="val count (w≤0.5)",
-                linewidth=2.0,
-                color="#8172B2",
-                marker="s",
-                markersize=5,
-            )
+        if has_gate_bins:
+            colors = ("#4C72B0", "#64B5CD", "#8172B2", "#DD8452", "#C44E52", "#937860")
+            for (bin_id, lower, upper), color in zip(GATE_BIN_SPECS, colors, strict=True):
+                epochs, counts = gate_bin_series[bin_id]["n"]
+                if epochs:
+                    closing = "]" if upper == 1.0 else ")"
+                    axes[row].plot(
+                        epochs,
+                        counts,
+                        label=f"w in [{lower:g},{upper:g}{closing}",
+                        linewidth=1.8,
+                        color=color,
+                        marker="o",
+                        markersize=4,
+                    )
+        else:
+            if n_high_epochs:
+                axes[row].plot(
+                    n_high_epochs,
+                    n_high_w,
+                    label="val count (w>=0.7)",
+                    linewidth=2.0,
+                    color="#55A868",
+                    marker="o",
+                    markersize=5,
+                )
+            if n_mid_epochs:
+                axes[row].plot(
+                    n_mid_epochs,
+                    n_mid_w,
+                    label="val count (0.3<w<0.7)",
+                    linewidth=2.0,
+                    color="#DD8452",
+                    marker="^",
+                    markersize=5,
+                )
+            if n_low_epochs:
+                axes[row].plot(
+                    n_low_epochs,
+                    n_low_w,
+                    label="val count (w<=0.3)",
+                    linewidth=2.0,
+                    color="#8172B2",
+                    marker="s",
+                    markersize=5,
+                )
         axes[row].set_ylabel("# val samples")
-        axes[row].set_title("Validation sample counts by gate weight", pad=8)
+        axes[row].set_title(
+            ("Six-bin validation sample counts" if has_gate_bins else "Validation sample counts by gate region"),
+            pad=8,
+        )
         axes[row].grid(True, alpha=0.3)
         handles, labels = axes[row].get_legend_handles_labels()
         if handles:
-            axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+            axes[row].legend(loc="best", fontsize=7, framealpha=0.92, ncol=2)
         else:
             _mark_pending(axes[row])
         row += 1

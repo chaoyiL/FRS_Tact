@@ -10,7 +10,6 @@ import pytest
 from deploy_smolvla import remote_client
 from deploy_smolvla.frs_runtime import FRSRuntime, TactileHistory
 
-
 ROOT = Path(__file__).resolve().parents[2]
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 
@@ -116,7 +115,9 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
     runtime.metadata = {
         "extra_metadata": {
             "loss_mode": "gated",
-            "loss_weighting_version": 2,
+            "loss_weighting_version": 4,
+            "rank_low_gate_threshold": 0.3,
+            "rank_high_gate_threshold": 0.7,
             "history_stride": 3,
             "tactile_window": 10,
             "gate_conditioning": True,
@@ -142,6 +143,14 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
 
 def test_frs_contract_accepts_matching_training_metadata() -> None:
     runtime, policy = _contract_runtime()
+
+    runtime._validate_contract(policy, source_sample_steps=10)
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_frs_contract_accepts_supported_loss_versions(version: int) -> None:
+    runtime, policy = _contract_runtime()
+    runtime.metadata["extra_metadata"]["loss_weighting_version"] = version
 
     runtime._validate_contract(policy, source_sample_steps=10)
 

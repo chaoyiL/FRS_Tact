@@ -44,23 +44,24 @@ class DecoderConfig:
     gate_conditioning: bool = False
 
     def __post_init__(self) -> None:
-        if min(
-            self.action_dim,
-            self.action_horizon,
-            self.tactile_window,
-            self.gru_hidden_dim,
-            self.resnet_embedding_dim,
-            self.model_dim,
-            self.depth,
-            self.num_heads,
-            self.mlp_ratio,
-            self.num_tactile_tokens,
-        ) <= 0:
+        if (
+            min(
+                self.action_dim,
+                self.action_horizon,
+                self.tactile_window,
+                self.gru_hidden_dim,
+                self.resnet_embedding_dim,
+                self.model_dim,
+                self.depth,
+                self.num_heads,
+                self.mlp_ratio,
+                self.num_tactile_tokens,
+            )
+            <= 0
+        ):
             raise ValueError("All decoder dimensions must be positive.")
         if self.model_dim % self.num_heads:
-            raise ValueError(
-                f"model_dim ({self.model_dim}) must be divisible by num_heads ({self.num_heads})."
-            )
+            raise ValueError(f"model_dim ({self.model_dim}) must be divisible by num_heads ({self.num_heads}).")
 
     @property
     def tactile_token_dim(self) -> int:
@@ -106,9 +107,7 @@ class SharedTactileGRU(nnx.Module):
         if xs.ndim != 3:
             raise ValueError(f"Expected GRU inputs [B, T, D], got {xs.shape}.")
         if xs.shape[-1] != self.input_dim:
-            raise ValueError(
-                f"Expected input_dim={self.input_dim}, got {xs.shape[-1]}."
-            )
+            raise ValueError(f"Expected input_dim={self.input_dim}, got {xs.shape[-1]}.")
         batch_size = xs.shape[0]
         carry = jnp.zeros((batch_size, self.hidden_dim), dtype=xs.dtype)
         xs_time_major = jnp.swapaxes(xs, 0, 1)  # [T, B, D]
@@ -178,9 +177,7 @@ class TactileConditionedFlowDecoder(nnx.Module):
         self.tactile_proj = nnx.Linear(config.gru_hidden_dim, config.model_dim, rngs=rngs)
         self.blocks = nnx.List(
             [
-                ConditionedTransformerBlock(
-                    config.model_dim, config.num_heads, config.mlp_ratio, rngs=rngs
-                )
+                ConditionedTransformerBlock(config.model_dim, config.num_heads, config.mlp_ratio, rngs=rngs)
                 for _ in range(config.depth)
             ]
         )
@@ -191,22 +188,15 @@ class TactileConditionedFlowDecoder(nnx.Module):
         """``[B, T, N, D] → [B, N, H]`` via shared GRU over each sensor stream."""
 
         if tactile_seq.ndim != 4:
-            raise ValueError(
-                f"Expected tactile_seq with shape [B, T, N, D], got {tactile_seq.shape}."
-            )
+            raise ValueError(f"Expected tactile_seq with shape [B, T, N, D], got {tactile_seq.shape}.")
         batch_size, time_steps, num_streams, embedding_dim = tactile_seq.shape
         if time_steps != self.config.tactile_window:
-            raise ValueError(
-                f"Expected tactile_window={self.config.tactile_window}, got T={time_steps}."
-            )
+            raise ValueError(f"Expected tactile_window={self.config.tactile_window}, got T={time_steps}.")
         if num_streams != self.config.num_tactile_tokens:
-            raise ValueError(
-                f"Expected {self.config.num_tactile_tokens} tactile streams, got {num_streams}."
-            )
+            raise ValueError(f"Expected {self.config.num_tactile_tokens} tactile streams, got {num_streams}.")
         if embedding_dim != self.config.resnet_embedding_dim:
             raise ValueError(
-                f"Expected resnet_embedding_dim={self.config.resnet_embedding_dim}, "
-                f"got {embedding_dim}."
+                f"Expected resnet_embedding_dim={self.config.resnet_embedding_dim}, " f"got {embedding_dim}."
             )
         # [B, T, N, D] -> [B, N, T, D] -> [B * N, T, D]
         sequences = jnp.transpose(tactile_seq, (0, 2, 1, 3)).reshape(
@@ -233,9 +223,7 @@ class TactileConditionedFlowDecoder(nnx.Module):
                 raise ValueError("gate_weights are required by this gate-conditioned checkpoint.")
             gate_weights = jnp.asarray(gate_weights, dtype=jnp.float32)
             if gate_weights.ndim != 1 or gate_weights.shape[0] != x_t.shape[0]:
-                raise ValueError(
-                    f"Expected gate_weights [B]={x_t.shape[0]}, got {gate_weights.shape}."
-                )
+                raise ValueError(f"Expected gate_weights [B]={x_t.shape[0]}, got {gate_weights.shape}.")
             x = x + self.gate_mlp(gate_weights)[:, None, :]
         condition = self.tactile_proj(tactile_tokens)
         for block in self.blocks:
@@ -295,9 +283,7 @@ def gt_supervised_loss_per_sample(
 ) -> Array:
     """Per-sample ``FM(gt) + λ_aux MSE(decode, gt)``."""
 
-    flow = flow_matching_loss_per_sample(
-        model, x_base, gt_action, t, tactile_seq, gate_weights
-    )
+    flow = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
     if aux_decode_weight == 0.0:
         return flow
     decode_mse = decode_mse_per_sample(
@@ -319,19 +305,32 @@ def gate_preference_ranking_loss_per_sample(
     gate_weights: Array,
     *,
     margin: float,
-    threshold: float = 0.5,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
 ) -> Array:
-    """Penalize decoded actions that are closer to the wrong endpoint for their gate group."""
+    """Apply endpoint ranking only in confident low/high gate regions.
+
+    Flow-matching and endpoint decode supervision remain continuously weighted for
+    every sample.  Ranking is deliberately disabled in the transition region so a
+    weak gate such as ``w=0.51`` is not forced to behave like a confident contact.
+    Within the two confident regions, ``w`` and ``1-w`` retain soft confidence
+    weighting.
+    """
 
     if margin < 0:
         raise ValueError(f"ranking margin must be non-negative, got {margin}.")
+    if not 0.0 <= low_gate_threshold < high_gate_threshold <= 1.0:
+        raise ValueError(
+            "gate thresholds must satisfy 0 <= low < high <= 1, got " f"{low_gate_threshold}, {high_gate_threshold}."
+        )
     mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
     mse_pred = jnp.mean(jnp.square(decoded_action - predicted_action), axis=(1, 2))
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     high_penalty = jax.nn.relu(mse_gt - mse_pred + float(margin))
     low_penalty = jax.nn.relu(mse_pred - mse_gt + float(margin))
-    del threshold  # Kept for checkpoint/API compatibility; weighting is now continuous.
-    return weights * high_penalty + (1.0 - weights) * low_penalty
+    high_strength = weights * (weights >= float(high_gate_threshold))
+    low_strength = (1.0 - weights) * (weights <= float(low_gate_threshold))
+    return high_strength * high_penalty + low_strength * low_penalty
 
 
 def high_gate_repair_loss_per_sample(
@@ -341,18 +340,20 @@ def high_gate_repair_loss_per_sample(
     gate_weights: Array,
     *,
     margin: float,
-    threshold: float = 0.5,
+    high_gate_threshold: float = 0.7,
 ) -> Array:
-    """Require high-gate decodes to improve on the frozen VLA-to-GT baseline."""
+    """Require confident high-gate decodes to beat the frozen VLA baseline."""
 
     if margin < 0:
         raise ValueError(f"repair margin must be non-negative, got {margin}.")
+    if not 0.0 <= high_gate_threshold <= 1.0:
+        raise ValueError(f"high_gate_threshold must be in [0, 1], got {high_gate_threshold}.")
     mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
     mse_vla_gt = jnp.mean(jnp.square(predicted_action - gt_action), axis=(1, 2))
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     penalty = jax.nn.relu(mse_gt - mse_vla_gt + float(margin))
-    del threshold  # Kept for checkpoint/API compatibility; weighting is now continuous.
-    return weights * penalty
+    high_strength = weights * (weights >= float(high_gate_threshold))
+    return high_strength * penalty
 
 
 def gated_loss_components_per_sample(
@@ -372,6 +373,8 @@ def gated_loss_components_per_sample(
     rank_margin: float = 0.0,
     repair_weight: float = 0.0,
     repair_margin: float = 0.0,
+    rank_low_gate_threshold: float = 0.3,
+    rank_high_gate_threshold: float = 0.7,
 ) -> dict[str, Array]:
     """Return the five weighted terms whose per-sample sum is the gated loss."""
 
@@ -380,12 +383,8 @@ def gated_loss_components_per_sample(
     if repair_weight < 0:
         raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
 
-    flow_gt = flow_matching_loss_per_sample(
-        model, x_base, gt_action, t, tactile_seq, gate_weights
-    )
-    flow_vla = flow_matching_loss_per_sample(
-        model, x_base, predicted_action, t, tactile_seq, gate_weights
-    )
+    flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
+    flow_vla = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, gate_weights)
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     zeros = jnp.zeros_like(flow_gt)
     decode_term = zeros
@@ -405,18 +404,14 @@ def gated_loss_components_per_sample(
     if aux_decode_weight != 0.0:
         assert decoded is not None
         decode_mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
-        decode_mse_vla = jnp.mean(
-            jnp.square(decoded - predicted_action), axis=(1, 2)
-        )
+        decode_mse_vla = jnp.mean(jnp.square(decoded - predicted_action), axis=(1, 2))
         # Match the endpoint supervision to the same soft gate used by flow
         # matching: high-w samples decode toward GT, while low-w samples are
         # explicitly anchored to the frozen VLA action.  The old objective only
         # contained w*MSE(decoded, GT), so low-w endpoint preservation was left
         # to an indirect flow/ranking signal and could violate the checkpoint
         # preservation threshold even while total loss decreased.
-        decode_term = float(aux_decode_weight) * (
-            weights * decode_mse_gt + (1.0 - weights) * decode_mse_vla
-        )
+        decode_term = float(aux_decode_weight) * (weights * decode_mse_gt + (1.0 - weights) * decode_mse_vla)
     if rank_weight != 0.0:
         assert decoded is not None
         rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(
@@ -425,6 +420,8 @@ def gated_loss_components_per_sample(
             predicted_action,
             gate_weights,
             margin=rank_margin,
+            low_gate_threshold=rank_low_gate_threshold,
+            high_gate_threshold=rank_high_gate_threshold,
         )
     if repair_weight != 0.0:
         assert decoded is not None
@@ -434,6 +431,7 @@ def gated_loss_components_per_sample(
             predicted_action,
             gate_weights,
             margin=repair_margin,
+            high_gate_threshold=rank_high_gate_threshold,
         )
 
     return {
@@ -462,6 +460,8 @@ def gated_flow_matching_loss_per_sample(
     rank_margin: float = 0.0,
     repair_weight: float = 0.0,
     repair_margin: float = 0.0,
+    rank_low_gate_threshold: float = 0.3,
+    rank_high_gate_threshold: float = 0.7,
 ) -> Array:
     """Gated endpoint loss plus preference and absolute-repair constraints."""
 
@@ -481,6 +481,8 @@ def gated_flow_matching_loss_per_sample(
         rank_margin=rank_margin,
         repair_weight=repair_weight,
         repair_margin=repair_margin,
+        rank_low_gate_threshold=rank_low_gate_threshold,
+        rank_high_gate_threshold=rank_high_gate_threshold,
     )
     return sum(components.values())
 
@@ -497,6 +499,8 @@ def gated_flow_matching_loss_per_sample(
         "rank_margin",
         "repair_weight",
         "repair_margin",
+        "rank_low_gate_threshold",
+        "rank_high_gate_threshold",
     ),
 )
 def train_step(
@@ -518,6 +522,8 @@ def train_step(
     rank_margin: float = 0.0,
     repair_weight: float = 0.0,
     repair_margin: float = 0.0,
+    rank_low_gate_threshold: float = 0.3,
+    rank_high_gate_threshold: float = 0.7,
 ) -> tuple[Array, dict[str, Array]]:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
@@ -525,9 +531,7 @@ def train_step(
         candidate: TactileConditionedFlowDecoder,
     ) -> tuple[Array, dict[str, Array]]:
         if loss_mode == "gt":
-            flow = flow_matching_loss_per_sample(
-                candidate, x_base, gt_action, t, tactile_seq, gate_weights
-            )
+            flow = flow_matching_loss_per_sample(candidate, x_base, gt_action, t, tactile_seq, gate_weights)
             decode = jnp.zeros_like(flow)
             if aux_decode_weight != 0.0:
                 decode = float(aux_decode_weight) * decode_mse_per_sample(
@@ -547,9 +551,7 @@ def train_step(
                 "repair": jnp.asarray(0.0, dtype=flow.dtype),
             }
         elif loss_mode == "predicted":
-            flow = flow_matching_loss_per_sample(
-                candidate, x_base, predicted_action, t, tactile_seq, gate_weights
-            )
+            flow = flow_matching_loss_per_sample(candidate, x_base, predicted_action, t, tactile_seq, gate_weights)
             components = {
                 "gt_fm": jnp.asarray(0.0, dtype=flow.dtype),
                 "vla_fm": jnp.mean(flow),
@@ -574,12 +576,12 @@ def train_step(
                 rank_margin=rank_margin,
                 repair_weight=repair_weight,
                 repair_margin=repair_margin,
+                rank_low_gate_threshold=rank_low_gate_threshold,
+                rank_high_gate_threshold=rank_high_gate_threshold,
             )
             components = {name: jnp.mean(per_sample[name]) for name in LOSS_COMPONENT_NAMES}
         else:
-            raise ValueError(
-                f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}."
-            )
+            raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
         total = sum(components.values())
         return total, components
 
@@ -635,13 +637,9 @@ def decode_actions(
     solver: FlowSolver = "euler",
 ) -> Array:
     if solver == "euler":
-        return decode_euler(
-            model, x_base, tactile_seq, gate_weights, num_steps=num_steps
-        )
+        return decode_euler(model, x_base, tactile_seq, gate_weights, num_steps=num_steps)
     if solver == "fireflow":
-        return decode_fireflow(
-            model, x_base, tactile_seq, gate_weights, num_steps=num_steps
-        )
+        return decode_fireflow(model, x_base, tactile_seq, gate_weights, num_steps=num_steps)
     raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
 
 
@@ -671,9 +669,7 @@ def make_learning_rate_schedule(
     if warmup_steps < 0:
         raise ValueError(f"warmup_steps must be non-negative, got {warmup_steps}.")
     if not 0.0 <= min_learning_rate_ratio <= 1.0:
-        raise ValueError(
-            f"min_learning_rate_ratio must be in [0, 1], got {min_learning_rate_ratio}."
-        )
+        raise ValueError(f"min_learning_rate_ratio must be in [0, 1], got {min_learning_rate_ratio}.")
 
     end_value = learning_rate * min_learning_rate_ratio
     if not cosine_decay:
@@ -723,9 +719,5 @@ def make_optimizer(
         cosine_decay=cosine_decay,
     )
     adamw = optax.adamw(lr, weight_decay=weight_decay)
-    transform = (
-        optax.chain(optax.clip_by_global_norm(grad_clip_norm), adamw)
-        if grad_clip_norm is not None
-        else adamw
-    )
+    transform = optax.chain(optax.clip_by_global_norm(grad_clip_norm), adamw) if grad_clip_norm is not None else adamw
     return nnx.Optimizer(model, transform, wrt=nnx.Param)

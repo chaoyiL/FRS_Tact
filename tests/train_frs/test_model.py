@@ -9,29 +9,31 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 
-from train_frs.utils.checkpoint import load_checkpoint
-from train_frs.utils.checkpoint import save_checkpoint
-from train_frs.utils.metrics import evaluate_split
-from train_frs.utils.metrics import gate_stratified_decode_metrics
-from train_frs.utils.model import DecoderConfig
-from train_frs.utils.model import TactileConditionedFlowDecoder
-from train_frs.utils.model import decode_actions
-from train_frs.utils.model import decode_euler
-from train_frs.utils.model import decode_mse_per_sample
-from train_frs.utils.model import flow_matching_loss_per_sample
-from train_frs.utils.model import gate_preference_ranking_loss_per_sample
-from train_frs.utils.model import gated_flow_matching_loss_per_sample
-from train_frs.utils.model import gated_loss_components_per_sample
-from train_frs.utils.model import gt_supervised_loss_per_sample
-from train_frs.utils.model import high_gate_repair_loss_per_sample
-from train_frs.utils.model import make_optimizer
-from train_frs.utils.model import train_step
+from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
+from train_frs.utils.metrics import (
+    evaluate_split,
+    gate_binned_decode_metrics,
+    gate_stratified_decode_metrics,
+)
+from train_frs.utils.model import (
+    DecoderConfig,
+    TactileConditionedFlowDecoder,
+    decode_actions,
+    decode_euler,
+    decode_mse_per_sample,
+    flow_matching_loss_per_sample,
+    gate_preference_ranking_loss_per_sample,
+    gated_flow_matching_loss_per_sample,
+    gated_loss_components_per_sample,
+    gt_supervised_loss_per_sample,
+    high_gate_repair_loss_per_sample,
+    make_optimizer,
+    train_step,
+)
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
-    def make_model(
-        self, *, tactile_window: int = 3, gate_conditioning: bool = False
-    ) -> TactileConditionedFlowDecoder:
+    def make_model(self, *, tactile_window: int = 3, gate_conditioning: bool = False) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
             DecoderConfig(
                 action_dim=3,
@@ -61,9 +63,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         tokens = model.encode_tactile_tokens(tactile)
         self.assertEqual(tokens.shape, (4, 4, 8))
         decoded = decode_euler(model, x_base, tactile, num_steps=4)
-        decoded_fireflow = decode_actions(
-            model, x_base, tactile, num_steps=4, solver="fireflow"
-        )
+        decoded_fireflow = decode_actions(model, x_base, tactile, num_steps=4, solver="fireflow")
         self.assertEqual(loss.shape, (4,))
         self.assertEqual(decoded.shape, gt.shape)
         self.assertEqual(decoded_fireflow.shape, gt.shape)
@@ -116,6 +116,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
         self.assertEqual(out["n_high_w"], 2)
         self.assertEqual(out["n_low_w"], 2)
+        self.assertEqual(out["n_mid_w"], 0)
         self.assertAlmostEqual(float(out["mse_gt_high_w"]), 1.5)
         self.assertAlmostEqual(float(out["mse_gt_low_w"]), 3.5)
         self.assertAlmostEqual(float(out["mse_pred_high_w"]), 0.15)
@@ -156,7 +157,16 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(zero_penalty, np.asarray([0.061, 0.061]), atol=1e-6)
+        np.testing.assert_allclose(zero_penalty, np.asarray([0.0, 0.0]), atol=1e-6)
+
+        transition_penalty = gate_preference_ranking_loss_per_sample(
+            wrongly_ordered[:1],
+            gt[:1],
+            predicted[:1],
+            jnp.asarray([0.5], dtype=jnp.float32),
+            margin=0.01,
+        )
+        np.testing.assert_allclose(transition_penalty, np.asarray([0.0]), atol=1e-6)
 
     def test_high_gate_repair_loss_requires_absolute_gt_gain(self):
         gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
@@ -170,7 +180,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.198, 0.301]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([0.198, 0.0]), atol=1e-6)
 
         improved = high_gate_repair_loss_per_sample(
             jnp.asarray([[[0.8]], [[2.0]]], dtype=jnp.float32),
@@ -179,7 +189,24 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(improved, np.asarray([0.0, 0.301]), atol=1e-6)
+        np.testing.assert_allclose(improved, np.asarray([0.0, 0.0]), atol=1e-6)
+
+    def test_gate_binned_decode_metrics_reports_all_six_bins(self):
+        weights = np.asarray([0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0])
+        mse_gt = np.asarray([1.0, 2.0, 3.0, 0.4, 0.2, 0.1, 0.0])
+        mse_pred = np.asarray([0.0, 0.1, 0.2, 0.5, 0.6, 0.8, 1.0])
+        baseline = np.ones_like(weights)
+        bins = gate_binned_decode_metrics(
+            mse_gt,
+            mse_pred,
+            baseline,
+            weights,
+            ranking_margin=0.01,
+        )
+        self.assertEqual(list(bins), ["00_01", "01_03", "03_05", "05_07", "07_09", "09_10"])
+        self.assertEqual([int(values["n"]) for values in bins.values()], [1, 1, 1, 1, 1, 2])
+        self.assertAlmostEqual(float(bins["09_10"]["mse_gt"]), 0.05)
+        self.assertAlmostEqual(float(bins["09_10"]["rank_satisfied_frac"]), 1.0)
 
     def test_gated_loss_components_sum_to_total(self):
         model = self.make_model()
@@ -233,9 +260,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         mse_vla = jnp.mean(jnp.square(decoded - predicted), axis=(1, 2))
         expected_decode = 0.7 * (gate * mse_gt + (1.0 - gate) * mse_vla)
         self.assertEqual(set(components), {"gt_fm", "vla_fm", "decode", "rank", "repair"})
-        self.assertTrue(
-            bool(jnp.allclose(components["decode"], expected_decode, atol=1e-6))
-        )
+        self.assertTrue(bool(jnp.allclose(components["decode"], expected_decode, atol=1e-6)))
         self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
     def test_explicit_gate_condition_changes_output(self):
@@ -305,9 +330,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         tactile = self._tactile_seq(jax.random.key(21), 3)
         t = jnp.full((3,), 0.5, dtype=jnp.float32)
         flow = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
-        decode_mse = decode_mse_per_sample(
-            model, x_base, gt, tactile, num_steps=4, solver="euler"
-        )
+        decode_mse = decode_mse_per_sample(model, x_base, gt, tactile, num_steps=4, solver="euler")
         combined = gt_supervised_loss_per_sample(
             model,
             x_base,
@@ -490,8 +513,10 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertTrue(metadata["decoder_config"]["gate_conditioning"])
 
     def test_optimizer_state_round_trip(self):
-        from train_frs.utils.checkpoint import load_optimizer_state
-        from train_frs.utils.checkpoint import restore_optimizer_state
+        from train_frs.utils.checkpoint import (
+            load_optimizer_state,
+            restore_optimizer_state,
+        )
         from train_frs.utils.model import make_optimizer
 
         model = self.make_model()
@@ -512,9 +537,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             opt_state, step = load_optimizer_state(checkpoint_dir)
             self.assertIsNotNone(opt_state)
             self.assertEqual(step, 4)
-            restored_opt = make_optimizer(
-                restored_model, learning_rate=1e-3, weight_decay=0.0, total_steps=10
-            )
+            restored_opt = make_optimizer(restored_model, learning_rate=1e-3, weight_decay=0.0, total_steps=10)
             restore_optimizer_state(restored_opt, opt_state=opt_state, step=step)
             self.assertEqual(int(restored_opt.step[...]), 4)
 
