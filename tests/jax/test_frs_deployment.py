@@ -14,6 +14,16 @@ ROOT = Path(__file__).resolve().parents[2]
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 
 
+def test_deploy_frs_config_uses_project_local_downloads() -> None:
+    config = remote_client.load_config(FRS_CONFIG)
+    root = ROOT / "checkpoints"
+    assert Path(config["checkpoint"]) == root / "model/pick_tube_02_3w_jax"
+    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0809_02"
+    assert Path(config["frs"]["tactile_encoder_checkpoint"]) == (
+        root / "encoder/encoder_ckpt_0809"
+    )
+
+
 def test_deploy_frs_config_preserves_training_time_scale() -> None:
     config = remote_client.load_config(FRS_CONFIG)
 
