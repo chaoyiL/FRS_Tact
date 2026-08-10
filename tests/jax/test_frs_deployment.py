@@ -294,7 +294,7 @@ def test_frs_contract_accepts_matching_training_metadata() -> None:
     runtime._validate_contract(policy, source_sample_steps=10)
 
 
-@pytest.mark.parametrize("version", [2, 3, 4])
+@pytest.mark.parametrize("version", [2, 3, 4, 5])
 def test_frs_contract_accepts_supported_loss_versions(version: int) -> None:
     runtime, policy = _contract_runtime()
     runtime.metadata["extra_metadata"]["loss_weighting_version"] = version

@@ -20,6 +20,7 @@ from train_frs.train import (
     _existing_run_artifacts,
     _validate_resume_cache,
     checkpoint_selection_key,
+    checkpoint_specialist_keys,
 )
 from train_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
@@ -116,6 +117,52 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
     assert higher_gain < feasible
 
 
+def test_checkpoint_constraints_do_not_cancel_each_other() -> None:
+    one_failed_constraint = checkpoint_selection_key(
+        {
+            "val_mse": 0.2,
+            "val_mse_pred_low_w": 0.02,
+            "val_gt_gain_high_w": 0.03,
+            "val_worst_dataset_rank_violation_high_w": 0.0,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
+    )
+    two_failed_constraints = checkpoint_selection_key(
+        {
+            "val_mse": 0.1,
+            "val_mse_pred_low_w": 0.0101,
+            "val_gt_gain_high_w": 0.03,
+            "val_worst_dataset_rank_violation_high_w": 0.0001,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
+    )
+    assert one_failed_constraint[0] == 1.0
+    assert two_failed_constraints[0] == 2.0
+    assert one_failed_constraint < two_failed_constraints
+
+
+def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
+    keys = checkpoint_specialist_keys(
+        {
+            "val_mse": 0.2,
+            "val_mse_pred_low_w": 0.005,
+            "val_gt_gain_high_w": 0.03,
+            "val_mse_gt_high_w": 0.08,
+            "val_mse_pred_high_w": 0.12,
+        },
+        high_gate_rank_margin=0.01,
+    )
+    assert keys["best_rank"][0] == 0.0
+    assert keys["best_low_preservation"][0] == 0.005
+    assert keys["best_gain"][0] == -0.03
+
+
 class _SpawnFakeDataset:
     """Top-level fake so a spawn DataLoader can import and unpickle it."""
 
@@ -206,6 +253,11 @@ def test_fresh_output_guard_ignores_logs_but_finds_training_state(
     history = tmp_path / "history.csv"
     history.write_text("epoch\n", encoding="utf-8")
     assert _existing_run_artifacts(tmp_path) == (history,)
+
+    specialist = tmp_path / "best_rank" / "checkpoint.json"
+    specialist.parent.mkdir()
+    specialist.write_text("{}", encoding="utf-8")
+    assert _existing_run_artifacts(tmp_path) == (history, specialist)
 
 
 def test_resume_cache_provenance_must_match() -> None:

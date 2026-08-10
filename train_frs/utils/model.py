@@ -298,6 +298,47 @@ def gt_supervised_loss_per_sample(
     return flow + float(aux_decode_weight) * decode_mse
 
 
+def three_region_effective_gate_weights(
+    gate_weights: Array,
+    *,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> Array:
+    """Map raw gate confidence to a saturated three-region objective weight.
+
+    The raw gate is still supplied to the decoder as a conditioning signal.  Only
+    loss targets use this remapping: the confident-low region is fully VLA, the
+    confident-high region is fully GT, and the transition region interpolates.
+    """
+
+    if not 0.0 <= low_gate_threshold < high_gate_threshold <= 1.0:
+        raise ValueError(
+            "gate thresholds must satisfy 0 <= low < high <= 1, got "
+            f"{low_gate_threshold}, {high_gate_threshold}."
+        )
+    weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+    return jnp.clip(
+        (weights - float(low_gate_threshold))
+        / float(high_gate_threshold - low_gate_threshold),
+        0.0,
+        1.0,
+    )
+
+
+def _active_group_normalized_per_sample(penalty: Array, strength: Array) -> tuple[Array, Array]:
+    """Return a vector whose batch mean is the active group's weighted mean."""
+
+    total_strength = jnp.sum(strength)
+    active = total_strength > 0.0
+    batch_size = jnp.asarray(penalty.shape[0], dtype=penalty.dtype)
+    scale = jnp.where(
+        active,
+        batch_size / jnp.maximum(total_strength, jnp.finfo(penalty.dtype).tiny),
+        0.0,
+    )
+    return strength * penalty * scale, active
+
+
 def gate_preference_ranking_loss_per_sample(
     decoded_action: Array,
     gt_action: Array,
@@ -310,11 +351,9 @@ def gate_preference_ranking_loss_per_sample(
 ) -> Array:
     """Apply endpoint ranking only in confident low/high gate regions.
 
-    Flow-matching and endpoint decode supervision remain continuously weighted for
-    every sample.  Ranking is deliberately disabled in the transition region so a
-    weak gate such as ``w=0.51`` is not forced to behave like a confident contact.
-    Within the two confident regions, ``w`` and ``1-w`` retain soft confidence
-    weighting.
+    Ranking is disabled in the transition region. Each active low/high group is
+    reduced by its own confidence sum before the two active group means are
+    averaged. Consequently, adding transition samples cannot dilute this term.
     """
 
     if margin < 0:
@@ -330,7 +369,10 @@ def gate_preference_ranking_loss_per_sample(
     low_penalty = jax.nn.relu(mse_pred - mse_gt + float(margin))
     high_strength = weights * (weights >= float(high_gate_threshold))
     low_strength = (1.0 - weights) * (weights <= float(low_gate_threshold))
-    return high_strength * high_penalty + low_strength * low_penalty
+    high_term, high_active = _active_group_normalized_per_sample(high_penalty, high_strength)
+    low_term, low_active = _active_group_normalized_per_sample(low_penalty, low_strength)
+    active_groups = high_active.astype(high_term.dtype) + low_active.astype(low_term.dtype)
+    return (high_term + low_term) / jnp.maximum(active_groups, 1.0)
 
 
 def high_gate_repair_loss_per_sample(
@@ -353,7 +395,8 @@ def high_gate_repair_loss_per_sample(
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     penalty = jax.nn.relu(mse_gt - mse_vla_gt + float(margin))
     high_strength = weights * (weights >= float(high_gate_threshold))
-    return high_strength * penalty
+    normalized, _ = _active_group_normalized_per_sample(penalty, high_strength)
+    return normalized
 
 
 def gated_loss_components_per_sample(
@@ -385,7 +428,11 @@ def gated_loss_components_per_sample(
 
     flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
     flow_vla = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, gate_weights)
-    weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+    effective_weights = three_region_effective_gate_weights(
+        gate_weights,
+        low_gate_threshold=rank_low_gate_threshold,
+        high_gate_threshold=rank_high_gate_threshold,
+    )
     zeros = jnp.zeros_like(flow_gt)
     decode_term = zeros
     rank_term = zeros
@@ -405,13 +452,10 @@ def gated_loss_components_per_sample(
         assert decoded is not None
         decode_mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
         decode_mse_vla = jnp.mean(jnp.square(decoded - predicted_action), axis=(1, 2))
-        # Match the endpoint supervision to the same soft gate used by flow
-        # matching: high-w samples decode toward GT, while low-w samples are
-        # explicitly anchored to the frozen VLA action.  The old objective only
-        # contained w*MSE(decoded, GT), so low-w endpoint preservation was left
-        # to an indirect flow/ranking signal and could violate the checkpoint
-        # preservation threshold even while total loss decreased.
-        decode_term = float(aux_decode_weight) * (weights * decode_mse_gt + (1.0 - weights) * decode_mse_vla)
+        decode_term = float(aux_decode_weight) * (
+            effective_weights * decode_mse_gt
+            + (1.0 - effective_weights) * decode_mse_vla
+        )
     if rank_weight != 0.0:
         assert decoded is not None
         rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(
@@ -435,8 +479,8 @@ def gated_loss_components_per_sample(
         )
 
     return {
-        "gt_fm": weights * flow_gt,
-        "vla_fm": float(gate_lambda) * (1.0 - weights) * flow_vla,
+        "gt_fm": effective_weights * flow_gt,
+        "vla_fm": float(gate_lambda) * (1.0 - effective_weights) * flow_vla,
         "decode": decode_term,
         "rank": rank_term,
         "repair": repair_term,

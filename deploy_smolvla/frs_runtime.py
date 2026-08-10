@@ -332,16 +332,18 @@ class FRSRuntime:
             raise ValueError("FRS checkpoint is missing extra_metadata")
         _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
         loss_weighting_version = int(extra.get("loss_weighting_version", 0))
-        if loss_weighting_version not in {2, 3, 4}:
+        if loss_weighting_version not in {2, 3, 4, 5}:
             raise ValueError(
-                "unsupported FRS loss_weighting_version: " f"{loss_weighting_version}; expected one of 2, 3, 4"
+                "unsupported FRS loss_weighting_version: "
+                f"{loss_weighting_version}; expected one of 2, 3, 4, 5"
             )
         if loss_weighting_version >= 4:
             low_threshold = float(extra.get("rank_low_gate_threshold", -1.0))
             high_threshold = float(extra.get("rank_high_gate_threshold", -1.0))
             if not 0.0 <= low_threshold < 0.5 < high_threshold <= 1.0:
                 raise ValueError(
-                    "invalid v4 three-region gate thresholds: " f"low={low_threshold}, high={high_threshold}"
+                    "invalid v4+ three-region gate thresholds: "
+                    f"low={low_threshold}, high={high_threshold}"
                 )
         _require_equal(
             int(extra.get("history_stride", 0)),
