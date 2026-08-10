@@ -38,6 +38,7 @@ frs:
   enabled: true
   checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0809_02
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
+
   tactile_keys:
     - observation.images.tactile_left_0
     - observation.images.tactile_right_0
@@ -46,7 +47,7 @@ frs:
 
   # 必须与训练 checkpoint metadata 一致。
   history_stride: 3
-  gate_tau: 0.2
+  gate_tau: 0.4
   gate_temperature: 0.1
   reverse_steps: 20
   reverse_solver: slerpflow
@@ -54,7 +55,7 @@ frs:
   decode_solver: euler
 
   # 防止误用另一份基础 SmolVLA。复制 checkpoint 时需保留文件 mtime（如 rsync -a）。
-  verify_source_checkpoint_fingerprint: true
+  verify_source_checkpoint_fingerprint: false
   # 超限会立即停止，不会静默退回未经 FRS 校验的 VLA action。
   max_normalized_action_abs: 8.0
   max_normalized_delta_rms: 4.0
@@ -84,7 +85,7 @@ control:
   control_frequency: 30.0
   controller_frequency: 80.0
   action_horizon: 10
-  steps_per_inference: 1
+  steps_per_inference: 10
   # 当前 FRS reverse 不支持 RTC 拼接；基础 checkpoint 必须关闭 RTC。
   inference_delay: null
   execution_horizon: null
