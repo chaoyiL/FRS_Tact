@@ -79,6 +79,8 @@ from pathlib import Path
 class AutoTokenizer:
     @classmethod
     def from_pretrained(cls, repo_id: str, *, local_files_only: bool):
+        if repo_id != "HuggingFaceTB/SmolVLM2-500M-Video-Instruct":
+            raise OSError("unexpected tokenizer repository")
         if not local_files_only:
             raise OSError("tokenizer must be offline")
         if os.environ.get("HF_HUB_OFFLINE") != "1":
@@ -114,7 +116,11 @@ with open(sys.argv[1], "a", encoding="utf-8") as file:
 PY
 
 output=""
+force_download=false
 for ((index = 1; index <= $#; index++)); do
+    if [[ "${!index}" == "--force-download" ]]; then
+        force_download=true
+    fi
     if [[ "${!index}" == "--output" || "${!index}" == "--local-dir" || "${!index}" == "--output-dir" || "${!index}" == "--cache-dir" ]]; then
         next=$((index + 1))
         output="${!next}"
@@ -155,7 +161,9 @@ elif [[ "$asset" == "tokenizer" ]]; then
     snapshot="$output/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct/snapshots/7b375e1b73b11138ff12fe22c8f2822d8fe03467"
     mkdir -p "$snapshot"
     for filename in config.json tokenizer_config.json tokenizer.json special_tokens_map.json added_tokens.json chat_template.json merges.txt vocab.json; do
-        printf 'tokenizer' > "$snapshot/$filename"
+        if [[ "$force_download" == "true" || ! -e "$snapshot/$filename" ]]; then
+            printf 'tokenizer' > "$snapshot/$filename"
+        fi
     done
 elif [[ "$asset" == "encoder" ]]; then
     mkdir -p "$output"
@@ -230,6 +238,7 @@ def expected_calls(project: Path) -> list[list[str]]:
             *TOKENIZER_FILES,
             "--cache-dir",
             str(project / TOKENIZER_CACHE_ROOT),
+            "--force-download",
         ],
         [
             "run",
@@ -600,3 +609,13 @@ def test_is_executable_and_supports_checkpoint_roots_with_spaces(tmp_path: Path)
     assert SCRIPT.stat().st_mode & stat.S_IXUSR
     assert result.returncode == 0, result.stderr
     assert (checkpoint_root / "model/pick_tube_02_3w_jax/model.safetensors").is_file()
+    tokenizer_repo_cache = (
+        checkpoint_root
+        / "model/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
+    )
+    assert (
+        (tokenizer_repo_cache / "refs/main").read_text().strip()
+        == TOKENIZER_REVISION
+    )
+    tokenizer_snapshot = tokenizer_repo_cache / "snapshots" / TOKENIZER_REVISION
+    assert {path.name for path in tokenizer_snapshot.iterdir()} == set(TOKENIZER_FILES)

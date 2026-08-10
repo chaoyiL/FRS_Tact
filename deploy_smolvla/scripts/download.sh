@@ -236,7 +236,7 @@ if tokenizer_complete; then
 else
     if ! "${UV_BIN}" run --no-sync hf download "${TOKENIZER_REPO}" \
         --revision "${TOKENIZER_REVISION}" --include "${TOKENIZER_FILES[@]}" \
-        --cache-dir "${TOKENIZER_CACHE_ROOT}"; then
+        --cache-dir "${TOKENIZER_CACHE_ROOT}" --force-download; then
         echo "tokenizer download failed: ${TOKENIZER_REPO} -> ${TOKENIZER_CACHE_ROOT}" >&2
         exit 1
     fi
