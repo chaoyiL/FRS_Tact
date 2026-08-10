@@ -481,6 +481,74 @@ def _predict_chunk(
     return action, action_norm
 
 
+def _trace_action_chunk(value: Any) -> np.ndarray:
+    chunk = np.asarray(value, dtype=np.float32)
+    if chunk.ndim == 3 and chunk.shape[0] == 1:
+        chunk = chunk[0]
+    if chunk.ndim != 2:
+        raise ValueError(f"trace action chunk must be rank 2, got {chunk.shape}")
+    return np.array(chunk, copy=True)
+
+
+def _build_action_trace(
+    policy: Policy,
+    frs_runtime: FRSRuntime | None,
+    *,
+    inference_wall_start_s: float,
+    inference_wall_end_s: float,
+) -> dict[str, Any] | None:
+    """Build a diagnostic-only v1 trace for a completed FRS inference."""
+
+    if frs_runtime is None:
+        return None
+    vla_normalized = frs_runtime.last_vla_normalized
+    frs_normalized = frs_runtime.last_frs_normalized
+    diagnostics = frs_runtime.last_diagnostics
+    if vla_normalized is None or frs_normalized is None or diagnostics is None:
+        return None
+
+    vla_chunk = _trace_action_chunk(vla_normalized)
+    frs_chunk = _trace_action_chunk(frs_normalized)
+    vla_action = _trace_action_chunk(policy.preprocessor.unnormalize_actions(vla_normalized))
+    frs_action = _trace_action_chunk(policy.preprocessor.unnormalize_actions(frs_normalized))
+    return {
+        "version": 1,
+        "vla_normalized": vla_chunk,
+        "frs_normalized": frs_chunk,
+        "vla_action": vla_action,
+        "frs_action": frs_action,
+        "inference_started_at": float(inference_wall_start_s),
+        "inference_finished_at": float(inference_wall_end_s),
+        "frs_diagnostics": {
+            "tactile_change": float(diagnostics.tactile_change),
+            "gate_weight": float(diagnostics.gate_weight),
+            "delta_rms": float(diagnostics.delta_rms),
+            "max_normalized_action_abs": float(diagnostics.max_normalized_action_abs),
+        },
+    }
+
+
+def _build_action_trace_or_none(
+    policy: Policy,
+    frs_runtime: FRSRuntime | None,
+    *,
+    inference_wall_start_s: float,
+    inference_wall_end_s: float,
+) -> dict[str, Any] | None:
+    """Keep trace-only failures from affecting the robot action path."""
+
+    try:
+        return _build_action_trace(
+            policy,
+            frs_runtime,
+            inference_wall_start_s=inference_wall_start_s,
+            inference_wall_end_s=inference_wall_end_s,
+        )
+    except Exception as error:
+        print(f"[client] Action trace omitted: {error}")
+        return None
+
+
 def _rtc_enabled(policy: Policy) -> bool:
     rtc = policy.config.rtc_config
     return rtc is not None and bool(rtc.enabled)
@@ -692,6 +760,7 @@ def run(
                 empty_cameras=empty_cameras,
                 required_image_keys=robot_tactile_keys,
             )
+            inference_started_at = time.time()
             start = time.perf_counter()
             action, action_norm = _predict_chunk(
                 policy,
@@ -706,7 +775,13 @@ def run(
                 frs_runtime=frs_runtime,
             )
             inference_ms = (time.perf_counter() - start) * 1000.0
-            bridge.send_action(action, obs_seq)
+            trace = _build_action_trace_or_none(
+                policy,
+                frs_runtime,
+                inference_wall_start_s=inference_started_at,
+                inference_wall_end_s=time.time(),
+            )
+            bridge.send_action(action, obs_seq, trace=trace)
             bridge.receive_action_ack(obs_seq, timeout=action_ack_timeout_s)
             if rtc_on:
                 previous_chunk = _remaining_action_chunk(action_norm, steps_per_inference)

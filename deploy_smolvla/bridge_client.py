@@ -195,8 +195,17 @@ class RobotBridgeClient:
             raise RuntimeError(f"Observation must be a dictionary, got {type(observation)}")
         return int(message["obs_seq"]), observation
 
-    def send_action(self, action: np.ndarray, obs_seq: int) -> None:
-        self._send({"type": "action", "obs_seq": int(obs_seq), "action": action})
+    def send_action(
+        self,
+        action: np.ndarray,
+        obs_seq: int,
+        *,
+        trace: dict[str, Any] | None = None,
+    ) -> None:
+        message: dict[str, Any] = {"type": "action", "obs_seq": int(obs_seq), "action": action}
+        if trace is not None:
+            message["trace"] = trace
+        self._send(message)
 
     def receive_action_ack(self, obs_seq: int, timeout: float) -> None:
         message = self._receive(timeout=timeout)

@@ -300,6 +300,8 @@ class FRSRuntime:
         )
         self.baseline: np.ndarray | None = None
         self.last_diagnostics: FRSDiagnostics | None = None
+        self.last_vla_normalized: np.ndarray | None = None
+        self.last_frs_normalized: np.ndarray | None = None
 
         def encode(params: Any, images: jax.Array) -> jax.Array:
             embeddings, _ = encode_resnet18(
@@ -426,6 +428,8 @@ class FRSRuntime:
         self.baseline = np.array(baseline, copy=True)
         self.history.reset(baseline)
         self.last_diagnostics = None
+        self.last_vla_normalized = None
+        self.last_frs_normalized = None
 
     @staticmethod
     def _eval_observation(policy: Any, observation: Mapping[str, Any], task: str) -> EvalObservation:
@@ -496,4 +500,6 @@ class FRSRuntime:
             delta_rms=delta_rms,
             max_normalized_action_abs=max_abs,
         )
+        self.last_vla_normalized = np.array(vla_np, copy=True)
+        self.last_frs_normalized = np.array(refined_np, copy=True)
         return jnp.asarray(refined_np)

@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from deploy_smolvla import remote_client
+from deploy_smolvla.bridge_client import RobotBridgeClient
 from deploy_smolvla.frs_runtime import FRSRuntime, TactileHistory
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +97,142 @@ def test_predict_chunk_unnormalizes_frs_output() -> None:
 
     np.testing.assert_array_equal(normalized, np.full((2, 1), 3.0, dtype=np.float32))
     np.testing.assert_array_equal(action, np.full((2, 1), 30.0, dtype=np.float32))
+
+
+def test_frs_runtime_retains_vla_and_refined_normalized_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(FRSRuntime)
+    runtime.config = SimpleNamespace(
+        tactile_keys=("left",),
+        gate_tau=0.2,
+        gate_temperature=0.1,
+        reverse_steps=2,
+        reverse_solver="euler",
+        decode_steps=2,
+        decode_solver="euler",
+        max_normalized_action_abs=8.0,
+        max_normalized_delta_rms=4.0,
+    )
+    runtime.baseline = np.zeros((1, 1), dtype=np.float32)
+    runtime.history = SimpleNamespace(
+        append=lambda tokens: None,
+        window_tokens=lambda: np.zeros((1, 1, 1), dtype=np.float32),
+    )
+    runtime._encode_observation = lambda observation: np.ones((1, 1), dtype=np.float32)
+    runtime._eval_observation = lambda policy, observation, task: object()
+    runtime.model = object()
+
+    monkeypatch.setattr(
+        "deploy_smolvla.frs_runtime.tactile_change_from_tokens",
+        lambda current, baseline: jnp.asarray([0.25], dtype=jnp.float32),
+    )
+    monkeypatch.setattr(
+        "deploy_smolvla.frs_runtime.gate_weights_from_change",
+        lambda change, *, tau, temperature: jnp.asarray([0.75], dtype=jnp.float32),
+    )
+    monkeypatch.setattr(
+        "deploy_smolvla.frs_runtime.reverse_integrate_actions",
+        lambda *args, **kwargs: args[2],
+    )
+    monkeypatch.setattr(
+        "deploy_smolvla.frs_runtime.decode_actions",
+        lambda *args, **kwargs: args[1] + 1.0,
+    )
+
+    vla = jnp.asarray([[[1.0], [2.0]]], dtype=jnp.float32)
+    refined = runtime.steer(object(), {}, "task", vla)
+
+    np.testing.assert_array_equal(runtime.last_vla_normalized, np.asarray(vla))
+    np.testing.assert_array_equal(runtime.last_frs_normalized, np.asarray(refined))
+
+
+def test_action_trace_contains_complete_vla_frs_chunks_timestamps_and_diagnostics() -> None:
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(actions):
+            return np.asarray(actions) * 10.0
+
+    policy = SimpleNamespace(preprocessor=Preprocessor())
+    frs_runtime = SimpleNamespace(
+        last_vla_normalized=np.asarray([[[1.0], [2.0]]], dtype=np.float32),
+        last_frs_normalized=np.asarray([[[3.0], [4.0]]], dtype=np.float32),
+        last_diagnostics=SimpleNamespace(
+            tactile_change=0.25,
+            gate_weight=0.75,
+            delta_rms=2.0,
+            max_normalized_action_abs=4.0,
+        ),
+    )
+
+    trace = remote_client._build_action_trace(
+        policy,
+        frs_runtime,
+        inference_wall_start_s=100.25,
+        inference_wall_end_s=100.75,
+    )
+
+    assert trace["version"] == 1
+    np.testing.assert_array_equal(trace["vla_normalized"], [[1.0], [2.0]])
+    np.testing.assert_array_equal(trace["vla_action"], [[10.0], [20.0]])
+    np.testing.assert_array_equal(trace["frs_normalized"], [[3.0], [4.0]])
+    np.testing.assert_array_equal(trace["frs_action"], [[30.0], [40.0]])
+    assert trace["inference_started_at"] == 100.25
+    assert trace["inference_finished_at"] == 100.75
+    assert trace["frs_diagnostics"] == {
+        "tactile_change": 0.25,
+        "gate_weight": 0.75,
+        "delta_rms": 2.0,
+        "max_normalized_action_abs": 4.0,
+    }
+
+
+def test_action_trace_failure_is_omitted_without_raising() -> None:
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(actions):
+            del actions
+            raise RuntimeError("trace-only unnormalization failed")
+
+    policy = SimpleNamespace(preprocessor=Preprocessor())
+    frs_runtime = SimpleNamespace(
+        last_vla_normalized=np.asarray([[[1.0]]], dtype=np.float32),
+        last_frs_normalized=np.asarray([[[2.0]]], dtype=np.float32),
+        last_diagnostics=SimpleNamespace(
+            tactile_change=0.25,
+            gate_weight=0.75,
+            delta_rms=1.0,
+            max_normalized_action_abs=2.0,
+        ),
+    )
+
+    assert (
+        remote_client._build_action_trace_or_none(
+            policy,
+            frs_runtime,
+            inference_wall_start_s=100.25,
+            inference_wall_end_s=100.75,
+        )
+        is None
+    )
+
+
+def test_bridge_send_action_keeps_legacy_payload_without_trace_and_adds_keyword_trace() -> None:
+    bridge = object.__new__(RobotBridgeClient)
+    messages: list[dict[str, object]] = []
+    bridge._send = messages.append
+    action = np.asarray([[1.0, 2.0]], dtype=np.float32)
+
+    bridge.send_action(action, 7)
+    bridge.send_action(action, 8, trace={"version": 1})
+
+    assert messages[0] == {"type": "action", "obs_seq": 7, "action": action}
+    assert messages[1] == {
+        "type": "action",
+        "obs_seq": 8,
+        "action": action,
+        "trace": {"version": 1},
+    }
 
 
 def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:

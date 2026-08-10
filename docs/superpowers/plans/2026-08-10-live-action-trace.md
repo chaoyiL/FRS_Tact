@@ -15,7 +15,9 @@
 - Preserve backward compatibility with action messages that omit `trace`.
 - Produce six panels: left/right arm by position delta, rotation delta, and gripper.
 - Produce both `full_prediction.png` and `executed_vs_actual.png` for the full run.
-- Keep full-resolution data in JSONL; display-only downsampling is allowed.
+- Keep full-resolution JSONL under normal storage throughput; a saturated
+  non-blocking writer records an explicit `trace_gap` instead of delaying robot
+  control. Display-only downsampling must preserve prediction chunk boundaries.
 - Do not start cameras or robot hardware during verification.
 - Preserve all pre-existing uncommitted configuration changes in both repositories.
 
@@ -36,10 +38,10 @@
 - Preserve `RobotBridgeClient.send_action(action, obs_seq)` compatibility by adding an optional keyword-only trace.
 - Add a server action-packet API while retaining legacy `wait_for_action()` behavior.
 
-- [ ] Write tests that fail because the original VLA chunk and optional trace are unavailable.
-- [ ] Run focused client/server tests and confirm the intended assertion failures.
-- [ ] Implement the smallest versioned trace envelope and compatibility API.
-- [ ] Run focused tests and confirm they pass.
+- [x] Write tests that fail because the original VLA chunk and optional trace are unavailable.
+- [x] Run focused client/server tests and confirm the intended assertion failures.
+- [x] Implement the smallest versioned trace envelope and compatibility API.
+- [x] Run focused tests and confirm they pass.
 
 ### Task 2: Server trace persistence and controller wall-clock feedback
 
@@ -55,11 +57,11 @@
 - `ActionTraceLogger.log_controller_samples(...)` appends controller feedback records.
 - Controller debug messages include an epoch timestamp without removing existing relative time.
 
-- [ ] Write failing schema, timestamp, finiteness, and failure-isolation tests.
-- [ ] Confirm the tests fail for missing trace persistence.
-- [ ] Implement append-only line-buffered JSONL and integrate it after scheduling.
-- [ ] Drain and persist controller feedback without blocking control.
-- [ ] Run focused tests and confirm they pass.
+- [x] Write failing schema, timestamp, finiteness, and failure-isolation tests.
+- [x] Confirm the tests fail for missing trace persistence.
+- [x] Implement append-only JSONL through a bounded background writer and integrate it after scheduling.
+- [x] Drain and persist controller feedback without blocking control.
+- [x] Run focused tests and confirm they pass.
 
 ### Task 3: Headless full-run PNG renderer
 
@@ -74,11 +76,11 @@
 - Render both required 2x3 figures with Matplotlib Agg using atomic replacement.
 - Provide a bounded polling CLI that the server can launch as an isolated subprocess.
 
-- [ ] Write failing tests for metrics, executed masks, feedback alignment, and two PNG files.
-- [ ] Confirm failures are caused by the missing plotter.
-- [ ] Implement pure metric/alignment functions and renderer.
-- [ ] Implement plotter subprocess lifecycle with at-most-once-per-second refresh.
-- [ ] Run focused tests and confirm they pass without a display or Chrome.
+- [x] Write failing tests for metrics, executed masks, feedback alignment, and two PNG files.
+- [x] Confirm failures are caused by the missing plotter.
+- [x] Implement pure metric/alignment functions and renderer.
+- [x] Implement plotter subprocess lifecycle with at-most-once-per-second refresh.
+- [x] Run focused tests and confirm they pass without a display or Chrome.
 
 ### Task 4: Integration, dry-run, and documentation
 
@@ -91,7 +93,7 @@
 - The plotter starts after the session directory exists, receives no robot handles, and is finalized on every shutdown path.
 - Dry-run accepts trace-bearing action messages but never initializes hardware.
 
-- [ ] Add failing integration tests for traced dry-run and plotter failure isolation.
-- [ ] Implement lifecycle integration and concise output-path logging.
-- [ ] Run all relevant client and server deployment suites.
-- [ ] Run shell/static checks and inspect both repository diffs for unrelated changes.
+- [x] Add failing integration tests for traced dry-run and plotter failure isolation.
+- [x] Implement lifecycle integration and concise output-path logging.
+- [x] Run all relevant client and server deployment suites.
+- [x] Run shell/static checks and inspect both repository diffs for unrelated changes.

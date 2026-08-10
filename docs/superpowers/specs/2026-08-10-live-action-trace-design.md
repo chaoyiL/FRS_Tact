@@ -51,11 +51,15 @@ since START.
 
 ## Runtime isolation
 
-The control process only appends flushed JSONL records. A separate headless
-plotter process tails those files and atomically replaces PNG files no more than
-once per second. It may downsample only in-memory display series; JSONL always
-retains full data. Plotter startup, rendering, or shutdown failures emit a
-warning and never delay ACKs, scheduling, controller execution, or STOP.
+The control process only enqueues records into a bounded, non-blocking writer.
+A separate headless plotter process tails the JSONL files and atomically
+replaces PNG files no more than once per second. Under normal storage throughput
+the JSONL retains full data. If the writer queue saturates, diagnostics may be
+dropped to protect robot control and the corresponding JSONL contains an
+explicit `trace_gap` count. Completed feedback metrics are cached so old raw
+80 Hz samples can be released; plot series preserve chunk boundaries while
+downsampling. Plotter startup, rendering, or shutdown failures emit a warning
+and never delay ACKs, scheduling, controller execution, or STOP.
 
 ## Verification
 
