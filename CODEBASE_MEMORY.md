@@ -218,3 +218,16 @@
   `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat1`、
   `/DATA/ljl/substage/outputs/vtsmolvla_tactile_8pct` 和
   `/DATA/ljl/substage/outputs/vtsmolvla_tactile_repeat32`。
+
+## 2026-08-10 - Fair K0 visual baseline
+
+- `configs/train_vtsmolvla_jax_visual_k0.yaml` 是与 VT 实验严格匹配的六数据集
+  纯视觉对照：不使用 tactile encoder/tokens/projector，复用相同 split、train-only
+  normalization、frozen vision/connector 离线 cache、BF16、seed、chunk20/action5。
+- K0 使用全局 `batch_size: 192` 在恰好两张 GPU 上 data parallel（每卡 96），训练
+  80000 steps，scheduler decay 80000，每 10000 steps 保存到
+  `/DATA/ljl/substage/outputs/smolvla_visual_k0`。
+- `precompute_smolvla_training_cache.sh` 和 `start_vtsmolvla_train.sh` 会读取
+  `model.use_tactile_encoder`：K0 跳过 tactile cache、仍检查/补齐共享 vision cache，
+  并调用 `tools/train_smolvla_jax.py`；VT 配置保持原 tactile 路径和入口。
+- 启动命令：`bash scripts/start_smolvla_k0_train.sh --gpus 0,1 --session smolvla_k0`。

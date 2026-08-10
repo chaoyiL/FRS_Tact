@@ -67,9 +67,25 @@ STORAGE_ROOT="${FRS_STORAGE_ROOT:-${PROJECT_ROOT}/.cache}"
 LOG_ROOT="${LOG_ROOT:-${STORAGE_ROOT}/logs/vtsmolvla-precompute}"
 mkdir -p "${LOG_ROOT}"
 
-echo "[vtsmolvla-precompute] tactile cache on GPU ${GPU_IDS[0]}"
-CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py \
-    --config "${K8_CONFIG}" 2>&1 | tee -a "${LOG_ROOT}/tactile.log"
+USE_TACTILE="$("${UV_BIN}" run --no-sync python - "${K8_CONFIG}" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+with pathlib.Path(sys.argv[1]).open(encoding="utf-8") as file:
+    config = yaml.safe_load(file) or {}
+print("1" if bool((config.get("model") or {}).get("use_tactile_encoder", False)) else "0")
+PY
+)"
+
+if [[ "${USE_TACTILE}" == "1" ]]; then
+    echo "[vtsmolvla-precompute] tactile cache on GPU ${GPU_IDS[0]}"
+    CUDA_VISIBLE_DEVICES="${GPU_IDS[0]}" "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py \
+        --config "${K8_CONFIG}" 2>&1 | tee -a "${LOG_ROOT}/tactile.log"
+else
+    echo "[vtsmolvla-precompute] visual-only config: skip tactile cache"
+fi
 
 dataset_count=6
 gpu_count="${#GPU_IDS[@]}"

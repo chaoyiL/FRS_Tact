@@ -194,15 +194,18 @@ output = config.get("output")
 if not output:
     raise ValueError("YAML 缺少 output")
 cache = config.get("tactile_embedding_cache") or {}
+model = config.get("model") or {}
 print(pathlib.Path(output).expanduser())
 print("1" if cache.get("enabled", False) else "0")
 print("" if config.get("resume") in (None, "") else pathlib.Path(config["resume"]).expanduser())
+print("1" if bool(model.get("use_tactile_encoder", False)) else "0")
 PY
     )
-    ((${#YAML_SETTINGS[@]} == 3)) || fail "无法从 YAML 读取 output/cache/resume"
+    ((${#YAML_SETTINGS[@]} == 4)) || fail "无法从 YAML 读取 output/cache/resume/tactile mode"
     OUTPUT_DIR="${YAML_SETTINGS[0]}"
     CACHE_ENABLED="${YAML_SETTINGS[1]}"
     RESUME_PATH="${YAML_SETTINGS[2]}"
+    USE_TACTILE="${YAML_SETTINGS[3]}"
 }
 
 preflight() {
@@ -247,7 +250,7 @@ prepare_caches() {
 }
 
 run_config() {
-    local config_path="$1" precompute="$2" timestamp precompute_log train_log
+    local config_path="$1" precompute="$2" timestamp precompute_log train_log train_entrypoint
     CONFIG_PATH="${config_path}"
     read_yaml_settings
     preflight
@@ -265,8 +268,14 @@ run_config() {
         "${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}" \
             2>&1 | tee -a "${precompute_log}"
     fi
-    log "开始 VT-SmolVLA 训练，日志=${train_log}"
-    "${UV_BIN}" run --no-sync python tools/train_vtsmolvla_jax.py --config "${CONFIG_PATH}" \
+    if [[ "${USE_TACTILE}" == "1" ]]; then
+        train_entrypoint="tools/train_vtsmolvla_jax.py"
+        log "开始 VT-SmolVLA 训练，日志=${train_log}"
+    else
+        train_entrypoint="tools/train_smolvla_jax.py"
+        log "开始纯视觉 SmolVLA 训练，日志=${train_log}"
+    fi
+    "${UV_BIN}" run --no-sync python "${train_entrypoint}" --config "${CONFIG_PATH}" \
         2>&1 | tee -a "${train_log}"
 }
 
