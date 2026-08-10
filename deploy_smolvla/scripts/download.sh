@@ -106,6 +106,12 @@ try:
         for name in required
     ):
         raise ValueError("tokenizer cache is incomplete")
+    for variable in (
+        "TRANSFORMERS_CACHE",
+        "PYTORCH_TRANSFORMERS_CACHE",
+        "PYTORCH_PRETRAINED_BERT_CACHE",
+    ):
+        os.environ.pop(variable, None)
     os.environ["HF_HUB_CACHE"] = str(cache_root)
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["TRANSFORMERS_OFFLINE"] = "1"

@@ -74,6 +74,17 @@ def make_project(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
 
 import os
 from pathlib import Path
+import warnings
+
+
+LEGACY_CACHE_VARIABLES = (
+    "TRANSFORMERS_CACHE",
+    "PYTORCH_TRANSFORMERS_CACHE",
+    "PYTORCH_PRETRAINED_BERT_CACHE",
+)
+for variable in LEGACY_CACHE_VARIABLES:
+    if variable in os.environ:
+        warnings.warn(f"{variable} is deprecated", FutureWarning)
 
 
 class AutoTokenizer:
@@ -89,6 +100,8 @@ class AutoTokenizer:
             raise OSError("HF_HUB_OFFLINE must be 1")
         if os.environ.get("TRANSFORMERS_OFFLINE") != "1":
             raise OSError("TRANSFORMERS_OFFLINE must be 1")
+        if any(variable in os.environ for variable in LEGACY_CACHE_VARIABLES):
+            raise OSError("legacy tokenizer cache variables must be absent")
         cache_root = Path(os.environ["HF_HUB_CACHE"])
         if Path(cache_dir).resolve() != cache_root.resolve():
             raise OSError("tokenizer cache_dir must equal HF_HUB_CACHE")
@@ -517,6 +530,7 @@ def test_skips_all_complete_assets_with_explicit_messages_and_summary(tmp_path: 
 
     assert result.returncode == 0, result.stderr
     assert read_calls(log_path) == []
+    assert "FutureWarning" not in result.stderr
     assert f"skip: base checkpoint: {project / BASE_DIR}" in result.stdout
     assert f"skip: tokenizer cache: {project / TOKENIZER_CACHE_ROOT}" in result.stdout
     assert f"skip: FRS checkpoint: {project / FRS_DIR}" in result.stdout
