@@ -5,7 +5,7 @@
 #   bash ./deploy_smolvla/scripts/start_frs.sh --check
 
 # FRS 训练 action cache 时使用的同一份“合并后的”视觉 SmolVLA JAX checkpoint。
-checkpoint: /home/typhon/models/pick_tube_02_3w_jax
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_02_3w_jax
 revision: null
 allow_download: false
 seed: 0
@@ -36,8 +36,8 @@ rename_map:
 # VLA normalized action -> source reverse -> x_base -> tactile FRS decode -> action。
 frs:
   enabled: true
-  checkpoint: /home/typhon/models/frs_pick_tube/run_gated_slerpflow_rankw10_repairw20_tau020_k20/best
-  tactile_encoder_checkpoint: /home/typhon/models/encoder_ckpt_06
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0809_02
+  tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
   tactile_keys:
     - observation.images.tactile_left_0
     - observation.images.tactile_right_0
