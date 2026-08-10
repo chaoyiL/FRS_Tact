@@ -28,6 +28,7 @@ from train_frs.utils.model import (
     gt_supervised_loss_per_sample,
     high_gate_repair_loss_per_sample,
     make_optimizer,
+    three_region_effective_gate_weights,
     train_step,
 )
 
@@ -147,7 +148,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.549, 0.549]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([0.61, 0.61]), atol=1e-6)
 
         correctly_ordered = jnp.asarray([[[0.2]], [[0.8]]], dtype=jnp.float32)
         zero_penalty = gate_preference_ranking_loss_per_sample(
@@ -168,6 +169,23 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
         np.testing.assert_allclose(transition_penalty, np.asarray([0.0]), atol=1e-6)
 
+        padded_penalty = gate_preference_ranking_loss_per_sample(
+            jnp.concatenate([wrongly_ordered, jnp.full((8, 1, 1), 0.5)], axis=0),
+            jnp.concatenate([gt, jnp.zeros((8, 1, 1))], axis=0),
+            jnp.concatenate([predicted, jnp.ones((8, 1, 1))], axis=0),
+            jnp.asarray([0.9, 0.1] + [0.5] * 8, dtype=jnp.float32),
+            margin=0.01,
+        )
+        self.assertAlmostEqual(float(jnp.mean(padded_penalty)), float(jnp.mean(penalty)), places=6)
+
+    def test_three_region_effective_gate_saturates_confident_regions(self):
+        effective = three_region_effective_gate_weights(
+            jnp.asarray([0.0, 0.3, 0.5, 0.7, 1.0], dtype=jnp.float32),
+            low_gate_threshold=0.3,
+            high_gate_threshold=0.7,
+        )
+        np.testing.assert_allclose(effective, np.asarray([0.0, 0.0, 0.5, 1.0, 1.0]), atol=1e-6)
+
     def test_high_gate_repair_loss_requires_absolute_gt_gain(self):
         gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
         predicted = jnp.asarray([[[1.0]], [[1.0]]], dtype=jnp.float32)
@@ -180,7 +198,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.198, 0.0]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([0.44, 0.0]), atol=1e-6)
 
         improved = high_gate_repair_loss_per_sample(
             jnp.asarray([[[0.8]], [[2.0]]], dtype=jnp.float32),
