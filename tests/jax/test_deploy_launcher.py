@@ -131,6 +131,11 @@ def _fake_python(tmp_path: Path) -> Path:
         'if [[ -n "${FAKE_PYTHON_MARKER:-}" ]]; then\n'
         '    : >"${FAKE_PYTHON_MARKER}"\n'
         "fi\n"
+        "if [[ -v TRANSFORMERS_CACHE || -v PYTORCH_TRANSFORMERS_CACHE || "
+        "-v PYTORCH_PRETRAINED_BERT_CACHE ]]; then\n"
+        "    echo 'legacy model cache variable reached Python' >&2\n"
+        "    exit 47\n"
+        "fi\n"
         "printf '%s\\n' \"${HF_HUB_CACHE}\"\n",
         encoding="utf-8",
     )
@@ -148,6 +153,9 @@ def _run_launcher(
     env = os.environ.copy()
     env["FRS_PYTHON"] = str(python)
     env["VB_ROBOT_TOKEN"] = "test-token"
+    env["TRANSFORMERS_CACHE"] = str(project / "decoy/transformers")
+    env["PYTORCH_TRANSFORMERS_CACHE"] = str(project / "decoy/pytorch-transformers")
+    env["PYTORCH_PRETRAINED_BERT_CACHE"] = str(project / "decoy/pytorch-bert")
     env.pop("HF_HUB_CACHE", None)
     env.pop("HUGGINGFACE_HUB_CACHE", None)
     if hub_cache is not None:
@@ -341,6 +349,20 @@ def test_launcher_exec_uses_project_model_cache_by_default(tmp_path: Path) -> No
     assert result.stdout == f"{project / 'checkpoints' / 'model'}\n"
     assert (project / "checkpoints" / "model").is_dir()
     assert (project / "checkpoints" / "encoder").is_dir()
+
+
+def test_launcher_exec_drops_legacy_cache_overrides(tmp_path: Path) -> None:
+    project = _copy_deploy_entry_points(tmp_path)
+    cache = tmp_path / "selected-hub-cache"
+
+    result = _run_launcher(
+        project,
+        _fake_python(tmp_path),
+        hub_cache=cache,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{cache}\n"
 
 
 def test_launcher_creates_checkpoint_directories_in_fresh_project(tmp_path: Path) -> None:

@@ -78,7 +78,9 @@ from pathlib import Path
 
 class AutoTokenizer:
     @classmethod
-    def from_pretrained(cls, repo_id: str, *, local_files_only: bool):
+    def from_pretrained(
+        cls, repo_id: str, *, local_files_only: bool, cache_dir: str
+    ):
         if repo_id != "HuggingFaceTB/SmolVLM2-500M-Video-Instruct":
             raise OSError("unexpected tokenizer repository")
         if not local_files_only:
@@ -88,6 +90,8 @@ class AutoTokenizer:
         if os.environ.get("TRANSFORMERS_OFFLINE") != "1":
             raise OSError("TRANSFORMERS_OFFLINE must be 1")
         cache_root = Path(os.environ["HF_HUB_CACHE"])
+        if Path(cache_dir).resolve() != cache_root.resolve():
+            raise OSError("tokenizer cache_dir must equal HF_HUB_CACHE")
         repo_cache = cache_root / "models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
         revision = (repo_cache / "refs/main").read_text(encoding="utf-8")
         tokenizer_json = repo_cache / "snapshots" / revision / "tokenizer.json"
@@ -141,6 +145,9 @@ if [[ "${FRS_TEST_FAIL_ASSET:-}" == "$asset" ]]; then
     printf 'simulated %s failure\\n' "$asset" >&2
     exit 23
 fi
+if [[ "${FRS_TEST_INVALID_ASSET:-}" == "$asset" ]]; then
+    exit 0
+fi
 
 if [[ "$asset" == "base" ]]; then
     mkdir -p "$output"
@@ -183,6 +190,9 @@ fi
         "FRS_DOWNLOAD_UV": str(fake_uv),
         "FRS_DOWNLOAD_PYTHON": sys.executable,
         "FRS_TEST_LOG": str(log_path),
+        "TRANSFORMERS_CACHE": str(project / "decoy/transformers"),
+        "PYTORCH_TRANSFORMERS_CACHE": str(project / "decoy/pytorch-transformers"),
+        "PYTORCH_PRETRAINED_BERT_CACHE": str(project / "decoy/pytorch-bert"),
     }
     return project, log_path, env
 
@@ -563,6 +573,26 @@ def test_broken_tokenizer_refreshes_only_tokenizer(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert read_calls(log_path) == [expected_calls(project)[1]]
+
+
+def test_tokenizer_cli_success_without_valid_cache_fails_validation(
+    tmp_path: Path,
+) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_frs(project)
+    write_complete_encoder(project)
+    env["FRS_TEST_INVALID_ASSET"] = "tokenizer"
+
+    result = run_download(project, env)
+
+    assert result.returncode != 0
+    assert read_calls(log_path) == [expected_calls(project)[1]]
+    assert (
+        f"tokenizer cache failed validation after download: "
+        f"{project / TOKENIZER_CACHE_ROOT}"
+    ) in result.stderr
+    assert "deployment checkpoints ready:" not in result.stdout
 
 
 @pytest.mark.parametrize(

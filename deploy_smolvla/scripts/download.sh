@@ -111,7 +111,11 @@ try:
     os.environ["TRANSFORMERS_OFFLINE"] = "1"
     from transformers import AutoTokenizer
 
-    AutoTokenizer.from_pretrained(repo_id, local_files_only=True)
+    AutoTokenizer.from_pretrained(
+        repo_id,
+        local_files_only=True,
+        cache_dir=str(cache_root),
+    )
 except (ImportError, OSError, ValueError, TypeError):
     raise SystemExit(1)
 PY

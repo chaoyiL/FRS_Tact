@@ -97,6 +97,7 @@ if [[ "${CHECK_ONLY}" == true ]]; then
     exit 0
 fi
 
+unset TRANSFORMERS_CACHE PYTORCH_TRANSFORMERS_CACHE PYTORCH_PRETRAINED_BERT_CACHE
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="${ROOT}/src:${ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 exec "${PYTHON_BIN}" -m deploy_smolvla.remote_client --config "${CONFIG}"
