@@ -89,7 +89,7 @@ class AutoTokenizer:
             raise OSError("TRANSFORMERS_OFFLINE must be 1")
         cache_root = Path(os.environ["HF_HUB_CACHE"])
         repo_cache = cache_root / "models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
-        revision = (repo_cache / "refs/main").read_text(encoding="utf-8").strip()
+        revision = (repo_cache / "refs/main").read_text(encoding="utf-8")
         tokenizer_json = repo_cache / "snapshots" / revision / "tokenizer.json"
         if tokenizer_json.read_text(encoding="utf-8") == "broken":
             raise OSError("invalid tokenizer")
@@ -312,7 +312,7 @@ def write_complete_tokenizer(
         )
     refs = repo_cache / "refs"
     refs.mkdir()
-    (refs / "main").write_text(f"{revision}\n", encoding="utf-8")
+    (refs / "main").write_text(revision, encoding="utf-8")
 
 
 def write_complete_frs(project: Path, *, provenance: bool = True) -> None:
@@ -363,9 +363,8 @@ def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path)
     tokenizer_snapshot = (
         project / TOKENIZER_REPO_CACHE / "snapshots" / TOKENIZER_REVISION
     )
-    assert (
-        (project / TOKENIZER_REPO_CACHE / "refs/main").read_text().strip()
-        == TOKENIZER_REVISION
+    assert (project / TOKENIZER_REPO_CACHE / "refs/main").read_bytes() == (
+        TOKENIZER_REVISION.encode("ascii")
     )
     assert all(
         (tokenizer_snapshot / filename).is_file()
@@ -384,6 +383,21 @@ def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path)
         "repo_id": ENCODER_REPO,
         "revision": ENCODER_REVISION,
     }
+
+
+def test_writes_tokenizer_ref_as_exact_revision_bytes(tmp_path: Path) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_frs(project)
+    write_complete_encoder(project)
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == [expected_calls(project)[1]]
+    assert (project / TOKENIZER_REPO_CACHE / "refs/main").read_bytes() == (
+        TOKENIZER_REVISION.encode("ascii")
+    )
 
 
 def test_skips_complete_assets_and_downloads_missing_frs(tmp_path: Path) -> None:
@@ -613,9 +627,8 @@ def test_is_executable_and_supports_checkpoint_roots_with_spaces(tmp_path: Path)
         checkpoint_root
         / "model/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
     )
-    assert (
-        (tokenizer_repo_cache / "refs/main").read_text().strip()
-        == TOKENIZER_REVISION
+    assert (tokenizer_repo_cache / "refs/main").read_bytes() == (
+        TOKENIZER_REVISION.encode("ascii")
     )
     tokenizer_snapshot = tokenizer_repo_cache / "snapshots" / TOKENIZER_REVISION
     assert {path.name for path in tokenizer_snapshot.iterdir()} == set(TOKENIZER_FILES)

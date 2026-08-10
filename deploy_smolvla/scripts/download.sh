@@ -98,7 +98,7 @@ repo_id = sys.argv[3]
 revision = sys.argv[4]
 required = tuple(sys.argv[5:])
 try:
-    if (repo_cache / "refs/main").read_text(encoding="utf-8").strip() != revision:
+    if (repo_cache / "refs/main").read_text(encoding="utf-8") != revision:
         raise ValueError("tokenizer revision mismatch")
     snapshot = repo_cache / "snapshots" / revision
     if any(
@@ -203,7 +203,7 @@ refs = repo_cache / "refs"
 refs.mkdir(parents=True, exist_ok=True)
 destination = refs / "main"
 temporary = refs / "main.tmp"
-temporary.write_text(revision + "\n", encoding="utf-8")
+temporary.write_text(revision, encoding="utf-8")
 temporary.replace(destination)
 PY
 }
