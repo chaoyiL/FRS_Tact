@@ -28,6 +28,11 @@ ASSET_FILES = (
     "policy_preprocessor_step_5_normalizer_processor.safetensors",
     "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
 )
+ADAPTER_INFERENCE_FILES = (
+    "adapter_model.safetensors",
+    "adapter_config.json",
+    *ASSET_FILES,
+)
 ADAPTER_PREFIX = "base_model.model."
 
 
@@ -227,7 +232,7 @@ def merge_checkpoint(
         adapter,
         revision=adapter_revision,
         allow_download=allow_download,
-        patterns=["*.json", "*.safetensors"],
+        patterns=list(ADAPTER_INFERENCE_FILES),
     )
     base_dir = _resolve_repo_or_path(
         base,

@@ -71,7 +71,7 @@ PY
 }
 
 checkpoint_complete() {
-    "${PYTHON_CMD[@]}" - "$1" <<'PY'
+    "${PYTHON_CMD[@]}" - "$1" "$2" "$3" "$4" "${ROOT}" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -79,7 +79,23 @@ import sys
 import numpy as np
 
 directory = Path(sys.argv[1]).resolve()
+repo_id, revision, checkpoint_kind, project_root = sys.argv[2:]
 try:
+    with (directory / ".download-provenance.json").open(encoding="utf-8") as file:
+        provenance = json.load(file)
+    expected_provenance = {
+        "format_version": 1,
+        "repo_id": repo_id,
+        "revision": revision,
+    }
+    if provenance != expected_provenance:
+        raise ValueError("checkpoint provenance mismatch")
+    if checkpoint_kind == "encoder":
+        sys.path.insert(0, project_root)
+        from deploy_smolvla.src.download_ckpt import verify_checkpoint
+
+        verify_checkpoint(directory)
+        raise SystemExit(0)
     with (directory / "checkpoint.json").open(encoding="utf-8") as file:
         metadata = json.load(file)
     if not isinstance(metadata, dict):
@@ -95,21 +111,42 @@ try:
     with np.load(params_path, allow_pickle=False) as archive:
         if not archive.files:
             raise ValueError("params archive is empty")
-except (OSError, ValueError, TypeError, EOFError):
+except (ImportError, OSError, ValueError, TypeError, EOFError, KeyError):
     raise SystemExit(1)
 PY
 }
 
 frs_complete() {
-    checkpoint_complete "${FRS_DIR}"
+    checkpoint_complete "${FRS_DIR}" "${FRS_REPO}" "${FRS_REVISION}" frs
 }
 
 encoder_complete() {
-    checkpoint_complete "${ENCODER_DIR}"
+    checkpoint_complete "${ENCODER_DIR}" "${ENCODER_REPO}" "${ENCODER_REVISION}" encoder
+}
+
+write_provenance() {
+    "${PYTHON_CMD[@]}" - "$1" "$2" "$3" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+directory = Path(sys.argv[1])
+directory.mkdir(parents=True, exist_ok=True)
+destination = directory / ".download-provenance.json"
+temporary = directory / ".download-provenance.json.tmp"
+temporary.write_text(
+    json.dumps(
+        {"format_version": 1, "repo_id": sys.argv[2], "revision": sys.argv[3]},
+        sort_keys=True,
+    ) + "\n",
+    encoding="utf-8",
+)
+temporary.replace(destination)
+PY
 }
 
 if base_complete; then
-    echo "base checkpoint is complete: ${BASE_DIR}"
+    echo "skip: base checkpoint: ${BASE_DIR}"
 else
     case "${BASE_DIR}" in
         "${CHECKPOINT_ROOT}/model/"*) ;;
@@ -118,10 +155,13 @@ else
             exit 1
             ;;
     esac
-    "${UV_BIN}" run --no-sync python "${ROOT}/tools/merge_smolvla_peft_to_jax.py" \
+    if ! "${UV_BIN}" run --no-sync python "${ROOT}/tools/merge_smolvla_peft_to_jax.py" \
         --adapter "${ADAPTER_REPO}" --adapter-revision "${ADAPTER_REVISION}" \
         --base "${BASE_REPO}" --base-revision "${BASE_REVISION}" \
-        --output "${BASE_DIR}" --allow-download --overwrite
+        --output "${BASE_DIR}" --allow-download --overwrite; then
+        echo "base checkpoint merge failed: ${BASE_DIR}" >&2
+        exit 1
+    fi
     base_complete || {
         echo "base checkpoint failed validation after merge: ${BASE_DIR}" >&2
         exit 1
@@ -129,11 +169,15 @@ else
 fi
 
 if frs_complete; then
-    echo "FRS checkpoint is complete: ${FRS_DIR}"
+    echo "skip: FRS checkpoint: ${FRS_DIR}"
 else
-    "${UV_BIN}" run --no-sync hf download "${FRS_REPO}" \
+    if ! "${UV_BIN}" run --no-sync hf download "${FRS_REPO}" \
         --revision "${FRS_REVISION}" --include checkpoint.json 'params-*.npz' \
-        --local-dir "${FRS_DIR}"
+        --local-dir "${FRS_DIR}"; then
+        echo "FRS checkpoint download failed: ${FRS_DIR}" >&2
+        exit 1
+    fi
+    write_provenance "${FRS_DIR}" "${FRS_REPO}" "${FRS_REVISION}"
     frs_complete || {
         echo "FRS checkpoint failed validation after download: ${FRS_DIR}" >&2
         exit 1
@@ -141,13 +185,22 @@ else
 fi
 
 if encoder_complete; then
-    echo "encoder checkpoint is complete: ${ENCODER_DIR}"
+    echo "skip: tactile encoder checkpoint: ${ENCODER_DIR}"
 else
-    "${UV_BIN}" run --no-sync python "${ROOT}/deploy_smolvla/src/download_ckpt.py" \
+    if ! "${UV_BIN}" run --no-sync python "${ROOT}/deploy_smolvla/src/download_ckpt.py" \
         --minimal --repo-id "${ENCODER_REPO}" --revision "${ENCODER_REVISION}" \
-        --output-dir "${ENCODER_DIR}"
+        --output-dir "${ENCODER_DIR}"; then
+        echo "tactile encoder download failed: ${ENCODER_DIR}" >&2
+        exit 1
+    fi
+    write_provenance "${ENCODER_DIR}" "${ENCODER_REPO}" "${ENCODER_REVISION}"
     encoder_complete || {
         echo "encoder checkpoint failed validation after download: ${ENCODER_DIR}" >&2
         exit 1
     }
 fi
+
+echo "deployment checkpoints ready:"
+echo "  checkpoint: ${BASE_DIR}"
+echo "  frs.checkpoint: ${FRS_DIR}"
+echo "  frs.tactile_encoder_checkpoint: ${ENCODER_DIR}"
