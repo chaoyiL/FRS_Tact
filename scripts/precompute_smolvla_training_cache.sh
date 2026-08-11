@@ -87,6 +87,22 @@ else
     echo "[vtsmolvla-precompute] visual-only config: skip tactile cache"
 fi
 
+OFFLINE_ENABLED="$("${UV_BIN}" run --no-sync python - "${K8_CONFIG}" <<'PY'
+import pathlib
+import sys
+
+import yaml
+
+with pathlib.Path(sys.argv[1]).open(encoding="utf-8") as file:
+    config = yaml.safe_load(file) or {}
+print("1" if bool((config.get("offline_training_cache") or {}).get("enabled", False)) else "0")
+PY
+)"
+if [[ "${OFFLINE_ENABLED}" != "1" ]]; then
+    echo "[vtsmolvla-precompute] offline training cache disabled: skip vision cache"
+    exit 0
+fi
+
 dataset_count=6
 gpu_count="${#GPU_IDS[@]}"
 

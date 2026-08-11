@@ -82,7 +82,7 @@ tactile_embedding_cache:
 
 # ---- 冻结视觉 token 的离线训练缓存 ----
 offline_training_cache:
-  enabled: true
+  enabled: false
   root: /DATA/ljl/substage/smolvla_training_cache
   dtype: bfloat16
   precompute_batch_size: 64
@@ -92,7 +92,7 @@ offline_training_cache:
 
 # ---- 输出与训练超参 ----
 output: /DATA/ljl/substage/outputs/smolvla_visual_k0
-steps: 80000
+steps: 20000
 batch_size: 192
 # 8 核 RunPod：每个 worker 内还会并行解码六路视频，避免开过多进程。
 num_workers: 2
@@ -102,7 +102,7 @@ video_backend: torchcodec
 # worker 间传 uint8，避免六路图像提前膨胀为 4 倍大小的 float32。
 return_uint8: true
 log_freq: 10
-save_freq: 10000
+save_freq: 5000
 eval_freq: 500
 seed: 42
 resume: null
@@ -112,7 +112,7 @@ allow_tokenizer_download: true
 # ---- 图像增强 ----
 # 仅对 model.image_keys 中的 RGB 图像生效，触觉图像保持原始分布。
 image_transforms:
-  enable: false
+  enable: true
   # 与 VB3 训练一致：每张 RGB 图像按 weight 无放回抽取 2 种增强。
   max_num_transforms: 2
   random_order: false
