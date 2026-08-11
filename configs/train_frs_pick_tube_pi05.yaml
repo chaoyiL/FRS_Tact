@@ -1,0 +1,186 @@
+# 四个 pick_tube 数据集上的触觉 Flow Steering 训练配置 —— pi0.5 base 版本。
+# pi0.5 模型代码（vendor 自 openpi）在 src/lerobot/policies/pi05_jax/，和主环境同一个
+# venv、同一份依赖，不需要单独环境。datasets / tactile encoder / frs_training 和 SmolVLA 版
+# 原样保留，因为 tactile_flow_steering 训练本身完全不 import base 模型代码，只读
+# action_cache + tactile_embedding_cache（见 ../pi05_frs_plan.md）。
+#
+# 一键跑完整管线（推荐，会在 tmux 后台跑，并在开跑前校验 checkpoint/encoder/数据集都就位）：
+#   bash scripts/start_frs_pi05_train.sh configs/train_frs_pick_tube_pi05.yaml
+#
+# 或者手动分步（和上面那个脚本做的事一样）：
+#   1) uv run --no-sync python tools/precompute_tactile_embeddings.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml
+#   2) uv run --no-sync python tools/prepare_frs_pi05_cache.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml
+#   3) uv run --no-sync python tools/train_frs.py \
+#        --config configs/train_frs_pick_tube_pi05.yaml
+# 第 1、3 步和 SmolVLA 版共用同一个工具（不依赖 base 模型）；只有第 2 步是 pi0.5 专用的。
+# 注意 SmolVLA 版还有一个"合并 PEFT adapter"的前置步骤，pi0.5 不需要——官方 checkpoint 直接用。
+#
+# 整条 pi0.5 链路（prepare_pi05.py / Pi05EvalModel / pi05_jax 全家桶）都还没在真机上跑过，
+# 见 ../pi05_frs_plan.md 的验证清单。
+
+# 官方 pi0.5 base checkpoint（通过 src/lerobot/policies/pi05_jax/download.py 下载/缓存，
+# 和 openpi 自己用的下载器逻辑一致，缓存目录也兼容）。传 checkpoint 根目录（不要带 /params），
+# src/lerobot/policies/pi05_jax/checkpoint.py:load_pi0 会自己拼 "params" 子目录。
+checkpoint: gs://openpi-assets/checkpoints/pi05_base
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_01
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_01
+    action_key: actions
+    rename_map: &camera_rename
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+  - repo_id: KaiyueChen/pick_tube_02
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_02
+    action_key: actions
+    rename_map: *camera_rename
+
+  - repo_id: KaiyueChen/pick_tube_03
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_03
+    action_key: actions
+    rename_map: *camera_rename
+
+  - repo_id: KaiyueChen/pick_tube_04
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_04
+    action_key: actions
+    rename_map: *camera_rename
+
+# pi0.5 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
+# 落盘格式和 SmolVLA 版完全一样（见 utils/cache.py），tools/train_frs.py 不用改。
+action_cache:
+  root: /workspace/frs_pick_tube_pi05/action_cache
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: fireflow
+  batch_size: 16
+  flush_every: 8
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+# 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
+# 和 base 模型无关，原样复用 SmolVLA 版本的配置。
+tactile_embedding_cache:
+  enabled: true
+  root: /workspace/tactile_embeddings
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+# 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_05
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+
+  # ---- pi0.5 专用（tools/prepare_frs_pi05_cache.py 读这些）----
+  # pi0.5 固定要 3 路图：base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb。
+  # 查了 https://huggingface.co/datasets/KaiyueChen/pick_tube_01 的 meta/info.json 和
+  # meta/tasks.jsonl（四个 pick_tube_0X 数据集结构一致）：
+  #   - robot_type: "bimanual"，只有 camera0/camera1 两路 RGB，没有第三路/外部机位；
+  #   - task 原文是 "Use the left hand to pick up the green tube, and then use the right
+  #     hand to pick up the blue tube."——双臂操作；
+  #   - 触觉 key 是 tactile_left_0/right_0（一个夹爪的两个指垫）+
+  #     tactile_left_1/right_1（另一个夹爪的两个指垫），"0"/"1" 和 camera0/camera1 的编号
+  #     对得上，说明 camera0/camera1 大概率是两条手臂各自的腕部相机，不是"一个主视角 + 一个
+  #     腕部"的 base+wrist 组合。
+  # 所以这里没有 base_0_rgb 对应的相机，两路都填腕部；空出来的 base_0_rgb 会自动补成
+  # 全黑 + mask=False（等价于 SmolVLA 版 empty_cameras 的处理方式）。
+  # 左右手对应关系已确认：camera0 = 左手。上面 rename_map 把 camera0 -> camera1、
+  # camera1 -> camera2（数字整体加一），所以下面 camera_map 里的 key 是 rename 之后的
+  # 名字：observation.images.camera1（= 原始 camera0）对应左手，camera2（= 原始 camera1）
+  # 对应右手。
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
+  # pi0.5 的动作维度固定用 32（pi05_droid_finetune 等官方配置的惯例，见 pi05_frs_plan.md），
+  # 不是这几个数据集自己的 20 维——真实维度会在 normalize/pad 时截断/补零。
+  action_dim: 32
+  # TODO: 官方 pi05_base checkpoint 实际的 action_horizon 需要确认（不同 finetune 配置从
+  # 10 到 50 都有），这里先按 pi0.5 默认值占位。
+  action_horizon: 50
+
+# pi0.5 的归一化统计量：按你的要求，直接借用 pi05_base 官方自带的统计量，不单独给
+# pick_tube 算一份。
+#
+# pi05_base 的 assets/ 目录（gs://openpi-assets/checkpoints/pi05_base/assets/）按 asset_id
+# 分开存，实际列出来是：arx / arx_mobile / droid / fibocom_mobile / franka / trossen /
+# trossen_mobile / ur5e_dual。这里选 trossen——pick_tube 是双臂（bimanual）、"左手/右手"
+# 任务描述，trossen 是 Physical Intelligence 自己最常用的双臂平台（ALOHA 用的就是 Trossen
+# 的机械臂），比 droid/franka 这种单臂平台更接近；ur5e_dual 也是双臂，两者选一个的话没有
+# 更硬的证据，trossen 数据量通常更大。
+#
+# 维度对不上：trossen 的 state/actions 都是 14 维，pick_tube 是 20 维。不是精确匹配（毕竟不是
+# pick_tube 自己的机器人），多出来的 6 维会被 Pi05EvalModel 自动 pad 成"不做归一化"
+# （mean=0/std=1，跑的时候会打印一条 WARNING）——这几维基本等于直接用原始数值，pi0.5 把 state
+# 编码进 prompt 时如果这几维不在 [-1,1] 范围内，会被 digitize 截断到边界，不是崩溃，但也不是
+# 严谨的归一化。先用这个把链路跑通；如果之后要认真训练，应该换成用 pick_tube 自己的数据算一份
+# 真实统计量（可以参考 openpi 的 scripts/compute_norm_stats.py，本仓库没有 vendor 这个脚本）。
+norm_stats:
+  dir: gs://openpi-assets/checkpoints/pi05_base/assets
+  asset_id: trossen
+  use_quantile_norm: true
+  use_quantile_norm: true
+
+frs_training:
+  output: /workspace/frs_pick_tube_pi05/run_gated_01
+  # tactile_window = action_horizon // tactile_window_divisor（必须整除，见
+  # tactile_flow_steering/utils/data.py:resolve_tactile_window），action_horizon 取自
+  # action_cache manifest，也就是上面 model.action_horizon = 50。
+  #
+  # 注意这里和 SmolVLA 版不是同一个量级：SmolVLA 那个 checkpoint 的 chunk_size=10，
+  # divisor=1 → tactile_window=10，配 history_stride=3 在 30Hz 下回看约 1 秒。
+  # pi0.5 的 action_horizon 是 50，如果照抄 divisor=1 就变成 tactile_window=50 →
+  # 回看 50*3/30 = 5 秒，而且 FRS transformer 的 token 数从 10 涨到 50（不会报错，
+  # 但历史长度和计算量都是 5 倍，对"实时反应式转向"来说 5 秒的历史太长了）。
+  # 所以这里用 divisor=5：50/5 = 10 个 token，和 SmolVLA 版的 1 秒历史对齐。
+  # 想改回长历史或换 action_horizon 时，记得这两个值要一起算。
+  tactile_window_divisor: 5
+  history_stride: 3
+
+  loss_mode: gated
+  gate_tau: 0.5
+  gate_temperature: 0.1
+  gate_lambda: 1.0
+  aux_decode_weight: 1.0
+  aux_decode_steps: 10
+
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+
+  batch_size: 128
+  epochs: 100
+  validation_steps: 10
+  eval_every: 5
+  seed: 42
+  write_plots: true
+  resume: false
+  resume_from: null

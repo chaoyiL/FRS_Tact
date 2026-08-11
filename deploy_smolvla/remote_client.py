@@ -23,6 +23,7 @@ from lerobot.policies.smolvla_jax import JaxSmolVLAPolicy
 from .bridge_client import RobotBridgeClient
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "configs" / "deploy_smolvla_jax.yaml"
+SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
 
 
 class ObservationSaver:
@@ -172,8 +173,8 @@ def load_config(path: Path) -> dict[str, Any]:
     ):
         _required(control, key, "control")
 
-    if observation["data_type"] != "vision":
-        raise ValueError("The current SmolVLA deployment supports data_type='vision' only")
+    if observation["data_type"] not in SUPPORTED_DATA_TYPES:
+        raise ValueError("observation.data_type must be 'vision' or 'vitac'")
     if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
         raise ValueError("The current checkpoint contract requires bimanual state mode")
     if int(control["action_horizon"]) <= 0:
@@ -234,10 +235,31 @@ def _parse_rename_map(config: Mapping[str, Any]) -> dict[str, str] | None:
     return {str(key): str(value) for key, value in rename_map.items()}
 
 
+def _validate_observation_mode(data_type: str, *, use_tactile_encoder: bool) -> None:
+    expected = "vitac" if use_tactile_encoder else "vision"
+    if data_type != expected:
+        raise ValueError(
+            f"Checkpoint requires observation.data_type={expected!r}, got {data_type!r}"
+        )
+
+
 def _robot_image_keys(policy: JaxSmolVLAPolicy, rename_map: Mapping[str, str] | None) -> tuple[str, ...]:
     """Map checkpoint image keys back to keys expected on the robot observation dict."""
     reverse = {value: key for key, value in (rename_map or {}).items()}
-    return tuple(reverse.get(key, key) for key in policy.config.image_keys)
+    model_keys = list(policy.config.image_keys)
+    if policy.config.use_tactile_encoder:
+        model_keys.extend(policy.config.tactile_keys)
+    return tuple(reverse.get(key, key) for key in model_keys)
+
+
+def _robot_tactile_keys(
+    policy: JaxSmolVLAPolicy,
+    rename_map: Mapping[str, str] | None,
+) -> tuple[str, ...]:
+    if not policy.config.use_tactile_encoder:
+        return ()
+    reverse = {value: key for key, value in (rename_map or {}).items()}
+    return tuple(reverse.get(key, key) for key in policy.config.tactile_keys)
 
 
 def _validate_observation(
@@ -246,11 +268,17 @@ def _validate_observation(
     state_dim: int,
     image_keys: Sequence[str],
     empty_cameras: int,
+    required_image_keys: Sequence[str] = (),
 ) -> None:
     if "observation.state" not in observation:
         raise ValueError("Robot observation is missing keys: ['observation.state']")
+    missing_required = [key for key in required_image_keys if key not in observation]
+    if missing_required:
+        raise ValueError(f"Robot observation is missing required tactile keys: {missing_required}")
+    required = set(required_image_keys)
+    optional_image_keys = [key for key in image_keys if key not in required]
     present = [key for key in image_keys if key in observation]
-    missing = [key for key in image_keys if key not in observation]
+    missing = [key for key in optional_image_keys if key not in observation]
     if not present:
         raise ValueError(f"Robot observation is missing all image keys: {list(image_keys)}")
     if len(missing) > max(empty_cameras, 0):
@@ -275,12 +303,14 @@ def _prepare_observation(
     state_dim: int,
     image_keys: Sequence[str],
     empty_cameras: int,
+    required_image_keys: Sequence[str] = (),
 ) -> dict[str, Any]:
     _validate_observation(
         observation,
         state_dim=state_dim,
         image_keys=image_keys,
         empty_cameras=empty_cameras,
+        required_image_keys=required_image_keys,
     )
     prepared = {
         key: np.asarray(observation[key]).copy()
@@ -365,6 +395,10 @@ def run(
         local_files_only=not allow_download,
     )
     policy.reset()
+    _validate_observation_mode(
+        str(observation_config["data_type"]),
+        use_tactile_encoder=bool(policy.config.use_tactile_encoder),
+    )
 
     configured_horizon = int(control["action_horizon"])
     if policy.config.chunk_size != configured_horizon:
@@ -378,11 +412,13 @@ def run(
         raise ValueError("Checkpoint does not declare any visual observation keys")
 
     robot_image_keys = _robot_image_keys(policy, rename_map)
+    robot_tactile_keys = _robot_tactile_keys(policy, rename_map)
     state_dim = int(policy.config.state_dim)
     empty_cameras = int(policy.config.empty_cameras)
     print(
         f"[client] Contract: state_dim={state_dim} action_dim={policy.config.action_dim} "
-        f"images={list(robot_image_keys)} empty_cameras={empty_cameras}"
+        f"images={list(robot_image_keys)} tactile={list(robot_tactile_keys)} "
+        f"empty_cameras={empty_cameras}"
     )
 
     steps_per_inference = int(control["steps_per_inference"])
@@ -449,6 +485,7 @@ def run(
             state_dim=state_dim,
             image_keys=robot_image_keys,
             empty_cameras=empty_cameras,
+            required_image_keys=robot_tactile_keys,
         )
         for warmup_index in range(warmup_runs):
             start = time.perf_counter()
@@ -481,6 +518,7 @@ def run(
                 state_dim=state_dim,
                 image_keys=robot_image_keys,
                 empty_cameras=empty_cameras,
+                required_image_keys=robot_tactile_keys,
             )
             start = time.perf_counter()
             action, action_norm = _predict_chunk(

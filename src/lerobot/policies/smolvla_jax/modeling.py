@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import jax
 import jax.numpy as jnp
+from flax import traverse_util
+from tactile_encoder.utils.resnet import encode_resnet18
 
 from .configuration import JaxSmolVLAConfig
 from .functional import (
@@ -24,6 +26,16 @@ from .rtc import rtc_guided_velocity
 Array = jax.Array
 type Params = Mapping[str, Array]
 type KVCache = tuple[tuple[Array, Array], ...]
+
+_TACTILE_ENCODER_PREFIX = "model.tactile_encoder."
+
+
+def normalize_tactile_embeddings(embeddings: Array, eps: float = 1e-6) -> Array:
+    """Normalize each frozen ResNet embedding to unit RMS before projection."""
+
+    embeddings = jnp.asarray(embeddings, dtype=jnp.float32)
+    inverse_rms = jax.lax.rsqrt(jnp.mean(jnp.square(embeddings), axis=-1, keepdims=True) + eps)
+    return embeddings * inverse_rms
 
 
 @dataclass(frozen=True)
@@ -147,6 +159,73 @@ class JaxSmolVLA:
         embedding = self._p(params, "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight")
         return embedding[tokens]
 
+    def _tactile_encoder_variables(self, params: Params) -> dict:
+        flat = {
+            tuple(name.removeprefix(_TACTILE_ENCODER_PREFIX).split("/")): value
+            for name, value in params.items()
+            if name.startswith(_TACTILE_ENCODER_PREFIX)
+        }
+        if not flat:
+            raise KeyError("Missing tactile encoder parameters; expected model.tactile_encoder.*")
+        return traverse_util.unflatten_dict(flat)
+
+    def embed_tactile(
+        self,
+        params: Params,
+        tactile_images: Array | None = None,
+        *,
+        tactile_embeddings: Array | None = None,
+    ) -> Array:
+        """Project live images or cached ResNet embeddings into prefix tokens."""
+
+        if not self.config.use_tactile_encoder:
+            raise ValueError("embed_tactile called while use_tactile_encoder=False")
+        if (tactile_images is None) == (tactile_embeddings is None):
+            raise ValueError("provide exactly one of tactile_images or tactile_embeddings")
+        if tactile_embeddings is None:
+            assert tactile_images is not None
+            if tactile_images.ndim != 5:
+                raise ValueError(
+                    f"tactile_images must be [B,N,H,W,C], got {tactile_images.shape}"
+                )
+            batch, token_count = tactile_images.shape[:2]
+            flat_images = tactile_images.reshape(
+                (batch * token_count,) + tactile_images.shape[2:]
+            )
+            tactile_tokens, _ = encode_resnet18(
+                self._tactile_encoder_variables(params),
+                jnp.asarray(flat_images, dtype=jnp.float32),
+                train=False,
+                embedding_dim=self.config.tactile_embedding_dim,
+            )
+            if self.config.freeze_tactile_encoder:
+                tactile_tokens = jax.lax.stop_gradient(tactile_tokens)
+            tactile_tokens = tactile_tokens.reshape(
+                batch,
+                token_count,
+                self.config.tactile_embedding_dim,
+            )
+        else:
+            tactile_tokens = jnp.asarray(tactile_embeddings, dtype=jnp.float32)
+            if tactile_tokens.ndim != 3:
+                raise ValueError(
+                    "tactile_embeddings must be [B,N,D], got "
+                    f"{tactile_tokens.shape}"
+                )
+            batch, token_count, embedding_dim = tactile_tokens.shape
+            if embedding_dim != self.config.tactile_embedding_dim:
+                raise ValueError(
+                    f"Expected tactile embedding dim {self.config.tactile_embedding_dim}, "
+                    f"got {embedding_dim}"
+                )
+        if token_count != self.config.tactile_num_tokens:
+            raise ValueError(
+                f"Expected {self.config.tactile_num_tokens} tactile tokens, got {token_count}"
+            )
+        tactile_tokens = normalize_tactile_embeddings(tactile_tokens)
+        tactile_tokens = self._linear(params, "model.tactile_proj", tactile_tokens, bias=True)
+        return tactile_tokens
+
     def embed_prefix(
         self,
         params: Params,
@@ -156,6 +235,9 @@ class JaxSmolVLA:
         language_masks: Array,
         state: Array,
         state_mask: Array | None = None,
+        tactile_images: Array | None = None,
+        tactile_embeddings: Array | None = None,
+        tactile_masks: Array | None = None,
     ) -> tuple[Array, Array, Array]:
         if isinstance(images, jax.Array):
             if images.ndim != 5:
@@ -206,6 +288,24 @@ class JaxSmolVLA:
                 embeddings.append(end_embedding)
                 pad_masks.append(jnp.ones(end_embedding.shape[:2], dtype=jnp.bool_))
                 attention_segments.append(jnp.zeros(end_embedding.shape[1], dtype=jnp.bool_))
+
+        if self.config.use_tactile_encoder:
+            if tactile_masks is None:
+                raise ValueError("tactile_masks are required for VT-SmolVLA")
+            tactile_embedding = self.embed_tactile(
+                params,
+                tactile_images,
+                tactile_embeddings=tactile_embeddings,
+            )
+            tactile_masks = jnp.asarray(tactile_masks, dtype=jnp.bool_)
+            if tactile_masks.shape != tactile_embedding.shape[:2]:
+                raise ValueError(
+                    f"tactile_masks must have shape {tactile_embedding.shape[:2]}, "
+                    f"got {tactile_masks.shape}"
+                )
+            embeddings.append(tactile_embedding)
+            pad_masks.append(tactile_masks)
+            attention_segments.append(jnp.zeros(tactile_embedding.shape[1], dtype=jnp.bool_))
 
         language_embedding = self.embed_language(params, language_tokens)
         language_embedding = language_embedding * jnp.sqrt(
@@ -514,6 +614,9 @@ class JaxSmolVLA:
         noisy_actions: Array,
         timestep: Array,
         state_mask: Array | None = None,
+        tactile_images: Array | None = None,
+        tactile_embeddings: Array | None = None,
+        tactile_masks: Array | None = None,
     ) -> Array:
         prefix, prefix_pad, prefix_ar = self.embed_prefix(
             params,
@@ -523,6 +626,9 @@ class JaxSmolVLA:
             language_masks,
             state,
             state_mask=state_mask,
+            tactile_images=tactile_images,
+            tactile_embeddings=tactile_embeddings,
+            tactile_masks=tactile_masks,
         )
         suffix, suffix_pad, suffix_ar = self.embed_suffix(params, noisy_actions, timestep)
         pad_mask = jnp.concatenate((prefix_pad, suffix_pad), axis=1)
@@ -565,6 +671,9 @@ class JaxSmolVLA:
             x_t,
             time,
             state_mask=batch.get("state_mask"),
+            tactile_images=batch.get("tactile_images"),
+            tactile_embeddings=batch.get("tactile_embeddings"),
+            tactile_masks=batch.get("tactile_masks"),
         )
         losses = jnp.square(target - velocity)[..., : self.config.action_dim]
         action_is_pad = batch.get("action_is_pad")
@@ -589,6 +698,9 @@ class JaxSmolVLA:
         language_masks: Array,
         state: Array,
         state_mask: Array | None = None,
+        tactile_images: Array | None = None,
+        tactile_embeddings: Array | None = None,
+        tactile_masks: Array | None = None,
     ) -> PrefixContext:
         prefix, pad_mask, attention_ar = self.embed_prefix(
             params,
@@ -598,6 +710,9 @@ class JaxSmolVLA:
             language_masks,
             state,
             state_mask=state_mask,
+            tactile_images=tactile_images,
+            tactile_embeddings=tactile_embeddings,
+            tactile_masks=tactile_masks,
         )
         attention_mask = make_att_2d_masks(pad_mask, attention_ar)
         position_ids = jnp.cumsum(pad_mask, axis=1) - 1
@@ -652,6 +767,9 @@ class JaxSmolVLA:
         state: Array,
         rng: Array,
         *,
+        tactile_images: Array | None = None,
+        tactile_embeddings: Array | None = None,
+        tactile_masks: Array | None = None,
         noise: Array | None = None,
         num_steps: int | None = None,
         previous_chunk: Array | None = None,
@@ -666,7 +784,15 @@ class JaxSmolVLA:
                 dtype=jnp.float32,
             )
         context = self.build_prefix_context(
-            params, images, image_masks, language_tokens, language_masks, state
+            params,
+            images,
+            image_masks,
+            language_tokens,
+            language_masks,
+            state,
+            tactile_images=tactile_images,
+            tactile_embeddings=tactile_embeddings,
+            tactile_masks=tactile_masks,
         )
         steps = self.config.num_steps if num_steps is None else num_steps
         dt = -1.0 / steps

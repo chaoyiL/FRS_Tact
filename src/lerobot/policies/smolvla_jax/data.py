@@ -10,12 +10,23 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Dataset, WeightedRandomSampler, default_collate
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Subset, WeightedRandomSampler, default_collate
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata, aggregate_stats
+from lerobot.datasets.sample_utils import (
+    action_delta_timestamps,
+    lerobot_sample_to_observation,
+    resolve_action_key,
+)
+from lerobot.datasets.sample_utils import to_numpy as _to_numpy
 
 from .configuration import JaxSmolVLAConfig
 from .preprocessing import JaxSmolVLAPreprocessor
+from .tactile_cache import (
+    TACTILE_EMBEDDING_OBSERVATION_KEY,
+    TactileEmbeddingCache,
+    tactile_cache_dir,
+)
 
 Array = jax.Array
 CANONICAL_ACTION_KEY = "action"
@@ -32,27 +43,6 @@ class DatasetSource:
     action_key: str | None = None
     rename_map: Mapping[str, str] | None = None
     weight: float = 1.0
-
-
-def resolve_action_key(features: Mapping[str, Any], action_key: str | None = None) -> str:
-    """Resolve both current ``action`` and legacy/custom ``actions`` feature names."""
-
-    if action_key is not None:
-        if action_key not in features:
-            raise KeyError(f"action feature {action_key!r} is absent from the dataset")
-        return action_key
-    matches = [key for key in ("action", "actions") if key in features]
-    if len(matches) != 1:
-        raise ValueError(
-            "could not unambiguously find the dataset action feature; pass action_key explicitly"
-        )
-    return matches[0]
-
-
-def action_delta_timestamps(action_key: str, chunk_size: int, fps: int) -> dict[str, list[float]]:
-    if fps <= 0:
-        raise ValueError(f"dataset FPS must be positive, got {fps}")
-    return {action_key: [index / fps for index in range(chunk_size)]}
 
 
 def canonicalize_dataset_stats(
@@ -110,16 +100,6 @@ def _collate_lerobot_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
     return default_collate([{key: sample[key] for key in keep} for sample in samples])
 
 
-def _to_numpy(value: Any) -> np.ndarray:
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
-
-
-def lerobot_sample_to_observation(sample: Mapping[str, Any]) -> dict[str, np.ndarray]:
-    return {key: _to_numpy(value) for key, value in sample.items() if key.startswith("observation.")}
-
-
 def prepare_lerobot_batch(
     raw_batch: Mapping[str, Any],
     preprocessor: JaxSmolVLAPreprocessor,
@@ -143,7 +123,7 @@ def prepare_lerobot_batch(
 
 
 class _KeyMappedLeRobotDataset(Dataset):
-    """Normalize per-dataset camera/action keys before concatenation."""
+    """Normalize keys and apply RGB-only augmentation before concatenation."""
 
     def __init__(
         self,
@@ -151,10 +131,16 @@ class _KeyMappedLeRobotDataset(Dataset):
         *,
         action_key: str,
         rename_map: Mapping[str, str] | None,
+        image_transforms: Callable | None = None,
+        image_transform_keys: Sequence[str] = (),
+        tactile_embedding_cache: TactileEmbeddingCache | None = None,
     ):
         self.dataset = dataset
         self.action_key = action_key
         self.rename_map = dict(rename_map or {})
+        self.image_transforms = image_transforms
+        self.image_transform_keys = frozenset(image_transform_keys)
+        self.tactile_embedding_cache = tactile_embedding_cache
         self.padding_key = f"{action_key}_is_pad"
 
     def __len__(self) -> int:
@@ -172,6 +158,18 @@ class _KeyMappedLeRobotDataset(Dataset):
                 mapped[self.rename_map.get(key, key)] = value
             elif key == "task":
                 mapped["task"] = value
+        if self.image_transforms is not None:
+            for key in self.image_transform_keys:
+                if key in mapped:
+                    mapped[key] = self.image_transforms(mapped[key])
+        if self.tactile_embedding_cache is not None:
+            episode_index = int(_to_numpy(sample["episode_index"]).reshape(()).item())
+            frame_index = int(_to_numpy(sample["frame_index"]).reshape(()).item())
+            episode = self.dataset.meta.episodes[episode_index]
+            absolute_index = int(episode["dataset_from_index"]) + frame_index
+            mapped[TACTILE_EMBEDDING_OBSERVATION_KEY] = self.tactile_embedding_cache[
+                absolute_index
+            ]
         if CANONICAL_ACTION_KEY not in mapped:
             raise KeyError(f"sample is missing action feature {self.action_key!r}")
         return mapped
@@ -203,6 +201,19 @@ def resolve_source_visual_keys(
             f"against cameras={list(available_cameras)}"
         )
     return list(dict.fromkeys(resolved))
+
+
+def resolve_model_visual_keys(
+    config: JaxSmolVLAConfig,
+    *,
+    use_tactile_embedding_cache: bool = False,
+) -> tuple[str, ...]:
+    """All dataset image/video columns needed by the configured model."""
+
+    keys = list(config.image_keys)
+    if config.use_tactile_encoder and not use_tactile_embedding_cache:
+        keys.extend(config.tactile_keys)
+    return tuple(dict.fromkeys(keys))
 
 
 def parse_dataset_sources(cfg: Mapping[str, Any]) -> list[DatasetSource]:
@@ -299,6 +310,51 @@ def split_sources_train_val(
     return train_sources, val_sources
 
 
+def fixed_stratified_subset_indices(
+    dataset_lengths: Sequence[int],
+    *,
+    sample_count: int,
+    seed: int,
+) -> tuple[int, ...]:
+    """Choose one fixed random subset while retaining coverage across datasets."""
+
+    lengths = np.asarray(dataset_lengths, dtype=np.int64)
+    if lengths.ndim != 1 or lengths.size == 0 or np.any(lengths <= 0):
+        raise ValueError(f"dataset_lengths must contain positive values, got {list(dataset_lengths)}")
+    total_frames = int(lengths.sum())
+    if sample_count <= 0:
+        raise ValueError(f"sample_count must be positive, got {sample_count}")
+    target = min(int(sample_count), total_frames)
+    if target == total_frames:
+        return tuple(range(total_frames))
+
+    ideal = target * lengths.astype(np.float64) / total_frames
+    quotas = np.floor(ideal).astype(np.int64)
+    if target >= lengths.size:
+        quotas = np.maximum(quotas, 1)
+    quotas = np.minimum(quotas, lengths)
+
+    while int(quotas.sum()) < target:
+        candidates = np.flatnonzero(quotas < lengths)
+        index = int(candidates[np.argmax(ideal[candidates] - quotas[candidates])])
+        quotas[index] += 1
+    while int(quotas.sum()) > target:
+        minimum = 1 if target >= lengths.size else 0
+        candidates = np.flatnonzero(quotas > minimum)
+        index = int(candidates[np.argmax(quotas[candidates] - ideal[candidates])])
+        quotas[index] -= 1
+
+    rng = np.random.default_rng(seed)
+    selected: list[int] = []
+    offset = 0
+    for length, quota in zip(lengths.tolist(), quotas.tolist(), strict=True):
+        local = rng.choice(length, size=quota, replace=False)
+        selected.extend(offset + int(index) for index in local)
+        offset += length
+    rng.shuffle(selected)
+    return tuple(selected)
+
+
 class LeRobotJaxDataLoader:
     """JAX batch stream backed by one or more LeRobot datasets."""
 
@@ -312,6 +368,7 @@ class LeRobotJaxDataLoader:
         num_workers: int = 4,
         prefetch_factor: int = 2,
         video_backend: str | None = None,
+        return_uint8: bool = True,
         seed: int = 0,
         local_files_only: bool = True,
         shuffle: bool = True,
@@ -319,6 +376,10 @@ class LeRobotJaxDataLoader:
         drop_last: bool | None = None,
         preprocessor: JaxSmolVLAPreprocessor | None = None,
         image_transforms: Callable | None = None,
+        tactile_embedding_cache_root: str | Path | None = None,
+        fixed_subset_size: int | None = None,
+        fixed_subset_seed: int = 0,
+        subset_indices: Sequence[int] | None = None,
     ):
         if batch_size <= 0:
             raise ValueError(f"batch size must be positive, got {batch_size}")
@@ -333,6 +394,13 @@ class LeRobotJaxDataLoader:
         self.infinite = bool(infinite)
         self.shuffle = bool(shuffle)
         self.image_transforms = image_transforms
+        self.tactile_embedding_cache_root = (
+            None
+            if tactile_embedding_cache_root is None
+            else Path(tactile_embedding_cache_root).expanduser()
+        )
+        if self.tactile_embedding_cache_root is not None and not config.use_tactile_encoder:
+            raise ValueError("tactile embedding cache requires use_tactile_encoder=True")
 
         mapped_datasets: list[_KeyMappedLeRobotDataset] = []
         stats_list: list[dict[str, dict[str, Any]]] = []
@@ -352,8 +420,37 @@ class LeRobotJaxDataLoader:
                 metadata.fps,
             )
             source_rename = dict(source.rename_map or {})
+            source_tactile_keys: tuple[str, ...] = ()
+            tactile_embedding_cache = None
+            if config.use_tactile_encoder:
+                source_tactile_keys = tuple(
+                    resolve_source_visual_keys(
+                        config.tactile_keys,
+                        source_rename,
+                        metadata.camera_keys,
+                    )
+                )
+            if self.tactile_embedding_cache_root is not None:
+                cache_dir = tactile_cache_dir(
+                    self.tactile_embedding_cache_root,
+                    source.repo_id,
+                )
+                tactile_embedding_cache = TactileEmbeddingCache(
+                    cache_dir,
+                    repo_id=source.repo_id,
+                    revision=metadata.revision,
+                    total_frames=metadata.total_frames,
+                    tactile_keys=config.tactile_keys,
+                    source_tactile_keys=source_tactile_keys,
+                    embedding_dim=config.tactile_embedding_dim,
+                    image_size=config.tactile_image_size,
+                    encoder_path=config.tactile_encoder_path,
+                )
             visual_keys = resolve_source_visual_keys(
-                config.image_keys,
+                resolve_model_visual_keys(
+                    config,
+                    use_tactile_embedding_cache=tactile_embedding_cache is not None,
+                ),
                 source_rename,
                 metadata.camera_keys,
             )
@@ -363,8 +460,12 @@ class LeRobotJaxDataLoader:
                 revision=metadata.revision,
                 episodes=list(source.episodes) if source.episodes is not None else None,
                 delta_timestamps=delta_timestamps,
-                image_transforms=image_transforms,
+                # Apply transforms after key mapping so tactile images can stay untouched.
+                image_transforms=None,
                 video_backend=video_backend,
+                # Keep decoded frames compact across worker boundaries. The RGB and
+                # tactile preprocessors perform the same uint8 -> float conversion.
+                return_uint8=return_uint8,
                 download_videos=True,
                 visual_keys=visual_keys,
             )
@@ -382,6 +483,9 @@ class LeRobotJaxDataLoader:
                 dataset,
                 action_key=resolved_action_key,
                 rename_map=source_rename,
+                image_transforms=image_transforms,
+                image_transform_keys=config.image_keys,
+                tactile_embedding_cache=tactile_embedding_cache,
             )
             mapped_datasets.append(mapped)
             sample_weights.extend([float(source.weight)] * len(mapped))
@@ -400,14 +504,47 @@ class LeRobotJaxDataLoader:
                     "action_key": resolved_action_key,
                     "weight": source.weight,
                     "visual_keys": list(visual_keys),
+                    "tactile_embedding_cache": (
+                        None
+                        if tactile_embedding_cache is None
+                        else str(tactile_embedding_cache.cache_dir)
+                    ),
                 }
             )
 
-        self.dataset: Dataset
+        full_dataset: Dataset
         if len(mapped_datasets) == 1:
-            self.dataset = mapped_datasets[0]
+            full_dataset = mapped_datasets[0]
         else:
-            self.dataset = ConcatDataset(mapped_datasets)
+            full_dataset = ConcatDataset(mapped_datasets)
+        self.full_dataset_size = len(full_dataset)
+        if fixed_subset_size is not None and subset_indices is not None:
+            raise ValueError("pass either fixed_subset_size or subset_indices, not both")
+        if (fixed_subset_size is not None or subset_indices is not None) and self.shuffle:
+            raise ValueError("fixed validation subsets require shuffle=False")
+
+        if subset_indices is not None:
+            selected = tuple(int(index) for index in subset_indices)
+            if not selected:
+                raise ValueError("subset_indices cannot be empty")
+            if len(set(selected)) != len(selected):
+                raise ValueError("subset_indices must be unique")
+            if min(selected) < 0 or max(selected) >= self.full_dataset_size:
+                raise ValueError(
+                    f"subset index outside [0, {self.full_dataset_size}): "
+                    f"min={min(selected)} max={max(selected)}"
+                )
+        elif fixed_subset_size is not None:
+            selected = fixed_stratified_subset_indices(
+                [len(dataset) for dataset in mapped_datasets],
+                sample_count=int(fixed_subset_size),
+                seed=int(fixed_subset_seed),
+            )
+        else:
+            selected = ()
+
+        self.subset_indices = selected
+        self.dataset = Subset(full_dataset, list(selected)) if selected else full_dataset
         effective_batch_size = min(batch_size, len(self.dataset))
         if effective_batch_size <= 0:
             raise ValueError("dataset is empty")
@@ -492,6 +629,19 @@ class LeRobotJaxDataLoader:
             for key, feature in features.items()
             if feature.get("dtype") in ("image", "video")
         }
+        missing_images = sorted(set(config.image_keys) - dataset_cameras)
+        if missing_images:
+            raise ValueError(
+                f"dataset {repo_id!r}: missing image keys after renaming: {missing_images}; "
+                f"dataset={sorted(dataset_cameras)}"
+            )
+        if config.use_tactile_encoder:
+            missing_tactile = sorted(set(config.tactile_keys) - dataset_cameras)
+            if missing_tactile:
+                raise ValueError(
+                    f"dataset {repo_id!r}: missing tactile keys after renaming: {missing_tactile}; "
+                    f"dataset={sorted(dataset_cameras)}"
+                )
         if not dataset_cameras.intersection(config.image_keys):
             raise ValueError(
                 f"dataset {repo_id!r}: none of the cameras match checkpoint image features "

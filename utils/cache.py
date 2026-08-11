@@ -93,6 +93,92 @@ def split_episodes(
     return train, val
 
 
+def _as_scalar(value: Any) -> Any:
+    array = np.asarray(value)
+    if array.shape == ():
+        return array.item()
+    if array.size == 1:
+        return array.reshape(()).item()
+    return array
+
+
+def _episode_bounds(metadata: Any, episode_index: int) -> tuple[int, int]:
+    if episode_index < 0 or episode_index >= metadata.total_episodes:
+        raise ValueError(
+            f"Episode {episode_index} is out of range for this dataset. "
+            f"Available episode indices are 0..{metadata.total_episodes - 1}."
+        )
+    episode = metadata.episodes[episode_index]
+    start = int(_as_scalar(episode["dataset_from_index"]))
+    end = int(_as_scalar(episode["dataset_to_index"]))
+    if end <= start:
+        raise ValueError(f"Episode {episode_index} has an empty frame range [{start}, {end}).")
+    return start, end
+
+
+def _indices_for_episode(metadata: Any, episode_index: int) -> tuple[int, ...]:
+    start, end = _episode_bounds(metadata, episode_index)
+    return tuple(range(start, end))
+
+
+def build_records(
+    metadata: Any,
+    *,
+    val_fraction: float,
+    split_seed: int,
+    frame_stride: int,
+    max_episodes: int | None,
+    max_samples: int | None,
+    action_horizon: int,
+    drop_tail_action_chunks: int = 1,
+) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
+    """Select an episode-disjoint train/val sample set from any LeRobot-metadata-like object.
+
+    ``metadata`` only needs ``total_episodes`` and ``episodes[i]["dataset_from_index"/"dataset_to_index"]``,
+    so this works with this repo's ``LeRobotDatasetMetadata`` as well as an independently installed
+    upstream ``lerobot`` package's metadata class (e.g. from an openpi environment), keeping every
+    action-cache producer (regardless of base model / Python environment) on identical record selection.
+    """
+    if frame_stride <= 0:
+        raise ValueError(f"frame_stride must be positive, got {frame_stride}.")
+    episode_count = int(metadata.total_episodes)
+    if episode_count < 2:
+        raise ValueError("At least two episodes are required for an episode-disjoint train/validation split.")
+    episodes = list(range(episode_count))
+    if max_episodes is not None:
+        if max_episodes < 2:
+            raise ValueError("max_episodes must be at least 2 for an episode-disjoint split.")
+        episodes = episodes[:max_episodes]
+    train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
+    val_set = set(val_episodes)
+
+    records: list[SampleRecord] = []
+    for episode_index in episodes:
+        split = "val" if episode_index in val_set else "train"
+        trimmed = trim_episode_tail(
+            _indices_for_episode(metadata, episode_index),
+            drop_tail_action_chunks=drop_tail_action_chunks,
+            action_horizon=action_horizon,
+        )
+        dataset_indices = trimmed[::frame_stride]
+        records.extend(SampleRecord(int(index), episode_index, split) for index in dataset_indices)
+    records = limit_records(records, max_samples=max_samples, seed=split_seed)
+    if not records:
+        raise ValueError(
+            "Dataset selection produced no samples. "
+            "Try lowering --drop-tail-action-chunks or using longer episodes."
+        )
+    present = {record.episode_index for record in records}
+    train_episodes = tuple(episode for episode in train_episodes if episode in present)
+    val_episodes = tuple(episode for episode in val_episodes if episode in present)
+    if not train_episodes or not val_episodes:
+        raise ValueError(
+            "After dropping episode tails, train or val split is empty. "
+            "Try lowering --drop-tail-action-chunks."
+        )
+    return records, train_episodes, val_episodes
+
+
 def limit_records(
     records: Sequence[SampleRecord], *, max_samples: int | None, seed: int
 ) -> list[SampleRecord]:
@@ -455,3 +541,143 @@ class CachedPairs:
                 np.asarray(self.arrays["target"][batch_indices], dtype=np.float32),
                 np.asarray(self.arrays["gt_action"][batch_indices], dtype=np.float32),
             )
+
+
+class MultiCachedPairs:
+    """Read several independent action caches as one source-aware sample set.
+
+    Global cache indices are only an in-memory training convention.  Each
+    underlying cache keeps its original dataset/episode indices, so datasets
+    whose local frame numbers overlap cannot corrupt each other.
+    """
+
+    def __init__(
+        self,
+        cache_dirs: Sequence[str | pathlib.Path],
+        *,
+        source_names: Sequence[str] | None = None,
+    ):
+        if not cache_dirs:
+            raise ValueError("MultiCachedPairs requires at least one cache directory.")
+        self.sources = tuple(CachedPairs(directory) for directory in cache_dirs)
+        if source_names is None:
+            source_names = tuple(source.cache_dir.name for source in self.sources)
+        if len(source_names) != len(self.sources):
+            raise ValueError(
+                f"source_names/cache_dirs length mismatch: {len(source_names)} != {len(self.sources)}"
+            )
+        self.source_names = tuple(str(name) for name in source_names)
+        if len(set(self.source_names)) != len(self.source_names):
+            raise ValueError(f"source_names must be unique, got {self.source_names}")
+
+        action_horizon = int(self.sources[0].manifest["action_horizon"])
+        action_dim = int(self.sources[0].manifest["action_dim"])
+        for name, source in zip(self.source_names, self.sources, strict=True):
+            shape = (
+                int(source.manifest["action_horizon"]),
+                int(source.manifest["action_dim"]),
+            )
+            if shape != (action_horizon, action_dim):
+                raise ValueError(
+                    f"action shape mismatch for {name}: {shape} != {(action_horizon, action_dim)}"
+                )
+
+        counts = np.asarray(
+            [int(source.manifest["sample_count"]) for source in self.sources],
+            dtype=np.int64,
+        )
+        self._starts = np.concatenate((np.zeros((1,), dtype=np.int64), np.cumsum(counts)[:-1]))
+        self._stops = np.cumsum(counts)
+        digest = hashlib.sha256()
+        for name, source in zip(self.source_names, self.sources, strict=True):
+            digest.update(f"{name}:{source.manifest['records_sha256']}\n".encode())
+        self.manifest: dict[str, Any] = {
+            "version": CACHE_VERSION,
+            "status": "complete",
+            "sample_count": int(np.sum(counts)),
+            "train_sample_count": int(
+                sum(int(source.manifest["train_sample_count"]) for source in self.sources)
+            ),
+            "val_sample_count": int(
+                sum(int(source.manifest["val_sample_count"]) for source in self.sources)
+            ),
+            "action_horizon": action_horizon,
+            "action_dim": action_dim,
+            "records_sha256": digest.hexdigest(),
+            "configuration": {
+                "sources": [
+                    {
+                        "name": name,
+                        "cache_dir": str(source.cache_dir.resolve()),
+                        "configuration": source.manifest.get("configuration", {}),
+                    }
+                    for name, source in zip(self.source_names, self.sources, strict=True)
+                ]
+            },
+        }
+
+    def __len__(self) -> int:
+        return int(self.manifest["sample_count"])
+
+    def source_and_local_indices(self, indices: Sequence[int] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        global_indices = np.asarray(indices, dtype=np.int64)
+        if global_indices.ndim != 1:
+            raise ValueError(f"indices must be one-dimensional, got {global_indices.shape}")
+        if np.any(global_indices < 0) or np.any(global_indices >= len(self)):
+            raise IndexError("global cache index out of range")
+        source_indices = np.searchsorted(self._stops, global_indices, side="right")
+        local_indices = global_indices - self._starts[source_indices]
+        return source_indices.astype(np.int32), local_indices.astype(np.int64)
+
+    def metadata_values(self, indices: Sequence[int] | np.ndarray, key: str) -> np.ndarray:
+        global_indices = np.asarray(indices, dtype=np.int64)
+        source_indices, local_indices = self.source_and_local_indices(global_indices)
+        output = np.empty(global_indices.shape, dtype=np.int64)
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            source = self.sources[int(source_index)]
+            output[positions] = np.asarray(
+                source.arrays[key][local_indices[positions]], dtype=np.int64
+            )
+        return output
+
+    def indices(self, split: Literal["train", "val"]) -> np.ndarray:
+        parts = [
+            source.indices(split) + self._starts[source_index]
+            for source_index, source in enumerate(self.sources)
+        ]
+        return np.concatenate(parts).astype(np.int64, copy=False)
+
+    def batches(
+        self,
+        split: Literal["train", "val"],
+        *,
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        if batch_size <= 0:
+            raise ValueError(f"batch_size must be positive, got {batch_size}.")
+        indices = self.indices(split)
+        if shuffle:
+            indices = np.random.default_rng(seed).permutation(indices)
+        shape = (
+            batch_size,
+            int(self.manifest["action_horizon"]),
+            int(self.manifest["action_dim"]),
+        )
+        for start in range(0, len(indices), batch_size):
+            batch_indices = indices[start : start + batch_size]
+            batch_n = len(batch_indices)
+            x_base = np.empty((batch_n,) + shape[1:], dtype=np.float32)
+            predicted = np.empty_like(x_base)
+            gt_action = np.empty_like(x_base)
+            source_indices, local_indices = self.source_and_local_indices(batch_indices)
+            for source_index in np.unique(source_indices):
+                positions = np.flatnonzero(source_indices == source_index)
+                local = local_indices[positions]
+                arrays = self.sources[int(source_index)].arrays
+                x_base[positions] = np.asarray(arrays["x_base"][local], dtype=np.float32)
+                predicted[positions] = np.asarray(arrays["target"][local], dtype=np.float32)
+                gt_action[positions] = np.asarray(arrays["gt_action"][local], dtype=np.float32)
+            yield batch_indices, x_base, predicted, gt_action

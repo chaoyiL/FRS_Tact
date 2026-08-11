@@ -28,97 +28,16 @@ from utils.cache import CACHE_VERSION
 from utils.cache import MANIFEST_NAME
 from utils.cache import SampleRecord
 from utils.cache import atomic_write_json
+from utils.cache import build_records
 from utils.cache import create_cache_arrays
 from utils.cache import flush_arrays
-from utils.cache import limit_records
 from utils.cache import load_manifest
 from utils.cache import open_cache_arrays
 from utils.cache import records_digest
-from utils.cache import split_episodes
-from utils.cache import trim_episode_tail
 from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
 from utils.source_model import stack_observations
-
-
-def _as_scalar(value: Any) -> Any:
-    value = np.asarray(value)
-    if value.shape == ():
-        return value.item()
-    if value.size == 1:
-        return value.reshape(()).item()
-    return value
-
-
-def _episode_bounds(metadata: LeRobotDatasetMetadata, episode_index: int) -> tuple[int, int]:
-    if episode_index < 0 or episode_index >= metadata.total_episodes:
-        raise ValueError(
-            f"Episode {episode_index} is out of range for this dataset. "
-            f"Available episode indices are 0..{metadata.total_episodes - 1}."
-        )
-    episode = metadata.episodes[episode_index]
-    start = int(_as_scalar(episode["dataset_from_index"]))
-    end = int(_as_scalar(episode["dataset_to_index"]))
-    if end <= start:
-        raise ValueError(f"Episode {episode_index} has an empty frame range [{start}, {end}).")
-    return start, end
-
-
-def _indices_for_episode(metadata: LeRobotDatasetMetadata, episode_index: int) -> tuple[int, ...]:
-    start, end = _episode_bounds(metadata, episode_index)
-    return tuple(range(start, end))
-
-
-def build_records(
-    metadata: LeRobotDatasetMetadata,
-    *,
-    val_fraction: float,
-    split_seed: int,
-    frame_stride: int,
-    max_episodes: int | None,
-    max_samples: int | None,
-    action_horizon: int,
-    drop_tail_action_chunks: int = 1,
-) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
-    if frame_stride <= 0:
-        raise ValueError(f"frame_stride must be positive, got {frame_stride}.")
-    episode_count = int(metadata.total_episodes)
-    if episode_count < 2:
-        raise ValueError("At least two episodes are required for an episode-disjoint train/validation split.")
-    episodes = list(range(episode_count))
-    if max_episodes is not None:
-        if max_episodes < 2:
-            raise ValueError("max_episodes must be at least 2 for an episode-disjoint split.")
-        episodes = episodes[:max_episodes]
-    train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
-    val_set = set(val_episodes)
-
-    records: list[SampleRecord] = []
-    for episode_index in episodes:
-        split = "val" if episode_index in val_set else "train"
-        trimmed = trim_episode_tail(
-            _indices_for_episode(metadata, episode_index),
-            drop_tail_action_chunks=drop_tail_action_chunks,
-            action_horizon=action_horizon,
-        )
-        dataset_indices = trimmed[::frame_stride]
-        records.extend(SampleRecord(int(index), episode_index, split) for index in dataset_indices)
-    records = limit_records(records, max_samples=max_samples, seed=split_seed)
-    if not records:
-        raise ValueError(
-            "Dataset selection produced no samples. "
-            "Try lowering --drop-tail-action-chunks or using longer episodes."
-        )
-    present = {record.episode_index for record in records}
-    train_episodes = tuple(episode for episode in train_episodes if episode in present)
-    val_episodes = tuple(episode for episode in val_episodes if episode in present)
-    if not train_episodes or not val_episodes:
-        raise ValueError(
-            "After dropping episode tails, train or val split is empty. "
-            "Try lowering --drop-tail-action-chunks."
-        )
-    return records, train_episodes, val_episodes
 
 
 def _configuration(
@@ -129,6 +48,7 @@ def _configuration(
     dataset_revision: str | None,
     action_key: str | None,
     rename_map: Mapping[str, str] | None,
+    normalization_source: str,
     model_sample_steps: int,
     reverse_steps: int,
     reverse_solver: str,
@@ -148,6 +68,7 @@ def _configuration(
         "dataset_revision": dataset_revision,
         "action_key": action_key,
         "rename_map": dict(rename_map) if rename_map is not None else None,
+        "normalization_source": normalization_source,
         "model_sample_steps": model_sample_steps,
         "reverse_steps": reverse_steps,
         "reverse_solver": reverse_solver,
@@ -270,6 +191,7 @@ def prepare_cache(
     dataset_revision: str | None = None,
     action_key: str | None = None,
     rename_map: Mapping[str, str] | None = None,
+    normalization_source: str = "checkpoint",
     allow_download: bool = False,
     model_sample_steps: int,
     reverse_steps: int,
@@ -300,6 +222,7 @@ def prepare_cache(
         dataset_revision=dataset_revision,
         action_key=action_key,
         rename_map=rename_map,
+        normalization_source=normalization_source,
         local_files_only=not allow_download,
     )
     metadata = LeRobotDatasetMetadata(
@@ -325,6 +248,7 @@ def prepare_cache(
         dataset_revision=model.dataset_revision,
         action_key=model.action_key,
         rename_map=rename_map,
+        normalization_source=normalization_source,
         model_sample_steps=model_sample_steps,
         reverse_steps=reverse_steps,
         reverse_solver=reverse_solver,
@@ -490,6 +414,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_eval_data_arguments(parser, required=True)
+    # FRS must stay in the base policy's normalized action/state space across
+    # every source dataset.  Individual dataset stats would make four
+    # incompatible cache spaces.
+    parser.set_defaults(normalization_source="checkpoint")
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--model-sample-steps", type=int, default=10)
     parser.add_argument("--reverse-steps", type=int, default=50)
@@ -534,6 +462,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         dataset_revision=args.dataset_revision,
         action_key=args.action_key,
         rename_map=parse_rename_map(args.rename_map),
+        normalization_source=args.normalization_source,
         allow_download=args.allow_download,
         model_sample_steps=args.model_sample_steps,
         reverse_steps=args.reverse_steps,

@@ -67,6 +67,7 @@ class SmolVLAEvalModel:
         dataset_revision: str | None = None,
         action_key: str | None = None,
         rename_map: Mapping[str, str] | None = None,
+        normalization_source: str = "dataset",
         local_files_only: bool = True,
     ):
         self.checkpoint = resolve_checkpoint(checkpoint, local_files_only=local_files_only)
@@ -85,7 +86,17 @@ class SmolVLAEvalModel:
         self.dataset_root = metadata.root
         self.dataset_revision = metadata.revision
         self.action_key = resolve_action_key(metadata.features, action_key)
-        stats = canonicalize_dataset_stats(metadata.stats, self.action_key)
+        if normalization_source not in ("checkpoint", "dataset"):
+            raise ValueError(
+                "normalization_source must be 'checkpoint' or 'dataset', "
+                f"got {normalization_source!r}"
+            )
+        stats = (
+            canonicalize_dataset_stats(metadata.stats, self.action_key)
+            if normalization_source == "dataset"
+            else None
+        )
+        self.normalization_source = normalization_source
         self.preprocessor = JaxSmolVLAPreprocessor(
             self.checkpoint,
             self.config,
@@ -213,6 +224,7 @@ def load_model(
     dataset_revision: str | None = None,
     action_key: str | None = None,
     rename_map: Mapping[str, str] | None = None,
+    normalization_source: str = "dataset",
     local_files_only: bool = True,
 ) -> SmolVLAEvalModel:
     return SmolVLAEvalModel(
@@ -222,6 +234,7 @@ def load_model(
         dataset_revision=dataset_revision,
         action_key=action_key,
         rename_map=rename_map,
+        normalization_source=normalization_source,
         local_files_only=local_files_only,
     )
 
@@ -369,6 +382,12 @@ def add_eval_data_arguments(parser: argparse.ArgumentParser, *, required: bool =
     parser.add_argument("--dataset-revision")
     parser.add_argument("--action-key")
     parser.add_argument("--rename-map", help="JSON object overriding checkpoint observation renames")
+    parser.add_argument(
+        "--normalization-source",
+        choices=("checkpoint", "dataset"),
+        default="dataset",
+        help="Use normalization assets saved with the checkpoint or stats from the selected dataset.",
+    )
     parser.add_argument("--allow-download", action="store_true")
 
 
@@ -380,5 +399,6 @@ def load_model_from_args(args: argparse.Namespace) -> SmolVLAEvalModel:
         dataset_revision=args.dataset_revision,
         action_key=args.action_key,
         rename_map=parse_rename_map(args.rename_map),
+        normalization_source=args.normalization_source,
         local_files_only=not args.allow_download,
     )

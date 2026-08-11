@@ -3,26 +3,28 @@
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Iterator, Sequence
-from typing import Literal
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, Literal
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_encoder.utils.checkpoint import TactileEncoderBundle
-from tactile_encoder.utils.checkpoint import load_tactile_encoder
+from lerobot.datasets import LeRobotDatasetMetadata
+from lerobot.policies.smolvla_jax.data import resolve_source_visual_keys
+from lerobot.policies.smolvla_jax.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
+from tactile_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_encoder
 from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.model import encode_resnet18
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
+from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 from tactile_encoder.utils.prefetch import prefetch_iterator
 from tactile_flow_steering.utils.mp_batches import MpTactileWindowLoader
-from tactile_flow_steering.utils.window_io import NUM_TACTILE_STREAMS
-from tactile_flow_steering.utils.window_io import TACTILE_KEYS
-from tactile_flow_steering.utils.window_io import load_tactile_windows
-from tactile_flow_steering.utils.window_io import _frame_streams_from_images
-from tactile_flow_steering.utils.window_io import window_frame_indices
-from utils.cache import CachedPairs
+from tactile_flow_steering.utils.window_io import (
+    NUM_TACTILE_STREAMS,
+    TACTILE_KEYS,
+    _frame_streams_from_images,
+    load_tactile_windows,
+)
+from utils.cache import CachedPairs, MultiCachedPairs
 
 Array = jax.Array
 SplitName = Literal["train", "val"]
@@ -445,3 +447,190 @@ class TactileConditionedBatches:
         ):
             tactile_seq = self._encode_window_images(images)
             yield indices, x_base, predicted, gt_action, tactile_seq
+
+
+class CachedTactileEmbeddingBatches:
+    """Source-aware FRS batches backed by precomputed frozen ResNet embeddings."""
+
+    def __init__(
+        self,
+        pairs: MultiCachedPairs,
+        *,
+        sources: Sequence[Mapping[str, Any]],
+        tactile_cache_root: pathlib.Path,
+        tactile_encoder_dir: pathlib.Path,
+        tactile_keys: Sequence[str],
+        tactile_window: int,
+        history_stride: int,
+        embedding_dim: int,
+        image_size: int,
+        build_episode_baselines: bool = False,
+    ):
+        if len(sources) != len(pairs.sources):
+            raise ValueError(
+                f"dataset source/action cache length mismatch: {len(sources)} != {len(pairs.sources)}"
+            )
+        if tactile_window <= 0 or history_stride <= 0:
+            raise ValueError("tactile_window and history_stride must be positive")
+        self.pairs = pairs
+        self.sources = tuple(dict(source) for source in sources)
+        self.tactile_window = int(tactile_window)
+        self.history_stride = int(history_stride)
+        self.resnet_embedding_dim = int(embedding_dim)
+        self.image_size = int(image_size)
+        self.tactile_keys = tuple(str(key) for key in tactile_keys)
+        self.repo_id = tuple(str(source["repo_id"]) for source in self.sources)
+        self._embedding_caches: list[TactileEmbeddingCache] = []
+        self._episode_starts: list[np.ndarray] = []
+        self.episode_baselines: dict[tuple[int, int], np.ndarray] = {}
+
+        for source_index, source in enumerate(self.sources):
+            repo_id = str(source["repo_id"])
+            root_value = source.get("root")
+            root = None if root_value in (None, "") else pathlib.Path(root_value).expanduser()
+            revision = source.get("revision")
+            metadata = LeRobotDatasetMetadata(
+                repo_id=repo_id,
+                root=root,
+                revision=revision,
+            )
+            rename_map = dict(source.get("rename_map") or {})
+            source_tactile_keys = tuple(
+                resolve_source_visual_keys(
+                    self.tactile_keys,
+                    rename_map,
+                    metadata.camera_keys,
+                )
+            )
+            cache = TactileEmbeddingCache(
+                tactile_cache_dir(tactile_cache_root, repo_id),
+                repo_id=repo_id,
+                revision=metadata.revision,
+                total_frames=metadata.total_frames,
+                tactile_keys=self.tactile_keys,
+                source_tactile_keys=source_tactile_keys,
+                embedding_dim=self.resnet_embedding_dim,
+                image_size=self.image_size,
+                encoder_path=tactile_encoder_dir,
+            )
+            starts = np.asarray(
+                [int(metadata.episodes[index]["dataset_from_index"]) for index in range(metadata.total_episodes)],
+                dtype=np.int64,
+            )
+            self._embedding_caches.append(cache)
+            self._episode_starts.append(starts)
+            print(
+                f"tactile_embedding_source={source_index}:{repo_id} "
+                f"frames={metadata.total_frames} episodes={metadata.total_episodes} "
+                f"cache={cache.cache_dir}",
+                flush=True,
+            )
+        if build_episode_baselines:
+            self.build_episode_baseline_embeddings()
+
+    def close(self) -> None:
+        return
+
+    def _source_episode_frames(
+        self, cache_indices: Sequence[int] | np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        global_indices = np.asarray(cache_indices, dtype=np.int64)
+        source_indices, _ = self.pairs.source_and_local_indices(global_indices)
+        dataset_indices = self.pairs.metadata_values(global_indices, "dataset_index")
+        episode_indices = self.pairs.metadata_values(global_indices, "episode_index")
+        return source_indices, dataset_indices, episode_indices
+
+    def _window_indices(self, cache_indices: Sequence[int] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        source_indices, current_frames, episode_indices = self._source_episode_frames(cache_indices)
+        windows = np.empty((len(current_frames), self.tactile_window), dtype=np.int64)
+        offsets = np.arange(self.tactile_window - 1, -1, -1, dtype=np.int64) * self.history_stride
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            episodes = episode_indices[positions]
+            starts_table = self._episode_starts[int(source_index)]
+            if np.any(episodes < 0) or np.any(episodes >= len(starts_table)):
+                raise IndexError(f"episode index out of range for source {source_index}")
+            starts = starts_table[episodes]
+            current = current_frames[positions]
+            if np.any(current < starts):
+                raise ValueError(f"cache frame precedes episode start for source {source_index}")
+            windows[positions] = np.maximum(current[:, None] - offsets[None, :], starts[:, None])
+        return source_indices, windows
+
+    def encode_cache_indices(self, cache_indices: Sequence[int] | np.ndarray) -> Array:
+        source_indices, windows = self._window_indices(cache_indices)
+        output = np.empty(
+            (
+                len(windows),
+                self.tactile_window,
+                len(self.tactile_keys),
+                self.resnet_embedding_dim,
+            ),
+            dtype=np.float32,
+        )
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            cache = self._embedding_caches[int(source_index)]
+            encoded = cache.get_many(windows[positions].reshape(-1)).reshape(
+                len(positions),
+                self.tactile_window,
+                len(self.tactile_keys),
+                self.resnet_embedding_dim,
+            )
+            output[positions] = encoded.astype(np.float32, copy=False)
+        return jnp.asarray(output)
+
+    def build_episode_baseline_embeddings(self) -> dict[tuple[int, int], np.ndarray]:
+        baselines: dict[tuple[int, int], np.ndarray] = {}
+        for source_index, (starts, cache) in enumerate(
+            zip(self._episode_starts, self._embedding_caches, strict=True)
+        ):
+            encoded = cache.get_many(starts).astype(np.float32, copy=False)
+            baselines.update(
+                {(source_index, episode_index): encoded[episode_index] for episode_index in range(len(starts))}
+            )
+        self.episode_baselines = baselines
+        print(f"episode_baselines={len(baselines)} (cached first-frame tokens)", flush=True)
+        return baselines
+
+    def tactile_change_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+    ) -> np.ndarray:
+        if not self.episode_baselines:
+            raise RuntimeError("episode baselines have not been built")
+        current = np.asarray(current_tokens, dtype=np.float32)
+        source_indices, _, episode_indices = self._source_episode_frames(cache_indices)
+        baseline = np.stack(
+            [
+                self.episode_baselines[(int(source_index), int(episode_index))]
+                for source_index, episode_index in zip(source_indices, episode_indices, strict=True)
+            ],
+            axis=0,
+        )
+        return tactile_change_from_tokens(current, baseline)
+
+    def gate_weights_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+        *,
+        tau: float,
+        temperature: float,
+    ) -> np.ndarray:
+        change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
+        return gate_weights_from_change(change, tau=tau, temperature=temperature)
+
+    def batches(
+        self,
+        split: SplitName,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
+        for indices, x_base, predicted, gt_action in self.pairs.batches(
+            split, batch_size=batch_size, shuffle=shuffle, seed=seed
+        ):
+            yield indices, x_base, predicted, gt_action, self.encode_cache_indices(indices)
