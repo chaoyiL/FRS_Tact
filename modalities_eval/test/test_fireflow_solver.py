@@ -7,10 +7,12 @@ import pathlib
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-EVAL_SCRIPTS = ROOT / "eval_scripts-jax"
+EVAL_SCRIPTS = ROOT / "modalities_eval"
 for path in (EVAL_SCRIPTS,):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+import importlib.util
 
 import jax
 import jax.numpy as jnp
@@ -19,15 +21,28 @@ import pytest
 from loglike_evaluate import (
     ODE_SOLVER_EULER,
     ODE_SOLVER_FIREFLOW,
+    ODE_SOLVER_SLERPFLOW,
     _add_batch_dim,
     _run_euler_likelihood_scan,
     _run_fireflow_likelihood_scan,
+    _run_slerpflow_likelihood_scan,
     create_velocity_context,
     integrate_to_base_log_likelihood,
     load_episode,
     predict_velocity_with_context,
 )
 from utils import load_model
+
+
+def _load_repo_integration():
+    spec = importlib.util.spec_from_file_location(
+        "repo_integration",
+        ROOT / "utils" / "integration.py",
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _expand_time(t: jax.Array, x_ndim: int) -> jax.Array:
@@ -101,6 +116,65 @@ def test_solver_nfe_counts(num_steps: int) -> None:
 
     assert int(euler_nfe) == num_steps
     assert int(fireflow_nfe) == num_steps + 1
+
+    _, _, slerpflow_nfe = _run_slerpflow_likelihood_scan(
+        x=x_start,
+        r_tot=r_tot,
+        t=t,
+        step_indices=step_indices,
+        dt=dt,
+        rng_key=rng_key,
+        velocity_fn=_toy_velocity,
+        hutchinson_samples=1,
+    )
+    assert int(slerpflow_nfe) == num_steps + 1
+
+
+def test_slerpflow_preserves_input_shape() -> None:
+    x_start = jnp.ones((2, 3, 4), dtype=jnp.float32)
+    r_tot = jnp.zeros((x_start.shape[0],), dtype=jnp.float32)
+    t = jnp.zeros((x_start.shape[0],), dtype=jnp.float32)
+    num_steps = 5
+
+    x_out, r_out, _ = _run_slerpflow_likelihood_scan(
+        x=x_start,
+        r_tot=r_tot,
+        t=t,
+        step_indices=jnp.arange(num_steps, dtype=jnp.int32),
+        dt=jnp.asarray(1.0 / num_steps, dtype=jnp.float32),
+        rng_key=jax.random.PRNGKey(0),
+        velocity_fn=_toy_velocity,
+        hutchinson_samples=1,
+    )
+
+    assert x_out.shape == x_start.shape
+    assert r_out.shape == r_tot.shape
+    assert bool(jnp.all(jnp.isfinite(x_out)))
+    assert bool(jnp.all(jnp.isfinite(r_out)))
+
+
+def test_slerpflow_matches_repo_integration_trajectory() -> None:
+    repo_integration = _load_repo_integration()
+    x_start = jax.random.normal(jax.random.PRNGKey(1), (2, 3, 4), dtype=jnp.float32)
+    num_steps = 8
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
+
+    x_likelihood, _, _ = _run_slerpflow_likelihood_scan(
+        x=x_start,
+        r_tot=jnp.zeros((x_start.shape[0],), dtype=jnp.float32),
+        t=jnp.zeros((x_start.shape[0],), dtype=jnp.float32),
+        step_indices=jnp.arange(num_steps, dtype=jnp.int32),
+        dt=dt,
+        rng_key=jax.random.PRNGKey(0),
+        velocity_fn=_toy_velocity,
+        hutchinson_samples=1,
+    )
+    x_repo = repo_integration.slerpflow_integrate_velocity(
+        _toy_velocity,
+        x_start,
+        num_steps=num_steps,
+    )
+    np.testing.assert_allclose(np.asarray(x_likelihood), np.asarray(x_repo), rtol=1e-5, atol=1e-5)
 
 
 def _denoise_with_solver(

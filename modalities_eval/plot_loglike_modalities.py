@@ -28,6 +28,7 @@ from loglike_evaluate import (
     load_episode,
     save_contribution_curve,
 )
+from plot_loglike_config import DEFAULT_CONFIG, add_config_argument, parse_args_with_config
 from utils import SmolVLAEvalModel, add_eval_data_arguments, load_model_from_args
 
 MODALITIES = ("vision", "tactile", "state", "language_prompt")
@@ -202,8 +203,12 @@ def plot_modalities(
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run log-likelihood modality ablations and plot modality contribution curves."
+        description=(
+            "Run log-likelihood modality ablations and plot modality contribution curves. "
+            f"Defaults load from --config (default: {DEFAULT_CONFIG})."
+        )
     )
+    add_config_argument(parser)
     add_eval_data_arguments(parser, required=False)
     parser.set_defaults(
         checkpoint_dir=DEFAULT_CHECKPOINT_DIR,
@@ -223,12 +228,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Evaluate only --frame instead of sampling an episode curve.",
     )
-    parser.add_argument("--num-steps", "-k", type=int, default=50)
+    parser.add_argument("--num-steps", "-k", type=int, default=15)
     parser.add_argument(
         "--ode-solver",
         choices=ODE_SOLVERS,
         default=ODE_SOLVER_FIREFLOW,
-        help="ODE solver for data-to-base likelihood integration.",
+        help="ODE solver for data-to-base likelihood integration (euler, fireflow, slerpflow).",
     )
     parser.add_argument(
         "--eval-batch-size",
@@ -266,8 +271,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parse_args_with_config(_build_parser, script="reverse", argv=argv)
 
     sample_interval = None if args.single_frame else args.sample_interval
     model = load_model_from_args(args)
