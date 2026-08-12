@@ -190,8 +190,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
         if tactile_seq.ndim != 4:
             raise ValueError(f"Expected tactile_seq with shape [B, T, N, D], got {tactile_seq.shape}.")
         batch_size, time_steps, num_streams, embedding_dim = tactile_seq.shape
-        if time_steps != self.config.tactile_window:
-            raise ValueError(f"Expected tactile_window={self.config.tactile_window}, got T={time_steps}.")
+        if time_steps < 1:
+            raise ValueError("tactile_seq must contain at least one time step")
         if num_streams != self.config.num_tactile_tokens:
             raise ValueError(f"Expected {self.config.num_tactile_tokens} tactile streams, got {num_streams}.")
         if embedding_dim != self.config.resnet_embedding_dim:

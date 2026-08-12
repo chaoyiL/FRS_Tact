@@ -7,6 +7,7 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from flax import nnx
 
 from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
@@ -31,6 +32,41 @@ from train_frs.utils.model import (
     three_region_effective_gate_weights,
     train_step,
 )
+
+
+@pytest.fixture
+def decoder() -> TactileConditionedFlowDecoder:
+    return TactileConditionedFlowDecoder(
+        DecoderConfig(
+            action_dim=3,
+            action_horizon=6,
+            tactile_window=3,
+            gru_hidden_dim=8,
+            resnet_embedding_dim=8,
+            model_dim=16,
+            depth=2,
+            num_heads=4,
+            num_tactile_tokens=2,
+        ),
+        rngs=nnx.Rngs(0),
+    )
+
+
+@pytest.mark.parametrize("sequence_length", [1, 3, 6])
+def test_tactile_encoder_accepts_sequence_lengths_one_training_window_and_horizon(
+    decoder,
+    sequence_length,
+):
+    tactile = jnp.ones((2, sequence_length, 2, 8), dtype=jnp.float32)
+    encoded = decoder.encode_tactile_tokens(tactile)
+    assert encoded.shape == (2, 2, decoder.config.gru_hidden_dim)
+    assert bool(jnp.isfinite(encoded).all())
+
+
+def test_tactile_encoder_rejects_empty_sequence(decoder):
+    tactile = jnp.ones((2, 0, 2, 8), dtype=jnp.float32)
+    with pytest.raises(ValueError, match="at least one time step"):
+        decoder.encode_tactile_tokens(tactile)
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
