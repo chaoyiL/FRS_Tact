@@ -1,1 +1,1 @@
-"""Evaluation scripts and SmolVLA helpers for this repository."""
+"""pi0.5 evaluation / dataset-sample helpers. See pi05_utils.py."""

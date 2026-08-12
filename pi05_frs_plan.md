@@ -5,6 +5,117 @@
 jax/flax/transformers/orbax 版本，不用兼顾 SmolVLA 还能不能跑。这个文件记录已确认的架构决策、
 关键发现和还没做完的事，避免跨 session 丢上下文。
 
+## 2026-08-12 重写：pi05_jax 改成 openpi JAX 源码的忠实副本 + 补全训练栈
+
+这一轮把 `src/lerobot/policies/pi05_jax/` 从"vendor 模型代码 + 手写周边"改成"逐字照搬 openpi 的
+JAX 代码"。下面这一节记录改动；**本文件后面几节里凡是和这里冲突的描述，以这里为准**
+（尤其是 `sharding.py` 是 no-op shim、`normalize.py` 不引 pydantic、`pi0.py` 里新增三个方法这几条，
+都已经不成立了）。目录级的逐文件对应表在
+[src/lerobot/policies/pi05_jax/README.md](src/lerobot/policies/pi05_jax/README.md)。
+
+对照物：upstream openpi `main` 分支 commit `15a9616a00943ada6c20a0f158e3adb39df2ccac`
+（就是当初 vendor 的那个 commit）。
+
+**改回逐字原版的（之前是改写/裁剪过的）：**
+
+- `pi0.py`：原来在文件末尾多了 `Pi0PrefixCache`/`build_prefix_cache`/`denoise_step`。现在这三个
+  东西搬到新的 `frs.py`，写成接收 model 作参数的自由函数，`pi0.py` 恢复成逐字原版。这样
+  "FRS 自己加的模型级逻辑" 和 "upstream 代码" 物理隔离，`frs.py` 有 bug 也影响不到
+  `sample_actions`。
+- `tokenizer.py`：原来只留了 `PaligemmaTokenizer`（58 行），现在是完整的 371 行原版
+  （`FASTTokenizer`/`BinningTokenizer`/`FSQTokenizer` 都在），并连带 vendor 了它依赖的
+  `models/utils/fsq_tokenizer.py`。代价：import 这个包现在会连带 import `transformers`
+  （`AutoProcessor`）和 `chex`——upstream 就是这样，pi0.5 本身只用 `PaligemmaTokenizer`。
+- `normalize.py`：原来是绕开 pydantic 的手写版（含自定义 `apply`/`unapply`）。现在是原版
+  （pydantic + numpydantic 的 `NormStats`、`RunningStats`、`serialize_json`/`save`/`load`）。
+  原来的 `apply`/`unapply` 对应 upstream `transforms.Normalize`/`Unnormalize`，所以连带 vendor
+  了完整的 `transforms.py`，调用方改用它。
+- `sharding.py`：原来是逐条意译的版本，现在是逐字原版，并按 upstream 的位置移到
+  `training/sharding.py`（`gemma.py`/`siglip.py` 的 import 跟着改成 `from .training import sharding`，
+  和 upstream 的 `import openpi.training.sharding as sharding` 结构一致）。
+
+**新增的（原来完全没有）：**
+
+- `training/`：`utils.py`（`TrainState`）、`optimizer.py`（`CosineDecaySchedule`/`AdamW`/
+  `create_optimizer`）、`weight_loaders.py`（`CheckpointWeightLoader` 会自动补 LoRA 权重）、
+  `checkpoints.py`（orbax `CheckpointManager`，checkpoint 里带 `assets/`）——全部逐字原版。
+- `training/config.py`：upstream 的 `AssetsConfig`/`DataConfig`/`ModelTransformFactory`/
+  `DataConfigFactory`/`TrainConfig`/`cli()`/`get_config()` 骨架照搬，把 upstream 的
+  Aloha/Libero/DROID 配置换成 `LeRobotPickTubeDataConfig` + 三个注册配置
+  （`pi05_pick_tube` LoRA、`pi05_pick_tube_full` 全量、`debug` 假数据）。
+- `training/data_loader.py`：upstream 的协议/`TransformedDataset`/`TorchDataLoader`/
+  `DataLoaderImpl` 照搬，**唯一必须改的地方**是把
+  `import lerobot.common.datasets.lerobot_dataset`（官方 lerobot，正是包名冲突的来源）换成本仓库的
+  `lerobot.datasets.LeRobotDataset`；另外支持多数据集拼接（`DataConfig.sources`，pick_tube 有 4 个）
+  并加了两个本地 transform（`RenameKeys`/`PromptFromTask`）来做每数据集的相机重命名，
+  这样 `transforms.py` 能保持逐字原版。RLDS/DROID 那条路没搬（要 TensorFlow）。
+- `policies/pick_tube_policy.py`：对应 upstream 的 `policies/libero_policy.py`，
+  `PickTubeInputs`/`PickTubeOutputs`。pick_tube 没有第三人称相机，`base_0_rgb` 补零 + mask=False，
+  和 `LiberoInputs` 处理它用不到的 `right_wrist_0_rgb` 是同一套写法。
+- `tools/train_pi05_jax.py` = openpi `scripts/train.py`（只改 import 和 `sys.path`）；
+  `tools/compute_pi05_norm_stats.py` = openpi `scripts/compute_norm_stats.py`。
+- `policy_config.py`（取代原 `checkpoint.py`）：upstream `policies/policy_config.py` 里
+  `create_trained_policy` 的加载权重那一半，加上能吃 URL 的 `load_norm_stats`。
+
+**训练入口从 YAML 改成 openpi 原版的 `TrainConfig` + tyro**：`configs/train_pi05_pick_tube.yaml`
+删除，配置写在 `training/config.py` 的 `_CONFIGS` 里；`scripts/start_pi05_train.sh` 改成
+`train_pi05_jax.py <config_name> --exp_name=<run>`，并在训练前自动检查/生成 norm stats。
+注意这只影响"微调 pi0.5 本身"这条链路——**FRS 那条链路
+（`configs/train_frs_pick_tube_pi05.yaml` + `scripts/start_frs_pi05_train.sh`）的 YAML 接口没变**。
+
+**为此新增的依赖**（都是 openpi 自己 pyproject 里就有的）：`pydantic`、`numpydantic`、
+`etils[epath]`、`tyro`、`chex`。之前刻意回避 pydantic/numpydantic/etils 的决定作废。
+
+**跟着改的调用方**（FRS 链路保持可用）：
+
+- `modalities_eval/pi05_utils.py`：`Pi05SampleProcessor` 构造签名不变，但 `prepare_sample` 内部
+  改成拼 openpi 的 transform 链（repack → `PickTubeInputs` → `Normalize` → `ResizeImages` →
+  `TokenizePrompt` → `PadStatesAndActions`），顺序和 `ModelTransformFactory` +
+  `transform_dataset` 完全一致——**action cache 和训练现在走同一份预处理代码**。
+  删掉了手写的 `_prepare_image`/`_resize`。
+- `utils/pi05_source_model.py`：`model.build_prefix_cache(...)` → `frs.build_prefix_cache(model, ...)`。
+- `prepare_pi05.py`：`load_norm_stats` 从 `normalize` 移到包顶层（`policy_config`）。
+- `tests/pi05/test_normalize.py` 改用 `transforms.Normalize`/`Unnormalize` 并加了 JSON 往返测试；
+  `tests/pi05/test_training.py` 整体重写（配置注册表、pick_tube transform 链、`RenameKeys`、
+  LoRA 权重合并、schedule）；`test_cache_optimizations.py` 删掉了针对已移除的 `_resize` 的用例。
+
+**本地验证到什么程度**：这台 macOS 上 `.venv` 里 jax/torch/numpy 全都没装（和本文件最后一节说的
+一致），所以只做了静态检查：全仓 AST 语法通过；一个专门写的脚本对 10 个逐字 vendor 的文件做了
+"除 provenance 头和 import 行外与 upstream 完全一致"的机器校验（全过）；另一个脚本 AST 解析了
+39 个 pi0.5 相关文件的所有一方 import，确认每个名字在目标模块里真实存在；两个 shell 脚本
+`bash -n` 通过。**真正的运行验证还没做**，清单见 pi05_jax/README.md 的 Status 一节，第一步是
+`python tools/train_pi05_jax.py debug --exp_name=smoke`（假数据，不需要数据集和 checkpoint）。
+
+## 2026-08-12：打通"先微调 pi0.5，再用它做 FRS"这条路
+
+确定的路线：**A（微调 pi0.5）的产物 → B（FRS）的 base model**。之前 B 一直用官方 `pi05_base`。
+接的时候发现一个会**静默出错**的坑，已修：
+
+`BaseModelConfig.load` 默认 `remove_extra_params=True`，会把 checkpoint 里当前模型结构装不下的
+参数直接 `intersect_trees` 掉。用 `pi05_pick_tube`（LoRA）训出来的 checkpoint 如果被默认的
+`Pi0Config`（`gemma_2b`/`gemma_300m`，不带 LoRA）加载，结果是：LoRA 权重全部被丢弃 → 剩下的
+base 权重因为 LoRA 训练时是**冻结**的，和原始 pi05_base 一模一样 → 拿到的就是没微调过的模型，
+**全程不报任何错**。整个 action cache 会白跑。
+
+修法：
+
+1. `policy_config.load_pi0` 加 `_reject_unused_params`：加载前用 `nnx.eval_shape` 拿到该配置
+   期望的参数树，和 checkpoint 的参数树求差集，有多余的就报错；如果多余的键里含 "lora"，
+   错误信息直接点名"这是 LoRA checkpoint 配了非 LoRA config"。想故意丢弃要显式传
+   `allow_extra_params=True`。测试见 `tests/pi05/test_training.py`。
+2. variant 打通到 FRS 侧：`configs/train_frs_pick_tube_pi05.yaml` 的 `model` 段新增
+   `paligemma_variant`/`action_expert_variant`，经 `tools/prepare_frs_pi05_cache.py` →
+   `prepare_pi05.prepare_cache` → `Pi05SampleProcessor` 一路传下去，`start_frs_pi05_train.sh`
+   的 checkpoint 冒烟检查也带上。默认值仍是 `gemma_2b`/`gemma_300m`（对应官方 pi05_base）。
+
+**切换 checkpoint 时必须同时改三处**（YAML 顶部注释里写了）：`checkpoint`、
+`model.*_variant`、`norm_stats.dir`+`asset_id`。第三处不能忘：训练用哪份归一化统计量，
+生成 action cache 就必须用同一份，否则 pi0.5 看到的 state/action 尺度和它训练时对不上。
+
+**顺带解决的**：本文件后面"norm stats 用借来的 trossen（14 维 vs pick_tube 20 维，多出 6 维不
+归一化）"那一节，在这条路线下自动作废——`tools/compute_pi05_norm_stats.py` 会用 pick_tube 自己的
+数据算真实的 20 维统计量，训练时写进 checkpoint 的 `assets/pick_tube/`，FRS 直接指过去即可。
+
 ## 架构决策：把 pi0.5 模型代码搬进本仓库，不装 openpi 这个包
 
 openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 commit），和本仓库自己的
@@ -25,10 +136,10 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
 **一处故意没跟 openpi 保持一致**：openpi pin 的是 `numpy>=1.22.4,<2.0.0`，但本仓库的
 `opencv-python-headless`/`pyarrow`/`datasets` 已经要求 `numpy>=2.0.0`，两边范围不相交。
 如果强行降到 numpy<2，大概率把这些包也一起弄坏。所以 `pyproject.toml` 里 numpy 保持
-`>=2.0.0,<2.3.0` 不变——这是已知的、还没验证的风险点：`jax==0.5.3`/`flax==0.10.2`
-到底能不能在 numpy>=2 下正常跑，要在训练服务器上 `uv sync` 才能确认。
+`>=2.0.0,<2.3.0` 不变。训练服务器已实际解析并安装 NumPy 2.2.6，JAX/Flax 导入、GPU
+发现、官方 checkpoint 恢复和目标测试均通过，因此这项兼容风险已经排除。
 
-## 现状：整条链路的代码都写完了，一行都没跑过
+## 现状：代码已完成，环境和 checkpoint 已在 H100 服务器验证
 
 已经做的：
 
@@ -58,8 +169,11 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
   - `utils/cache.py` 里的 `build_records`（上一轮已经做的，这里不重复）；
   - 新增 `lerobot/datasets/sample_utils.py`（`resolve_action_key`/`action_delta_timestamps`/
     `lerobot_sample_to_observation`，从 `smolvla_jax/data.py` 挪出来，那边保留原名字重新
-    导出，其他地方的 import 不用改）和 `utils/flow_matching.py`（`deterministic_noise`/
-    `inversion_mse`，从 `utils/source_model.py` 挪出来，同样保留重新导出）。
+    导出，其他地方的 import 不用改）、`lerobot/datasets/dataset_sources.py`
+    （`DatasetSource`/`parse_dataset_sources`/`resolve_source_visual_keys`）和
+    `lerobot/datasets/tactile_cache.py`（触觉 embedding cache）；后两者让 pi0.5 的
+    预计算和 FRS 训练不再 import `smolvla_jax`。以及 `utils/flow_matching.py`
+    （`deterministic_noise`/`inversion_mse`，从 `utils/source_model.py` 挪出来，同样保留重新导出）。
 - 修了一个真实 bug（不是 TODO，是实际改对了）：`prepare_pi05.py`/
   `tools/prepare_frs_pi05_cache.py` 一开始把 `gs://...` checkpoint URL 直接传给
   `pathlib.Path(...)`，Python 的 `Path` 会把 URL 里的 `//` 归一化成单个 `/`
@@ -67,20 +181,28 @@ openpi 自己的 `pyproject.toml` 会拉官方 `lerobot` 包（pin 死某个 com
   （基于 `urllib.parse.urlparse`）先判断是不是 URL，是的话全程留在字符串形态，
   只有确认是本地路径才包一层 `Path`。
 
-**完全没跑过、必须在训练服务器上验证的（`src/lerobot/policies/pi05_jax/README.md` 里也写了）：**
+**2026-08-10 在 Linux 双 H100 80GB 服务器完成的验证：**
 
-1. `uv sync` 能不能正常解析出一套依赖（尤其是 numpy 版本风险，见上面"架构决策"）。
-2. `load_pi0("gs://openpi-assets/checkpoints/pi05_base")` 加载出来的参数形状能不能对上
-   `Pi0Config(pi05=True)`（对不上 `BaseModelConfig.load` 会直接报错，容易发现）。
-3. **`build_prefix_cache`/`denoise_step` 拆分对不对**——这是这次唯一真正新写的模型级逻辑
+1. `uv lock` 和 `uv sync --frozen` 成功；实际安装 JAX 0.5.3、Flax 0.10.2、
+   Transformers 4.53.2、Orbax Checkpoint 0.11.13 和 NumPy 2.2.6。
+2. `scripts/setup_env.sh` 完整执行成功，JAX 和 PyTorch 都识别两张 H100。
+3. `load_pi0("gs://openpi-assets/checkpoints/pi05_base")` 使用
+   `Pi0Config(pi05=True, action_dim=32, action_horizon=50)` 成功恢复官方 checkpoint；
+   因此配置里的 action horizon 50 已确认，不再是占位值。
+
+**仍需用真实数据验证的：**
+
+1. **`build_prefix_cache`/`denoise_step` 拆分对不对**——这是这次唯一真正新写的模型级逻辑
    （其余都是原样 vendor），最值得单独验证：用同一份输入分别跑 upstream 原版
    `sample_actions`（t:1→0）和"手动逐步调 denoise_step"，两边应该给出完全一样的结果。
-4. `Pi05EvalModel.prepare_sample` 拼出来的 `Observation`/`Pi0PrefixCache` 在
+2. `Pi05EvalModel.prepare_sample` 拼出来的 `Observation`/`Pi0PrefixCache` 在
    `nnx.split`/`nnx.merge` + `jax.jit`（`utils/pi05_source_model.py`）下能不能正常跑通一次
    完整的 `sample_and_reverse`，shape 对不对。特别是 `prepare_pi05.py:_pad_observation_batch`
    用 `jax.tree.map` 给 `Observation`（flax `struct.dataclass` + jaxtyping 装饰）补批次维度
    这一步——只做过代码审查（`array_typing.py` 里那个 patch 会在 tree unflatten 时跳过类型
-   检查，所以理论上没问题），没有实际跑过。
+   检查，所以理论上没问题）。触觉 encoder `KaiyueChen/encoder_ckpt_0809` 已下载并成功
+   加载；四个 pick_tube 数据集已下载、从 v2.1 转换为 v3.0，并逐个读取真实样本成功。
+   全量三阶段流水线已在服务器启动，触觉 embedding 和 action cache 仍在生成中。
 
 ## 全盘代码审查（2026-08-08）
 
@@ -127,7 +249,7 @@ pick_tube 自己机器人的统计量。`modalities_eval/pi05_utils.py:_match_no
 多出来的 6 维补成"不做归一化"（mean=0/std=1，运行时会打印 WARNING），先把链路跑通；这几维
 的数值不会被正确归一化，pi0.5 拿 state 编码进 prompt 时如果这几维超出 `[-1,1]` 会被直接截断到
 边界（不会崩溃，但不严谨）。真要认真训练的话应该换成用 pick_tube 自己的数据算一份统计量
-（参考 openpi 的 `scripts/compute_norm_stats.py`，本仓库没 vendor 这个脚本）。
+（用 `tools/compute_pi05_norm_stats.py`，就是 openpi 的 `scripts/compute_norm_stats.py`）。
 
 **相机映射：已经查过真实数据集 + 你确认了左右手对应关系，不再有不确定性了。**
 查了 [KaiyueChen/pick_tube_01](https://huggingface.co/datasets/KaiyueChen/pick_tube_01) 的
@@ -206,11 +328,9 @@ pi0.5 部署/训练。核对了一下发现两件事：
 | 3. FRS 训练 | `tools/train_frs.py` | 现有工具直接可用，**已验证**不用改 |
 | 4. FRS 评估 | `tactile_flow_steering/evaluate.py` | 现有工具直接可用（完全不依赖 base 模型） |
 
-第 1、3 步能直接复用是核对过的：它们读的每个配置键 pi0.5 配置里都有，而且它们从
-`smolvla_jax` 只 import 了跟 base 模型无关的工具函数（`parse_dataset_sources` /
-`resolve_source_visual_keys` / `TactileEmbeddingCache`），那条 import 链的第三方依赖只有
-`transformers.AutoTokenizer`（老稳定 API，在 `transformers==4.53.2` 下也在）。
-第 4 步 `evaluate.py` 根本不 import 任何 base 模型代码，只读 cache。
+第 1、3 步能直接复用是核对过的：它们读的每个配置键 pi0.5 配置里都有；原来位于
+`smolvla_jax` 的通用数据源解析和触觉 cache 已抽到 `lerobot/datasets/`，所以 pi0.5
+运行时不再 import SmolVLA。第 4 步 `evaluate.py` 根本不 import 任何 base 模型代码，只读 cache。
 
 原来的 `scripts/start_frs_train.sh` 对 pi0.5 配置会**在第 55 行直接退出**（它要求
 `checkpoint_merge.adapter` 非空，pi0.5 没有这个概念），即使绕过也会去跑
@@ -224,18 +344,40 @@ PEFT 合并这一步（pi0.5 直接用官方 checkpoint），并且在跑那两�
    `src/lerobot/policies/pi05_jax/README.md` 的清单验证；新脚本已经把其中第 2 项
    （checkpoint 能否加载）内建成了前置检查。清单第 3 项（`denoise_step` 和 upstream
    `sample_actions` 数值是否一致）仍然需要手动做一次——那是这次唯一新写的模型级逻辑。
-2. **没有移植的周边**（都不影响 FRS 训练本身，按需再做）：
-   - `deploy_smolvla/` 真机部署是 SmolVLA 专用的，pi0.5 没有对应物。
-   - `modalities_eval/` 下的分析脚本（`loglike_evaluate.py` / `action_error_evaluate.py` /
-     `action_reverse_tsne.py`）只支持 SmolVLA；`modalities_eval/pi05_utils.py` 提供的
-     `Pi05EvalModel` 已经够它们改造时复用了。
-   - `doc.md` / `train_for_agent.md` 描述的还是 SmolVLA/VT-SmolVLA 的流程。
+2. **没有移植的周边**（都不影响 FRS 训练本身，按需再做）。这些原本只有 SmolVLA 版，
+   已随 SmolVLA 一起从本分支删除（见下面 2026-08-12 的清理记录，`git log` 里可找回）：
+   - 真机部署客户端（原 `deploy_smolvla/`）。
+   - loglike / action-error / t-SNE 分析脚本（原 `modalities_eval/` 下几个）。
+     真要做的话 `modalities_eval/pi05_utils.py` 的 `Pi05EvalModel` 够复用。
 
 ## 明确不做的事
 
 - 不 `pip install openpi`、不给它开单独环境——包名冲突的解法是 vendor 代码，不是隔离环境
   （之前 `openpi_bridge/` 那版方案已经废弃删除）。
-- 不管 `smolvla_jax/` 能不能跑、不管 `configs/train_smolvla_jax.yaml` /
-  `configs/train_vtsmolvla_jax.yaml` 还有没有用——这个分支的目标就是换 base，不是两条线都要维护。
+- 不维护 SmolVLA 那条线——这个分支的目标就是换 base，不是两条线都要维护。相关代码已于
+  2026-08-12 全部删除（见下）。
 - 不在这台本地 macOS 机器上装 jax/flax/跑推理、不下载 pi0.5 checkpoint——这些必须在训练服务器
-  （Linux + NVIDIA）上做，参考 [train_for_agent.md](train_for_agent.md) 的环境搭建流程。
+  （Linux + NVIDIA）上做，环境搭建见 [README.md](README.md) 的「快速开始」。
+
+## 2026-08-12：删除 SmolVLA 整条线
+
+这个分支现在只维护 pi0.5。删掉的（约 11000 行，`git log` 里都在）：
+`src/lerobot/policies/smolvla_jax/`、`deploy_smolvla/`、`prepare.py`、`utils/source_model.py`、
+`utils/utils.py`、`modalities_eval/utils.py` + 4 个分析脚本 + `modalities_eval/test/`、
+`tools/` 下 6 个 SmolVLA 工具、4 个 SmolVLA config、`scripts/start_frs_train.sh` 和
+`scripts/start_vtsmolvla_train.sh`、`tests/jax/` 下 9 个测试（只留 `test_tactile_cache.py`，
+它测的是 `lerobot/datasets/tactile_cache.py`）。顺带删了没人引用的 `finalize_cache.py`、
+`filter_cache.py`（`utils/cache.py:filter_cache_by_mse` 本体和它的测试都保留）、
+`download_ckpt.py`，以及已被 README 取代的 `doc.md` / `train_for_agent.md`。
+
+**顺带修掉一个真 bug**：`src/lerobot/policies/__init__.py` 原本
+`from .smolvla_jax import JaxSmolVLA, ...`。因为 `import lerobot.policies.pi05_jax` 会先执行
+父包的 `__init__.py`，**每一次 pi0.5 运行都在连带 import 整个 SmolVLA 模型栈**——而这个分支的
+依赖是按 openpi 钉死的，本文件上面自己写着「smolvla_jax 大概率跑不起来」。一旦它 import 失败，
+pi0.5 会在什么都没做之前就死。原来的 `tests/pi05/test_independence.py` 只 grep 几个具体运行时
+文件，正好漏掉了这条包初始化路径；已改写成直接断言 `lerobot/policies/__init__.py` 不含任何
+import，并覆盖全部共享阶段。
+
+清理依赖：`websockets`/`msgpack`（原 `deploy_smolvla/` 用）、`scikit-learn`（原 t-SNE 脚本用）、
+`contourpy`（原 loglike 画图用）现在都没有使用者了，从 `pyproject.toml` 移除并重新 `uv lock`
+（159 个包，原 164 个）。`[tool.setuptools.packages.find]` 里的 `deploy*` glob 也一并去掉。

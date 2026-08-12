@@ -26,7 +26,7 @@ from lerobot.utils.feature_utils import dataset_to_policy_features
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Inspect a LeRobot dataset and print schema info for SmolVLA inference."
+        description="Inspect a LeRobot dataset and print schema info for pi0.5 inference."
     )
     parser.add_argument(
         "--dataset-path",
@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="Optional SmolVLA checkpoint id/path to compare expected policy features.",
+        help="Optional checkpoint id/path to compare expected policy features.",
     )
     parser.add_argument(
         "--output-json",
@@ -174,7 +174,7 @@ def _chw_to_hwc_uint8(image: np.ndarray | torch.Tensor) -> np.ndarray:
 
 
 def frame_to_raw_observation(sample: dict[str, Any], features: dict[str, dict]) -> dict[str, Any]:
-    """Convert a dataset frame into the raw dict expected by JAX SmolVLA preprocessing."""
+    """Convert a dataset frame into the raw dict a policy preprocessor expects."""
     observation: dict[str, Any] = {}
     for key, feat in features.items():
         if key not in sample:
@@ -209,8 +209,8 @@ def _build_infer_snippet(raw_obs: dict[str, Any], task: str | None) -> str:
     lines.extend(
         [
             "",
-            "# With a loaded JaxSmolVLAPreprocessor:",
-            f"prepared = preprocessor.prepare(obs, {task!r})",
+            "# With a modalities_eval.pi05_utils.Pi05SampleProcessor:",
+            "observation, actions, prompt = processor.prepare_sample(sample)",
         ]
     )
     return "\n".join(lines)
@@ -378,7 +378,7 @@ def print_text_report(report: dict[str, Any]) -> None:
         for key, summary in report["sample_summary"].items():
             print(f"  - {key}: {summary}")
 
-        print("\n[Raw observation for infer_smolvla_jax]")
+        print("\n[Raw observation for inference]")
         for key, summary in report["raw_observation_for_inference"].items():
             print(f"  - {key}: {summary}")
         if "task" in report["sample_summary"]:

@@ -21,6 +21,7 @@ HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
 HF_HUB_CACHE_VALUE="${HF_HOME_VALUE}/hub"
 HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
 HF_LEROBOT_HOME_VALUE="${HF_HOME_VALUE}/lerobot"
+OPENPI_DATA_HOME_VALUE="${STORAGE_ROOT}/openpi_cache"
 TMPDIR_VALUE="${STORAGE_ROOT}/tmp"
 UV_BIN=""
 
@@ -125,11 +126,13 @@ configure_runtime_storage() {
         "${HF_HUB_CACHE_VALUE}" \
         "${HF_DATASETS_CACHE_VALUE}" \
         "${HF_LEROBOT_HOME_VALUE}" \
+        "${OPENPI_DATA_HOME_VALUE}" \
         "${TMPDIR_VALUE}"
     export HF_HOME="${HF_HOME_VALUE}"
     export HF_HUB_CACHE="${HF_HUB_CACHE_VALUE}"
     export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_VALUE}"
     export HF_LEROBOT_HOME="${HF_LEROBOT_HOME_VALUE}"
+    export OPENPI_DATA_HOME="${OPENPI_DATA_HOME_VALUE}"
     export TMPDIR="${TMPDIR_VALUE}"
 }
 
@@ -143,6 +146,7 @@ write_environment_file() {
         printf 'export HF_HUB_CACHE=%q\n' "${HF_HUB_CACHE}"
         printf 'export HF_DATASETS_CACHE=%q\n' "${HF_DATASETS_CACHE}"
         printf 'export HF_LEROBOT_HOME=%q\n' "${HF_LEROBOT_HOME}"
+        printf 'export OPENPI_DATA_HOME=%q\n' "${OPENPI_DATA_HOME}"
         printf 'export TMPDIR=%q\n' "${TMPDIR}"
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
@@ -235,6 +239,7 @@ main() {
     echo "环境变量：${ENV_FILE}"
     echo "Hugging Face 缓存：${HF_HOME}"
     echo "Arrow 数据缓存：${HF_DATASETS_CACHE}"
+    echo "OpenPI checkpoint 缓存：${OPENPI_DATA_HOME}"
     echo
     echo "首次使用时登录："
     echo "  cd ${PROJECT_ROOT}"
@@ -242,8 +247,8 @@ main() {
     echo "  ${UV_BIN} run --no-sync hf auth login"
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
-    echo "一键启动 VT-SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/scripts/start_vtsmolvla_train.sh"
+    echo "一键启动 pi0.5 FRS："
+    echo "  bash ${PROJECT_ROOT}/scripts/start_frs_pi05_train.sh ${PROJECT_ROOT}/configs/train_frs_pick_tube_pi05.yaml"
 }
 
 main "$@"

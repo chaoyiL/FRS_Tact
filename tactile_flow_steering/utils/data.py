@@ -11,8 +11,8 @@ import jax.numpy as jnp
 import numpy as np
 
 from lerobot.datasets import LeRobotDatasetMetadata
-from lerobot.policies.smolvla_jax.data import resolve_source_visual_keys
-from lerobot.policies.smolvla_jax.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
+from lerobot.datasets.dataset_sources import resolve_source_visual_keys
+from lerobot.datasets.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
 from tactile_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_encoder
 from tactile_encoder.utils.image_dataset import create_image_dataset
 from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict

@@ -1,9 +1,8 @@
 """Base-model-agnostic helpers for reading `LeRobotDataset` samples.
 
-Extracted from `lerobot.policies.smolvla_jax.data` (which re-exports these for backward
-compatibility) so that other base models -- e.g. `lerobot.policies.pi05_jax` -- can parse the
-same LeRobot sample dicts without importing SmolVLA's config/preprocessing code. These functions
-only depend on the dataset's feature/sample schema, not on any particular policy.
+Base-model-agnostic: these only depend on the dataset's feature/sample schema, not on any
+particular policy, so `lerobot.policies.pi05_jax` and its tooling can parse LeRobot sample dicts
+without importing any model code.
 """
 
 from __future__ import annotations

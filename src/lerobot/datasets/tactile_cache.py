@@ -1,3 +1,5 @@
+"""Model-neutral on-disk cache for frozen tactile embeddings."""
+
 from __future__ import annotations
 
 import hashlib
@@ -16,8 +18,6 @@ TACTILE_EMBEDDING_OBSERVATION_KEY = "observation.tactile_embeddings"
 
 
 def tactile_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
-    """Return ``cache_root/namespace/dataset`` for a Hugging Face repo id."""
-
     parts = [part for part in str(repo_id).split("/") if part not in ("", ".", "..")]
     if not parts:
         raise ValueError(f"invalid dataset repo id: {repo_id!r}")
@@ -37,8 +37,6 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
 
 @lru_cache(maxsize=8)
 def tactile_encoder_fingerprint(checkpoint_dir: str | Path) -> str:
-    """Hash the encoder files that determine frozen ResNet embeddings."""
-
     directory = Path(checkpoint_dir).expanduser().resolve()
     candidates = [directory / "checkpoint.json", directory / "params.npz"]
     missing = [path for path in candidates if not path.is_file()]
@@ -124,7 +122,6 @@ class TactileEmbeddingCache:
         self.cache_dir = Path(cache_dir).expanduser()
         self.metadata = load_tactile_cache_metadata(self.cache_dir)
         self._embeddings: np.ndarray | None = None
-
         expected = {
             "repo_id": str(repo_id),
             "revision": None if revision is None else str(revision),
@@ -143,32 +140,25 @@ class TactileEmbeddingCache:
         }
         if self.metadata.get("status") != "complete":
             raise ValueError(
-                f"tactile embedding cache is incomplete: "
+                "tactile embedding cache is incomplete: "
                 f"{self.metadata.get('completed_frames', 0)}/{self.metadata.get('total_frames')} "
                 f"at {self.cache_dir}"
             )
         if mismatches:
             raise ValueError(f"tactile embedding cache does not match training inputs: {mismatches}")
-        embeddings_path = self.cache_dir / TACTILE_EMBEDDINGS_NAME
-        if not embeddings_path.is_file():
-            raise FileNotFoundError(f"tactile embeddings not found: {embeddings_path}")
+        if not (self.cache_dir / TACTILE_EMBEDDINGS_NAME).is_file():
+            raise FileNotFoundError(f"tactile embeddings not found: {self.cache_dir / TACTILE_EMBEDDINGS_NAME}")
 
     def _array(self) -> np.ndarray:
         if self._embeddings is None:
-            embeddings = np.load(
-                self.cache_dir / TACTILE_EMBEDDINGS_NAME,
-                mmap_mode="r",
-                allow_pickle=False,
-            )
+            embeddings = np.load(self.cache_dir / TACTILE_EMBEDDINGS_NAME, mmap_mode="r", allow_pickle=False)
             expected_shape = (
                 int(self.metadata["total_frames"]),
                 int(self.metadata["num_tactile_tokens"]),
                 int(self.metadata["embedding_dim"]),
             )
             if embeddings.shape != expected_shape:
-                raise ValueError(
-                    f"tactile embedding array shape mismatch: {embeddings.shape} != {expected_shape}"
-                )
+                raise ValueError(f"tactile embedding array shape mismatch: {embeddings.shape} != {expected_shape}")
             self._embeddings = embeddings
         return self._embeddings
 
@@ -179,12 +169,9 @@ class TactileEmbeddingCache:
         index = int(frame_index)
         if index < 0 or index >= len(self):
             raise IndexError(index)
-        # Copy only 4x512 values so default_collate receives writable storage.
         return np.array(self._array()[index], copy=True)
 
     def get_many(self, frame_indices: Sequence[int] | np.ndarray) -> np.ndarray:
-        """Return copied embeddings for an arbitrary array of absolute frame indices."""
-
         indices = np.asarray(frame_indices, dtype=np.int64)
         if np.any(indices < 0) or np.any(indices >= len(self)):
             raise IndexError("tactile embedding frame index out of range")

@@ -69,7 +69,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
     missing = [path for path in cache_dirs if not (path / "manifest.json").is_file()]
     if missing:
         raise FileNotFoundError(
-            f"action caches are missing: {missing}. Run tools/prepare_frs_caches.py first."
+            f"action caches are missing: {missing}. Run tools/prepare_frs_pi05_cache.py first."
         )
 
     train_decoder(

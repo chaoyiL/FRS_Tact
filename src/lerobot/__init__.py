@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""SmolVLA inference-only LeRobot core."""
+"""Inference-only LeRobot core, trimmed to what the pi0.5 FRS pipeline needs."""
 
 from lerobot.__version__ import __version__
 

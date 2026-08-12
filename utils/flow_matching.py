@@ -1,9 +1,7 @@
 """Base-model-agnostic flow-matching helpers, shared by every FRS action_cache producer.
 
-Extracted from `utils/source_model.py` (SmolVLA's velocity-field glue, which re-exports these for
-backward compatibility) so a pi0.5 equivalent doesn't need to import SmolVLA's modeling code just
-to get deterministic noise / inversion MSE -- these two functions only touch plain jax/numpy
-arrays, not any particular model.
+`deterministic_noise` and `inversion_mse` only touch plain jax/numpy arrays, so they live here
+rather than next to any one base model's velocity-field glue (`utils/pi05_source_model.py`).
 """
 
 from __future__ import annotations

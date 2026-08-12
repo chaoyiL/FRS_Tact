@@ -1,6 +1,6 @@
 """Tests for utils.cache.build_records.
 
-`build_records` was moved out of prepare.py into utils/cache.py so both the SmolVLA and pi0.5
+`build_records` was moved out of the per-model prepare scripts into utils/cache.py so every
 action-cache producers share one record-selection/split implementation instead of drifting apart.
 It had no coverage before that move. These tests need only numpy + stdlib (utils/cache.py pulls in
 nothing else), so they run anywhere -- unlike tests/jax/*.

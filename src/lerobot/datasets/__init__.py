@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Minimal LeRobot dataset read API for SmolVLA inference workflows."""
+"""Minimal LeRobot dataset read API for the pi0.5 FRS pipeline."""
 
 from lerobot.utils.import_utils import require_package
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lerobot.policies.smolvla_jax.tactile_cache import (
+from lerobot.datasets.tactile_cache import (
     TACTILE_EMBEDDINGS_NAME,
     TACTILE_METADATA_NAME,
     TactileEmbeddingCache,

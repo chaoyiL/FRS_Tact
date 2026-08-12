@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""为 VT-SmolVLA/FRS 预计算每一帧的四路 tactile ResNet embedding。"""
+"""为 FRS 预计算每一帧的四路 tactile ResNet embedding。"""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ import yaml
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.policies.smolvla_jax.data import parse_dataset_sources, resolve_source_visual_keys
-from lerobot.policies.smolvla_jax.tactile_cache import (
+from lerobot.datasets.dataset_sources import parse_dataset_sources, resolve_source_visual_keys
+from lerobot.datasets.tactile_cache import (
     TACTILE_EMBEDDINGS_NAME,
     TACTILE_METADATA_NAME,
     atomic_write_json,
@@ -31,7 +31,7 @@ from tactile_encoder.utils.image_dataset import parse_image_to_uint8
 from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "train_vtsmolvla_jax.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube_pi05.yaml"
 
 
 def _start_cpu_only_workers(loader: DataLoader, num_workers: int):

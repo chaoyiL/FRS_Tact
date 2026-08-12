@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig, JaxSmolVLAPolicy
+# Deliberately empty of re-exports. This used to do
+# `from .smolvla_jax import JaxSmolVLA, JaxSmolVLAConfig, JaxSmolVLAPolicy`, which meant every
+# `import lerobot.policies.pi05_jax` first executed this file and pulled in SmolVLA's entire model
+# stack -- on a branch whose jax/flax/transformers pins come from openpi and are not expected to
+# keep SmolVLA working. Any import failure there would have taken pi0.5 down with it, before it
+# did anything. Import policies from their own subpackage (`lerobot.policies.pi05_jax`) instead.
 
-__all__ = [
-    "JaxSmolVLA",
-    "JaxSmolVLAConfig",
-    "JaxSmolVLAPolicy",
-]
+__all__: list[str] = []
