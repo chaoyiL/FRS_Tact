@@ -32,6 +32,23 @@ _MEMORY_BANK_ARRAY_KEYS = (
 )
 
 
+def _resolve_checkpoint_file(directory: pathlib.Path, filename: str) -> pathlib.Path:
+    """Accept both native names and Hugging Face content-hashed checkpoint names."""
+
+    expected = directory / filename
+    if expected.exists():
+        return expected
+
+    suffix = expected.suffix
+    candidates = sorted(directory.glob(f"{expected.stem}-*{suffix}"))
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(candidates) > 1:
+        names = ", ".join(path.name for path in candidates)
+        raise FileNotFoundError(f"Multiple candidates for {filename} in {directory}: {names}")
+    return expected
+
+
 def _path_name(path: tuple[Any, ...]) -> str:
     return "/".join(str(part) for part in path)
 
@@ -100,7 +117,7 @@ def save_memory_bank(directory: pathlib.Path, memory_bank: dict[str, Any] | None
 
 def load_memory_bank(directory: str | pathlib.Path) -> dict[str, Any] | None:
     directory = pathlib.Path(directory)
-    path = directory / MEMORY_BANK_NAME
+    path = _resolve_checkpoint_file(directory, MEMORY_BANK_NAME)
     if not path.exists():
         return None
     with np.load(path) as archive:
@@ -158,7 +175,7 @@ def load_checkpoint(directory: str | pathlib.Path) -> tuple[dict[str, Any], dict
     with (directory / CHECKPOINT_NAME).open(encoding="utf-8") as file:
         metadata = json.load(file)
     restored_flat: dict[tuple[str, ...], Any] = {}
-    with np.load(directory / PARAMS_NAME) as archive:
+    with np.load(_resolve_checkpoint_file(directory, PARAMS_NAME)) as archive:
         for index, path_name in enumerate(metadata["parameter_paths"]):
             restored_flat[tuple(path_name.split("/"))] = _numpy_to_leaf(archive[f"p{index:05d}"])
     return traverse_util.unflatten_dict(restored_flat), metadata
@@ -172,8 +189,8 @@ def load_train_state(
     directory = pathlib.Path(directory)
     params, metadata = load_checkpoint(directory)
     opt_state = None
-    opt_state_path = directory / OPT_STATE_NAME
-    treedef_path = directory / OPT_STATE_TREEDEF_NAME
+    opt_state_path = _resolve_checkpoint_file(directory, OPT_STATE_NAME)
+    treedef_path = _resolve_checkpoint_file(directory, OPT_STATE_TREEDEF_NAME)
     if metadata.get("has_opt_state") and opt_state_path.exists() and treedef_path.exists():
         try:
             with treedef_path.open("rb") as file:

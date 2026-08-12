@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-'''
-'''
 
 set -euo pipefail
 
@@ -483,8 +481,11 @@ upgrade_dataset_to_v30() {
 
     repair_corrupt_parquets "$dataset_name" "$snapshot_dir"
 
+    # cleanup_local_convert_work may remove the empty work root between datasets.
+    mkdir -p "$V30_CONVERT_WORK_ROOT"
+
     # workspace 至少留约 50G，避免写到一半空间不足
-    avail_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}')"
+    avail_kb="$(df -Pk "$V30_CONVERT_WORK_ROOT" 2>/dev/null | awk 'NR==2{print $4}' || true)"
     if [[ -n "$avail_kb" && "$avail_kb" -lt 52428800 ]]; then
         log "警告: 转换工作盘可用空间约 $((avail_kb / 1024 / 1024))G，建议 >= 50G（目录: ${V30_CONVERT_WORK_ROOT}）"
     fi
