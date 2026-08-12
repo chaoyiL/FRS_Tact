@@ -36,6 +36,7 @@ rename_map:
 # VLA normalized action -> source reverse -> x_base -> tactile FRS decode -> action。
 frs:
   enabled: true
+  steering_protection_interval_s: null
   checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0809_02
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
@@ -81,7 +82,7 @@ observation:
   no_state_obs_mode: false
 
 control:
-  # 训练数据是 30 Hz；每次只执行 1 步，才能让 history_stride=3 保持训练时约 0.9 s 的窗口。
+  # 训练数据是 30 Hz；FRS v1 逐 action 重定向，完整协商 horizon 不截断执行。
   control_frequency: 30.0
   controller_frequency: 80.0
   action_horizon: 10

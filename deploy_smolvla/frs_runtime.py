@@ -9,6 +9,7 @@ import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,7 @@ class FRSConfig:
     reverse_solver: str
     decode_steps: int
     decode_solver: str
+    steering_protection_interval_s: float | None
     verify_source_checkpoint_fingerprint: bool
     max_normalized_action_abs: float
     max_normalized_delta_rms: float
@@ -90,6 +92,23 @@ def _local_directory(value: Any, *, config_path: Path, name: str) -> Path:
     if not path.is_dir():
         raise FileNotFoundError(f"{name} directory does not exist: {path}")
     return path
+
+
+def _steering_protection_interval(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(
+            "frs.steering_protection_interval_s must be null or a finite "
+            "non-negative number"
+        )
+    interval = float(value)
+    if not math.isfinite(interval) or interval < 0:
+        raise ValueError(
+            "frs.steering_protection_interval_s must be null or a finite "
+            "non-negative number"
+        )
+    return interval
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -125,6 +144,9 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     gate_temperature = float(raw["gate_temperature"])
     max_action_abs = float(raw.get("max_normalized_action_abs", 8.0))
     max_delta_rms = float(raw.get("max_normalized_delta_rms", 4.0))
+    steering_protection_interval_s = _steering_protection_interval(
+        raw.get("steering_protection_interval_s")
+    )
     if min(history_stride, reverse_steps, decode_steps) <= 0:
         raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
     if gate_temperature <= 0:
@@ -153,6 +175,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         reverse_solver=reverse_solver,
         decode_steps=decode_steps,
         decode_solver=decode_solver,
+        steering_protection_interval_s=steering_protection_interval_s,
         verify_source_checkpoint_fingerprint=bool(raw.get("verify_source_checkpoint_fingerprint", True)),
         max_normalized_action_abs=max_action_abs,
         max_normalized_delta_rms=max_delta_rms,
@@ -203,8 +226,18 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         raise ValueError("frs.reverse_solver must be euler, fireflow, or slerpflow")
     if str(raw["decode_solver"]) not in {"euler", "fireflow"}:
         raise ValueError("frs.decode_solver must be euler or fireflow")
+    _steering_protection_interval(raw.get("steering_protection_interval_s"))
     if config.get("observation", {}).get("data_type") != "vitac":
         raise ValueError("FRS deployment requires observation.data_type='vitac'")
+    control = config.get("control", {})
+    if (
+        control.get("steps_per_inference") is not None
+        and control.get("action_horizon") is not None
+        and int(control["steps_per_inference"]) != int(control["action_horizon"])
+    ):
+        raise ValueError(
+            "FRS deployment requires steps_per_inference to equal action_horizon"
+        )
 
 
 def _checkpoint_fingerprint(checkpoint_dir: Path) -> str:

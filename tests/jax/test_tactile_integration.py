@@ -201,6 +201,9 @@ def test_checkpoint_steps_override_is_sent_to_robot_server_after_validation(
     assert policy.config.n_action_steps == 5
     assert sent_server_config["steps_per_inference"] == 10
     assert sent_server_config["action_horizon"] == 20
+    assert "execution_protocol" not in sent_server_config
+    assert "steering_protection_interval_s" not in sent_server_config
+    assert "frs_tactile_keys" not in sent_server_config
 
 
 def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(

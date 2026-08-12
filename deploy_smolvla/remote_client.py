@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import queue
 import threading
@@ -24,11 +25,18 @@ from train_vtsmolvla import VTJaxSmolVLAPolicy
 from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
 
 from .bridge_client import RobotBridgeClient
-from .frs_runtime import FRSRuntime, validate_frs_config_section
+from .frs_protocol import FRSSteerRequest
+from .frs_runtime import (
+    FRSChunkReady,
+    FRSRuntime,
+    FRSSteerResult,
+    validate_frs_config_section,
+)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
 Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
+LOGGER = logging.getLogger(__name__)
 
 
 class ObservationSaver:
@@ -490,6 +498,68 @@ def _trace_action_chunk(value: Any) -> np.ndarray:
     return np.array(chunk, copy=True)
 
 
+def _immutable_trace_array(value: Any) -> np.ndarray:
+    source = np.asarray(value, dtype=np.float32)
+    return np.frombuffer(source.tobytes(order="C"), dtype=np.float32).reshape(source.shape)
+
+
+def _build_frs_chunk_trace(ready: FRSChunkReady) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "kind": "frs_chunk",
+        "chunk_id": int(ready.chunk_id),
+        "action_vla_normalized": _immutable_trace_array(ready.action_vla_normalized),
+        "action_vla": _immutable_trace_array(ready.action_vla),
+        "x_base": _immutable_trace_array(ready.x_base),
+        "prediction_started_at": float(ready.prediction_started_at),
+        "prediction_finished_at": float(ready.prediction_finished_at),
+    }
+
+
+def _build_frs_steer_trace(
+    result: FRSSteerResult,
+    request: FRSSteerRequest,
+) -> dict[str, Any]:
+    if (result.chunk_id, result.request_id, result.action_index) != (
+        request.chunk_id,
+        request.request_id,
+        request.action_index,
+    ):
+        raise ValueError("FRS steer trace result does not match its request")
+    diagnostics = result.diagnostics
+    return {
+        "version": 2,
+        "kind": "frs_steer",
+        "chunk_id": int(result.chunk_id),
+        "request_id": int(result.request_id),
+        "action_index": int(result.action_index),
+        "target_timestamp": request.target_timestamp,
+        "protection_applied": request.protection_applied,
+        "decoded_normalized": _immutable_trace_array(result.decoded_normalized),
+        "selected_normalized": _immutable_trace_array(result.selected_normalized),
+        "selected_action": _immutable_trace_array(result.selected_action),
+        "tactile_sequence_length": int(result.tactile_sequence_length),
+        "encode_started_at": float(result.encode_started_at),
+        "encode_finished_at": float(result.encode_finished_at),
+        "decode_started_at": float(result.decode_started_at),
+        "decode_finished_at": float(result.decode_finished_at),
+        "frs_diagnostics": {
+            "tactile_change": float(diagnostics.tactile_change),
+            "gate_weight": float(diagnostics.gate_weight),
+            "delta_rms": float(diagnostics.delta_rms),
+            "max_normalized_action_abs": float(diagnostics.max_normalized_action_abs),
+        },
+    }
+
+
+def _build_trace_or_none(builder: Any, *args: Any) -> dict[str, Any] | None:
+    try:
+        return builder(*args)
+    except Exception as exc:
+        LOGGER.warning("Omitting FRS trace after serialization failure: %s", exc)
+        return None
+
+
 def _build_action_trace(
     policy: Policy,
     frs_runtime: FRSRuntime | None,
@@ -565,6 +635,33 @@ def _remaining_action_chunk(action_chunk: np.ndarray, executed_steps: int) -> np
             f"executed_steps must be in [0, {chunk.shape[0]}], got {executed_steps}"
         )
     return np.array(chunk[int(executed_steps) :], copy=True)
+
+
+def _build_server_config(
+    observation_config: Mapping[str, Any],
+    control: Mapping[str, Any],
+    *,
+    frs_policy: FRSRuntime | None,
+) -> dict[str, Any]:
+    server_config = {
+        "data_type": observation_config["data_type"],
+        "language_prompt": observation_config["language_prompt"],
+        "control_frequency": float(control["control_frequency"]),
+        "controller_frequency": float(control["controller_frequency"]),
+        "single_arm_mode": bool(observation_config["single_arm_mode"]),
+        "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
+        "steps_per_inference": int(control["steps_per_inference"]),
+        "action_horizon": int(control["action_horizon"]),
+    }
+    if frs_policy is not None:
+        server_config.update(
+            execution_protocol="frs_steering_v1",
+            steering_protection_interval_s=(
+                frs_policy.config.steering_protection_interval_s
+            ),
+            frs_tactile_keys=list(frs_policy.tactile_keys),
+        )
+    return server_config
 
 
 def run(
@@ -668,16 +765,11 @@ def run(
             f"execution_horizon={execution_horizon}"
         )
 
-    server_config = {
-        "data_type": observation_config["data_type"],
-        "language_prompt": observation_config["language_prompt"],
-        "control_frequency": float(control["control_frequency"]),
-        "controller_frequency": float(control["controller_frequency"]),
-        "single_arm_mode": bool(observation_config["single_arm_mode"]),
-        "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
-        "steps_per_inference": steps_per_inference,
-        "action_horizon": configured_horizon,
-    }
+    server_config = _build_server_config(
+        observation_config,
+        control,
+        frs_policy=frs_runtime,
+    )
     bridge = RobotBridgeClient(
         address=str(connection["address"]),
         port=int(connection["port"]),

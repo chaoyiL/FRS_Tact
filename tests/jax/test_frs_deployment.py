@@ -10,7 +10,14 @@ import pytest
 from deploy_smolvla import remote_client
 from deploy_smolvla import frs_runtime as frs_runtime_module
 from deploy_smolvla.bridge_client import RobotBridgeClient
-from deploy_smolvla.frs_runtime import FRSRuntime, TactileHistory
+from deploy_smolvla.frs_protocol import FRSSteerRequest
+from deploy_smolvla.frs_runtime import (
+    FRSChunkReady,
+    FRSDiagnostics,
+    FRSRuntime,
+    FRSSteerResult,
+    TactileHistory,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
@@ -1214,10 +1221,278 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
 
     assert config["observation"]["data_type"] == "vitac"
     assert config["control"]["control_frequency"] == 30.0
-    assert config["control"]["steps_per_inference"] == 1
+    assert config["control"]["steps_per_inference"] == 10
+    assert config["control"]["steps_per_inference"] == config["control"]["action_horizon"]
+    assert config["frs"]["steering_protection_interval_s"] is None
     assert config["frs"]["history_stride"] == 3
     assert config["frs"]["reverse_solver"] == "slerpflow"
     assert config["frs"]["decode_solver"] == "euler"
+
+
+def test_frs_server_config_advertises_explicit_v1_fields() -> None:
+    observation = {
+        "data_type": "vitac",
+        "language_prompt": "test",
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+    }
+    control = {
+        "control_frequency": 30.0,
+        "controller_frequency": 80.0,
+        "steps_per_inference": 10,
+        "action_horizon": 10,
+    }
+    frs_policy = SimpleNamespace(
+        config=SimpleNamespace(steering_protection_interval_s=None),
+        tactile_keys=("left", "right"),
+    )
+
+    config = remote_client._build_server_config(
+        observation,
+        control,
+        frs_policy=frs_policy,
+    )
+
+    assert config == {
+        "data_type": "vitac",
+        "language_prompt": "test",
+        "control_frequency": 30.0,
+        "controller_frequency": 80.0,
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+        "steps_per_inference": 10,
+        "action_horizon": 10,
+        "execution_protocol": "frs_steering_v1",
+        "steering_protection_interval_s": None,
+        "frs_tactile_keys": ["left", "right"],
+    }
+
+
+def test_legacy_server_config_omits_all_frs_protocol_fields() -> None:
+    observation = {
+        "data_type": "vision",
+        "language_prompt": "test",
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+    }
+    control = {
+        "control_frequency": 20.0,
+        "controller_frequency": 80.0,
+        "steps_per_inference": 5,
+        "action_horizon": 10,
+    }
+
+    config = remote_client._build_server_config(observation, control, frs_policy=None)
+
+    assert config == {
+        "data_type": "vision",
+        "language_prompt": "test",
+        "control_frequency": 20.0,
+        "controller_frequency": 80.0,
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+        "steps_per_inference": 5,
+        "action_horizon": 10,
+    }
+    assert "execution_protocol" not in config
+    assert "steering_protection_interval_s" not in config
+    assert "frs_tactile_keys" not in config
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, 0, 0.0, 0.25, np.float32(0.5)],
+)
+def test_frs_config_accepts_null_or_nonnegative_finite_protection_interval(
+    value: object,
+) -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": 1,
+            "gate_tau": 0.2,
+            "gate_temperature": 0.1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+            "steering_protection_interval_s": value,
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "history_stride": 1,
+        "gate_tau": 0.2,
+        "gate_temperature": 0.1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+        "steering_protection_interval_s": 0.25,
+    }
+
+    parsed = frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
+
+    assert parsed.steering_protection_interval_s == 0.25
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -0.1, float("nan"), float("inf"), float("-inf"), "0.1"],
+)
+def test_frs_config_rejects_invalid_protection_interval(value: object) -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": 1,
+            "gate_tau": 0.2,
+            "gate_temperature": 0.1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+            "steering_protection_interval_s": value,
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="steering_protection_interval_s"):
+        frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_frs_config_requires_full_horizon_steps_per_inference() -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": 1,
+            "gate_tau": 0.2,
+            "gate_temperature": 0.1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 1, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="steps_per_inference.*action_horizon"):
+        frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_trace_v2_chunk_copies_and_freezes_source_base_and_timing() -> None:
+    normalized = np.asarray([[[1.0], [2.0]]], dtype=np.float32)
+    action = np.asarray([[[10.0], [20.0]]], dtype=np.float32)
+    x_base = np.asarray([[[3.0], [4.0]]], dtype=np.float32)
+    ready = FRSChunkReady(7, normalized, action, x_base, 100.25, 100.75)
+
+    trace = remote_client._build_frs_chunk_trace(ready)
+
+    assert trace["version"] == 2
+    assert trace["kind"] == "frs_chunk"
+    assert trace["chunk_id"] == 7
+    np.testing.assert_array_equal(trace["action_vla_normalized"], normalized)
+    np.testing.assert_array_equal(trace["action_vla"], action)
+    np.testing.assert_array_equal(trace["x_base"], x_base)
+    assert trace["prediction_started_at"] == 100.25
+    assert trace["prediction_finished_at"] == 100.75
+    for key in ("action_vla_normalized", "action_vla", "x_base"):
+        assert trace[key].flags.writeable is False
+        assert not np.shares_memory(trace[key], getattr(ready, key))
+
+    normalized[...] = -1.0
+    np.testing.assert_array_equal(trace["action_vla_normalized"], [[[1.0], [2.0]]])
+
+
+def test_trace_v2_steer_records_request_decode_selection_timing_and_diagnostics() -> None:
+    result = FRSSteerResult(
+        chunk_id=7,
+        request_id=11,
+        action_index=1,
+        action_vla_normalized=np.asarray([[[1.0], [2.0]]], dtype=np.float32),
+        x_base=np.asarray([[[3.0], [4.0]]], dtype=np.float32),
+        decoded_normalized=np.asarray([[[5.0], [6.0]]], dtype=np.float32),
+        selected_normalized=np.asarray([6.0], dtype=np.float32),
+        selected_action=np.asarray([60.0], dtype=np.float32),
+        tactile_sequence_length=2,
+        diagnostics=FRSDiagnostics(0.25, 0.75, 2.0, 6.0),
+        encode_started_at=101.0,
+        encode_finished_at=101.1,
+        decode_started_at=101.2,
+        decode_finished_at=101.4,
+    )
+    request = FRSSteerRequest(
+        chunk_id=7,
+        request_id=11,
+        action_index=1,
+        target_timestamp=102.0,
+        protection_applied=True,
+        observation={},
+    )
+
+    trace = remote_client._build_frs_steer_trace(result, request)
+
+    assert trace == {
+        "version": 2,
+        "kind": "frs_steer",
+        "chunk_id": 7,
+        "request_id": 11,
+        "action_index": 1,
+        "target_timestamp": 102.0,
+        "protection_applied": True,
+        "decoded_normalized": trace["decoded_normalized"],
+        "selected_normalized": trace["selected_normalized"],
+        "selected_action": trace["selected_action"],
+        "tactile_sequence_length": 2,
+        "encode_started_at": 101.0,
+        "encode_finished_at": 101.1,
+        "decode_started_at": 101.2,
+        "decode_finished_at": 101.4,
+        "frs_diagnostics": {
+            "tactile_change": 0.25,
+            "gate_weight": 0.75,
+            "delta_rms": 2.0,
+            "max_normalized_action_abs": 6.0,
+        },
+    }
+    assert "status" not in trace
+    np.testing.assert_array_equal(trace["decoded_normalized"], result.decoded_normalized)
+    np.testing.assert_array_equal(trace["selected_normalized"], result.selected_normalized)
+    np.testing.assert_array_equal(trace["selected_action"], result.selected_action)
+    for key in ("decoded_normalized", "selected_normalized", "selected_action"):
+        assert trace[key].flags.writeable is False
+        assert not np.shares_memory(trace[key], getattr(result, key))
+
+
+def test_trace_v2_builder_exception_is_fail_open(caplog: pytest.LogCaptureFixture) -> None:
+    def fail_builder() -> dict[str, object]:
+        raise RuntimeError("trace serialization failed")
+
+    assert remote_client._build_trace_or_none(fail_builder) is None
+    assert "Omitting FRS trace after serialization failure" in caplog.text
 
 
 def test_tactile_history_matches_clamped_training_indices() -> None:
