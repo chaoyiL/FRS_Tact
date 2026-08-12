@@ -7,7 +7,8 @@
 #   * action caches come from tools/prepare_frs_pi05_cache.py, not tools/prepare_frs_caches.py.
 # Stages 2 and 3 reuse the exact same base-model-agnostic tools as the SmolVLA pipeline.
 #
-# UNTESTED, like the rest of this branch's pi0.5 work -- see pi05_frs_plan.md.
+# Environment setup and official checkpoint loading were verified on Linux with two H100 GPUs.
+# The full three-stage run still requires the configured datasets and tactile encoder checkpoint.
 
 set -Eeuo pipefail
 
@@ -82,7 +83,7 @@ CAMERA_MAP_SIZE="${SETTINGS[6]}"
     || fail "配置缺少 model.camera_map（pi0.5 相机槽位 -> 数据集 observation key）"
 [[ -d "${ENCODER_DIR}" ]] || fail "触觉 encoder 不存在：${ENCODER_DIR}"
 if [[ "${CHECKPOINT_IS_URL}" == "1" ]]; then
-    log "checkpoint 是远端 URL，首次运行会下载并缓存到 \${OPENPI_DATA_HOME:-~/.cache/openpi}：${CHECKPOINT}"
+    log "checkpoint 是远端 URL，首次运行会下载并缓存到 ${OPENPI_DATA_HOME:-${HOME}/.cache/openpi}：${CHECKPOINT}"
 else
     [[ -d "${CHECKPOINT}" ]] || fail "本地 checkpoint 目录不存在：${CHECKPOINT}"
     [[ -d "${CHECKPOINT}/params" ]] \
@@ -92,6 +93,15 @@ for setting in "${SETTINGS[@]:7}"; do
     [[ "${setting}" == DATASET=* ]] || continue
     dataset_root="${setting#DATASET=}"
     [[ -d "${dataset_root}" ]] || fail "数据集目录不存在：${dataset_root}"
+    info_path="${dataset_root}/meta/info.json"
+    [[ -f "${info_path}" ]] || fail "数据集缺少 meta/info.json：${dataset_root}"
+    dataset_version="$(
+        "${UV_BIN}" run --no-sync python -c \
+            'import json, sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("codebase_version", ""))' \
+            "${info_path}"
+    )"
+    [[ "${dataset_version}" == "v3.0" ]] \
+        || fail "数据集必须是 LeRobot v3.0，当前为 ${dataset_version:-unknown}：${dataset_root}"
 done
 
 if [[ "${FRS_FOREGROUND:-0}" != "1" && -z "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
@@ -134,15 +144,23 @@ from lerobot.policies.pi05_jax import Pi0Config, load_pi0
 with Path(sys.argv[1]).open(encoding="utf-8") as file:
     cfg = yaml.safe_load(file) or {}
 model_cfg = cfg.get("model") or {}
+paligemma_variant = str(model_cfg.get("paligemma_variant", "gemma_2b"))
+action_expert_variant = str(model_cfg.get("action_expert_variant", "gemma_300m"))
 config = Pi0Config(
     pi05=True,
     action_dim=int(model_cfg.get("action_dim", 32)),
     action_horizon=int(model_cfg.get("action_horizon", 50)),
+    paligemma_variant=paligemma_variant,
+    action_expert_variant=action_expert_variant,
 )
+# load_pi0 raises if the checkpoint carries parameters this config has no slot for -- the
+# case that matters is a LoRA fine-tune loaded with the default (non-LoRA) variants, where
+# the LoRA weights would otherwise be dropped without a word.
 model = load_pi0(str(cfg["checkpoint"]), config=config)
 print(
     f"pi0.5 loaded: action_dim={model.action_dim} action_horizon={model.action_horizon} "
-    f"max_token_len={model.max_token_len} pi05={model.pi05}"
+    f"max_token_len={model.max_token_len} pi05={model.pi05} "
+    f"variants={paligemma_variant}/{action_expert_variant}"
 )
 PY
 

@@ -21,8 +21,8 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 
-from lerobot.policies.pi05_jax import Observation, Pi0
-from lerobot.policies.pi05_jax.pi0 import Pi0PrefixCache
+from lerobot.policies.pi05_jax import Observation, Pi0, frs as _frs
+from lerobot.policies.pi05_jax.frs import Pi0PrefixCache
 from utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 
 # Keyed by `_cache_key`; values are jitted functions taking `state` as their first argument.
@@ -62,7 +62,7 @@ def _jitted_prefix(model: Pi0):
 
         @jax.jit
         def jitted(state: nnx.State, observation: Observation) -> Pi0PrefixCache:
-            return nnx.merge(graphdef, state).build_prefix_cache(observation)
+            return _frs.build_prefix_cache(nnx.merge(graphdef, state), observation)
 
         _PREFIX_CACHE[cache_key] = jitted
     return jitted
@@ -82,7 +82,7 @@ def _jitted_sample(model: Pi0, *, num_steps: int):
 
             def body(step: jax.Array, x_t: jax.Array) -> jax.Array:
                 t = jnp.full((batch,), 1.0 + step.astype(jnp.float32) * dt, dtype=jnp.float32)
-                return x_t + dt * merged.denoise_step(cache, x_t, t)
+                return x_t + dt * _frs.denoise_step(merged, cache, x_t, t)
 
             return jax.lax.fori_loop(0, num_steps, body, noise)
 
@@ -102,7 +102,7 @@ def _jitted_reverse(model: Pi0, *, num_steps: int, solver: Literal["euler", "fir
             merged = nnx.merge(graphdef, state)
 
             def velocity_fn(x: jax.Array, t: jax.Array) -> jax.Array:
-                return merged.denoise_step(cache, x, t)
+                return _frs.denoise_step(merged, cache, x, t)
 
             return integrate(velocity_fn, jnp.asarray(actions, dtype=jnp.float32), num_steps=num_steps)
 
@@ -111,7 +111,7 @@ def _jitted_reverse(model: Pi0, *, num_steps: int, solver: Literal["euler", "fir
 
 
 def build_prefix_cache(model: Pi0, observation: Observation) -> Pi0PrefixCache:
-    """JIT-compiled `Pi0.build_prefix_cache` (one image/language encode per observation batch)."""
+    """JIT-compiled `frs.build_prefix_cache` (one image/language encode per observation batch)."""
     _, state = nnx.split(model)
     return _jitted_prefix(model)(state, observation)
 

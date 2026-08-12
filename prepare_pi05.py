@@ -14,6 +14,7 @@ src/lerobot/policies/pi05_jax/README.md and pi05_frs_plan.md.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import pathlib
@@ -32,11 +33,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
-from lerobot.datasets.sample_utils import action_delta_timestamps
+from lerobot.datasets.dataset_sources import resolve_source_visual_keys
+from lerobot.datasets.sample_utils import to_numpy
 
 from modalities_eval.pi05_utils import Pi05EvalModel, stack_observations
-from lerobot.policies.pi05_jax import Observation
-from lerobot.policies.pi05_jax.normalize import NormStats, load_norm_stats
+from lerobot.policies.pi05_jax import Observation, Pi0, load_norm_stats
+from lerobot.policies.pi05_jax.normalize import NormStats
 from utils.cache import CACHE_VERSION
 from utils.cache import MANIFEST_NAME
 from utils.cache import SampleRecord
@@ -78,26 +80,101 @@ def _checkpoint_fingerprint(checkpoint_dir: pathlib.Path) -> str:
     return digest.hexdigest()
 
 
-def _load_observation_and_gt(
-    model: Pi05EvalModel, dataset: LeRobotDataset, dataset_index: int
-) -> tuple[Observation, jax.Array]:
-    sample = dataset[dataset_index]
-    observation, gt_actions, _ = model.prepare_sample(sample)
-    return observation, jnp.asarray(gt_actions, dtype=jnp.float32)
-
-
 def _load_observation_batch(
     model: Pi05EvalModel,
     dataset: LeRobotDataset,
+    action_dataset: Any,
     batch_records: Sequence[SampleRecord],
+    *,
+    action_key: str,
+    action_horizon: int,
+    episode_end_indices: Mapping[int, int],
+    load_workers: int,
 ) -> tuple[Observation, jax.Array]:
+    indices = [record.dataset_index for record in batch_records]
+    if load_workers == 1:
+        samples = [dataset[index] for index in indices]
+        action_windows = _load_action_windows(
+            action_dataset,
+            batch_records,
+            action_key=action_key,
+            action_horizon=action_horizon,
+            episode_end_indices=episode_end_indices,
+        )
+    else:
+        with ThreadPoolExecutor(max_workers=load_workers + 1) as pool:
+            action_future = pool.submit(
+                _load_action_windows,
+                action_dataset,
+                batch_records,
+                action_key=action_key,
+                action_horizon=action_horizon,
+                episode_end_indices=episode_end_indices,
+            )
+            samples = list(pool.map(dataset.__getitem__, indices))
+            action_windows = action_future.result()
+
     observations: list[Observation] = []
     gt_actions: list[jax.Array] = []
-    for record in batch_records:
-        observation, actions = _load_observation_and_gt(model, dataset, record.dataset_index)
+    for sample, action_window in zip(samples, action_windows, strict=True):
+        sample = {**sample, action_key: action_window}
+        observation, actions, _ = model.prepare_sample(sample)
         observations.append(observation)
         gt_actions.append(actions)
     return stack_observations(observations), jnp.stack(gt_actions, axis=0)
+
+
+def _load_action_windows(
+    action_dataset: Any,
+    batch_records: Sequence[SampleRecord],
+    *,
+    action_key: str,
+    action_horizon: int,
+    episode_end_indices: Mapping[int, int],
+) -> np.ndarray:
+    """Read overlapping action windows as merged contiguous Arrow slices."""
+    if not batch_records:
+        raise ValueError("batch_records must not be empty")
+
+    offsets = np.arange(action_horizon, dtype=np.int64)
+    query_indices = np.empty((len(batch_records), action_horizon), dtype=np.int64)
+    for row, record in enumerate(batch_records):
+        try:
+            episode_end = int(episode_end_indices[record.episode_index])
+        except KeyError as error:
+            raise KeyError(f"missing end index for episode {record.episode_index}") from error
+        if record.dataset_index >= episode_end:
+            raise ValueError(
+                f"dataset index {record.dataset_index} is outside episode {record.episode_index} "
+                f"ending at {episode_end}"
+            )
+        query_indices[row] = np.minimum(record.dataset_index + offsets, episode_end - 1)
+
+    unique_indices = np.unique(query_indices)
+    split_points = np.flatnonzero(np.diff(unique_indices) > action_horizon) + 1
+    index_groups = np.split(unique_indices, split_points)
+    windows: np.ndarray | None = None
+
+    for group in index_groups:
+        start = int(group[0])
+        stop = int(group[-1]) + 1
+        rows = action_dataset[start:stop][action_key]
+        if isinstance(rows, np.ndarray):
+            contiguous = rows
+        else:
+            contiguous = np.stack([to_numpy(row) for row in rows], axis=0)
+        contiguous = np.asarray(contiguous, dtype=np.float32)
+        if contiguous.shape[0] != stop - start:
+            raise ValueError(
+                f"action slice [{start}:{stop}] returned {contiguous.shape[0]} rows"
+            )
+        if windows is None:
+            windows = np.empty((*query_indices.shape, *contiguous.shape[1:]), dtype=np.float32)
+        mask = (query_indices >= start) & (query_indices < stop)
+        windows[mask] = contiguous[query_indices[mask] - start]
+
+    assert windows is not None
+    return windows
 
 
 def _pad_observation_batch(observation: Observation, target_batch: int) -> Observation:
@@ -163,10 +240,15 @@ def prepare_cache(
     use_quantile_norm: bool,
     action_dim: int,
     action_horizon: int,
+    # Must match the TrainConfig the checkpoint was trained with; the defaults describe the
+    # official pi05_base. See modalities_eval/pi05_utils.py:Pi05SampleProcessor.
+    paligemma_variant: str = "gemma_2b",
+    action_expert_variant: str = "gemma_300m",
     model_sample_steps: int,
     reverse_steps: int,
     reverse_solver: str,
     batch_size: int,
+    load_workers: int,
     inference_seed: int,
     split_seed: int,
     val_fraction: float,
@@ -175,9 +257,12 @@ def prepare_cache(
     max_samples: int | None,
     drop_tail_action_chunks: int = 1,
     flush_every: int = 8,
+    loaded_model: Pi0 | None = None,
 ) -> dict[str, Any]:
-    if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
-        raise ValueError("model_sample_steps, reverse_steps, and batch_size must all be positive.")
+    if min(model_sample_steps, reverse_steps, batch_size, load_workers) <= 0:
+        raise ValueError(
+            "model_sample_steps, reverse_steps, batch_size, and load_workers must all be positive."
+        )
     if reverse_solver not in ("euler", "fireflow"):
         raise ValueError(f"reverse_solver must be 'euler' or 'fireflow', got {reverse_solver!r}.")
     if flush_every <= 0:
@@ -199,6 +284,9 @@ def prepare_cache(
         use_quantile_norm=use_quantile_norm,
         action_dim=action_dim,
         action_horizon=action_horizon,
+        paligemma_variant=paligemma_variant,
+        action_expert_variant=action_expert_variant,
+        loaded_model=loaded_model,
     )
     metadata = LeRobotDatasetMetadata(model.dataset_repo_id, root=model.dataset_root, revision=model.dataset_revision)
     action_horizon = int(model.action_horizon)
@@ -289,12 +377,27 @@ def prepare_cache(
         print(f"cache complete: {cache_dir}")
         return manifest
 
+    source_camera_keys = resolve_source_visual_keys(
+        tuple(camera_map.values()),
+        rename_map,
+        metadata.camera_keys,
+    )
+    print(
+        f"loading only pi0.5 RGB columns: {source_camera_keys} "
+        f"(workers={load_workers}, available_cameras={len(metadata.camera_keys)})",
+        flush=True,
+    )
     dataset = LeRobotDataset(
         model.dataset_repo_id,
         root=model.dataset_root,
         revision=model.dataset_revision,
-        delta_timestamps=action_delta_timestamps(model.action_key, action_horizon, metadata.fps),
+        visual_keys=source_camera_keys,
     )
+    action_dataset = dataset.select_columns(model.action_key)
+    episode_end_indices = {
+        episode_index: int(np.asarray(metadata.episodes[episode_index]["dataset_to_index"]).item())
+        for episode_index in range(metadata.total_episodes)
+    }
     action_shape = (action_horizon, action_dim)
     loop_started = time.perf_counter()
     batches_since_flush = 0
@@ -339,7 +442,16 @@ def prepare_cache(
         stop = min(start + batch_size, len(records))
         batch_records = records[start:stop]
         valid = len(batch_records)
-        observation_batch, gt_action_batch = _load_observation_batch(model, dataset, batch_records)
+        observation_batch, gt_action_batch = _load_observation_batch(
+            model,
+            dataset,
+            action_dataset,
+            batch_records,
+            action_key=model.action_key,
+            action_horizon=action_horizon,
+            episode_end_indices=episode_end_indices,
+            load_workers=load_workers,
+        )
         if valid < batch_size:
             observation_batch = _pad_observation_batch(observation_batch, batch_size)
             gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
@@ -419,6 +531,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reverse-steps", type=int, default=50)
     parser.add_argument("--reverse-solver", choices=("euler", "fireflow"), default="fireflow")
     parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--load-workers", type=int, default=4)
     parser.add_argument("--flush-every", type=int, default=8)
     parser.add_argument("--inference-seed", type=int, default=0)
     parser.add_argument("--split-seed", type=int, default=0)
@@ -453,6 +566,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         reverse_steps=args.reverse_steps,
         reverse_solver=args.reverse_solver,
         batch_size=args.batch_size,
+        load_workers=args.load_workers,
         inference_seed=args.inference_seed,
         split_seed=args.split_seed,
         val_fraction=args.val_fraction,

@@ -1,124 +1,150 @@
-"""Normalization stats + apply/unapply formulas, adapted from openpi (Apache-2.0):
-src/openpi/shared/normalize.py + the Normalize/Unnormalize transforms in src/openpi/transforms.py,
-commit 15a9616a00943ada6c20a0f158e3adb39df2ccac (2026-06-16).
+# Vendored from openpi (Apache-2.0), src/openpi/shared/normalize.py,
+# commit 15a9616a00943ada6c20a0f158e3adb39df2ccac (2026-06-16).
+# Unmodified except this header.
 
-Deliberately NOT a byte-for-byte vendor: upstream's `NormStats`/JSON (de)serialization goes
-through `pydantic` + `numpydantic`, and `load_norm_stats` through `etils.epath` -- three more
-dependencies just to read a small JSON file. `NormStats` here is a plain dataclass and
-`load_norm_stats`/`save_norm_stats` do the same `<assets_dir>/<asset_id>/norm_stats.json` layout
-with stdlib `json`, byte-compatible with files written by upstream openpi (same key names/nesting)
-so checkpoints downloaded via `../../../../pi05_frs_plan.md`'s `gs://openpi-assets/...` URLs load
-with either implementation.
-
-The z-score/quantile normalize math in `apply`/`unapply` is copied verbatim from
-`openpi.transforms.Normalize`/`Unnormalize`.
-
-IMPORTANT -- what this file does *not* decide: pi0.5's officially released checkpoints only ship
-norm stats for the datasets they were pretrained/finetuned on (keyed by `asset_id`, e.g. "droid").
-There is no `asset_id` for a brand-new robot/dataset like pick_tube. Whoever wires this up needs
-to decide: (a) reuse one of the shipped asset_id's stats as an approximation, or (b) compute fresh
-stats from the pick_tube dataset itself (openpi's own `scripts/compute_norm_stats.py` does this
-for training data -- not vendored here). See pi05_frs_plan.md.
-"""
-
-from __future__ import annotations
-
-import dataclasses
 import json
-from pathlib import Path
+import pathlib
 
 import numpy as np
+import numpydantic
+import pydantic
 
-from . import download
 
-
-@dataclasses.dataclass(frozen=True)
+@pydantic.dataclasses.dataclass
 class NormStats:
-    mean: np.ndarray
-    std: np.ndarray
-    q01: np.ndarray | None = None  # 1st percentile
-    q99: np.ndarray | None = None  # 99th percentile
+    mean: numpydantic.NDArray
+    std: numpydantic.NDArray
+    q01: numpydantic.NDArray | None = None  # 1st quantile
+    q99: numpydantic.NDArray | None = None  # 99th quantile
 
 
-def _to_array(value) -> np.ndarray:
-    return np.asarray(value, dtype=np.float32)
+class RunningStats:
+    """Compute running statistics of a batch of vectors."""
+
+    def __init__(self):
+        self._count = 0
+        self._mean = None
+        self._mean_of_squares = None
+        self._min = None
+        self._max = None
+        self._histograms = None
+        self._bin_edges = None
+        self._num_quantile_bins = 5000  # for computing quantiles on the fly
+
+    def update(self, batch: np.ndarray) -> None:
+        """
+        Update the running statistics with a batch of vectors.
+
+        Args:
+            vectors (np.ndarray): An array where all dimensions except the last are batch dimensions.
+        """
+        batch = batch.reshape(-1, batch.shape[-1])
+        num_elements, vector_length = batch.shape
+        if self._count == 0:
+            self._mean = np.mean(batch, axis=0)
+            self._mean_of_squares = np.mean(batch**2, axis=0)
+            self._min = np.min(batch, axis=0)
+            self._max = np.max(batch, axis=0)
+            self._histograms = [np.zeros(self._num_quantile_bins) for _ in range(vector_length)]
+            self._bin_edges = [
+                np.linspace(self._min[i] - 1e-10, self._max[i] + 1e-10, self._num_quantile_bins + 1)
+                for i in range(vector_length)
+            ]
+        else:
+            if vector_length != self._mean.size:
+                raise ValueError("The length of new vectors does not match the initialized vector length.")
+            new_max = np.max(batch, axis=0)
+            new_min = np.min(batch, axis=0)
+            max_changed = np.any(new_max > self._max)
+            min_changed = np.any(new_min < self._min)
+            self._max = np.maximum(self._max, new_max)
+            self._min = np.minimum(self._min, new_min)
+
+            if max_changed or min_changed:
+                self._adjust_histograms()
+
+        self._count += num_elements
+
+        batch_mean = np.mean(batch, axis=0)
+        batch_mean_of_squares = np.mean(batch**2, axis=0)
+
+        # Update running mean and mean of squares.
+        self._mean += (batch_mean - self._mean) * (num_elements / self._count)
+        self._mean_of_squares += (batch_mean_of_squares - self._mean_of_squares) * (num_elements / self._count)
+
+        self._update_histograms(batch)
+
+    def get_statistics(self) -> NormStats:
+        """
+        Compute and return the statistics of the vectors processed so far.
+
+        Returns:
+            dict: A dictionary containing the computed statistics.
+        """
+        if self._count < 2:
+            raise ValueError("Cannot compute statistics for less than 2 vectors.")
+
+        variance = self._mean_of_squares - self._mean**2
+        stddev = np.sqrt(np.maximum(0, variance))
+        q01, q99 = self._compute_quantiles([0.01, 0.99])
+        return NormStats(mean=self._mean, std=stddev, q01=q01, q99=q99)
+
+    def _adjust_histograms(self):
+        """Adjust histograms when min or max changes."""
+        for i in range(len(self._histograms)):
+            old_edges = self._bin_edges[i]
+            new_edges = np.linspace(self._min[i], self._max[i], self._num_quantile_bins + 1)
+
+            # Redistribute the existing histogram counts to the new bins
+            new_hist, _ = np.histogram(old_edges[:-1], bins=new_edges, weights=self._histograms[i])
+
+            self._histograms[i] = new_hist
+            self._bin_edges[i] = new_edges
+
+    def _update_histograms(self, batch: np.ndarray) -> None:
+        """Update histograms with new vectors."""
+        for i in range(batch.shape[1]):
+            hist, _ = np.histogram(batch[:, i], bins=self._bin_edges[i])
+            self._histograms[i] += hist
+
+    def _compute_quantiles(self, quantiles):
+        """Compute quantiles based on histograms."""
+        results = []
+        for q in quantiles:
+            target_count = q * self._count
+            q_values = []
+            for hist, edges in zip(self._histograms, self._bin_edges, strict=True):
+                cumsum = np.cumsum(hist)
+                idx = np.searchsorted(cumsum, target_count)
+                q_values.append(edges[idx])
+            results.append(np.array(q_values))
+        return results
 
 
-def _from_json_stats(value: dict) -> NormStats:
-    return NormStats(
-        mean=_to_array(value["mean"]),
-        std=_to_array(value["std"]),
-        q01=None if value.get("q01") is None else _to_array(value["q01"]),
-        q99=None if value.get("q99") is None else _to_array(value["q99"]),
-    )
+class _NormStatsDict(pydantic.BaseModel):
+    norm_stats: dict[str, NormStats]
 
 
-def _to_json_stats(stats: NormStats) -> dict:
-    return {
-        "mean": stats.mean.tolist(),
-        "std": stats.std.tolist(),
-        "q01": None if stats.q01 is None else stats.q01.tolist(),
-        "q99": None if stats.q99 is None else stats.q99.tolist(),
-    }
+def serialize_json(norm_stats: dict[str, NormStats]) -> str:
+    """Serialize the running statistics to a JSON string."""
+    return _NormStatsDict(norm_stats=norm_stats).model_dump_json(indent=2)
 
 
-def load_norm_stats(assets_dir: str | Path, asset_id: str) -> dict[str, NormStats]:
-    """Load `<assets_dir>/<asset_id>/norm_stats.json`, as written by openpi training/tooling.
-
-    `assets_dir` may be a local path or a URL `download.maybe_download` understands (e.g.
-    `gs://openpi-assets/checkpoints/pi05_base/assets`, to reuse an official checkpoint's stats --
-    see pi05_frs_plan.md). The join happens on plain strings, not `pathlib.Path`, before handing
-    off to `download.maybe_download`: `Path("gs://x") / "y"` corrupts the URL the same way
-    `checkpoint.py`/`prepare_pi05.py`'s `_is_local_path` docstring describes for checkpoint dirs.
-    """
-    joined = f"{str(assets_dir).rstrip('/')}/{asset_id}"
-    local_dir = download.maybe_download(joined)
-    path = Path(local_dir) / "norm_stats.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"norm stats file not found: {path}")
-    payload = json.loads(path.read_text())
-    return {key: _from_json_stats(value) for key, value in payload["norm_stats"].items()}
+def deserialize_json(data: str) -> dict[str, NormStats]:
+    """Deserialize the running statistics from a JSON string."""
+    return _NormStatsDict(**json.loads(data)).norm_stats
 
 
-def save_norm_stats(assets_dir: str | Path, asset_id: str, stats: dict[str, NormStats]) -> None:
-    """Local-path only (unlike `load_norm_stats`) -- writing to a `gs://` URL isn't supported by
-    `download.py`'s helpers, which are download/cache-only."""
-    path = Path(assets_dir) / asset_id / "norm_stats.json"
+def save(directory: pathlib.Path | str, norm_stats: dict[str, NormStats]) -> None:
+    """Save the normalization stats to a directory."""
+    path = pathlib.Path(directory) / "norm_stats.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {"norm_stats": {key: _to_json_stats(value) for key, value in stats.items()}}
-    path.write_text(json.dumps(payload, indent=2))
+    path.write_text(serialize_json(norm_stats))
 
 
-def apply(x: np.ndarray, stats: NormStats, *, use_quantiles: bool = False) -> np.ndarray:
-    """Normalize `x` into model space. Matches `openpi.transforms.Normalize`."""
-    if use_quantiles:
-        if stats.q01 is None or stats.q99 is None:
-            raise ValueError("use_quantiles=True requires stats.q01/q99")
-        q01, q99 = stats.q01[..., : x.shape[-1]], stats.q99[..., : x.shape[-1]]
-        return (x - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0
-    mean, std = stats.mean[..., : x.shape[-1]], stats.std[..., : x.shape[-1]]
-    return (x - mean) / (std + 1e-6)
-
-
-def _pad_to_dim(x: np.ndarray, dim: int, *, value: float) -> np.ndarray:
-    if x.shape[-1] >= dim:
-        return x
-    pad_width = [(0, 0)] * (x.ndim - 1) + [(0, dim - x.shape[-1])]
-    return np.pad(x, pad_width, constant_values=value)
-
-
-def unapply(x: np.ndarray, stats: NormStats, *, use_quantiles: bool = False) -> np.ndarray:
-    """Undo `apply` (model space -> real units). Matches `openpi.transforms.Unnormalize`."""
-    if use_quantiles:
-        if stats.q01 is None or stats.q99 is None:
-            raise ValueError("use_quantiles=True requires stats.q01/q99")
-        q01, q99 = stats.q01, stats.q99
-        dim = q01.shape[-1]
-        if dim < x.shape[-1]:
-            return np.concatenate(
-                [(x[..., :dim] + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01, x[..., dim:]], axis=-1
-            )
-        return (x + 1.0) / 2.0 * (q99 - q01 + 1e-6) + q01
-    mean = _pad_to_dim(stats.mean, x.shape[-1], value=0.0)
-    std = _pad_to_dim(stats.std, x.shape[-1], value=1.0)
-    return x * (std + 1e-6) + mean
+def load(directory: pathlib.Path | str) -> dict[str, NormStats]:
+    """Load the normalization stats from a directory."""
+    path = pathlib.Path(directory) / "norm_stats.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Norm stats file not found at: {path}")
+    return deserialize_json(path.read_text())

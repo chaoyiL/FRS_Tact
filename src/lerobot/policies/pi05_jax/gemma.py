@@ -14,8 +14,7 @@
 #
 # Vendored from openpi (Apache-2.0), src/openpi/models/gemma.py,
 # commit 15a9616a00943ada6c20a0f158e3adb39df2ccac (2026-06-16).
-# Only change: imports of lora / array_typing / (training.)sharding -> local modules
-# (../sharding.py here is a single-device no-op shim, not vendored -- see its docstring).
+# Only change: imports of lora / array_typing / training.sharding -> local modules.
 
 """Gemma adaptation for Pi, taken from big_vision.
 
@@ -41,7 +40,7 @@ import jax.numpy as jnp
 
 from . import array_typing as at
 from . import lora
-from . import sharding
+from .training import sharding
 
 PALIGEMMA_VOCAB_SIZE = 257_152
 

@@ -14,8 +14,7 @@
 #
 # Vendored from openpi (Apache-2.0), src/openpi/models/siglip.py,
 # commit 15a9616a00943ada6c20a0f158e3adb39df2ccac (2026-06-16).
-# Only change: `openpi.training.sharding` -> local `sharding` (single-device no-op shim,
-# see sharding.py's docstring; not otherwise used by pi0.py's So400m/14 vision tower here).
+# Only change: `openpi.training.sharding` -> local `training.sharding`.
 
 from collections.abc import Sequence
 
@@ -24,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from . import sharding
+from .training import sharding
 
 
 def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):

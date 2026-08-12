@@ -2,14 +2,22 @@
 Observation glue for FRS action_cache generation.
 
 A separate class rather than a SmolVLAEvalModel subclass/branch: pi0.5's observation format
-differs enough (fixed base_0_rgb/left_wrist_0_rgb/right_wrist_0_rgb image keys in HWC float32
-[-1,1], and -- critically -- state baked into the tokenized prompt rather than passed as a
-continuous input, see pi05_jax/tokenizer.py) that sharing SmolVLAEvalModel's code would mean more
-branching than duplication.
+differs enough (fixed base_0_rgb/left_wrist_0_rgb/right_wrist_0_rgb image keys, and -- critically
+-- state baked into the tokenized prompt rather than passed as a continuous input, see
+pi05_jax/tokenizer.py) that sharing SmolVLAEvalModel's code would mean more branching than
+duplication.
 
-UNTESTED, like the rest of the pi0.5 integration on this branch (see
-src/lerobot/policies/pi05_jax/README.md and pi05_frs_plan.md at the repo root for the full status
-and open questions -- especially where `state_stats`/`action_stats` should come from).
+The preprocessing itself is *not* hand-written: `prepare_sample` composes the same vendored openpi
+transforms the trainer uses (`pi05_jax/transforms.py`, driven by
+`pi05_jax/policies/pick_tube_policy.py`), in the same order openpi's
+`training/config.py:ModelTransformFactory` and `training/data_loader.py:transform_dataset` use --
+
+    repack -> PickTubeInputs -> Normalize -> ResizeImages -> TokenizePrompt -> PadStatesAndActions
+
+-- so a sample fed to the action cache is preprocessed byte-identically to one fed to training.
+The class keeps its own constructor (camera_map / explicit norm stats) rather than taking a
+`TrainConfig`, because FRS's cache tools are configured from YAML per dataset; see
+prepare_pi05.py.
 """
 
 from __future__ import annotations
@@ -28,47 +36,12 @@ from lerobot.datasets.sample_utils import (
     lerobot_sample_to_observation,
     resolve_action_key,
 )
-from lerobot.policies.pi05_jax import Observation, PaligemmaTokenizer, Pi0, Pi0Config, load_pi0
+from lerobot.policies.pi05_jax import Observation, PaligemmaTokenizer, Pi0, Pi0Config, load_pi0, transforms
 from lerobot.policies.pi05_jax.model import IMAGE_KEYS, IMAGE_RESOLUTION
 from lerobot.policies.pi05_jax.normalize import NormStats
-from lerobot.policies.pi05_jax.normalize import apply as normalize_apply
-from lerobot.policies.pi05_jax.normalize import unapply as normalize_unapply
+from lerobot.policies.pi05_jax.policies.pick_tube_policy import PickTubeInputs
 
 Array = jax.Array
-
-
-def _prepare_image(frame: Any) -> np.ndarray:
-    """Dataset frame -> HWC float32 in [-1, 1], as pi0.5's vision tower expects.
-
-    Layout: LeRobotDataset hands back **CHW** float32 in [0, 1] for image features -- see
-    `lerobot/datasets/io_utils.py`'s `hf_transform_to_torch`/`pil_to_chw_tensor` (PIL -> ToTensor).
-    pi0.5's `siglip.py` is flax.linen and expects channel-**last** (its `nn.Conv` patch-extracts
-    over `image[..., h, w, c]`), so CHW must be transposed to HWC here. (SmolVLA needs the
-    opposite and converts the other way in `smolvla_jax/preprocessing.py:_as_bchw`.)
-
-    Both layouts are accepted defensively, keyed off which axis looks like channels, since
-    `precompute_tactile_embeddings.py` and other callers can pass already-HWC numpy frames.
-
-    Range: [0, 1] -> [-1, 1] (matches SmolVLA's `image * 2.0 - 1.0`). uint8 0..255 input is
-    rescaled first.
-    """
-    image = np.asarray(frame, dtype=np.float32)
-    if image.ndim != 3:
-        raise ValueError(f"expected a single 3-D image frame, got shape {image.shape}")
-    if image.shape[0] in (1, 3) and image.shape[-1] not in (1, 3):
-        image = np.transpose(image, (1, 2, 0))  # CHW -> HWC
-    elif image.shape[-1] not in (1, 3):
-        raise ValueError(f"cannot identify the channel axis of an image with shape {image.shape}")
-    if image.max(initial=0.0) > 1.0:
-        image = image / 255.0
-    return image * 2.0 - 1.0
-
-
-def _resize(image: np.ndarray) -> np.ndarray:
-    from lerobot.policies.pi05_jax import image_tools
-
-    resized = image_tools.resize_with_pad(jnp.asarray(image)[None, ...], *IMAGE_RESOLUTION)
-    return np.asarray(resized[0])
 
 
 def _match_norm_stats_dim(stats: NormStats, dim: int, *, label: str) -> NormStats:
@@ -78,15 +51,16 @@ def _match_norm_stats_dim(stats: NormStats, dim: int, *, label: str) -> NormStat
     See pi05_frs_plan.md: pi05_base's shipped assets (droid/franka/trossen/ur5e_dual/...) don't
     include one for a new dataset like pick_tube. If told to reuse one anyway and it's narrower
     than this dataset's state/action dim, the extra dims are padded to an identity transform
-    (mean=0/std=1, or q01=-1/q99=1 under quantile norm -- both reduce `apply()`'s formula to `x`,
+    (mean=0/std=1, or q01=-1/q99=1 under quantile norm -- both reduce `Normalize`'s formula to `x`,
     up to the `1e-6` epsilon it adds to the denominator, i.e. ~1e-6 relative; verified against the
     real trossen stats). This is a real approximation, not just unit padding: those extra dims pass
     through *unnormalized*, which for pi0.5 also means they won't be meaningfully discretized
     into the tokenized prompt (see tokenizer.py) since they aren't guaranteed to be in [-1, 1].
     Loud on purpose (prints, doesn't just silently do this) -- narrower-than-needed stats mean
-    someone chose to reuse a mismatched asset_id rather than compute real ones.
+    someone chose to reuse a mismatched asset_id rather than compute real ones with
+    `tools/compute_pi05_norm_stats.py`.
     """
-    current = stats.mean.shape[-1]
+    current = np.asarray(stats.mean).shape[-1]
     if current == dim:
         return stats
     if current > dim:
@@ -98,20 +72,23 @@ def _match_norm_stats_dim(stats: NormStats, dim: int, *, label: str) -> NormStat
         "See _match_norm_stats_dim's docstring / pi05_frs_plan.md.",
         flush=True,
     )
+
+    def pad_with(value: np.ndarray | None, fill: float) -> np.ndarray | None:
+        return None if value is None else np.pad(np.asarray(value), (0, pad), constant_values=fill)
+
     return NormStats(
-        mean=np.pad(stats.mean, (0, pad), constant_values=0.0),
-        std=np.pad(stats.std, (0, pad), constant_values=1.0),
-        q01=None if stats.q01 is None else np.pad(stats.q01, (0, pad), constant_values=-1.0),
-        q99=None if stats.q99 is None else np.pad(stats.q99, (0, pad), constant_values=1.0),
+        mean=np.pad(np.asarray(stats.mean), (0, pad), constant_values=0.0),
+        std=np.pad(np.asarray(stats.std), (0, pad), constant_values=1.0),
+        q01=pad_with(stats.q01, -1.0),
+        q99=pad_with(stats.q99, 1.0),
     )
 
 
-class Pi05EvalModel:
-    """Checkpoint, normalization and observation-building bundled for FRS action-cache scripts."""
+class Pi05SampleProcessor:
+    """Normalize and convert one LeRobot sample into pi0.5 model inputs."""
 
     def __init__(
         self,
-        checkpoint: str | pathlib.Path,
         *,
         dataset_repo_id: str,
         dataset_root: str | pathlib.Path | None = None,
@@ -125,15 +102,15 @@ class Pi05EvalModel:
         action_dim: int = 32,
         action_horizon: int = 50,
         max_token_len: int | None = None,
+        paligemma_variant: str = "gemma_2b",
+        action_expert_variant: str = "gemma_300m",
     ):
         """
         Args:
             camera_map: pi0.5 image key (subset of `base_0_rgb`/`left_wrist_0_rgb`/
                 `right_wrist_0_rgb`) -> dataset observation key, *after* `rename_map` is applied
                 (e.g. `{"base_0_rgb": "observation.images.camera1"}`). Keys from `IMAGE_KEYS` not
-                present in `camera_map` are filled with a masked (all -1, mask=False) empty
-                camera, mirroring SmolVLA's `empty_cameras` handling
-                (`smolvla_jax/preprocessing.py`).
+                present in `camera_map` are zero-filled and masked off by `PickTubeInputs`.
             state_stats / action_stats: required, not loaded automatically -- see this module's
                 docstring and pi05_frs_plan.md for why (no norm stats exist for a brand-new
                 dataset in the pretrained pi05_base checkpoint's assets).
@@ -141,14 +118,24 @@ class Pi05EvalModel:
                 prompt assuming it is already in [-1, 1] (see pi05_jax/tokenizer.py) -- quantile
                 normalization guarantees that range; z-score normalization does not. Leave True
                 unless you have a specific reason and have re-checked that assumption.
+            paligemma_variant / action_expert_variant: must match the `TrainConfig` the checkpoint
+                was trained with. The defaults describe the official `pi05_base`; a LoRA
+                fine-tune from `tools/train_pi05_jax.py pi05_pick_tube` needs
+                `gemma_2b_lora`/`gemma_300m_lora` instead. Getting this wrong is caught by
+                `policy_config.load_pi0` rather than silently discarding the LoRA weights.
         """
-        missing_cameras = set(camera_map) - set(IMAGE_KEYS)
-        if missing_cameras:
-            raise ValueError(f"camera_map keys must be a subset of {IMAGE_KEYS}, got extra {missing_cameras}")
+        unknown_cameras = set(camera_map) - set(IMAGE_KEYS)
+        if unknown_cameras:
+            raise ValueError(f"camera_map keys must be a subset of {IMAGE_KEYS}, got extra {sorted(unknown_cameras)}")
 
-        self.config = Pi0Config(pi05=True, action_dim=action_dim, action_horizon=action_horizon, max_token_len=max_token_len)
-        self.model: Pi0 = load_pi0(checkpoint, config=self.config)
-        self.tokenizer = PaligemmaTokenizer(max_len=self.config.max_token_len)
+        self.config = Pi0Config(
+            pi05=True,
+            action_dim=action_dim,
+            action_horizon=action_horizon,
+            max_token_len=max_token_len,
+            paligemma_variant=paligemma_variant,
+            action_expert_variant=action_expert_variant,
+        )
 
         self.dataset_repo_id = dataset_repo_id
         self.dataset_root = pathlib.Path(dataset_root).expanduser() if dataset_root is not None else None
@@ -163,12 +150,39 @@ class Pi05EvalModel:
         self.camera_map = dict(camera_map)
         # Norm stats must match *this dataset's* raw feature width (e.g. pick_tube's 20-dim
         # state/actions), not the model's action_dim=32 -- normalization happens before the
-        # separate pad-to-action_dim step in prepare_sample() below.
+        # separate PadStatesAndActions step below.
         state_dim = int(metadata.features["observation.state"]["shape"][0])
         action_feature_dim = int(metadata.features[self.action_key]["shape"][0])
         self.state_stats = _match_norm_stats_dim(state_stats, state_dim, label="state")
         self.action_stats = _match_norm_stats_dim(action_stats, action_feature_dim, label="action")
         self.use_quantile_norm = use_quantile_norm
+
+        # The training-time pipeline, rebuilt here for a single sample. Order and contents match
+        # `training/data_loader.py:transform_dataset` + `ModelTransformFactory` for PI05.
+        norm_stats = {"state": self.state_stats, "actions": self.action_stats}
+        self._inputs = transforms.compose(
+            [
+                transforms.RepackTransform(
+                    {
+                        "image": dict(self.camera_map),
+                        "state": "observation.state",
+                        "actions": self.action_key,
+                        "prompt": "prompt",
+                    }
+                ),
+                PickTubeInputs(model_type=self.config.model_type),
+                transforms.Normalize(norm_stats, use_quantiles=use_quantile_norm),
+                transforms.ResizeImages(*IMAGE_RESOLUTION),
+                transforms.TokenizePrompt(
+                    PaligemmaTokenizer(self.config.max_token_len),
+                    discrete_state_input=self.config.discrete_state_input,
+                ),
+                transforms.PadStatesAndActions(self.config.action_dim),
+            ]
+        )
+        self._unnormalize_actions = transforms.Unnormalize(
+            {"actions": self.action_stats}, use_quantiles=use_quantile_norm
+        )
 
     @property
     def action_horizon(self) -> int:
@@ -178,63 +192,78 @@ class Pi05EvalModel:
     def action_dim(self) -> int:
         return self.config.action_dim
 
-    def _renamed_observation(self, sample: Mapping[str, Any]) -> dict[str, Any]:
+    def _renamed_sample(self, sample: Mapping[str, Any]) -> dict[str, Any]:
+        """Dataset sample -> the flat key space the repack transform reads.
+
+        Mirrors `training/data_loader.py:RenameKeys` + `PromptFromTask`, except the action column
+        keeps its own name here (the repack maps it explicitly, since a `Pi05SampleProcessor` is
+        built per dataset and already knows `self.action_key`).
+        """
         observation = lerobot_sample_to_observation(sample)
-        return {self.rename_map.get(key, key): value for key, value in observation.items()}
+        renamed = {self.rename_map.get(key, key): value for key, value in observation.items()}
+        renamed[self.action_key] = sample[self.action_key]
+        renamed["prompt"] = np.asarray(str(sample.get("task", "")))
+        return renamed
 
     def prepare_sample(self, sample: Mapping[str, Any]) -> tuple[Observation, Array, str]:
-        renamed = self._renamed_observation(sample)
+        renamed = self._renamed_sample(sample)
         if "observation.state" not in renamed:
             raise KeyError("observation.state is required")
+        missing = [key for key in self.camera_map.values() if key not in renamed]
+        if missing:
+            raise KeyError(f"camera_map points at keys not in the sample: {missing}; have {sorted(renamed)}")
 
-        raw_state = np.asarray(renamed["observation.state"], dtype=np.float32)
-        norm_state = normalize_apply(raw_state, self.state_stats, use_quantiles=self.use_quantile_norm)
-        padded_state = np.zeros((self.action_dim,), dtype=np.float32)
-        padded_state[: norm_state.shape[-1]] = norm_state[: self.action_dim]
-
-        images: dict[str, np.ndarray] = {}
-        image_masks: dict[str, np.ndarray] = {}
-        empty_image = None
-        for key in IMAGE_KEYS:
-            source_key = self.camera_map.get(key)
-            if source_key is not None and source_key in renamed:
-                image = _resize(_prepare_image(renamed[source_key]))
-                images[key] = image
-                image_masks[key] = np.asarray(True)
-                empty_image = image
-            else:
-                images[key] = None  # filled below once we know the resolved image shape
-                image_masks[key] = np.asarray(False)
-        if empty_image is None:
-            raise ValueError(f"camera_map matched none of {IMAGE_KEYS} for sample keys {list(renamed)}")
-        for key in IMAGE_KEYS:
-            if images[key] is None:
-                images[key] = -np.ones_like(empty_image)
-
-        prompt = str(sample.get("task", ""))
-        # pi0.5: state is discretized into the tokenized prompt, not a continuous model input
-        # (see pi05_jax/tokenizer.py's module docstring / pi0.py:embed_suffix).
-        tokens, token_mask = self.tokenizer.tokenize(prompt, state=norm_state)
-
-        observation = Observation(
-            images={key: jnp.asarray(value) for key, value in images.items()},
-            image_masks={key: jnp.asarray(value) for key, value in image_masks.items()},
-            state=jnp.asarray(padded_state),
-            tokenized_prompt=jnp.asarray(tokens, dtype=jnp.int32),
-            tokenized_prompt_mask=jnp.asarray(token_mask, dtype=jnp.bool_),
-        )
-
-        raw_actions = np.asarray(sample[self.action_key], dtype=np.float32)
-        norm_actions = normalize_apply(raw_actions, self.action_stats, use_quantiles=self.use_quantile_norm)
-        padded_actions = np.zeros((norm_actions.shape[0], self.action_dim), dtype=np.float32)
-        padded_actions[:, : norm_actions.shape[-1]] = norm_actions[:, : self.action_dim]
-
-        return observation, jnp.asarray(padded_actions), prompt
+        prompt = str(np.asarray(renamed["prompt"]).item())
+        # Normalize every leaf to a numpy array before building the Observation. This is the
+        # single-sample analogue of what openpi's `data_loader._collate_fn` does for a batch, and
+        # it is required, not cosmetic: `Observation` is `@at.typecheck`'d and its fields share
+        # one `ArrayT` TypeVar, so the mixed types coming out of the transform chain --
+        # `ResizeImages` returns *jax* arrays (it is jitted) while `state`/`actions`/tokens stay
+        # numpy -- would fail the check. `image_mask` is worse: `PickTubeInputs` emits `np.True_`,
+        # a numpy *scalar*, which is not an `np.ndarray` at all.
+        data = jax.tree.map(np.asarray, self._inputs(renamed))
+        return Observation.from_dict(data), jnp.asarray(data["actions"], dtype=jnp.float32), prompt
 
     def unnormalize_actions(self, actions: Array) -> Array:
-        actions_np = np.asarray(actions)
-        real_dim = self.action_stats.mean.shape[-1]
-        return jnp.asarray(normalize_unapply(actions_np[..., :real_dim], self.action_stats, use_quantiles=self.use_quantile_norm))
+        """Model-space actions -> real units, dropping the PadStatesAndActions zero padding."""
+        real_dim = np.asarray(self.action_stats.mean).shape[-1]
+        unnormalized = self._unnormalize_actions({"actions": np.asarray(actions)[..., :real_dim]})
+        return jnp.asarray(unnormalized["actions"])
+
+
+class Pi05EvalModel(Pi05SampleProcessor):
+    """pi0.5 checkpoint plus the sample processor used by FRS cache generation."""
+
+    def __init__(
+        self,
+        checkpoint: str | pathlib.Path,
+        *,
+        loaded_model: Pi0 | None = None,
+        **processor_kwargs: Any,
+    ):
+        super().__init__(**processor_kwargs)
+        if loaded_model is None:
+            self.model = load_pi0(checkpoint, config=self.config)
+            return
+
+        actual = (
+            loaded_model.action_dim,
+            loaded_model.action_horizon,
+            loaded_model.max_token_len,
+            loaded_model.pi05,
+        )
+        expected = (
+            self.config.action_dim,
+            self.config.action_horizon,
+            self.config.max_token_len,
+            self.config.pi05,
+        )
+        if actual != expected:
+            raise ValueError(
+                "loaded pi0.5 model config does not match requested config: "
+                f"actual={actual}, expected={expected}"
+            )
+        self.model = loaded_model
 
 
 def stack_observations(observations: list[Observation]) -> Observation:

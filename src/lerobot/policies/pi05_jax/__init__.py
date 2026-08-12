@@ -1,11 +1,12 @@
-"""Pure-JAX pi0.5, vendored from openpi. See README.md in this directory for what was vendored,
-what was trimmed, and what's still missing before this can actually drive FRS.
+"""Pure-JAX pi0.5, vendored from openpi. See README.md in this directory for what was vendored
+verbatim, what deviates, and why openpi is copied in rather than installed.
 """
 
-from .checkpoint import load_pi0, resolve_checkpoint
+from .frs import Pi0PrefixCache, build_prefix_cache, denoise_step
 from .model import Actions, Observation
-from .pi0 import Pi0, Pi0PrefixCache
+from .pi0 import Pi0
 from .pi0_config import Pi0Config
+from .policy_config import load_norm_stats, load_pi0, resolve_checkpoint
 from .tokenizer import PaligemmaTokenizer
 
 __all__ = [
@@ -15,6 +16,9 @@ __all__ = [
     "Pi0",
     "Pi0Config",
     "Pi0PrefixCache",
+    "build_prefix_cache",
+    "denoise_step",
+    "load_norm_stats",
     "load_pi0",
     "resolve_checkpoint",
 ]

@@ -5,8 +5,8 @@ pi0.5 analogue of tools/prepare_frs_caches.py -- same config file
 (configs/train_frs_pick_tube_pi05.yaml), same output cache format (utils/cache.py), just backed
 by prepare_pi05.prepare_cache() instead of prepare.prepare_cache().
 
-UNTESTED, like the rest of this branch's pi0.5 integration -- see
-src/lerobot/policies/pi05_jax/README.md and pi05_frs_plan.md.
+The environment, official checkpoint restore, and real LeRobot sample loading are verified on
+the training server. Full cache generation remains a long-running pipeline stage.
 """
 
 # ruff: noqa: E402, I001
@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from prepare_pi05 import prepare_cache
+from lerobot.policies.pi05_jax import Pi0Config, load_pi0
 
 DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube_pi05.yaml"
 
@@ -73,6 +74,22 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             "dataset in the pretrained pi05_base checkpoint's assets)."
         )
 
+    # Must match the TrainConfig the checkpoint came from. The defaults describe the official
+    # pi05_base; a LoRA fine-tune from tools/train_pi05_jax.py needs the *_lora variants, and
+    # load_pi0 refuses (rather than silently dropping the LoRA weights) if they disagree.
+    paligemma_variant = str(model_config.get("paligemma_variant", "gemma_2b"))
+    action_expert_variant = str(model_config.get("action_expert_variant", "gemma_300m"))
+
+    shared_model = load_pi0(
+        checkpoint,
+        config=Pi0Config(
+            pi05=True,
+            action_dim=int(model_config.get("action_dim", 32)),
+            action_horizon=int(model_config.get("action_horizon", 50)),
+            paligemma_variant=paligemma_variant,
+            action_expert_variant=action_expert_variant,
+        ),
+    )
     outputs: list[Path] = []
     for source_index, source in enumerate(datasets):
         if not isinstance(source, Mapping):
@@ -96,10 +113,13 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             use_quantile_norm=bool(norm_stats_config.get("use_quantile_norm", True)),
             action_dim=int(model_config.get("action_dim", 32)),
             action_horizon=int(model_config.get("action_horizon", 50)),
+            paligemma_variant=paligemma_variant,
+            action_expert_variant=action_expert_variant,
             model_sample_steps=int(cache_config.get("model_sample_steps", 10)),
             reverse_steps=int(cache_config.get("reverse_steps", 50)),
             reverse_solver=str(cache_config.get("reverse_solver", "fireflow")),
             batch_size=int(cache_config.get("batch_size", 16)),
+            load_workers=int(cache_config.get("load_workers", 4)),
             inference_seed=int(cache_config.get("inference_seed", 0)),
             split_seed=int(cache_config.get("split_seed", 42)),
             val_fraction=float(cache_config.get("val_fraction", 0.1)),
@@ -108,6 +128,7 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             max_samples=(None if cache_config.get("max_samples") is None else int(cache_config["max_samples"])),
             drop_tail_action_chunks=int(cache_config.get("drop_tail_action_chunks", 1)),
             flush_every=int(cache_config.get("flush_every", 8)),
+            loaded_model=shared_model,
         )
         outputs.append(output)
     return outputs

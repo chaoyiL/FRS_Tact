@@ -115,6 +115,15 @@ dependencies = [
     "filelock>=3.16.1",
     "fsspec[gcs]>=2024.6.0",
     "tqdm-loggable>=0.2",
+    "chex==0.1.90",
+    # pi0.5 training-stack deps, matching openpi's own pyproject: `numpydantic`/`pydantic` back
+    # `shared/normalize.py`'s NormStats (de)serialization, `etils[epath]` is the path abstraction
+    # `training/checkpoints.py` and `training/config.py` use, and `tyro` is the CLI that turns a
+    # registered `TrainConfig` into command-line flags (`tools/train_pi05_jax.py`).
+    "numpydantic>=1.6.6",
+    "pydantic>=2.0.0",
+    "etils[epath]>=1.11.0",
+    "tyro>=0.9.5",
     # Eval / tests (former: smolvla-likelihood-eval / smolvla-jax-test)
     "matplotlib>=3.10.3,<4.0.0",
     "contourpy>=1.3.0,<2.0.0",
@@ -179,6 +188,14 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401", "F403", "E402"]
+# `src/lerobot/policies/pi05_jax/` is openpi's JAX source copied in verbatim (see its README.md
+# for the file-by-file mapping). Reformatting it would destroy the byte-for-byte correspondence
+# with upstream that makes re-syncing cheap, so the rules that only disagree with openpi's own
+# ruff config are disabled there. F722 is openpi's own ignore, for the same reason it gives:
+# "Conflicts with array typing" -- jaxtyping shape strings like `Float[Array, "b s"]` are not
+# valid Python annotations. Everything else (F401 unused imports, F821 undefined names, B, SIM,
+# ...) still applies.
+"src/lerobot/policies/pi05_jax/**" = ["F722", "I001", "UP035", "UP040", "UP046", "UP047"]
 
 [tool.ruff.lint.isort]
 combine-as-imports = true

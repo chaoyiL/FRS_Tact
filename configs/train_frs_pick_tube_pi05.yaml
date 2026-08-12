@@ -17,12 +17,26 @@
 # 第 1、3 步和 SmolVLA 版共用同一个工具（不依赖 base 模型）；只有第 2 步是 pi0.5 专用的。
 # 注意 SmolVLA 版还有一个"合并 PEFT adapter"的前置步骤，pi0.5 不需要——官方 checkpoint 直接用。
 #
-# 整条 pi0.5 链路（prepare_pi05.py / Pi05EvalModel / pi05_jax 全家桶）都还没在真机上跑过，
-# 见 ../pi05_frs_plan.md 的验证清单。
+# Linux H100 上已验证环境安装、测试和官方 checkpoint 加载；使用真实数据跑完整三阶段管线前，
+# 仍需把下面配置的数据集与触觉 encoder checkpoint 放到服务器。见 ../pi05_frs_plan.md。
 
-# 官方 pi0.5 base checkpoint（通过 src/lerobot/policies/pi05_jax/download.py 下载/缓存，
-# 和 openpi 自己用的下载器逻辑一致，缓存目录也兼容）。传 checkpoint 根目录（不要带 /params），
-# src/lerobot/policies/pi05_jax/checkpoint.py:load_pi0 会自己拼 "params" 子目录。
+# 传 checkpoint 根目录（不要带 /params），policy_config.py:load_pi0 会自己拼 "params" 子目录。
+#
+# 现在指向的是官方 pi0.5 base checkpoint（通过 src/lerobot/policies/pi05_jax/download.py
+# 下载/缓存，和 openpi 自己用的下载器逻辑一致，缓存目录也兼容）。
+#
+# ---- 换成自己微调出来的 checkpoint ----
+# 先按 src/lerobot/policies/pi05_jax/README.md 跑一遍 pi0.5 微调：
+#     python tools/compute_pi05_norm_stats.py --config-name=pi05_pick_tube
+#     bash scripts/start_pi05_train.sh pi05_pick_tube lora_r1
+# 产物在 checkpoints/pi05_pick_tube/lora_r1/<step>/，里面有 params/ 和 assets/pick_tube/。
+# 然后这个文件要**同时**改三处，缺一不可：
+#   1) checkpoint            -> /abs/path/to/checkpoints/pi05_pick_tube/lora_r1/<step>
+#   2) model.*_variant       -> LoRA 配置训出来的必须写 gemma_2b_lora / gemma_300m_lora
+#                               （见下面 model 段；写错的话 load_pi0 会直接报错，不会静默丢权重）
+#   3) norm_stats.dir/asset_id -> 同一个 checkpoint 目录下的 assets/ + pick_tube
+#                               （训练用哪份统计量，推理就必须用哪份）
+# 用 pi05_pick_tube_full（全量微调，不带 LoRA）的话第 2 步保持默认即可。
 checkpoint: gs://openpi-assets/checkpoints/pi05_base
 allow_download: true
 
@@ -57,6 +71,7 @@ action_cache:
   reverse_steps: 50
   reverse_solver: fireflow
   batch_size: 16
+  load_workers: 4
   flush_every: 8
   inference_seed: 0
   split_seed: 42
@@ -81,7 +96,7 @@ tactile_embedding_cache:
 # 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
 model:
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_05
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_0809
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_left_0
@@ -115,9 +130,14 @@ model:
   # pi0.5 的动作维度固定用 32（pi05_droid_finetune 等官方配置的惯例，见 pi05_frs_plan.md），
   # 不是这几个数据集自己的 20 维——真实维度会在 normalize/pad 时截断/补零。
   action_dim: 32
-  # TODO: 官方 pi05_base checkpoint 实际的 action_horizon 需要确认（不同 finetune 配置从
-  # 10 到 50 都有），这里先按 pi0.5 默认值占位。
+  # 已在官方 pi05_base checkpoint 上实测确认该配置可加载，action_horizon=50。
   action_horizon: 50
+  # 必须和产出 checkpoint 的那个 TrainConfig 一致（见文件顶部）。
+  # 官方 pi05_base / pi05_pick_tube_full（全量微调）：gemma_2b + gemma_300m
+  # pi05_pick_tube（LoRA 微调）：       gemma_2b_lora + gemma_300m_lora
+  # 写错不会静默降级——load_pi0 会检查 checkpoint 里有没有这个配置装不下的参数并直接报错。
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
 
 # pi0.5 的归一化统计量：按你的要求，直接借用 pi05_base 官方自带的统计量，不单独给
 # pick_tube 算一份。
@@ -133,12 +153,20 @@ model:
 # pick_tube 自己的机器人），多出来的 6 维会被 Pi05EvalModel 自动 pad 成"不做归一化"
 # （mean=0/std=1，跑的时候会打印一条 WARNING）——这几维基本等于直接用原始数值，pi0.5 把 state
 # 编码进 prompt 时如果这几维不在 [-1,1] 范围内，会被 digitize 截断到边界，不是崩溃，但也不是
-# 严谨的归一化。先用这个把链路跑通；如果之后要认真训练，应该换成用 pick_tube 自己的数据算一份
-# 真实统计量（可以参考 openpi 的 scripts/compute_norm_stats.py，本仓库没有 vendor 这个脚本）。
+# 严谨的归一化。
+#
+# ---- 这个问题在"先微调 pi0.5 再做 FRS"的路线下会自动消失 ----
+# tools/compute_pi05_norm_stats.py 会用 pick_tube 自己的数据算一份真实的 20 维统计量
+# （openpi 的 scripts/compute_norm_stats.py，现在已经 vendor 了），训练时写进
+# checkpoints/<config>/<exp>/<step>/assets/pick_tube/norm_stats.json。
+# 换 checkpoint 时把下面两行一起改成：
+#   dir: /abs/path/to/checkpoints/pi05_pick_tube/lora_r1/<step>/assets
+#   asset_id: pick_tube
+# 就不再有 14 维借用 + 6 维不归一化的近似了。**训练用哪份统计量，生成 action cache 就必须
+# 用哪份**——否则 pi0.5 看到的 state/action 分布和它训练时不是一个尺度。
 norm_stats:
   dir: gs://openpi-assets/checkpoints/pi05_base/assets
   asset_id: trossen
-  use_quantile_norm: true
   use_quantile_norm: true
 
 frs_training:

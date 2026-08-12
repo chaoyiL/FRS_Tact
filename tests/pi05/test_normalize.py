@@ -1,9 +1,6 @@
 """Tests for pi0.5 normalization and the borrowed-norm-stats dimension padding.
 
-SKIPPED unless the pi0.5 deps are importable. `pi05_jax.normalize` imports `download`
-(filelock/fsspec/tqdm_loggable) and `modalities_eval.pi05_utils` imports jax, so these run on the
-training server but not on a plain dev box -- same situation as tests/jax/*. The numbers asserted
-below were verified by hand against the real
+The numbers asserted below were verified by hand against the real
 gs://openpi-assets/checkpoints/pi05_base/assets/trossen/norm_stats.json before being written down
 here; see pi05_frs_plan.md.
 
@@ -11,6 +8,9 @@ What matters here: the configured setup borrows pi05_base's `trossen` stats (14-
 pick_tube (20-dim), so `_match_norm_stats_dim` pads the extra 6 dims to an identity transform.
 If that padding is ever wrong, state/actions get silently mis-scaled -- and for pi0.5 the state
 also feeds the tokenized prompt, so it would corrupt the prompt too.
+
+The normalization itself is openpi's `transforms.Normalize`/`Unnormalize` (vendored verbatim);
+these tests pin the behaviour this repo depends on rather than re-deriving the formulas.
 """
 
 from __future__ import annotations
@@ -19,19 +19,12 @@ import unittest
 
 import numpy as np
 
-try:
-    from lerobot.policies.pi05_jax.normalize import NormStats
-    from lerobot.policies.pi05_jax.normalize import apply as normalize_apply
-    from lerobot.policies.pi05_jax.normalize import unapply as normalize_unapply
-
-    from modalities_eval.pi05_utils import _match_norm_stats_dim
-
-    DEPS_AVAILABLE = True
-except ImportError:  # pragma: no cover - depends on the environment, not the code
-    DEPS_AVAILABLE = False
+from lerobot.policies.pi05_jax import transforms
+from lerobot.policies.pi05_jax.normalize import NormStats
+from modalities_eval.pi05_utils import _match_norm_stats_dim
 
 
-def make_stats(dim: int, *, quantiles: bool = True) -> "NormStats":
+def make_stats(dim: int, *, quantiles: bool = True) -> NormStats:
     rng = np.random.default_rng(0)
     return NormStats(
         mean=rng.normal(size=dim).astype(np.float32),
@@ -41,7 +34,14 @@ def make_stats(dim: int, *, quantiles: bool = True) -> "NormStats":
     )
 
 
-@unittest.skipUnless(DEPS_AVAILABLE, "pi0.5 deps (jax/fsspec/filelock) not installed")
+def normalize_apply(x: np.ndarray, stats: NormStats, *, use_quantiles: bool) -> np.ndarray:
+    return transforms.Normalize({"state": stats}, use_quantiles=use_quantiles)({"state": x})["state"]
+
+
+def normalize_unapply(x: np.ndarray, stats: NormStats, *, use_quantiles: bool) -> np.ndarray:
+    return transforms.Unnormalize({"state": stats}, use_quantiles=use_quantiles)({"state": x})["state"]
+
+
 class MatchNormStatsDimTest(unittest.TestCase):
     def test_same_dim_is_returned_unchanged(self):
         stats = make_stats(20)
@@ -56,7 +56,7 @@ class MatchNormStatsDimTest(unittest.TestCase):
         np.testing.assert_array_equal(padded.q99[14:], np.ones(6, dtype=np.float32))
 
     def test_padded_dims_pass_through_both_norm_modes(self):
-        """Identity only up to the 1e-6 epsilon apply() adds to the denominator, hence atol."""
+        """Identity only up to the 1e-6 epsilon Normalize adds to the denominator, hence atol."""
         padded = _match_norm_stats_dim(make_stats(14), 20, label="state")
         x = np.random.default_rng(1).uniform(-5, 5, 20).astype(np.float32)
         for use_quantiles in (True, False):
@@ -77,7 +77,6 @@ class MatchNormStatsDimTest(unittest.TestCase):
             _match_norm_stats_dim(make_stats(20), 14, label="state")
 
 
-@unittest.skipUnless(DEPS_AVAILABLE, "pi0.5 deps (jax/fsspec/filelock) not installed")
 class NormalizeRoundTripTest(unittest.TestCase):
     def test_round_trip_1d(self):
         stats = make_stats(20)
@@ -111,11 +110,26 @@ class NormalizeRoundTripTest(unittest.TestCase):
         quantile norm (see pi05_jax/tokenizer.py)."""
         stats = make_stats(20)
         np.testing.assert_allclose(
-            normalize_apply(stats.q01, stats, use_quantiles=True), -np.ones(20), atol=1e-5
+            normalize_apply(np.asarray(stats.q01), stats, use_quantiles=True), -np.ones(20), atol=1e-5
         )
         np.testing.assert_allclose(
-            normalize_apply(stats.q99, stats, use_quantiles=True), np.ones(20), atol=1e-5
+            normalize_apply(np.asarray(stats.q99), stats, use_quantiles=True), np.ones(20), atol=1e-5
         )
+
+
+class NormStatsSerializationTest(unittest.TestCase):
+    """openpi writes `norm_stats.json` through pydantic; a round-trip must survive it, or a
+    checkpoint's `assets/` written by this repo will not load in openpi (and vice versa)."""
+
+    def test_json_round_trip(self):
+        from lerobot.policies.pi05_jax import normalize
+
+        stats = {"state": make_stats(20), "actions": make_stats(20)}
+        restored = normalize.deserialize_json(normalize.serialize_json(stats))
+        self.assertEqual(set(restored), {"state", "actions"})
+        for key in ("state", "actions"):
+            np.testing.assert_allclose(np.asarray(restored[key].mean), np.asarray(stats[key].mean))
+            np.testing.assert_allclose(np.asarray(restored[key].q99), np.asarray(stats[key].q99))
 
 
 if __name__ == "__main__":

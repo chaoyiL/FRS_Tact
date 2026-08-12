@@ -1,33 +1,21 @@
 # Vendored from openpi (Apache-2.0), src/openpi/models/pi0.py,
 # commit 15a9616a00943ada6c20a0f158e3adb39df2ccac (2026-06-16).
-# Import paths -> local modules; everything through `sample_actions` is otherwise unchanged.
-#
-# FRS ADDITION (not in upstream openpi, at the bottom of the `Pi0` class): `Pi0PrefixCache`,
-# `build_prefix_cache`, and `denoise_step`. FRS needs to integrate the flow-matching velocity
-# field backwards (t:0->1, see ../../../../utils/integration.py's euler/fireflow solvers, driven
-# from ../../../../utils/source_model.py for SmolVLA), which requires calling the velocity field
-# at arbitrary (x, t) -- but upstream `sample_actions` below only exposes a fixed t:1->0 forward
-# loop with the per-step logic inlined in a closure. `denoise_step` is that same per-step logic
-# (embed_suffix + attend over a cached prefix + action_out_proj), copied verbatim out of the
-# `step()` closure in `sample_actions` and made independently callable; `build_prefix_cache` is
-# the KV-cache-filling half that precedes it. `sample_actions` itself is untouched, so normal
-# forward sampling still goes through the exact upstream code path.
+# Import paths -> local modules; otherwise unchanged.
 
 import logging
 
 import einops
 import flax.nnx as nnx
 import flax.nnx.bridge as nnx_bridge
-import flax.struct as struct
 import jax
 import jax.numpy as jnp
 from typing_extensions import override
 
-from . import array_typing as at
-from . import gemma as _gemma
 from . import model as _model
 from . import pi0_config
+from . import gemma as _gemma
 from . import siglip as _siglip
+from . import array_typing as at
 
 logger = logging.getLogger("openpi")
 
@@ -293,65 +281,3 @@ class Pi0(_model.BaseModel):
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
         return x_0
-
-    # ------------------------------------------------------------------
-    # FRS ADDITION -- not in upstream openpi. See module docstring above.
-    # ------------------------------------------------------------------
-
-    @at.typecheck
-    def build_prefix_cache(self, observation: _model.Observation) -> "Pi0PrefixCache":
-        """Prefix half of `sample_actions` above, factored out for reuse.
-
-        Encodes images/language once into a KV cache, exactly like the first half of
-        `sample_actions`. The returned `Pi0PrefixCache` can then be fed to `denoise_step` at
-        arbitrary `(x_t, t)` pairs -- both for ordinary forward sampling (as `sample_actions`
-        does internally) and for FRS's reverse ODE integration (t:0->1), which needs many
-        velocity evaluations at arbitrary intermediate times, not just a fixed t:1->0 sweep.
-        """
-        observation = _model.preprocess_observation(None, observation, train=False)
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
-        return Pi0PrefixCache(observation=observation, prefix_mask=prefix_mask, kv_cache=kv_cache)
-
-    @at.typecheck
-    def denoise_step(
-        self,
-        cache: "Pi0PrefixCache",
-        x_t: _model.Actions,
-        timestep: at.Float[at.Array, " b"],
-    ) -> _model.Actions:
-        """Single flow-matching velocity evaluation v(x_t, t) given a `Pi0PrefixCache`.
-
-        This is exactly the body of the `step()` closure inside `sample_actions` above, with
-        `observation`/`prefix_mask`/`kv_cache` coming from the cache instead of the enclosing
-        closure, and no fixed step direction/count baked in -- callers (e.g. an FRS reverse ODE
-        solver, see ../../../../utils/integration.py) drive `(x_t, timestep)` themselves.
-        """
-        batch_size = cache.observation.state.shape[0]
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-            cache.observation, x_t, jnp.broadcast_to(timestep, batch_size)
-        )
-        suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
-        prefix_attn_mask = einops.repeat(cache.prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
-        full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
-        positions = jnp.sum(cache.prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [None, suffix_tokens],
-            mask=full_attn_mask,
-            positions=positions,
-            kv_cache=cache.kv_cache,
-            adarms_cond=[None, adarms_cond],
-        )
-        assert prefix_out is None
-        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
-
-
-@struct.dataclass
-class Pi0PrefixCache:
-    """Pytree bundle returned by `Pi0.build_prefix_cache` (FRS addition, see above)."""
-
-    observation: _model.Observation
-    prefix_mask: at.Bool[at.Array, "b s"]
-    kv_cache: _gemma.KVCache
