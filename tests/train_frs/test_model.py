@@ -53,6 +53,25 @@ def decoder() -> TactileConditionedFlowDecoder:
 
 
 @pytest.fixture
+def gated_decoder() -> TactileConditionedFlowDecoder:
+    return TactileConditionedFlowDecoder(
+        DecoderConfig(
+            action_dim=3,
+            action_horizon=6,
+            tactile_window=3,
+            gru_hidden_dim=8,
+            resnet_embedding_dim=8,
+            model_dim=16,
+            depth=2,
+            num_heads=4,
+            num_tactile_tokens=2,
+            gate_conditioning=True,
+        ),
+        rngs=nnx.Rngs(1),
+    )
+
+
+@pytest.fixture
 def decode_inputs():
     batch_size = 2
     return (
@@ -84,6 +103,21 @@ def test_cached_condition_decode_matches_recomputed_condition(decoder, decode_in
 
 
 @pytest.mark.parametrize("solver", ["euler", "fireflow"])
+def test_cached_condition_gated_decode_matches_recomputed_condition(gated_decoder, decode_inputs, solver):
+    x_base, tactile, gate = decode_inputs
+    with jax.enable_x64(True):
+        gate = gate.astype(jnp.float64)
+        expected = integrate_decode_reference(
+            lambda x_t, t: gated_decoder(x_t, t, tactile, gate),
+            x_base,
+            num_steps=4,
+            solver=solver,
+        )
+        actual = decode_actions(gated_decoder, x_base, tactile, gate, num_steps=4, solver=solver)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("solver", ["euler", "fireflow"])
 def test_decode_encodes_tactile_condition_once(decoder, decode_inputs, solver, monkeypatch):
     x_base, tactile, gate = decode_inputs
     original_encode = decoder.encode_tactile_condition
@@ -99,6 +133,57 @@ def test_decode_encodes_tactile_condition_once(decoder, decode_inputs, solver, m
 
     assert decoded.shape == x_base.shape
     assert call_count == 1
+
+
+@pytest.mark.parametrize("solver", ["euler", "fireflow"])
+def test_gated_decode_casts_weights_and_encodes_tactile_condition_once(
+    gated_decoder,
+    decode_inputs,
+    solver,
+    monkeypatch,
+):
+    x_base, tactile, gate = decode_inputs
+    original_encode = gated_decoder.encode_tactile_condition
+    call_count = 0
+
+    def count_encode(tactile_seq):
+        nonlocal call_count
+        call_count += 1
+        return original_encode(tactile_seq)
+
+    with jax.enable_x64(True):
+        float64_gate = gate.astype(jnp.float64)
+        expected = decode_actions(
+            gated_decoder,
+            x_base,
+            tactile,
+            float64_gate.astype(jnp.float32),
+            num_steps=4,
+            solver=solver,
+        )
+        monkeypatch.setattr(gated_decoder, "encode_tactile_condition", count_encode)
+        actual = decode_actions(gated_decoder, x_base, tactile, float64_gate, num_steps=4, solver=solver)
+
+    assert call_count == 1
+    assert actual.dtype == jnp.float32
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+def test_decode_validates_solver_before_encoding_tactile_condition(decoder, decode_inputs, monkeypatch):
+    x_base, tactile, gate = decode_inputs
+    original_encode = decoder.encode_tactile_condition
+    call_count = 0
+
+    def count_encode(tactile_seq):
+        nonlocal call_count
+        call_count += 1
+        return original_encode(tactile_seq)
+
+    monkeypatch.setattr(decoder, "encode_tactile_condition", count_encode)
+    with pytest.raises(ValueError, match="solver must be 'euler' or 'fireflow'"):
+        decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver="invalid")
+
+    assert call_count == 0
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])

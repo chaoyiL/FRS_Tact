@@ -210,15 +210,20 @@ class TactileConditionedFlowDecoder(nnx.Module):
 
         return self.tactile_proj(self.encode_tactile_tokens(tactile_seq))
 
-    def _apply_gate(self, tactile_condition: Array, gate_weights: Array | None) -> Array:
+    def _validated_action_gate_weights(
+        self,
+        gate_weights: Array | None,
+        *,
+        batch_size: int,
+    ) -> Array | None:
         if not self.config.gate_conditioning:
-            return tactile_condition
+            return gate_weights
         if gate_weights is None:
             raise ValueError("gate_weights are required by this gate-conditioned checkpoint.")
         gate_weights = jnp.asarray(gate_weights, dtype=jnp.float32)
-        if gate_weights.ndim != 1 or gate_weights.shape[0] != tactile_condition.shape[0]:
-            raise ValueError(f"Expected gate_weights [B]={tactile_condition.shape[0]}, got {gate_weights.shape}.")
-        return tactile_condition
+        if gate_weights.ndim != 1 or gate_weights.shape[0] != batch_size:
+            raise ValueError(f"Expected gate_weights [B]={batch_size}, got {gate_weights.shape}.")
+        return gate_weights
 
     def _decode_velocity(
         self,
@@ -245,8 +250,11 @@ class TactileConditionedFlowDecoder(nnx.Module):
         tactile_condition: Array,
         gate_weights: Array | None = None,
     ) -> Array:
-        gated_condition = self._apply_gate(tactile_condition, gate_weights)
-        return self._decode_velocity(x_t, t, gated_condition, gate_weights)
+        action_gate_weights = self._validated_action_gate_weights(
+            gate_weights,
+            batch_size=x_t.shape[0],
+        )
+        return self._decode_velocity(x_t, t, tactile_condition, action_gate_weights)
 
     def __call__(
         self,
@@ -708,12 +716,12 @@ def decode_actions(
     num_steps: int,
     solver: FlowSolver = "euler",
 ) -> Array:
+    if solver not in ("euler", "fireflow"):
+        raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
     tactile_condition = model.encode_tactile_condition(tactile_seq)
     if solver == "euler":
         return decode_euler(model, x_base, tactile_condition, gate_weights, num_steps=num_steps)
-    if solver == "fireflow":
-        return decode_fireflow(model, x_base, tactile_condition, gate_weights, num_steps=num_steps)
-    raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
+    return decode_fireflow(model, x_base, tactile_condition, gate_weights, num_steps=num_steps)
 
 
 def resolve_peak_learning_rate(
