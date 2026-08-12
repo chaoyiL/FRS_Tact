@@ -8,11 +8,222 @@ import numpy as np
 import pytest
 
 from deploy_smolvla import remote_client
+from deploy_smolvla import frs_runtime as frs_runtime_module
 from deploy_smolvla.bridge_client import RobotBridgeClient
 from deploy_smolvla.frs_runtime import FRSRuntime, TactileHistory
 
 ROOT = Path(__file__).resolve().parents[2]
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
+
+
+class LifecycleSource:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(chunk_size=3, action_dim=2)
+        self.preprocessor = SimpleNamespace(
+            unnormalize_actions=lambda actions: np.asarray(actions) * 10.0
+        )
+        self.predict_calls = 0
+        self.reverse_calls = 0
+        self.predict_kwargs: dict[str, object] = {}
+        self.reverse_kwargs: dict[str, object] = {}
+
+    def predict_action_chunk(self, observation, task, **kwargs):
+        del observation, task
+        self.predict_calls += 1
+        self.predict_kwargs = kwargs
+        return jnp.arange(6, dtype=jnp.float32).reshape(1, 3, 2)
+
+    def reverse_action_chunk(self, observation, task, normalized_actions, **kwargs):
+        del observation, task
+        self.reverse_calls += 1
+        self.reverse_kwargs = kwargs
+        return normalized_actions + 100.0
+
+
+@pytest.fixture
+def lifecycle_source() -> LifecycleSource:
+    return LifecycleSource()
+
+
+@pytest.fixture
+def lifecycle_runtime(
+    lifecycle_source: LifecycleSource,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runtime = object.__new__(FRSRuntime)
+    runtime.policy = lifecycle_source
+    runtime.config = SimpleNamespace(reverse_steps=5, reverse_solver="slerpflow")
+    runtime.history = SimpleNamespace(reset=lambda baseline: None)
+    runtime.baseline = None
+    runtime.last_diagnostics = None
+    runtime.last_vla_normalized = None
+    runtime.last_frs_normalized = None
+    runtime._episode_baseline = None
+    runtime._active_chunk_id = None
+    runtime._action_vla_normalized = None
+    runtime._action_vla = None
+    runtime._x_base = None
+    runtime._tactile_sequence = []
+    runtime._request_results = {}
+    runtime.decode_calls = 0
+
+    def record_decode(*args, **kwargs):
+        del args, kwargs
+        runtime.decode_calls += 1
+        raise AssertionError("begin_chunk must not decode")
+
+    monkeypatch.setattr(frs_runtime_module, "decode_actions", record_decode)
+    runtime._encode_observation = lambda observation: np.asarray(
+        observation["encoded"], dtype=np.float32
+    )
+    return runtime
+
+
+def initial_observation(value: float = 1.0) -> dict[str, np.ndarray]:
+    return {"encoded": np.full((1, 2), value, dtype=np.float32)}
+
+
+def test_frs_runtime_is_a_true_compatibility_alias() -> None:
+    assert frs_runtime_module.FRSRuntime is frs_runtime_module.FRSSteeringPolicy
+
+
+def test_begin_chunk_predicts_and_reverses_exactly_once_without_decoding(
+    lifecycle_runtime,
+    lifecycle_source: LifecycleSource,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    lifecycle_runtime._tactile_sequence.append(np.ones((1, 2), dtype=np.float32))
+    lifecycle_runtime._request_results[6] = object()
+
+    ready = lifecycle_runtime.begin_chunk(
+        7,
+        initial_observation(),
+        "pick the tube",
+        seed=3,
+        jit=True,
+        num_steps=None,
+    )
+
+    assert lifecycle_source.predict_calls == 1
+    assert lifecycle_source.reverse_calls == 1
+    assert lifecycle_runtime.decode_calls == 0
+    assert lifecycle_source.predict_kwargs == {
+        "seed": 3,
+        "jit": True,
+        "num_steps": None,
+        "normalized": True,
+    }
+    assert lifecycle_source.reverse_kwargs == {"num_steps": 5, "solver": "slerpflow"}
+    assert ready.chunk_id == 7
+    assert ready.action_vla_normalized.shape == ready.x_base.shape == (1, 3, 2)
+    np.testing.assert_array_equal(ready.action_vla, ready.action_vla_normalized * 10.0)
+    assert lifecycle_runtime._tactile_sequence == []
+    assert lifecycle_runtime._request_results == {}
+    assert ready.prediction_started_at <= ready.prediction_finished_at
+
+
+def test_begin_chunk_requires_an_episode_baseline(lifecycle_runtime) -> None:
+    with pytest.raises(RuntimeError, match="reset_episode"):
+        lifecycle_runtime.begin_chunk(
+            1,
+            initial_observation(),
+            "pick the tube",
+            seed=0,
+            jit=False,
+            num_steps=4,
+        )
+
+
+def test_begin_chunk_rejects_nested_active_chunks(lifecycle_runtime) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    lifecycle_runtime.begin_chunk(
+        1,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+
+    with pytest.raises(RuntimeError, match="active chunk"):
+        lifecycle_runtime.begin_chunk(
+            2,
+            initial_observation(),
+            "pick the tube",
+            seed=1,
+            jit=False,
+            num_steps=4,
+        )
+
+
+def test_end_chunk_rejects_the_wrong_active_chunk_id(lifecycle_runtime) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    lifecycle_runtime.begin_chunk(
+        4,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+
+    with pytest.raises(ValueError, match="active chunk 4"):
+        lifecycle_runtime.end_chunk(5)
+
+    assert lifecycle_runtime._active_chunk_id == 4
+
+
+def test_chunk_lifecycle_clears_local_state_and_preserves_episode_baseline(
+    lifecycle_runtime,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation(2.0))
+    baseline = lifecycle_runtime._episode_baseline
+    ready = lifecycle_runtime.begin_chunk(
+        4,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+    lifecycle_runtime._tactile_sequence.append(np.ones((1, 2), dtype=np.float32))
+    lifecycle_runtime._request_results[9] = object()
+
+    lifecycle_runtime.end_chunk(4)
+
+    assert lifecycle_runtime._episode_baseline is baseline
+    assert lifecycle_runtime._active_chunk_id is None
+    assert lifecycle_runtime._action_vla_normalized is None
+    assert lifecycle_runtime._action_vla is None
+    assert lifecycle_runtime._x_base is None
+    assert lifecycle_runtime._tactile_sequence == []
+    assert lifecycle_runtime._request_results == {}
+    assert ready.action_vla_normalized.flags.writeable is False
+    assert ready.action_vla.flags.writeable is False
+    assert ready.x_base.flags.writeable is False
+
+
+def test_reset_episode_replaces_baseline_and_clears_an_active_chunk(lifecycle_runtime) -> None:
+    lifecycle_runtime.reset_episode(initial_observation(1.0))
+    lifecycle_runtime.begin_chunk(
+        3,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+
+    lifecycle_runtime.reset_episode(initial_observation(8.0))
+
+    np.testing.assert_array_equal(
+        lifecycle_runtime._episode_baseline,
+        np.full((1, 2), 8.0, dtype=np.float32),
+    )
+    assert lifecycle_runtime._episode_baseline.flags.writeable is False
+    assert lifecycle_runtime._active_chunk_id is None
+    assert lifecycle_runtime._tactile_sequence == []
+    assert lifecycle_runtime._request_results == {}
 
 
 def test_deploy_frs_config_uses_project_local_downloads() -> None:

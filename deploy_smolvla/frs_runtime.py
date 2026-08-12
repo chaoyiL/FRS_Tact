@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -32,6 +33,16 @@ class FRSDiagnostics:
     gate_weight: float
     delta_rms: float
     max_normalized_action_abs: float
+
+
+@dataclass(frozen=True)
+class FRSChunkReady:
+    chunk_id: int
+    action_vla_normalized: np.ndarray
+    action_vla: np.ndarray
+    x_base: np.ndarray
+    prediction_started_at: float
+    prediction_finished_at: float
 
 
 @dataclass(frozen=True)
@@ -263,7 +274,7 @@ class TactileHistory:
         return np.stack([frames[index] for index in indices], axis=0)
 
 
-class FRSRuntime:
+class FRSSteeringPolicy:
     """Load, validate and run FRS steering without silently falling back to VLA."""
 
     def __init__(
@@ -274,6 +285,7 @@ class FRSRuntime:
         policy: Any,
         source_sample_steps: int,
     ) -> None:
+        self.policy = policy
         self.config = parse_frs_config(raw_config, config_path=config_path)
         if bool(getattr(policy.config, "use_tactile_encoder", False)):
             raise ValueError("FRS deployment requires a visual SmolVLA source checkpoint")
@@ -299,9 +311,8 @@ class FRSRuntime:
             token_shape=(len(self.config.tactile_keys), self.embedding_dim),
         )
         self.baseline: np.ndarray | None = None
-        self.last_diagnostics: FRSDiagnostics | None = None
-        self.last_vla_normalized: np.ndarray | None = None
-        self.last_frs_normalized: np.ndarray | None = None
+        self._episode_baseline: np.ndarray | None = None
+        self._clear_chunk_state()
 
         def encode(params: Any, images: jax.Array) -> jax.Array:
             embeddings, _ = encode_resnet18(
@@ -425,13 +436,107 @@ class FRSRuntime:
         )
         return np.asarray(jax.device_get(embeddings), dtype=np.float32)
 
-    def reset(self, observation: Mapping[str, Any]) -> None:
-        baseline = self._encode_observation(observation)
-        self.baseline = np.array(baseline, copy=True)
-        self.history.reset(baseline)
+    @staticmethod
+    def _readonly_array(value: Any) -> np.ndarray:
+        array = np.array(jax.device_get(value), dtype=np.float32, copy=True)
+        array.setflags(write=False)
+        return array
+
+    def _clear_chunk_state(self) -> None:
+        self._active_chunk_id: int | None = None
+        self._action_vla_normalized: np.ndarray | None = None
+        self._action_vla: np.ndarray | None = None
+        self._x_base: np.ndarray | None = None
+        self._tactile_sequence: list[np.ndarray] = []
+        self._request_results: dict[int, Any] = {}
         self.last_diagnostics = None
         self.last_vla_normalized = None
         self.last_frs_normalized = None
+
+    def reset_episode(self, initial_observation: Mapping[str, Any]) -> None:
+        baseline = self._readonly_array(self._encode_observation(initial_observation))
+        self._episode_baseline = baseline
+        self.baseline = baseline
+        self.history.reset(baseline)
+        self._clear_chunk_state()
+
+    def reset(self, observation: Mapping[str, Any]) -> None:
+        """Compatibility wrapper for the legacy one-shot steering path."""
+
+        self.reset_episode(observation)
+
+    def _require_episode_and_no_active_chunk(self) -> None:
+        if self._episode_baseline is None:
+            raise RuntimeError("FRS reset_episode() must be called before begin_chunk()")
+        if self._active_chunk_id is not None:
+            raise RuntimeError(f"FRS active chunk {self._active_chunk_id} must be ended first")
+
+    def _activate_chunk(self, chunk_id: int, normalized: Any, x_base: Any) -> None:
+        self._clear_chunk_state()
+        normalized_array = self._readonly_array(normalized)
+        action_array = self._readonly_array(
+            self.policy.preprocessor.unnormalize_actions(normalized_array)
+        )
+        self._active_chunk_id = chunk_id
+        self._action_vla_normalized = normalized_array
+        self._action_vla = action_array
+        self._x_base = self._readonly_array(x_base)
+
+    def _make_chunk_ready(self, started: float, finished: float) -> FRSChunkReady:
+        assert self._active_chunk_id is not None
+        assert self._action_vla_normalized is not None
+        assert self._action_vla is not None
+        assert self._x_base is not None
+        return FRSChunkReady(
+            chunk_id=self._active_chunk_id,
+            action_vla_normalized=self._action_vla_normalized,
+            action_vla=self._action_vla,
+            x_base=self._x_base,
+            prediction_started_at=started,
+            prediction_finished_at=finished,
+        )
+
+    def begin_chunk(
+        self,
+        chunk_id: int,
+        initial_observation: Mapping[str, Any],
+        task: str,
+        *,
+        seed: int,
+        jit: bool,
+        num_steps: int | None,
+    ) -> FRSChunkReady:
+        self._require_episode_and_no_active_chunk()
+        started = time.time()
+        normalized = self.policy.predict_action_chunk(
+            initial_observation,
+            task,
+            seed=seed,
+            jit=jit,
+            num_steps=num_steps,
+            normalized=True,
+        )
+        x_base = self.policy.reverse_action_chunk(
+            initial_observation,
+            task,
+            normalized,
+            num_steps=self.config.reverse_steps,
+            solver=self.config.reverse_solver,
+        )
+        self._activate_chunk(chunk_id, normalized, x_base)
+        return self._make_chunk_ready(started, time.time())
+
+    def _require_active_chunk(self, chunk_id: int) -> None:
+        if self._active_chunk_id is None:
+            raise RuntimeError("FRS has no active chunk")
+        if chunk_id != self._active_chunk_id:
+            raise ValueError(
+                f"FRS chunk id {chunk_id} does not match active chunk {self._active_chunk_id}"
+            )
+
+    def end_chunk(self, chunk_id: int) -> None:
+        self._require_active_chunk(chunk_id)
+        self._clear_chunk_state()
 
     @staticmethod
     def _eval_observation(policy: Any, observation: Mapping[str, Any], task: str) -> EvalObservation:
@@ -505,3 +610,6 @@ class FRSRuntime:
         self.last_vla_normalized = np.array(vla_np, copy=True)
         self.last_frs_normalized = np.array(refined_np, copy=True)
         return jnp.asarray(refined_np)
+
+
+FRSRuntime = FRSSteeringPolicy
