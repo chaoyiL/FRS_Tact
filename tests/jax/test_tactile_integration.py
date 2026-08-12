@@ -9,6 +9,8 @@ import numpy as np
 import pytest
 
 from deploy_smolvla import remote_client
+from deploy_smolvla.frs_protocol import FRSChunkEnd, FRSChunkStart
+from deploy_smolvla.frs_runtime import FRSChunkReady
 from deploy_smolvla.remote_client import (
     _prepare_observation,
     _remaining_action_chunk,
@@ -453,3 +455,310 @@ def test_select_action_advances_chunk_seed() -> None:
     policy.select_action({}, "task", seed=10, jit=False)
 
     assert seeds == [10, 11]
+
+
+def _write_protocol_run_config(path: Path, *, frs_enabled: bool) -> Path:
+    config = {
+        "checkpoint": "unused",
+        "allow_download": False,
+        "checkpoint_contract": {
+            "state_dim": 3,
+            "action_dim": 2,
+            "chunk_size": 3,
+            "image_keys": ["camera"],
+            "tactile_keys": [],
+            "tactile_embedding_dim": 4,
+            "tactile_num_tokens": 0,
+            "lora_rank": 0,
+            "vlm_lora_target_modules": [],
+        },
+        "connection": {
+            "address": "127.0.0.1",
+            "port": 26421,
+            "action_ack_timeout_s": 2.0,
+            "observation_timeout_s": 10.0,
+            "require_token": False,
+        },
+        "observation": {
+            "data_type": "vitac" if frs_enabled else "vision",
+            "language_prompt": "pick",
+            "single_arm_mode": False,
+            "no_state_obs_mode": False,
+        },
+        "control": {
+            "control_frequency": 20.0,
+            "controller_frequency": 80.0,
+            "steps_per_inference": 3,
+            "action_horizon": 3,
+        },
+        "runtime": {
+            "auto_start": True,
+            "warmup_runs": 1,
+            "max_iterations": 1,
+        },
+        "logging": {"save_observations": False},
+    }
+    if frs_enabled:
+        config["frs"] = {
+            "enabled": True,
+            "checkpoint": "unused-frs",
+            "tactile_encoder_checkpoint": "unused-tactile",
+            "tactile_keys": ["tactile"],
+            "history_stride": 1,
+            "gate_tau": 0.1,
+            "gate_temperature": 0.2,
+            "reverse_steps": 2,
+            "reverse_solver": "euler",
+            "decode_steps": 2,
+            "decode_solver": "euler",
+        }
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+def _run_protocol_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    frs_enabled: bool,
+    fail_frs_receive: bool = False,
+    fail_begin_chunk: bool = False,
+) -> tuple[Path, list[tuple[object, ...]], list[np.ndarray]]:
+    events: list[tuple[object, ...]] = []
+    sent_actions: list[np.ndarray] = []
+    normalized = jnp.asarray(
+        [[[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]], dtype=jnp.float32
+    )
+
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(action: object) -> jnp.ndarray:
+            return jnp.asarray(action) + 10.0
+
+    class Policy:
+        config = SimpleNamespace(
+            state_dim=3,
+            action_dim=2,
+            chunk_size=3,
+            n_action_steps=3,
+            image_keys=("camera",),
+            tactile_keys=(),
+            tactile_num_tokens=0,
+            use_tactile_encoder=False,
+            empty_cameras=0,
+            rtc_config=None,
+            num_steps=4,
+            adapt_to_pi_aloha=False,
+        )
+        preprocessor = Preprocessor()
+
+        @staticmethod
+        def reset() -> None:
+            events.append(("policy_reset",))
+
+        @staticmethod
+        def predict_action_chunk(*args: object, **kwargs: object) -> jnp.ndarray:
+            del args, kwargs
+            events.append(("predict",))
+            return normalized
+
+    class SteeringPolicy:
+        tactile_keys = ("tactile",)
+
+        def __init__(self, *args: object, policy: Policy, **kwargs: object) -> None:
+            del args, kwargs
+            self.policy = policy
+            self.config = SimpleNamespace(
+                checkpoint="unused-frs",
+                history_stride=1,
+                steering_protection_interval_s=None,
+            )
+            self.model = SimpleNamespace(config=SimpleNamespace(tactile_window=3))
+            self.last_diagnostics = None
+            events.append(("frs_init",))
+
+        @staticmethod
+        def reset_episode(initial_observation: object) -> None:
+            del initial_observation
+            events.append(("reset_episode",))
+
+        @staticmethod
+        def warmup_all_tactile_lengths() -> None:
+            events.append(("warmup_all",))
+
+        @staticmethod
+        def begin_chunk(
+            chunk_id: int,
+            initial_observation: object,
+            task: str,
+            **kwargs: object,
+        ) -> FRSChunkReady:
+            del initial_observation, task, kwargs
+            events.append(("begin_chunk", chunk_id))
+            if fail_begin_chunk:
+                raise RuntimeError("source model failed")
+            chunk = np.zeros((1, 3, 2), dtype=np.float32)
+            return FRSChunkReady(chunk_id, chunk, chunk, chunk, 1.0, 2.0)
+
+        @staticmethod
+        def end_chunk(chunk_id: int) -> None:
+            events.append(("end_chunk", chunk_id))
+
+    warmup_observation = {
+        "observation.state": np.zeros((3,), dtype=np.float32),
+        "camera": np.zeros((4, 4, 3), dtype=np.uint8),
+        "tactile": np.zeros((4, 4, 3), dtype=np.uint8),
+    }
+
+    class Bridge:
+        observation_calls = 0
+        frs_calls = 0
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            events.append(("bridge",))
+
+        @staticmethod
+        def send_config(config: object) -> None:
+            del config
+            events.append(("config",))
+
+        @classmethod
+        def receive_observation(cls, timeout: float) -> tuple[int, dict[str, np.ndarray]]:
+            del timeout
+            cls.observation_calls += 1
+            events.append(("receive_observation", cls.observation_calls))
+            return cls.observation_calls, warmup_observation
+
+        @staticmethod
+        def send_state(state: str) -> None:
+            events.append((state,))
+
+        @staticmethod
+        def send_action(action: np.ndarray, obs_seq: int, *, trace: object) -> None:
+            del trace
+            events.append(("legacy_action", obs_seq))
+            sent_actions.append(np.array(action, copy=True))
+
+        @staticmethod
+        def receive_action_ack(obs_seq: int, timeout: float) -> None:
+            del timeout
+            events.append(("legacy_ack", obs_seq))
+
+        @classmethod
+        def receive_frs_message(cls, timeout: float) -> FRSChunkStart | FRSChunkEnd:
+            del timeout
+            cls.frs_calls += 1
+            events.append(("receive_frs", cls.frs_calls))
+            if fail_frs_receive:
+                raise TimeoutError("FRS receive timed out")
+            if cls.frs_calls == 1:
+                return FRSChunkStart(
+                    obs_seq=11,
+                    chunk_id=5,
+                    observation=warmup_observation,
+                    observation_timestamp=100.0,
+                    control_dt=0.05,
+                    action_horizon=3,
+                    execution_mode="block",
+                    action_timestamps=None,
+                    nominal_chunk_end=None,
+                )
+            return FRSChunkEnd(5, "exhausted", 0, 0)
+
+        @staticmethod
+        def send_frs_chunk_ready(
+            obs_seq: int,
+            chunk_id: int,
+            prediction_trace: object,
+        ) -> None:
+            del prediction_trace
+            events.append(("ready", obs_seq, chunk_id))
+
+        @staticmethod
+        def close() -> None:
+            events.append(("close",))
+
+    monkeypatch.setattr(remote_client, "_load_validated_policy", lambda *a, **k: Policy())
+    monkeypatch.setattr(remote_client, "FRSRuntime", SteeringPolicy)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", Bridge)
+    config_path = _write_protocol_run_config(
+        tmp_path / ("frs.yaml" if frs_enabled else "legacy.yaml"),
+        frs_enabled=frs_enabled,
+    )
+    return config_path, events, sent_actions
+
+
+def test_frs_run_warms_all_tactile_lengths_before_start_and_uses_typed_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, events, sent_actions = _run_protocol_fixture(
+        tmp_path, monkeypatch, frs_enabled=True
+    )
+
+    remote_client.run(config_path)
+
+    names = [event[0] for event in events]
+    assert names.index("receive_observation") < names.index("reset_episode")
+    assert names.index("reset_episode") < names.index("warmup_all") < names.index("start")
+    assert names.index("start") < names.index("receive_frs") < names.index("begin_chunk")
+    assert names[-2:] == ["stop", "close"]
+    assert sent_actions == []
+
+
+def test_frs_receive_failure_sends_stop_and_closes_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, events, _ = _run_protocol_fixture(
+        tmp_path,
+        monkeypatch,
+        frs_enabled=True,
+        fail_frs_receive=True,
+    )
+
+    with pytest.raises(TimeoutError, match="FRS receive timed out"):
+        remote_client.run(config_path)
+
+    assert ("receive_frs", 1) in events
+    assert events[-2:] == [("stop",), ("close",)]
+
+
+def test_frs_model_failure_sends_stop_and_closes_bridge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, events, _ = _run_protocol_fixture(
+        tmp_path,
+        monkeypatch,
+        frs_enabled=True,
+        fail_begin_chunk=True,
+    )
+
+    with pytest.raises(RuntimeError, match="source model failed"):
+        remote_client.run(config_path)
+
+    assert ("begin_chunk", 5) in events
+    assert events[-2:] == [("stop",), ("close",)]
+
+
+def test_legacy_run_sends_the_exact_full_unnormalized_chunk_and_acknowledges_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, events, sent_actions = _run_protocol_fixture(
+        tmp_path, monkeypatch, frs_enabled=False
+    )
+
+    remote_client.run(config_path)
+
+    assert [event for event in events if event[0] == "legacy_action"] == [
+        ("legacy_action", 2)
+    ]
+    assert ("legacy_ack", 2) in events
+    assert len(sent_actions) == 1
+    np.testing.assert_array_equal(
+        sent_actions[0],
+        np.asarray([[[10.0, 11.0], [12.0, 13.0], [14.0, 15.0]]], dtype=np.float32)[0],
+    )

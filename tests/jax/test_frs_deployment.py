@@ -1519,7 +1519,7 @@ def test_tactile_history_clamps_short_episode_to_first_frame() -> None:
     )
 
 
-def test_predict_chunk_unnormalizes_frs_output() -> None:
+def test_predict_chunk_unnormalizes_the_legacy_source_chunk_without_frs() -> None:
     class Preprocessor:
         @staticmethod
         def unnormalize_actions(actions):
@@ -1534,13 +1534,6 @@ def test_predict_chunk_unnormalizes_frs_output() -> None:
             del args, kwargs
             return jnp.ones((1, 2, 1), dtype=jnp.float32)
 
-    class FRS:
-        @staticmethod
-        def steer(policy, observation, task, actions, *, update_history):
-            del policy, observation, task
-            assert update_history is True
-            return actions + 2.0
-
     action, normalized = remote_client._predict_chunk(
         Policy(),
         {},
@@ -1551,11 +1544,10 @@ def test_predict_chunk_unnormalizes_frs_output() -> None:
         previous_chunk=None,
         inference_delay=None,
         execution_horizon=None,
-        frs_runtime=FRS(),  # type: ignore[arg-type]
     )
 
-    np.testing.assert_array_equal(normalized, np.full((2, 1), 3.0, dtype=np.float32))
-    np.testing.assert_array_equal(action, np.full((2, 1), 30.0, dtype=np.float32))
+    np.testing.assert_array_equal(normalized, np.ones((2, 1), dtype=np.float32))
+    np.testing.assert_array_equal(action, np.full((2, 1), 10.0, dtype=np.float32))
 
 
 def test_frs_runtime_retains_vla_and_refined_normalized_chunks(

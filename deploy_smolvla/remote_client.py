@@ -25,7 +25,7 @@ from train_vtsmolvla import VTJaxSmolVLAPolicy
 from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
 
 from .bridge_client import RobotBridgeClient
-from .frs_protocol import FRSSteerRequest
+from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import (
     FRSChunkReady,
     FRSRuntime,
@@ -439,7 +439,6 @@ def _prepare_observation(
     prepared["observation.state"] = np.asarray(observation["observation.state"]).copy()
     return prepared
 
-
 def _predict_chunk(
     policy: Policy,
     observation: Mapping[str, Any],
@@ -451,8 +450,6 @@ def _predict_chunk(
     previous_chunk: np.ndarray | None,
     inference_delay: int | None,
     execution_horizon: int | None,
-    frs_runtime: FRSRuntime | None = None,
-    update_frs_history: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(robot_action, model_space_action)`` each shaped ``[horizon, action_dim]``."""
     actions_norm = policy.predict_action_chunk(
@@ -467,15 +464,7 @@ def _predict_chunk(
         execution_horizon=execution_horizon,
     )
     jax.block_until_ready(actions_norm)
-    if frs_runtime is not None:
-        actions_norm = frs_runtime.steer(
-            policy,
-            observation,
-            task,
-            actions_norm,
-            update_history=update_frs_history,
-        )
-        jax.block_until_ready(actions_norm)
+
     actions = policy.preprocessor.unnormalize_actions(actions_norm)
     expected_shape = (1, policy.config.chunk_size, policy.config.action_dim)
     action = np.asarray(actions)
@@ -558,6 +547,155 @@ def _build_trace_or_none(builder: Any, *args: Any) -> dict[str, Any] | None:
     except Exception as exc:
         LOGGER.warning("Omitting FRS trace after serialization failure: %s", exc)
         return None
+
+
+def _run_frs_protocol(
+    bridge: RobotBridgeClient,
+    steering_policy: FRSRuntime,
+    *,
+    task: str,
+    state_dim: int,
+    image_keys: Sequence[str],
+    empty_cameras: int,
+    observation_timeout_s: float,
+    action_ack_timeout_s: float,
+    seed: int,
+    jit: bool,
+    num_steps: int | None,
+    max_chunks: int,
+    observation_saver: ObservationSaver,
+) -> None:
+    """Run the strictly ordered, server-directed FRS steering protocol."""
+
+    completed_chunks = 0
+    previous_chunk_id: int | None = None
+    while max_chunks <= 0 or completed_chunks < max_chunks:
+        chunk_start = bridge.receive_frs_message(observation_timeout_s)
+        if not isinstance(chunk_start, FRSChunkStart):
+            raise RuntimeError(
+                "expected FRS chunk start, received "
+                f"{type(chunk_start).__name__}"
+            )
+        if previous_chunk_id is not None and chunk_start.chunk_id <= previous_chunk_id:
+            raise RuntimeError(
+                "FRS chunk ids must be strictly increasing: "
+                f"{chunk_start.chunk_id} <= {previous_chunk_id}"
+            )
+        observation_saver.submit(
+            completed_chunks + 1,
+            chunk_start.obs_seq,
+            chunk_start.observation,
+        )
+        initial_observation = _prepare_observation(
+            dict(chunk_start.observation),
+            state_dim=state_dim,
+            image_keys=image_keys,
+            empty_cameras=empty_cameras,
+            required_image_keys=steering_policy.tactile_keys,
+        )
+        ready = steering_policy.begin_chunk(
+            chunk_start.chunk_id,
+            initial_observation,
+            task,
+            seed=seed,
+            jit=jit,
+            num_steps=num_steps,
+        )
+        if ready.chunk_id != chunk_start.chunk_id:
+            raise RuntimeError(
+                "FRS chunk ready id does not match chunk start: "
+                f"{ready.chunk_id} != {chunk_start.chunk_id}"
+            )
+        bridge.send_frs_chunk_ready(
+            chunk_start.obs_seq,
+            chunk_start.chunk_id,
+            _build_trace_or_none(_build_frs_chunk_trace, ready),
+        )
+
+        while True:
+            message = bridge.receive_frs_message(observation_timeout_s)
+            if isinstance(message, FRSChunkEnd):
+                if message.chunk_id != chunk_start.chunk_id:
+                    raise RuntimeError(
+                        "FRS chunk end chunk id does not match active chunk: "
+                        f"{message.chunk_id} != {chunk_start.chunk_id}"
+                    )
+                steering_policy.end_chunk(chunk_start.chunk_id)
+                previous_chunk_id = chunk_start.chunk_id
+                completed_chunks += 1
+                break
+            if not isinstance(message, FRSSteerRequest):
+                raise RuntimeError(
+                    "expected FRS steer request or chunk end, received "
+                    f"{type(message).__name__}"
+                )
+            if message.chunk_id != chunk_start.chunk_id:
+                raise RuntimeError(
+                    "FRS steer request chunk id does not match active chunk: "
+                    f"{message.chunk_id} != {chunk_start.chunk_id}"
+                )
+
+            request_observation = _prepare_observation(
+                dict(message.observation),
+                state_dim=state_dim,
+                image_keys=image_keys,
+                empty_cameras=empty_cameras,
+                required_image_keys=steering_policy.tactile_keys,
+            )
+            result = steering_policy.steer_action(
+                message.chunk_id,
+                message.request_id,
+                request_observation,
+                message.action_index,
+            )
+            request_ids = (
+                message.chunk_id,
+                message.request_id,
+                message.action_index,
+            )
+            result_ids = (result.chunk_id, result.request_id, result.action_index)
+            if result_ids != request_ids:
+                raise RuntimeError(
+                    "FRS steer result does not match its request: "
+                    f"{result_ids} != {request_ids}"
+                )
+            selected_action = np.asarray(result.selected_action)
+            expected_shape = (int(steering_policy.policy.config.action_dim),)
+            if selected_action.shape != expected_shape:
+                raise RuntimeError(
+                    "FRS selected action must have shape "
+                    f"{expected_shape}, got {selected_action.shape}"
+                )
+            bridge.send_frs_steer_action(
+                message.chunk_id,
+                message.request_id,
+                message.action_index,
+                selected_action,
+                trace=_build_trace_or_none(_build_frs_steer_trace, result, message),
+            )
+
+            acknowledgement = bridge.receive_frs_message(action_ack_timeout_s)
+            if not isinstance(acknowledgement, FRSSteerAck):
+                raise RuntimeError(
+                    "expected FRS steer acknowledgement, received "
+                    f"{type(acknowledgement).__name__}"
+                )
+            acknowledgement_ids = (
+                acknowledgement.chunk_id,
+                acknowledgement.request_id,
+                acknowledgement.action_index,
+            )
+            if acknowledgement_ids != request_ids:
+                raise RuntimeError(
+                    "FRS steer acknowledgement does not match its request: "
+                    f"{acknowledgement_ids} != {request_ids}"
+                )
+            if acknowledgement.status == "rejected":
+                raise RuntimeError(
+                    "FRS steer action was rejected for "
+                    f"chunk={message.chunk_id} request={message.request_id} "
+                    f"action_index={message.action_index}"
+                )
 
 
 def _build_action_trace(
@@ -810,7 +948,8 @@ def run(
             required_image_keys=robot_tactile_keys,
         )
         if frs_runtime is not None:
-            frs_runtime.reset(warmup_frame)
+            frs_runtime.reset_episode(warmup_frame)
+            frs_runtime.warmup_all_tactile_lengths()
             print(
                 "[client] FRS enabled: "
                 f"checkpoint={frs_runtime.config.checkpoint} "
@@ -829,8 +968,6 @@ def run(
                 previous_chunk=None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
-                frs_runtime=frs_runtime,
-                update_frs_history=False,
             )
             warmup_ms = (time.perf_counter() - start) * 1000.0
             print(f"[client] Warmup {warmup_index + 1}/{warmup_runs}: {warmup_ms:.1f}ms")
@@ -839,6 +976,24 @@ def run(
         if not bool(runtime.get("auto_start", False)):
             input("[client] Ready. Press Enter to send START to the robot server... ")
         bridge.send_state("start")
+
+        if frs_runtime is not None:
+            _run_frs_protocol(
+                bridge,
+                frs_runtime,
+                task=task,
+                state_dim=state_dim,
+                image_keys=robot_image_keys,
+                empty_cameras=empty_cameras,
+                observation_timeout_s=observation_timeout_s,
+                action_ack_timeout_s=action_ack_timeout_s,
+                seed=seed,
+                jit=jit,
+                num_steps=num_steps,
+                max_chunks=max_iterations,
+                observation_saver=observation_saver,
+            )
+            return
 
         iteration = 0
         last_status_time = time.monotonic()
@@ -864,7 +1019,6 @@ def run(
                 previous_chunk=previous_chunk if rtc_on else None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
-                frs_runtime=frs_runtime,
             )
             inference_ms = (time.perf_counter() - start) * 1000.0
             trace = _build_action_trace_or_none(
