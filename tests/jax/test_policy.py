@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -13,8 +16,11 @@ from modalities_eval.utils import EvalObservation
 from train_smolvla import policy as policy_module
 from train_smolvla.modeling import PrefixContext
 from train_smolvla.policy import JaxSmolVLAPolicy
+from utils import source_flow
 from utils import source_model
 from utils.source_model import reverse_integrate_actions
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
@@ -25,22 +31,49 @@ def observation() -> dict[str, np.ndarray]:
 @pytest.fixture
 def policy() -> JaxSmolVLAPolicy:
     prepare_calls: list[tuple[object, str]] = []
+    prepared_batch = {
+        "images": jnp.full((1, 1, 3, 8, 8), 0.125, dtype=jnp.float32),
+        "image_masks": jnp.ones((1, 1), dtype=jnp.bool_),
+        "language_tokens": jnp.asarray([[2, 7]], dtype=jnp.int32),
+        "language_masks": jnp.asarray([[True, False]], dtype=jnp.bool_),
+        "state": jnp.asarray([[0.25, 0.5, 0.75]], dtype=jnp.float32),
+    }
 
     class RecordingPreprocessor:
         def prepare(self, observation, task):
             prepare_calls.append((observation, task))
-            return {
-                "images": jnp.zeros((1, 1, 3, 8, 8), dtype=jnp.float32),
-                "image_masks": jnp.ones((1, 1), dtype=jnp.bool_),
-                "language_tokens": jnp.ones((1, 2), dtype=jnp.int32),
-                "language_masks": jnp.ones((1, 2), dtype=jnp.bool_),
-                "state": jnp.zeros((1, 3), dtype=jnp.float32),
-            }
+            return prepared_batch
 
         def unnormalize_actions(self, actions):
             raise AssertionError("reverse_action_chunk must not unnormalize actions")
 
-    class ConstantVelocityModel:
+    class RecordingInputDependentModel:
+        def __init__(self):
+            self.prefix_records: list[dict[str, np.ndarray]] = []
+            self.denoise_records: list[dict[str, np.ndarray]] = []
+
+        def _record_prefix(self, images, image_masks, language_tokens, language_masks, state):
+            self.prefix_records.append(
+                {
+                    "images": np.asarray(images),
+                    "image_masks": np.asarray(image_masks),
+                    "language_tokens": np.asarray(language_tokens),
+                    "language_masks": np.asarray(language_masks),
+                    "state": np.asarray(state),
+                }
+            )
+
+        def _record_denoise(self, parameter, context_value, pad_mask, x_t, timestep):
+            self.denoise_records.append(
+                {
+                    "parameter": np.asarray(parameter),
+                    "context_value": np.asarray(context_value),
+                    "pad_mask": np.asarray(pad_mask),
+                    "x_t": np.asarray(x_t),
+                    "timestep": np.asarray(timestep),
+                }
+            )
+
         def build_prefix_context(
             self,
             params,
@@ -50,22 +83,62 @@ def policy() -> JaxSmolVLAPolicy:
             language_masks,
             state,
         ):
-            del params, images, image_masks, language_tokens, language_masks
+            del params
+            jax.debug.callback(
+                self._record_prefix,
+                images,
+                image_masks,
+                language_tokens,
+                language_masks,
+                state,
+                ordered=True,
+            )
+            batch_size = state.shape[0]
+
+            def batch_sum(value):
+                return jnp.asarray(value, dtype=jnp.float32).reshape(batch_size, -1).sum(axis=-1)
+
+            context_value = (
+                0.001 * batch_sum(images)
+                + 0.01 * batch_sum(image_masks)
+                + 0.02 * batch_sum(language_tokens)
+                + 0.03 * batch_sum(language_masks)
+                + 0.04 * batch_sum(state)
+            )
             return PrefixContext(
-                pad_mask=jnp.ones((state.shape[0], 1), dtype=jnp.bool_),
-                cache=(),
+                pad_mask=language_masks,
+                cache=((context_value[:, None], (2.0 * context_value)[:, None]),),
             )
 
         def denoise_step(self, params, context, x_t, timestep):
-            del params, context, timestep
-            return jnp.full_like(x_t, 0.25)
+            context_value = context.cache[0][0]
+            jax.debug.callback(
+                self._record_denoise,
+                params["velocity_bias"],
+                context_value,
+                context.pad_mask,
+                x_t,
+                timestep,
+                ordered=True,
+            )
+            time = timestep[:, None, None]
+            conditioning = context_value[:, :, None]
+            padded_width = jnp.asarray(x_t.shape[-1], dtype=jnp.float32)
+            return (
+                0.05 * x_t
+                + params["velocity_bias"]
+                + conditioning
+                + jnp.square(time)
+                + 0.01 * padded_width
+            )
 
     result = object.__new__(JaxSmolVLAPolicy)
     result.config = SimpleNamespace(chunk_size=2, action_dim=3, max_action_dim=4)
-    result.params = {}
-    result.model = ConstantVelocityModel()
+    result.params = {"velocity_bias": jnp.asarray(0.2, dtype=jnp.float32)}
+    result.model = RecordingInputDependentModel()
     result.preprocessor = RecordingPreprocessor()
     result.prepare_calls = prepare_calls
+    result.prepared_batch = prepared_batch
     return result
 
 
@@ -147,6 +220,34 @@ def test_policy_rejects_tactile_checkpoint_through_visual_config_entry(tmp_path:
         JaxSmolVLAPolicy.from_pretrained(tmp_path, local_files_only=True)
 
 
+def test_policy_reverse_core_import_does_not_load_evaluation_stack() -> None:
+    script = """
+import sys
+
+class BlockEvaluationImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "modalities_eval" or fullname.startswith("modalities_eval."):
+            raise RuntimeError(f"evaluation import is forbidden: {fullname}")
+        return None
+
+sys.meta_path.insert(0, BlockEvaluationImports())
+import train_smolvla.policy
+import utils.source_flow
+assert not any(name == "modalities_eval" or name.startswith("modalities_eval.") for name in sys.modules)
+assert "EvalObservation" not in vars(utils.source_flow)
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize("solver", ["euler", "fireflow", "slerpflow"])
 def test_reverse_action_chunk_supports_all_solvers(policy, observation, solver) -> None:
     actions = jnp.zeros((1, policy.config.chunk_size, policy.config.action_dim), dtype=jnp.float16)
@@ -158,11 +259,30 @@ def test_reverse_action_chunk_supports_all_solvers(policy, observation, solver) 
         num_steps=4,
         solver=solver,
     )
+    jax.block_until_ready(result)
 
     assert result.shape == actions.shape
     assert result.dtype == jnp.float32
     assert bool(jnp.isfinite(result).all())
     assert policy.prepare_calls == [(observation, "pick the tube")]
+    assert len(policy.model.prefix_records) == 1
+    expected_timesteps = {
+        "euler": [0.0, 0.25, 0.5, 0.75],
+        "fireflow": [0.0, 0.125, 0.375, 0.625, 0.875],
+        "slerpflow": [0.0, 0.25, 0.5, 0.75, 1.0],
+    }
+    np.testing.assert_allclose(
+        [float(record["timestep"][0]) for record in policy.model.denoise_records],
+        expected_timesteps[solver],
+        rtol=0.0,
+        atol=1e-7,
+    )
+    for record in policy.model.denoise_records:
+        assert record["x_t"].shape == (1, 2, policy.config.max_action_dim)
+        np.testing.assert_array_equal(record["x_t"][..., -1], np.zeros((1, 2)))
+        np.testing.assert_array_equal(record["pad_mask"], policy.prepared_batch["language_masks"])
+        np.testing.assert_allclose(record["parameter"], policy.params["velocity_bias"])
+        np.testing.assert_allclose(record["context_value"], [[0.304]], rtol=0.0, atol=1e-6)
 
 
 @pytest.mark.parametrize(
@@ -237,6 +357,10 @@ def test_reverse_action_chunk_rejects_invalid_reverse_output(
 
 
 def test_reverse_integrate_actions_eval_wrapper_matches_prepared_core(policy, observation) -> None:
+    assert (
+        source_model.reverse_integrate_prepared_actions
+        is source_flow.reverse_integrate_prepared_actions
+    )
     prepared = policy.preprocessor.prepare(observation, "pick the tube")
     eval_observation = EvalObservation(
         images=prepared["images"],
@@ -255,12 +379,20 @@ def test_reverse_integrate_actions_eval_wrapper_matches_prepared_core(policy, ob
         num_steps=4,
         solver="fireflow",
     )
-    prepared_result = source_model.reverse_integrate_prepared_actions(
+    jax.block_until_ready(wrapped)
+    assert len(policy.model.prefix_records) == 1
+    for field in ("images", "image_masks", "language_tokens", "language_masks", "state"):
+        np.testing.assert_array_equal(policy.model.prefix_records[0][field], prepared[field])
+    for record in policy.model.denoise_records:
+        np.testing.assert_allclose(record["context_value"], [[0.304]], rtol=0.0, atol=1e-6)
+
+    prepared_result = source_flow.reverse_integrate_prepared_actions(
         policy,
         prepared,
         actions,
         num_steps=4,
         solver="fireflow",
     )
+    jax.block_until_ready(prepared_result)
 
     np.testing.assert_allclose(wrapped, prepared_result, rtol=0.0, atol=0.0)

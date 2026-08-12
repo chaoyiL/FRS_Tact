@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -11,14 +9,13 @@ import numpy as np
 
 from modalities_eval.utils import EvalObservation
 from modalities_eval.utils import SmolVLAEvalModel
-from modalities_eval.utils import VelocityContext
 from modalities_eval.utils import _stack_observations
 from train_smolvla.modeling import PrefixContext
-from utils.integration import euler_integrate_velocity
-from utils.integration import fireflow_integrate_velocity
-from utils.integration import slerpflow_integrate_velocity
-
-ReverseSolver = Literal["euler", "fireflow", "slerpflow"]
+from utils.source_flow import ReverseSolver
+from utils.source_flow import VelocityContext
+from utils.source_flow import _jitted_reverse_from_context
+from utils.source_flow import build_velocity_context_from_prepared
+from utils.source_flow import reverse_integrate_prepared_actions
 
 
 def stack_observations(observations: Sequence[EvalObservation]) -> EvalObservation:
@@ -27,9 +24,7 @@ def stack_observations(observations: Sequence[EvalObservation]) -> EvalObservati
     return _stack_observations(*observations)
 
 
-_PREFIX_CACHE: dict[int, Any] = {}
 _SAMPLE_CACHE: dict[tuple[int, int], Any] = {}
-_REVERSE_CACHE: dict[tuple[int, int, str], Any] = {}
 
 
 def _pad_actions_to_model(model: SmolVLAEvalModel, actions: jax.Array) -> jax.Array:
@@ -38,37 +33,6 @@ def _pad_actions_to_model(model: SmolVLAEvalModel, actions: jax.Array) -> jax.Ar
     if pad > 0:
         actions = jnp.pad(actions, ((0, 0), (0, 0), (0, pad)))
     return actions
-
-
-def _jitted_prefix_builder(model: SmolVLAEvalModel):
-    cache_key = id(model)
-    run = _PREFIX_CACHE.get(cache_key)
-    if run is not None:
-        return run
-
-    functional_model = model.model
-
-    @jax.jit
-    def run(
-        params,
-        images: jax.Array,
-        image_masks: jax.Array,
-        language_tokens: jax.Array,
-        language_masks: jax.Array,
-        state: jax.Array,
-    ) -> VelocityContext:
-        prefix = functional_model.build_prefix_context(
-            params,
-            images,
-            image_masks,
-            language_tokens,
-            language_masks,
-            state,
-        )
-        return VelocityContext(pad_mask=prefix.pad_mask, cache=prefix.cache)
-
-    _PREFIX_CACHE[cache_key] = run
-    return run
 
 
 def build_velocity_context(model: SmolVLAEvalModel, observation: EvalObservation) -> VelocityContext:
@@ -82,21 +46,6 @@ def build_velocity_context(model: SmolVLAEvalModel, observation: EvalObservation
             "language_masks": observation.language_masks,
             "state": observation.state,
         },
-    )
-
-
-def build_velocity_context_from_prepared(
-    model: SmolVLAEvalModel,
-    batch: Mapping[str, Any],
-) -> VelocityContext:
-    """JIT-compiled prefix encode from a preprocessor output mapping."""
-    return _jitted_prefix_builder(model)(
-        model.params,
-        batch["images"],
-        batch["image_masks"],
-        batch["language_tokens"],
-        batch["language_masks"],
-        batch["state"],
     )
 
 
@@ -129,52 +78,6 @@ def _jitted_sample_from_context(model: SmolVLAEvalModel, *, num_steps: int):
         return actions[..., :action_dim]
 
     _SAMPLE_CACHE[cache_key] = run
-    return run
-
-
-def _jitted_reverse_from_context(
-    model: SmolVLAEvalModel,
-    *,
-    num_steps: int,
-    solver: ReverseSolver,
-):
-    cache_key = (id(model), num_steps, solver)
-    run = _REVERSE_CACHE.get(cache_key)
-    if run is not None:
-        return run
-
-    if solver == "euler":
-        integrate = euler_integrate_velocity
-    elif solver == "fireflow":
-        integrate = fireflow_integrate_velocity
-    else:
-        integrate = slerpflow_integrate_velocity
-    functional_model = model.model
-    max_action_dim = int(model.config.max_action_dim)
-
-    @jax.jit
-    def run(params, context: VelocityContext, actions: jax.Array) -> jax.Array:
-        actions = jnp.asarray(actions, dtype=jnp.float32)
-
-        def velocity_fn(x: jax.Array, t: jax.Array) -> jax.Array:
-            x_in = x
-            pad = max_action_dim - x.shape[-1]
-            if pad > 0:
-                x_in = jnp.pad(x, ((0, 0), (0, 0), (0, pad)))
-            t = jnp.asarray(t, dtype=jnp.float32)
-            if t.ndim == 0:
-                t = jnp.full((x.shape[0],), t)
-            velocity = functional_model.denoise_step(
-                params,
-                PrefixContext(pad_mask=context.pad_mask, cache=context.cache),
-                x_in,
-                t,
-            )
-            return velocity[..., : x.shape[-1]].astype(jnp.float32)
-
-        return integrate(velocity_fn, actions, num_steps=num_steps)
-
-    _REVERSE_CACHE[cache_key] = run
     return run
 
 
@@ -228,25 +131,6 @@ def reverse_integrate_actions(
         actions,
         num_steps=num_steps,
         solver=solver,
-    )
-
-
-def reverse_integrate_prepared_actions(
-    model: SmolVLAEvalModel,
-    batch: Mapping[str, Any],
-    normalized_actions: jax.Array,
-    *,
-    num_steps: int,
-    solver: ReverseSolver = "slerpflow",
-) -> jax.Array:
-    """Reverse normalized actions using an already prepared observation batch."""
-    if solver not in ("euler", "fireflow", "slerpflow"):
-        raise ValueError(
-            f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
-        )
-    context = build_velocity_context_from_prepared(model, batch)
-    return _jitted_reverse_from_context(model, num_steps=num_steps, solver=solver)(
-        model.params, context, jnp.asarray(normalized_actions, dtype=jnp.float32)
     )
 
 

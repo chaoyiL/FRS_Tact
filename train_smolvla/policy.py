@@ -6,7 +6,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-from utils.source_model import ReverseSolver, reverse_integrate_prepared_actions
+from utils.source_flow import ReverseSolver, reverse_integrate_prepared_actions
 
 from .checkpoint import load_config, load_params, resolve_checkpoint
 from .modeling import JaxSmolVLA
