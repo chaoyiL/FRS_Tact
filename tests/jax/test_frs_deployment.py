@@ -53,7 +53,7 @@ def lifecycle_runtime(
     runtime = object.__new__(FRSRuntime)
     runtime.policy = lifecycle_source
     runtime.config = SimpleNamespace(reverse_steps=5, reverse_solver="slerpflow")
-    runtime.history = SimpleNamespace(reset=lambda baseline: None)
+    runtime.history = TactileHistory(window=2, stride=1, token_shape=(1, 2))
     runtime.baseline = None
     runtime.last_diagnostics = None
     runtime.last_vla_normalized = None
@@ -226,6 +226,253 @@ def test_reset_episode_replaces_baseline_and_clears_an_active_chunk(lifecycle_ru
     assert lifecycle_runtime._request_results == {}
 
 
+@pytest.mark.parametrize(
+    "invalid_tokens",
+    [
+        pytest.param(np.ones((2,), dtype=np.float32), id="malformed"),
+        pytest.param(np.asarray([[np.nan, 0.0]], dtype=np.float32), id="nonfinite"),
+    ],
+)
+def test_reset_episode_validation_failure_preserves_the_complete_live_state(
+    lifecycle_runtime,
+    invalid_tokens: np.ndarray,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation(2.0))
+    lifecycle_runtime.begin_chunk(
+        3,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+    tactile = np.full((1, 2), 6.0, dtype=np.float32)
+    lifecycle_runtime._tactile_sequence.append(tactile)
+    result = object()
+    lifecycle_runtime._request_results[8] = result
+    old_internal_baseline = lifecycle_runtime._episode_baseline
+    old_public_baseline = lifecycle_runtime.baseline
+    old_history = lifecycle_runtime.history
+    old_history_tokens = old_history.window_tokens().copy()
+    old_normalized = lifecycle_runtime._action_vla_normalized
+    old_action = lifecycle_runtime._action_vla
+    old_x_base = lifecycle_runtime._x_base
+
+    with pytest.raises(ValueError, match="expected tactile tokens|NaN or Inf"):
+        lifecycle_runtime.reset_episode({"encoded": invalid_tokens})
+
+    assert lifecycle_runtime._episode_baseline is old_internal_baseline
+    assert lifecycle_runtime.baseline is old_public_baseline
+    assert lifecycle_runtime.history is old_history
+    np.testing.assert_array_equal(lifecycle_runtime.history.window_tokens(), old_history_tokens)
+    assert lifecycle_runtime._active_chunk_id == 3
+    assert lifecycle_runtime._action_vla_normalized is old_normalized
+    assert lifecycle_runtime._action_vla is old_action
+    assert lifecycle_runtime._x_base is old_x_base
+    assert lifecycle_runtime._tactile_sequence == [tactile]
+    assert lifecycle_runtime._request_results == {8: result}
+
+
+def test_tactile_history_reset_is_transactional_on_invalid_tokens() -> None:
+    history = TactileHistory(window=2, stride=1, token_shape=(1, 2))
+    history.reset(np.asarray([[1.0, 2.0]], dtype=np.float32))
+    history.append(np.asarray([[3.0, 4.0]], dtype=np.float32))
+    before = history.window_tokens().copy()
+
+    with pytest.raises(ValueError, match="expected tactile tokens"):
+        history.reset(np.ones((2,), dtype=np.float32))
+
+    np.testing.assert_array_equal(history.window_tokens(), before)
+
+
+def test_public_episode_baseline_is_isolated_from_internal_baseline(lifecycle_runtime) -> None:
+    lifecycle_runtime.reset_episode(initial_observation(3.0))
+    public = lifecycle_runtime.baseline
+    internal = lifecycle_runtime._episode_baseline
+    assert public is not None
+    assert internal is not None
+    assert not np.shares_memory(public, internal)
+
+    public.setflags(write=True)
+    public[...] = -99.0
+
+    np.testing.assert_array_equal(internal, np.full((1, 2), 3.0, dtype=np.float32))
+    np.testing.assert_array_equal(
+        lifecycle_runtime.history.window_tokens()[-1],
+        np.full((1, 2), 3.0, dtype=np.float32),
+    )
+
+
+def test_legacy_steer_uses_internal_episode_baseline_after_public_mutation(
+    lifecycle_runtime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation(3.0))
+    lifecycle_runtime.baseline.setflags(write=True)
+    lifecycle_runtime.baseline[...] = -99.0
+    captured: list[np.ndarray] = []
+
+    def capture_baseline(current, baseline):
+        del current
+        captured.append(np.asarray(baseline).copy())
+        raise RuntimeError("baseline captured")
+
+    monkeypatch.setattr(
+        frs_runtime_module,
+        "tactile_change_from_tokens",
+        capture_baseline,
+    )
+
+    with pytest.raises(RuntimeError, match="baseline captured"):
+        lifecycle_runtime.steer(
+            object(),
+            initial_observation(4.0),
+            "pick the tube",
+            jnp.zeros((1, 3, 2), dtype=jnp.float32),
+            update_history=False,
+        )
+
+    np.testing.assert_array_equal(
+        captured[0],
+        np.full((1, 1, 2), 3.0, dtype=np.float32),
+    )
+
+
+def test_chunk_ready_arrays_are_isolated_from_internal_chunk_state(lifecycle_runtime) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    ready = lifecycle_runtime.begin_chunk(
+        7,
+        initial_observation(),
+        "pick the tube",
+        seed=0,
+        jit=False,
+        num_steps=4,
+    )
+    internal_normalized = lifecycle_runtime._action_vla_normalized.copy()
+    internal_action = lifecycle_runtime._action_vla.copy()
+    internal_x_base = lifecycle_runtime._x_base.copy()
+
+    for array in (ready.action_vla_normalized, ready.action_vla, ready.x_base):
+        array.setflags(write=True)
+        array[...] = -123.0
+
+    np.testing.assert_array_equal(
+        lifecycle_runtime._action_vla_normalized,
+        internal_normalized,
+    )
+    np.testing.assert_array_equal(lifecycle_runtime._action_vla, internal_action)
+    np.testing.assert_array_equal(lifecycle_runtime._x_base, internal_x_base)
+
+
+@pytest.mark.parametrize(
+    ("source_result", "reverse_result"),
+    [
+        pytest.param(np.zeros((1, 2, 2), dtype=np.float32), None, id="source-shape"),
+        pytest.param(
+            np.full((1, 3, 2), np.nan, dtype=np.float32),
+            None,
+            id="source-nonfinite",
+        ),
+        pytest.param(
+            None,
+            np.zeros((1, 2, 2), dtype=np.float32),
+            id="reverse-shape",
+        ),
+        pytest.param(
+            None,
+            np.full((1, 3, 2), np.inf, dtype=np.float32),
+            id="reverse-nonfinite",
+        ),
+    ],
+)
+def test_begin_chunk_rejects_invalid_source_chunks_without_partial_activation(
+    lifecycle_runtime,
+    lifecycle_source: LifecycleSource,
+    source_result: np.ndarray | None,
+    reverse_result: np.ndarray | None,
+) -> None:
+    if source_result is not None:
+        lifecycle_source.predict_action_chunk = lambda *args, **kwargs: source_result
+    if reverse_result is not None:
+        lifecycle_source.reverse_action_chunk = lambda *args, **kwargs: reverse_result
+    lifecycle_runtime.reset_episode(initial_observation())
+
+    with pytest.raises(ValueError, match="normalized VLA|reverse-flow base"):
+        lifecycle_runtime.begin_chunk(
+            4,
+            initial_observation(),
+            "pick the tube",
+            seed=0,
+            jit=False,
+            num_steps=4,
+        )
+
+    assert lifecycle_runtime._active_chunk_id is None
+    assert lifecycle_runtime._action_vla_normalized is None
+    assert lifecycle_runtime._action_vla is None
+    assert lifecycle_runtime._x_base is None
+    assert lifecycle_runtime._tactile_sequence == []
+    assert lifecycle_runtime._request_results == {}
+
+
+def test_activate_chunk_conversion_failure_preserves_existing_local_state(
+    lifecycle_runtime,
+    lifecycle_source: LifecycleSource,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    tactile = np.ones((1, 2), dtype=np.float32)
+    cached = object()
+    lifecycle_runtime._tactile_sequence.append(tactile)
+    lifecycle_runtime._request_results[9] = cached
+
+    def fail_unnormalize(actions):
+        del actions
+        raise RuntimeError("unnormalization failed")
+
+    lifecycle_source.preprocessor.unnormalize_actions = fail_unnormalize
+    normalized = np.zeros((1, 3, 2), dtype=np.float32)
+
+    with pytest.raises(RuntimeError, match="unnormalization failed"):
+        lifecycle_runtime._activate_chunk(4, normalized, normalized)
+
+    assert lifecycle_runtime._active_chunk_id is None
+    assert lifecycle_runtime._action_vla_normalized is None
+    assert lifecycle_runtime._action_vla is None
+    assert lifecycle_runtime._x_base is None
+    assert lifecycle_runtime._tactile_sequence == [tactile]
+    assert lifecycle_runtime._request_results == {9: cached}
+
+
+@pytest.mark.parametrize(
+    "robot_actions",
+    [
+        pytest.param(np.zeros((1, 2, 2), dtype=np.float32), id="malformed"),
+        pytest.param(
+            np.full((1, 3, 2), np.nan, dtype=np.float32),
+            id="nonfinite",
+        ),
+    ],
+)
+def test_activate_chunk_rejects_invalid_robot_actions_without_partial_state(
+    lifecycle_runtime,
+    lifecycle_source: LifecycleSource,
+    robot_actions: np.ndarray,
+) -> None:
+    lifecycle_runtime.reset_episode(initial_observation())
+    lifecycle_source.preprocessor.unnormalize_actions = lambda actions: robot_actions
+    normalized = np.zeros((1, 3, 2), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="robot-space VLA"):
+        lifecycle_runtime._activate_chunk(4, normalized, normalized)
+
+    assert lifecycle_runtime._active_chunk_id is None
+    assert lifecycle_runtime._action_vla_normalized is None
+    assert lifecycle_runtime._action_vla is None
+    assert lifecycle_runtime._x_base is None
+    assert lifecycle_runtime._tactile_sequence == []
+    assert lifecycle_runtime._request_results == {}
+
+
 def test_deploy_frs_config_uses_project_local_downloads() -> None:
     config = remote_client.load_config(FRS_CONFIG)
     root = ROOT / "checkpoints"
@@ -325,7 +572,8 @@ def test_frs_runtime_retains_vla_and_refined_normalized_chunks(
         max_normalized_action_abs=8.0,
         max_normalized_delta_rms=4.0,
     )
-    runtime.baseline = np.zeros((1, 1), dtype=np.float32)
+    runtime._episode_baseline = np.zeros((1, 1), dtype=np.float32)
+    runtime.baseline = np.array(runtime._episode_baseline, copy=True)
     runtime.history = SimpleNamespace(
         append=lambda tokens: None,
         window_tokens=lambda: np.zeros((1, 1, 1), dtype=np.float32),

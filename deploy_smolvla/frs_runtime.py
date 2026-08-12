@@ -253,17 +253,20 @@ class TactileHistory:
         self.token_shape = tuple(token_shape)
         self._frames: deque[np.ndarray] = deque(maxlen=(window - 1) * stride + 1)
 
-    def reset(self, tokens: np.ndarray) -> None:
-        self._frames.clear()
-        self.append(tokens)
-
-    def append(self, tokens: np.ndarray) -> None:
+    def _validated_copy(self, tokens: np.ndarray) -> np.ndarray:
         tokens = np.asarray(tokens, dtype=np.float32)
         if tokens.shape != self.token_shape:
             raise ValueError(f"expected tactile tokens {self.token_shape}, got {tokens.shape}")
         if not np.isfinite(tokens).all():
             raise ValueError("tactile encoder produced NaN or Inf")
-        self._frames.append(np.array(tokens, copy=True))
+        return np.array(tokens, copy=True)
+
+    def reset(self, tokens: np.ndarray) -> None:
+        prepared = self._validated_copy(tokens)
+        self._frames = deque((prepared,), maxlen=self._frames.maxlen)
+
+    def append(self, tokens: np.ndarray) -> None:
+        self._frames.append(self._validated_copy(tokens))
 
     def window_tokens(self) -> np.ndarray:
         if not self._frames:
@@ -442,6 +445,19 @@ class FRSSteeringPolicy:
         array.setflags(write=False)
         return array
 
+    def _readonly_action_chunk(self, value: Any, *, name: str) -> np.ndarray:
+        array = self._readonly_array(value)
+        expected = (
+            1,
+            int(self.policy.config.chunk_size),
+            int(self.policy.config.action_dim),
+        )
+        if array.shape != expected:
+            raise ValueError(f"{name} must have shape {expected}, got {array.shape}")
+        if not np.isfinite(array).all():
+            raise ValueError(f"{name} must be finite")
+        return array
+
     def _clear_chunk_state(self) -> None:
         self._active_chunk_id: int | None = None
         self._action_vla_normalized: np.ndarray | None = None
@@ -454,10 +470,18 @@ class FRSSteeringPolicy:
         self.last_frs_normalized = None
 
     def reset_episode(self, initial_observation: Mapping[str, Any]) -> None:
-        baseline = self._readonly_array(self._encode_observation(initial_observation))
-        self._episode_baseline = baseline
-        self.baseline = baseline
-        self.history.reset(baseline)
+        internal_baseline = self._readonly_array(self._encode_observation(initial_observation))
+        prepared_history = TactileHistory(
+            window=self.history.window,
+            stride=self.history.stride,
+            token_shape=self.history.token_shape,
+        )
+        prepared_history.reset(internal_baseline)
+        public_baseline = self._readonly_array(internal_baseline)
+
+        self._episode_baseline = internal_baseline
+        self.baseline = public_baseline
+        self.history = prepared_history
         self._clear_chunk_state()
 
     def reset(self, observation: Mapping[str, Any]) -> None:
@@ -472,15 +496,24 @@ class FRSSteeringPolicy:
             raise RuntimeError(f"FRS active chunk {self._active_chunk_id} must be ended first")
 
     def _activate_chunk(self, chunk_id: int, normalized: Any, x_base: Any) -> None:
-        self._clear_chunk_state()
-        normalized_array = self._readonly_array(normalized)
-        action_array = self._readonly_array(
-            self.policy.preprocessor.unnormalize_actions(normalized_array)
+        normalized_array = self._readonly_action_chunk(
+            normalized,
+            name="normalized VLA actions",
         )
+        x_base_array = self._readonly_action_chunk(
+            x_base,
+            name="reverse-flow base",
+        )
+        action_array = self._readonly_action_chunk(
+            self.policy.preprocessor.unnormalize_actions(normalized_array),
+            name="robot-space VLA actions",
+        )
+
+        self._clear_chunk_state()
         self._active_chunk_id = chunk_id
         self._action_vla_normalized = normalized_array
         self._action_vla = action_array
-        self._x_base = self._readonly_array(x_base)
+        self._x_base = x_base_array
 
     def _make_chunk_ready(self, started: float, finished: float) -> FRSChunkReady:
         assert self._active_chunk_id is not None
@@ -489,9 +522,9 @@ class FRSSteeringPolicy:
         assert self._x_base is not None
         return FRSChunkReady(
             chunk_id=self._active_chunk_id,
-            action_vla_normalized=self._action_vla_normalized,
-            action_vla=self._action_vla,
-            x_base=self._x_base,
+            action_vla_normalized=self._readonly_array(self._action_vla_normalized),
+            action_vla=self._readonly_array(self._action_vla),
+            x_base=self._readonly_array(self._x_base),
             prediction_started_at=started,
             prediction_finished_at=finished,
         )
@@ -565,7 +598,7 @@ class FRSSteeringPolicy:
         if update_history:
             self.history.append(current)
         tactile_seq = self.history.window_tokens()[None, ...]
-        change = tactile_change_from_tokens(current[None, ...], self.baseline[None, ...])
+        change = tactile_change_from_tokens(current[None, ...], self._episode_baseline[None, ...])
         gate = gate_weights_from_change(change, tau=self.config.gate_tau, temperature=self.config.gate_temperature)
         eval_observation = self._eval_observation(policy, observation, task)
         x_base = reverse_integrate_actions(
