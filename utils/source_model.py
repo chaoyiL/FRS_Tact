@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from collections.abc import Sequence
 from typing import Any
 from typing import Literal
@@ -72,13 +73,30 @@ def _jitted_prefix_builder(model: SmolVLAEvalModel):
 
 def build_velocity_context(model: SmolVLAEvalModel, observation: EvalObservation) -> VelocityContext:
     """JIT-compiled prefix encode for the prepare hot path."""
+    return build_velocity_context_from_prepared(
+        model,
+        {
+            "images": observation.images,
+            "image_masks": observation.image_masks,
+            "language_tokens": observation.language_tokens,
+            "language_masks": observation.language_masks,
+            "state": observation.state,
+        },
+    )
+
+
+def build_velocity_context_from_prepared(
+    model: SmolVLAEvalModel,
+    batch: Mapping[str, Any],
+) -> VelocityContext:
+    """JIT-compiled prefix encode from a preprocessor output mapping."""
     return _jitted_prefix_builder(model)(
         model.params,
-        observation.images,
-        observation.image_masks,
-        observation.language_tokens,
-        observation.language_masks,
-        observation.state,
+        batch["images"],
+        batch["image_masks"],
+        batch["language_tokens"],
+        batch["language_masks"],
+        batch["state"],
     )
 
 
@@ -197,13 +215,38 @@ def reverse_integrate_actions(
     solver: ReverseSolver = "slerpflow",
 ) -> jax.Array:
     """Integrate model-space actions from data time t=0 to base noise time t=1."""
+    batch = {
+        "images": observation.images,
+        "image_masks": observation.image_masks,
+        "language_tokens": observation.language_tokens,
+        "language_masks": observation.language_masks,
+        "state": observation.state,
+    }
+    return reverse_integrate_prepared_actions(
+        model,
+        batch,
+        actions,
+        num_steps=num_steps,
+        solver=solver,
+    )
+
+
+def reverse_integrate_prepared_actions(
+    model: SmolVLAEvalModel,
+    batch: Mapping[str, Any],
+    normalized_actions: jax.Array,
+    *,
+    num_steps: int,
+    solver: ReverseSolver = "slerpflow",
+) -> jax.Array:
+    """Reverse normalized actions using an already prepared observation batch."""
     if solver not in ("euler", "fireflow", "slerpflow"):
         raise ValueError(
             f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
         )
-    context = build_velocity_context(model, observation)
+    context = build_velocity_context_from_prepared(model, batch)
     return _jitted_reverse_from_context(model, num_steps=num_steps, solver=solver)(
-        model.params, context, jnp.asarray(actions, dtype=jnp.float32)
+        model.params, context, jnp.asarray(normalized_actions, dtype=jnp.float32)
     )
 
 

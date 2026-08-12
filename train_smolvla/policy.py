@@ -6,6 +6,7 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
+from utils.source_model import ReverseSolver, reverse_integrate_prepared_actions
 
 from .checkpoint import load_config, load_params, resolve_checkpoint
 from .modeling import JaxSmolVLA
@@ -169,6 +170,33 @@ class JaxSmolVLAPolicy:
         if self.config.adapt_to_pi_aloha:
             actions = aloha_encode_actions(actions)
         return actions if normalized else self.preprocessor.unnormalize_actions(actions)
+
+    def reverse_action_chunk(
+        self,
+        observation: Mapping[str, Any],
+        task: str,
+        normalized_actions: jax.Array,
+        *,
+        num_steps: int,
+        solver: ReverseSolver,
+    ) -> jax.Array:
+        actions = jnp.asarray(normalized_actions, dtype=jnp.float32)
+        expected = (1, self.config.chunk_size, self.config.action_dim)
+        if actions.shape != expected:
+            raise ValueError(f"normalized_actions must have shape {expected}, got {actions.shape}")
+        if not bool(jnp.isfinite(actions).all()):
+            raise ValueError("normalized_actions must be finite")
+        batch = self.preprocessor.prepare(observation, task)
+        result = reverse_integrate_prepared_actions(
+            self,
+            batch,
+            actions,
+            num_steps=num_steps,
+            solver=solver,
+        )
+        if result.shape != expected or not bool(jnp.isfinite(result).all()):
+            raise RuntimeError("reverse integration returned an invalid normalized chunk")
+        return result
 
     def select_action(
         self,
