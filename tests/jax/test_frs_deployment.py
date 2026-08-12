@@ -477,12 +477,24 @@ class PerActionSource:
     def __init__(self) -> None:
         self.config = SimpleNamespace(chunk_size=4, action_dim=2)
         self.unnormalize_inputs: list[np.ndarray] = []
+        self.predicted_normalized = jnp.arange(8, dtype=jnp.float32).reshape(1, 4, 2) / 20.0
+        self.reverse_result = self.predicted_normalized + 77.0
+        self.reverse_inputs: list[np.ndarray] = []
         self.preprocessor = SimpleNamespace(unnormalize_actions=self._unnormalize)
 
     def _unnormalize(self, actions):
         array = np.asarray(actions, dtype=np.float32)
         self.unnormalize_inputs.append(array.copy())
         return array * 10.0
+
+    def predict_action_chunk(self, observation, task, **kwargs):
+        del observation, task, kwargs
+        return self.predicted_normalized
+
+    def reverse_action_chunk(self, observation, task, normalized_actions, **kwargs):
+        del observation, task, kwargs
+        self.reverse_inputs.append(np.asarray(normalized_actions).copy())
+        return self.reverse_result
 
 
 @pytest.fixture
@@ -508,6 +520,7 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
     runtime.decode_calls = 0
     runtime.decode_input_shapes = []
     runtime.decode_x_bases = []
+    runtime.decode_tactiles = []
     runtime.decode_result = np.arange(8, dtype=np.float32).reshape(1, 4, 2) / 10.0
 
     def encode_observation(observation):
@@ -522,6 +535,7 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
         runtime.decode_calls += 1
         runtime.decode_input_shapes.append(tuple(tactile.shape))
         runtime.decode_x_bases.append(np.asarray(x_base).copy())
+        runtime.decode_tactiles.append(np.asarray(tactile).copy())
         return jnp.asarray(runtime.decode_result)
 
     runtime._encode_observation = encode_observation
@@ -600,6 +614,48 @@ def test_steer_action_result_has_the_exact_frozen_contract(per_action_runtime) -
         result.request_id = 11
 
 
+def test_steer_result_arrays_cannot_be_mutated_or_corrupt_cached_replay(
+    per_action_runtime,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+    observation = tactile_observation(1.0)
+    result = per_action_runtime.steer_action(4, 10, observation, 1)
+    public_arrays = (
+        result.action_vla_normalized,
+        result.x_base,
+        result.decoded_normalized,
+        result.selected_normalized,
+        result.selected_action,
+    )
+    expected = tuple(array.copy() for array in public_arrays)
+    internal_arrays = (
+        per_action_runtime._action_vla_normalized,
+        per_action_runtime._x_base,
+        *per_action_runtime._tactile_sequence,
+    )
+
+    for public in public_arrays:
+        assert public.flags.writeable is False
+        assert all(not np.shares_memory(public, internal) for internal in internal_arrays)
+        with pytest.raises(ValueError):
+            public.setflags(write=True)
+        with pytest.raises(ValueError):
+            public.flat[0] = -999.0
+
+    replay = per_action_runtime.steer_action(4, 10, observation, 1)
+    assert replay is result
+    for actual, original in zip(public_arrays, expected, strict=True):
+        np.testing.assert_array_equal(actual, original)
+    np.testing.assert_array_equal(
+        per_action_runtime._action_vla_normalized,
+        np.arange(8, dtype=np.float32).reshape(1, 4, 2) / 20.0,
+    )
+    np.testing.assert_array_equal(
+        per_action_runtime._x_base,
+        np.arange(8, dtype=np.float32).reshape(1, 4, 2) / 20.0 + 100.0,
+    )
+
+
 def test_unique_steer_requests_grow_true_unpadded_sequence_one_at_a_time(
     per_action_runtime,
 ) -> None:
@@ -611,6 +667,25 @@ def test_unique_steer_requests_grow_true_unpadded_sequence_one_at_a_time(
     assert first.tactile_sequence_length == 1
     assert second.tactile_sequence_length == 2
     assert per_action_runtime.decode_input_shapes == [(1, 1, 2, 3), (1, 2, 2, 3)]
+
+
+def test_online_tactile_sequence_content_and_order_is_exact_for_every_length(
+    per_action_runtime,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+
+    for index, value in enumerate((1.0, 2.0, 3.0, 4.0)):
+        result = per_action_runtime.steer_action(
+            4,
+            10 + index,
+            tactile_observation(value),
+            index,
+        )
+        expected = np.stack(
+            [np.full((2, 3), prior, dtype=np.float32) for prior in range(1, index + 2)]
+        )[None, ...]
+        assert result.tactile_sequence_length == index + 1
+        np.testing.assert_array_equal(per_action_runtime.decode_tactiles[index], expected)
 
 
 def test_duplicate_identical_request_is_cached_without_side_effects(per_action_runtime) -> None:
@@ -724,6 +799,49 @@ def test_steer_action_uses_fixed_base_and_unnormalizes_only_selected_row(
     np.testing.assert_array_equal(second.selected_action, second.selected_normalized * 10.0)
 
 
+def test_begin_chunk_reverse_receives_normalized_source_and_decoder_reuses_exact_base(
+    per_action_runtime,
+) -> None:
+    per_action_runtime.config.reverse_steps = 5
+    per_action_runtime.config.reverse_solver = "slerpflow"
+
+    ready = per_action_runtime.begin_chunk(
+        4,
+        tactile_observation(0.0),
+        "pick the tube",
+        seed=3,
+        jit=True,
+        num_steps=7,
+    )
+    per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+
+    np.testing.assert_array_equal(
+        per_action_runtime.policy.reverse_inputs[0],
+        per_action_runtime.policy.predicted_normalized,
+    )
+    np.testing.assert_array_equal(ready.x_base, per_action_runtime.policy.reverse_result)
+    np.testing.assert_array_equal(
+        per_action_runtime.decode_x_bases[0],
+        per_action_runtime.policy.reverse_result,
+    )
+
+
+def test_full_chunk_rms_rejects_safe_selected_row_when_another_row_is_unsafe(
+    per_action_runtime,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+    decoded = per_action_runtime._action_vla_normalized.copy()
+    decoded[0, 1:, :] = 7.0
+    per_action_runtime.decode_result = decoded
+
+    with pytest.raises(ValueError, match="delta safety limit"):
+        per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+
+    assert np.max(np.abs(decoded[0, 0])) < per_action_runtime.config.max_normalized_action_abs
+    assert per_action_runtime.policy.unnormalize_inputs == []
+    assert per_action_runtime._tactile_sequence == []
+
+
 @pytest.mark.parametrize(
     ("decoded", "match"),
     [
@@ -786,21 +904,177 @@ def test_chunk_boundary_clears_sequence_cache_and_index_state(per_action_runtime
     assert per_action_runtime.decode_input_shapes[-1] == (1, 1, 2, 3)
 
 
-def test_gate_uses_protected_episode_baseline(per_action_runtime, monkeypatch) -> None:
+def test_gate_uses_newest_current_token_and_protected_episode_baseline(
+    per_action_runtime,
+    monkeypatch,
+) -> None:
     start_per_action_chunk(per_action_runtime)
     per_action_runtime.baseline.setflags(write=True)
     per_action_runtime.baseline[...] = -999.0
     captured = []
 
     def capture(current, baseline):
-        del current
-        captured.append(np.asarray(baseline).copy())
+        captured.append((np.asarray(current).copy(), np.asarray(baseline).copy()))
         return jnp.asarray([0.0], dtype=jnp.float32)
 
     monkeypatch.setattr(frs_runtime_module, "tactile_change_from_tokens", capture)
     per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
 
-    np.testing.assert_array_equal(captured[0], np.zeros((1, 2, 3), dtype=np.float32))
+    np.testing.assert_array_equal(captured[0][0], np.ones((1, 2, 3), dtype=np.float32))
+    np.testing.assert_array_equal(captured[0][1], np.zeros((1, 2, 3), dtype=np.float32))
+
+
+def _array_state(array: np.ndarray | None) -> tuple[object, ...] | None:
+    if array is None:
+        return None
+    return (
+        id(array),
+        array.dtype.str,
+        array.shape,
+        array.flags.writeable,
+        array.tobytes(order="C"),
+    )
+
+
+def _result_state(result) -> tuple[object, ...]:
+    return (
+        id(result),
+        result.chunk_id,
+        result.request_id,
+        result.action_index,
+        _array_state(result.action_vla_normalized),
+        _array_state(result.x_base),
+        _array_state(result.decoded_normalized),
+        _array_state(result.selected_normalized),
+        _array_state(result.selected_action),
+        result.tactile_sequence_length,
+        result.diagnostics,
+        result.encode_started_at,
+        result.encode_finished_at,
+        result.decode_started_at,
+        result.decode_finished_at,
+    )
+
+
+def _deep_live_state(runtime: FRSRuntime) -> tuple[object, ...]:
+    requests = tuple(
+        (
+            request_id,
+            chunk_id,
+            action_index,
+            tactile_hash,
+            _result_state(result),
+        )
+        for request_id, (chunk_id, action_index, tactile_hash, result) in sorted(
+            runtime._request_results.items()
+        )
+    )
+    return (
+        _array_state(runtime._episode_baseline),
+        _array_state(runtime.baseline),
+        id(runtime.history),
+        id(runtime.history._frames),
+        runtime.history._frames.maxlen,
+        tuple(_array_state(frame) for frame in runtime.history._frames),
+        runtime._active_chunk_id,
+        _array_state(runtime._action_vla_normalized),
+        _array_state(runtime._action_vla),
+        _array_state(runtime._x_base),
+        id(runtime._tactile_sequence),
+        tuple(_array_state(token) for token in runtime._tactile_sequence),
+        id(runtime._request_results),
+        requests,
+        runtime._last_action_index,
+        runtime.last_diagnostics,
+        _array_state(runtime.last_vla_normalized),
+        _array_state(runtime.last_frs_normalized),
+    )
+
+
+@pytest.mark.parametrize("failure", [False, True], ids=("success", "decode-exception"))
+def test_warmup_preserves_deep_active_state_content_and_identity(
+    per_action_runtime,
+    monkeypatch,
+    failure: bool,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+    per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 1)
+    before = _deep_live_state(per_action_runtime)
+    calls = 0
+
+    def warmup_decode(*args, **kwargs):
+        nonlocal calls
+        del args, kwargs
+        calls += 1
+        if failure and calls == 2:
+            raise RuntimeError("warmup decode failed")
+        return jnp.zeros((1, 4, 2), dtype=jnp.float32)
+
+    monkeypatch.setattr(frs_runtime_module, "decode_actions", warmup_decode)
+
+    if failure:
+        with pytest.raises(RuntimeError, match="warmup decode failed"):
+            per_action_runtime.warmup_all_tactile_lengths()
+    else:
+        per_action_runtime.warmup_all_tactile_lengths()
+
+    assert _deep_live_state(per_action_runtime) == before
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    ("gate", "decoder", "unnormalize-exception", "unnormalize-shape", "unnormalize-nonfinite"),
+)
+def test_unique_steer_late_failures_leave_all_live_state_unchanged(
+    per_action_runtime,
+    monkeypatch,
+    failure_kind: str,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+    sentinel_diagnostics = frs_runtime_module.FRSDiagnostics(0.1, 0.2, 0.3, 0.4)
+    per_action_runtime.last_diagnostics = sentinel_diagnostics
+    per_action_runtime.last_vla_normalized = per_action_runtime._readonly_array(
+        np.full((1, 4, 2), 11.0, dtype=np.float32)
+    )
+    per_action_runtime.last_frs_normalized = per_action_runtime._readonly_array(
+        np.full((1, 4, 2), 12.0, dtype=np.float32)
+    )
+
+    if failure_kind == "gate":
+        monkeypatch.setattr(
+            frs_runtime_module,
+            "gate_weights_from_change",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("gate failed")),
+        )
+        match = "gate failed"
+    elif failure_kind == "decoder":
+        monkeypatch.setattr(
+            frs_runtime_module,
+            "decode_actions",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("decode failed")),
+        )
+        match = "decode failed"
+    elif failure_kind == "unnormalize-exception":
+        per_action_runtime.policy.preprocessor.unnormalize_actions = (
+            lambda actions: (_ for _ in ()).throw(RuntimeError("unnormalize failed"))
+        )
+        match = "unnormalize failed"
+    elif failure_kind == "unnormalize-shape":
+        per_action_runtime.policy.preprocessor.unnormalize_actions = lambda actions: np.zeros(
+            (1, 2), dtype=np.float32
+        )
+        match = "selected action must have shape"
+    else:
+        per_action_runtime.policy.preprocessor.unnormalize_actions = lambda actions: np.asarray(
+            [np.nan, 0.0], dtype=np.float32
+        )
+        match = "selected action must be finite"
+    before = _deep_live_state(per_action_runtime)
+
+    with pytest.raises((RuntimeError, ValueError), match=match):
+        per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+
+    assert _deep_live_state(per_action_runtime) == before
 
 
 def _live_state_identities(runtime: FRSRuntime) -> tuple[object, ...]:

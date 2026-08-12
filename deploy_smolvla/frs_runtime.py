@@ -464,6 +464,11 @@ class FRSSteeringPolicy:
         array.setflags(write=False)
         return array
 
+    @staticmethod
+    def _immutable_public_array(value: Any) -> np.ndarray:
+        array = np.asarray(jax.device_get(value), dtype=np.float32)
+        return np.frombuffer(array.tobytes(order="C"), dtype=np.float32).reshape(array.shape)
+
     def _readonly_action_chunk(self, value: Any, *, name: str) -> np.ndarray:
         array = self._readonly_array(value)
         expected = (
@@ -714,8 +719,8 @@ class FRSSteeringPolicy:
             delta_rms=delta_rms,
             max_normalized_action_abs=max_abs,
         )
-        selected_normalized = self._readonly_array(decoded_array[0, action_index])
-        selected_action = self._readonly_array(
+        selected_normalized = self._immutable_public_array(decoded_array[0, action_index])
+        selected_action = self._immutable_public_array(
             self.policy.preprocessor.unnormalize_actions(selected_normalized)
         )
         expected_selected_shape = (int(self.policy.config.action_dim),)
@@ -731,9 +736,9 @@ class FRSSteeringPolicy:
             chunk_id=chunk_id,
             request_id=request_id,
             action_index=action_index,
-            action_vla_normalized=self._readonly_array(self._action_vla_normalized),
-            x_base=self._readonly_array(self._x_base),
-            decoded_normalized=self._readonly_array(decoded_array),
+            action_vla_normalized=self._immutable_public_array(self._action_vla_normalized),
+            x_base=self._immutable_public_array(self._x_base),
+            decoded_normalized=self._immutable_public_array(decoded_array),
             selected_normalized=selected_normalized,
             selected_action=selected_action,
             tactile_sequence_length=len(tactile_sequence),
