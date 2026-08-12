@@ -56,12 +56,69 @@ class FRSChunkEnd:
 
 FRSServerMessage: TypeAlias = FRSChunkStart | FRSSteerRequest | FRSSteerAck | FRSChunkEnd
 
+_CHUNK_START_KEYS = frozenset(
+    {
+        "type",
+        "obs_seq",
+        "chunk_id",
+        "observation",
+        "observation_timestamp",
+        "control_dt",
+        "action_horizon",
+        "execution_mode",
+        "action_timestamps",
+        "nominal_chunk_end",
+    }
+)
+_STEER_REQUEST_KEYS = frozenset(
+    {
+        "type",
+        "chunk_id",
+        "request_id",
+        "action_index",
+        "target_timestamp",
+        "protection_applied",
+        "observation",
+    }
+)
+_STEER_ACK_KEYS = frozenset(
+    {
+        "type",
+        "chunk_id",
+        "request_id",
+        "action_index",
+        "status",
+        "scheduled_timestamp",
+    }
+)
+_CHUNK_END_KEYS = frozenset(
+    {
+        "type",
+        "chunk_id",
+        "reason",
+        "scheduled_count",
+        "stale_count",
+    }
+)
+
 
 def _field(message: Mapping[str, Any], name: str) -> Any:
     try:
         return message[name]
     except KeyError as error:
         raise FRSProtocolError(f"missing FRS message field: {name}") from error
+
+
+def _exact_keys(message: Mapping[str, Any], expected: frozenset[str]) -> None:
+    actual = set(message)
+    missing = expected - actual
+    if missing:
+        raise FRSProtocolError(f"missing FRS message fields: {sorted(missing)}")
+    extras = actual - expected
+    if extras:
+        raise FRSProtocolError(
+            f"unexpected FRS message fields: {sorted(map(repr, extras))}"
+        )
 
 
 def _nonnegative_id(message: Mapping[str, Any], name: str) -> int:
@@ -104,7 +161,7 @@ def _observation(message: Mapping[str, Any]) -> Mapping[str, Any]:
 def _parse_chunk_start(message: Mapping[str, Any]) -> FRSChunkStart:
     action_horizon = _positive_integer(message, "action_horizon")
     execution_mode = _field(message, "execution_mode")
-    if execution_mode not in ("rtc", "block"):
+    if type(execution_mode) is not str or execution_mode not in ("rtc", "block"):
         raise FRSProtocolError("execution_mode must be 'rtc' or 'block'")
 
     action_timestamps = _field(message, "action_timestamps")
@@ -164,7 +221,7 @@ def _parse_steer_request(message: Mapping[str, Any]) -> FRSSteerRequest:
 
 def _parse_steer_ack(message: Mapping[str, Any]) -> FRSSteerAck:
     status = _field(message, "status")
-    if status not in ("scheduled", "stale", "rejected"):
+    if type(status) is not str or status not in ("scheduled", "stale", "rejected"):
         raise FRSProtocolError("invalid FRS steer acknowledgement status")
     scheduled_timestamp = _nullable_finite_float(message, "scheduled_timestamp")
     if (status == "scheduled") != (scheduled_timestamp is not None):
@@ -182,7 +239,12 @@ def _parse_steer_ack(message: Mapping[str, Any]) -> FRSSteerAck:
 
 def _parse_chunk_end(message: Mapping[str, Any]) -> FRSChunkEnd:
     reason = _field(message, "reason")
-    if reason not in ("exhausted", "deadline", "no_future_action", "stopped"):
+    if type(reason) is not str or reason not in (
+        "exhausted",
+        "deadline",
+        "no_future_action",
+        "stopped",
+    ):
         raise FRSProtocolError("invalid FRS chunk end reason")
     return FRSChunkEnd(
         chunk_id=_nonnegative_id(message, "chunk_id"),
@@ -198,12 +260,18 @@ def parse_frs_server_message(message: Mapping[str, Any]) -> FRSServerMessage:
     if not isinstance(message, Mapping):
         raise FRSProtocolError(f"FRS message must be a mapping, got {type(message)}")
     message_type = message.get("type")
+    if type(message_type) is not str:
+        raise FRSProtocolError("FRS message type must be a built-in str")
     if message_type == "frs_chunk_start":
+        _exact_keys(message, _CHUNK_START_KEYS)
         return _parse_chunk_start(message)
     if message_type == "frs_steer_request":
+        _exact_keys(message, _STEER_REQUEST_KEYS)
         return _parse_steer_request(message)
     if message_type == "frs_steer_ack":
+        _exact_keys(message, _STEER_ACK_KEYS)
         return _parse_steer_ack(message)
     if message_type == "frs_chunk_end":
+        _exact_keys(message, _CHUNK_END_KEYS)
         return _parse_chunk_end(message)
     raise FRSProtocolError(f"unsupported FRS server message type: {message_type!r}")

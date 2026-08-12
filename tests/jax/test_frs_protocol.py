@@ -147,6 +147,73 @@ def test_protocol_parses_ack_and_end_enums(
 @pytest.mark.parametrize(
     "message",
     [
+        {**_rtc_start(), "type": np.asarray(["frs_chunk_start"])},
+        {**_rtc_start(), "execution_mode": np.asarray(["rtc"])},
+        {
+            "type": "frs_steer_ack",
+            "chunk_id": 3,
+            "request_id": 8,
+            "action_index": 1,
+            "status": np.asarray(["scheduled", "stale"]),
+            "scheduled_timestamp": None,
+        },
+        {
+            "type": "frs_chunk_end",
+            "chunk_id": 3,
+            "reason": np.asarray(["deadline", "stopped"]),
+            "scheduled_count": 1,
+            "stale_count": 2,
+        },
+    ],
+)
+def test_protocol_rejects_non_string_discriminator_and_enum_values(
+    message: dict[str, Any]
+) -> None:
+    with pytest.raises(FRSProtocolError):
+        parse_frs_server_message(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {**_rtc_start(), "unexpected": True},
+        {
+            "type": "frs_steer_request",
+            "chunk_id": 3,
+            "request_id": 8,
+            "action_index": 1,
+            "target_timestamp": None,
+            "protection_applied": False,
+            "observation": {},
+            "unexpected": True,
+        },
+        {
+            "type": "frs_steer_ack",
+            "chunk_id": 3,
+            "request_id": 8,
+            "action_index": 1,
+            "status": "stale",
+            "scheduled_timestamp": None,
+            "unexpected": True,
+        },
+        {
+            "type": "frs_chunk_end",
+            "chunk_id": 3,
+            "reason": "deadline",
+            "scheduled_count": 1,
+            "stale_count": 2,
+            "unexpected": True,
+        },
+    ],
+)
+def test_protocol_rejects_extra_top_level_fields(message: dict[str, Any]) -> None:
+    with pytest.raises(FRSProtocolError, match="unexpected FRS message fields"):
+        parse_frs_server_message(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
         {**_rtc_start(), "chunk_id": True},
         {**_rtc_start(), "obs_seq": True},
         {
@@ -213,6 +280,24 @@ def test_bridge_sends_chunk_ready_with_the_optional_trace(
         "chunk_id": 3,
         "prediction_trace": trace,
     }
+
+
+@pytest.mark.parametrize("trace", [[], "not-a-diagnostic"])
+def test_bridge_rejects_non_mapping_diagnostic_traces(
+    bridge: RobotBridgeClient, trace: object
+) -> None:
+    with pytest.raises(ValueError, match="trace must be a dictionary or null"):
+        bridge.send_frs_chunk_ready(2, 3, trace)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="trace must be a dictionary or null"):
+        bridge.send_frs_steer_action(3, 8, 4, np.zeros((2,), dtype=np.float32), trace=trace)  # type: ignore[arg-type]
+
+
+def test_bridge_sends_explicit_none_diagnostics(bridge: RobotBridgeClient, socket: RecordingSocket) -> None:
+    bridge.send_frs_chunk_ready(2, 3)
+    bridge.send_frs_steer_action(3, 8, 4, np.zeros((2,), dtype=np.float32))
+
+    assert unpack(socket.sent[0])["prediction_trace"] is None
+    assert unpack(socket.sent[1])["trace"] is None
 
 
 def test_bridge_receives_a_typed_frs_message(bridge: RobotBridgeClient) -> None:

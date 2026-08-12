@@ -208,12 +208,13 @@ class RobotBridgeClient:
         chunk_id: int,
         prediction_trace: dict[str, Any] | None = None,
     ) -> None:
+        serialized_trace = _diagnostic_trace(prediction_trace, "prediction_trace")
         self._send(
             {
                 "type": "frs_chunk_ready",
                 "obs_seq": _nonnegative_int(obs_seq, "obs_seq"),
                 "chunk_id": _nonnegative_int(chunk_id, "chunk_id"),
-                "prediction_trace": prediction_trace,
+                "prediction_trace": serialized_trace,
             }
         )
 
@@ -227,6 +228,7 @@ class RobotBridgeClient:
         trace: dict[str, Any] | None = None,
     ) -> None:
         selected_action = _selected_frs_action(action)
+        serialized_trace = _diagnostic_trace(trace, "trace")
         self._send(
             {
                 "type": "frs_steer_action",
@@ -234,7 +236,7 @@ class RobotBridgeClient:
                 "request_id": _nonnegative_int(request_id, "request_id"),
                 "action_index": _nonnegative_int(action_index, "action_index"),
                 "action": selected_action,
-                "trace": trace,
+                "trace": serialized_trace,
             }
         )
 
@@ -290,3 +292,11 @@ def _selected_frs_action(action: np.ndarray) -> np.ndarray:
     if not np.isfinite(serialized).all():
         raise ValueError("FRS selected action is not float32-representable")
     return serialized
+
+
+def _diagnostic_trace(trace: dict[str, Any] | None, name: str) -> dict[str, Any] | None:
+    if trace is None:
+        return None
+    if not isinstance(trace, dict):
+        raise ValueError(f"{name} must be a dictionary or null")
+    return dict(trace)
