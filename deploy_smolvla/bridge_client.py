@@ -13,6 +13,8 @@ import numpy as np
 from websockets.exceptions import InvalidStatus
 from websockets.sync.client import ClientConnection, connect
 
+from .frs_protocol import FRSServerMessage, parse_frs_server_message
+
 _TUNNEL_HOST_SUFFIXES = (
     "ngrok-free.dev",
     "ngrok-free.app",
@@ -195,6 +197,47 @@ class RobotBridgeClient:
             raise RuntimeError(f"Observation must be a dictionary, got {type(observation)}")
         return int(message["obs_seq"]), observation
 
+    def receive_frs_message(self, timeout: float | None = None) -> FRSServerMessage:
+        """Receive and strictly parse one FRS server message."""
+
+        return parse_frs_server_message(self._receive(timeout=timeout))
+
+    def send_frs_chunk_ready(
+        self,
+        obs_seq: int,
+        chunk_id: int,
+        prediction_trace: dict[str, Any] | None = None,
+    ) -> None:
+        self._send(
+            {
+                "type": "frs_chunk_ready",
+                "obs_seq": _nonnegative_int(obs_seq, "obs_seq"),
+                "chunk_id": _nonnegative_int(chunk_id, "chunk_id"),
+                "prediction_trace": prediction_trace,
+            }
+        )
+
+    def send_frs_steer_action(
+        self,
+        chunk_id: int,
+        request_id: int,
+        action_index: int,
+        action: np.ndarray,
+        *,
+        trace: dict[str, Any] | None = None,
+    ) -> None:
+        selected_action = _selected_frs_action(action)
+        self._send(
+            {
+                "type": "frs_steer_action",
+                "chunk_id": _nonnegative_int(chunk_id, "chunk_id"),
+                "request_id": _nonnegative_int(request_id, "request_id"),
+                "action_index": _nonnegative_int(action_index, "action_index"),
+                "action": selected_action,
+                "trace": trace,
+            }
+        )
+
     def send_action(
         self,
         action: np.ndarray,
@@ -226,3 +269,24 @@ class RobotBridgeClient:
 
     def close(self) -> None:
         self._websocket.close()
+
+
+def _nonnegative_int(value: int, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"{name} must be a nonnegative integer")
+    return value
+
+
+def _selected_frs_action(action: np.ndarray) -> np.ndarray:
+    selected = np.asarray(action)
+    if selected.ndim != 1 or selected.dtype.kind != "f":
+        raise ValueError("FRS selected action must be a rank-one floating array")
+    if not np.isfinite(selected).all():
+        raise ValueError("FRS selected action must be finite")
+    max_float32 = np.finfo(np.float32).max
+    if np.any(np.abs(selected) > max_float32):
+        raise ValueError("FRS selected action is outside the float32 range")
+    serialized = np.array(selected, dtype=np.float32, copy=True)
+    if not np.isfinite(serialized).all():
+        raise ValueError("FRS selected action is not float32-representable")
+    return serialized
