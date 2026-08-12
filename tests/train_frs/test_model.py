@@ -16,11 +16,11 @@ from train_frs.utils.metrics import (
     gate_binned_decode_metrics,
     gate_stratified_decode_metrics,
 )
+from train_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 from train_frs.utils.model import (
     DecoderConfig,
     TactileConditionedFlowDecoder,
     decode_actions,
-    decode_euler,
     decode_mse_per_sample,
     flow_matching_loss_per_sample,
     gate_preference_ranking_loss_per_sample,
@@ -50,6 +50,55 @@ def decoder() -> TactileConditionedFlowDecoder:
         ),
         rngs=nnx.Rngs(0),
     )
+
+
+@pytest.fixture
+def decode_inputs():
+    batch_size = 2
+    return (
+        jax.random.normal(jax.random.key(100), (batch_size, 6, 3)),
+        jax.random.normal(jax.random.key(101), (batch_size, 3, 2, 8)),
+        jnp.asarray([0.2, 0.8], dtype=jnp.float32),
+    )
+
+
+def integrate_decode_reference(velocity, x_base, *, num_steps: int, solver: str):
+    if solver == "euler":
+        return euler_integrate_velocity(velocity, x_base, num_steps=num_steps)
+    if solver == "fireflow":
+        return fireflow_integrate_velocity(velocity, x_base, num_steps=num_steps)
+    raise AssertionError(f"Unexpected solver: {solver}")
+
+
+@pytest.mark.parametrize("solver", ["euler", "fireflow"])
+def test_cached_condition_decode_matches_recomputed_condition(decoder, decode_inputs, solver):
+    x_base, tactile, gate = decode_inputs
+    expected = integrate_decode_reference(
+        lambda x_t, t: decoder(x_t, t, tactile, gate),
+        x_base,
+        num_steps=4,
+        solver=solver,
+    )
+    actual = decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver=solver)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("solver", ["euler", "fireflow"])
+def test_decode_encodes_tactile_condition_once(decoder, decode_inputs, solver, monkeypatch):
+    x_base, tactile, gate = decode_inputs
+    original_encode = decoder.encode_tactile_condition
+    call_count = 0
+
+    def count_encode(tactile_seq):
+        nonlocal call_count
+        call_count += 1
+        return original_encode(tactile_seq)
+
+    monkeypatch.setattr(decoder, "encode_tactile_condition", count_encode)
+    decoded = decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver=solver)
+
+    assert decoded.shape == x_base.shape
+    assert call_count == 1
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])
@@ -99,7 +148,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         loss = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
         tokens = model.encode_tactile_tokens(tactile)
         self.assertEqual(tokens.shape, (4, 4, 8))
-        decoded = decode_euler(model, x_base, tactile, num_steps=4)
+        decoded = decode_actions(model, x_base, tactile, num_steps=4, solver="euler")
         decoded_fireflow = decode_actions(model, x_base, tactile, num_steps=4, solver="fireflow")
         self.assertEqual(loss.shape, (4,))
         self.assertEqual(decoded.shape, gt.shape)
@@ -328,12 +377,13 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         high = model(x_t, t, tactile, jnp.ones((2,), dtype=jnp.float32))
         self.assertGreater(float(jnp.max(jnp.abs(low - high))), 1e-4)
 
-        decoded = decode_euler(
+        decoded = decode_actions(
             model,
             x_t,
             tactile,
             jnp.asarray([0.2, 0.8], dtype=jnp.float32),
             num_steps=3,
+            solver="euler",
         )
         self.assertEqual(decoded.shape, x_t.shape)
 
@@ -531,8 +581,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertGreater(float(jnp.max(jnp.abs(velocity_a - velocity_b))), 1e-4)
 
         x_base = jax.random.normal(jax.random.key(6), (2, 6, 3))
-        decoded_a = decode_euler(model, x_base, tactile_a, num_steps=3)
-        decoded_b = decode_euler(model, x_base, tactile_b, num_steps=3)
+        decoded_a = decode_actions(model, x_base, tactile_a, num_steps=3, solver="euler")
+        decoded_b = decode_actions(model, x_base, tactile_b, num_steps=3, solver="euler")
         self.assertGreater(float(jnp.max(jnp.abs(decoded_a - decoded_b))), 1e-4)
 
     def test_checkpoint_round_trip(self):
