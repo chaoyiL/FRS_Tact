@@ -602,6 +602,11 @@ class FRSSteeringPolicy:
             if key not in observation:
                 raise ValueError(f"robot observation is missing FRS tactile key: {key}")
             array = np.asarray(observation[key])
+            if array.dtype.hasobject or array.dtype.fields is not None:
+                raise ValueError(
+                    f"FRS tactile key {key!r} must use a numeric non-structured dtype, "
+                    f"got {array.dtype}"
+                )
             contiguous = np.ascontiguousarray(array)
             for value in (key.encode(), contiguous.dtype.str.encode()):
                 digest.update(len(value).to_bytes(8, "big"))

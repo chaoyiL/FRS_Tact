@@ -605,6 +605,16 @@ def test_steer_action_result_has_the_exact_frozen_contract(per_action_runtime) -
     assert result.action_vla_normalized.shape == result.x_base.shape == (1, 4, 2)
     assert result.decoded_normalized.shape == (1, 4, 2)
     assert result.selected_normalized.shape == result.selected_action.shape == (2,)
+    assert all(
+        array.dtype == np.dtype(np.float32)
+        for array in (
+            result.action_vla_normalized,
+            result.x_base,
+            result.decoded_normalized,
+            result.selected_normalized,
+            result.selected_action,
+        )
+    )
     np.testing.assert_array_equal(result.selected_normalized, result.decoded_normalized[0, 2])
     np.testing.assert_array_equal(result.selected_action, result.selected_normalized * 10.0)
     assert result.encode_started_at <= result.encode_finished_at <= result.decode_started_at
@@ -748,6 +758,45 @@ def test_tactile_hash_uses_configured_key_order_not_mapping_order(per_action_run
 
     assert per_action_runtime.steer_action(4, 10, reordered, 1) is first
     assert per_action_runtime.encode_calls == 1
+
+
+def test_noncontiguous_tactile_replay_is_content_equivalent(per_action_runtime) -> None:
+    start_per_action_chunk(per_action_runtime)
+    observation = tactile_observation(1.0)
+    first = per_action_runtime.steer_action(4, 10, observation, 1)
+    replay = {
+        key: np.asfortranarray(value)
+        for key, value in observation.items()
+        if key in ("left", "right")
+    }
+    assert replay["left"].flags.c_contiguous is False
+
+    assert per_action_runtime.steer_action(4, 10, replay, 1) is first
+    assert per_action_runtime.encode_calls == 1
+
+
+@pytest.mark.parametrize(
+    "invalid_dtype",
+    [
+        pytest.param(np.dtype(object), id="object"),
+        pytest.param(np.dtype([("value", np.float32)]), id="structured"),
+    ],
+)
+def test_tactile_hash_rejects_object_and_structured_dtypes_before_encoding(
+    per_action_runtime,
+    invalid_dtype: np.dtype,
+) -> None:
+    start_per_action_chunk(per_action_runtime)
+    observation = tactile_observation(1.0)
+    observation["left"] = np.ones((2, 2, 3), dtype=invalid_dtype)
+
+    with pytest.raises(ValueError, match="numeric non-structured dtype"):
+        per_action_runtime.steer_action(4, 10, observation, 0)
+
+    assert per_action_runtime.encode_calls == 0
+    assert per_action_runtime.decode_calls == 0
+    assert per_action_runtime._tactile_sequence == []
+    assert per_action_runtime._request_results == {}
 
 
 @pytest.mark.parametrize("indices", [(1, 1), (2, 0), (0, 4), (0, -1)])
@@ -919,9 +968,12 @@ def test_gate_uses_newest_current_token_and_protected_episode_baseline(
 
     monkeypatch.setattr(frs_runtime_module, "tactile_change_from_tokens", capture)
     per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+    per_action_runtime.steer_action(4, 11, tactile_observation(2.0), 1)
 
     np.testing.assert_array_equal(captured[0][0], np.ones((1, 2, 3), dtype=np.float32))
     np.testing.assert_array_equal(captured[0][1], np.zeros((1, 2, 3), dtype=np.float32))
+    np.testing.assert_array_equal(captured[1][0], np.full((1, 2, 3), 2.0, dtype=np.float32))
+    np.testing.assert_array_equal(captured[1][1], np.zeros((1, 2, 3), dtype=np.float32))
 
 
 def _array_state(array: np.ndarray | None) -> tuple[object, ...] | None:
