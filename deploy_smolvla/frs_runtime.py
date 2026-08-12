@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import time
 from collections import deque
@@ -43,6 +44,24 @@ class FRSChunkReady:
     x_base: np.ndarray
     prediction_started_at: float
     prediction_finished_at: float
+
+
+@dataclass(frozen=True)
+class FRSSteerResult:
+    chunk_id: int
+    request_id: int
+    action_index: int
+    action_vla_normalized: np.ndarray
+    x_base: np.ndarray
+    decoded_normalized: np.ndarray
+    selected_normalized: np.ndarray
+    selected_action: np.ndarray
+    tactile_sequence_length: int
+    diagnostics: FRSDiagnostics
+    encode_started_at: float
+    encode_finished_at: float
+    decode_started_at: float
+    decode_finished_at: float
 
 
 @dataclass(frozen=True)
@@ -464,7 +483,8 @@ class FRSSteeringPolicy:
         self._action_vla: np.ndarray | None = None
         self._x_base: np.ndarray | None = None
         self._tactile_sequence: list[np.ndarray] = []
-        self._request_results: dict[int, Any] = {}
+        self._request_results: dict[int, tuple[int, int, bytes, FRSSteerResult]] = {}
+        self._last_action_index: int | None = None
         self.last_diagnostics = None
         self.last_vla_normalized = None
         self.last_frs_normalized = None
@@ -570,6 +590,250 @@ class FRSSteeringPolicy:
     def end_chunk(self, chunk_id: int) -> None:
         self._require_active_chunk(chunk_id)
         self._clear_chunk_state()
+
+    def _tactile_payload_hash(self, observation: Mapping[str, Any]) -> bytes:
+        digest = hashlib.sha256()
+        for key in self.config.tactile_keys:
+            if key not in observation:
+                raise ValueError(f"robot observation is missing FRS tactile key: {key}")
+            array = np.asarray(observation[key])
+            contiguous = np.ascontiguousarray(array)
+            for value in (key.encode(), contiguous.dtype.str.encode()):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+            digest.update(len(contiguous.shape).to_bytes(8, "big"))
+            for dimension in contiguous.shape:
+                digest.update(int(dimension).to_bytes(8, "big", signed=True))
+            payload = contiguous.tobytes(order="C")
+            digest.update(len(payload).to_bytes(8, "big"))
+            digest.update(payload)
+        return digest.digest()
+
+    def _validated_decoded_chunk(self, decoded: Any) -> tuple[np.ndarray, float, float]:
+        assert self._action_vla_normalized is not None
+        decoded_array = self._readonly_array(decoded)
+        expected = (
+            1,
+            int(self.policy.config.chunk_size),
+            int(self.policy.config.action_dim),
+        )
+        if decoded_array.shape != expected:
+            raise ValueError(f"FRS output must have shape {expected}, got {decoded_array.shape}")
+        if not np.isfinite(decoded_array).all():
+            raise ValueError("FRS action contains NaN or Inf")
+        delta_rms = float(
+            np.sqrt(np.mean(np.square(decoded_array - self._action_vla_normalized)))
+        )
+        max_abs = float(np.max(np.abs(decoded_array)))
+        if max_abs > self.config.max_normalized_action_abs:
+            raise ValueError(
+                f"FRS normalized action safety limit exceeded: {max_abs:.4f} > "
+                f"{self.config.max_normalized_action_abs:.4f}"
+            )
+        if delta_rms > self.config.max_normalized_delta_rms:
+            raise ValueError(
+                f"FRS normalized delta safety limit exceeded: {delta_rms:.4f} > "
+                f"{self.config.max_normalized_delta_rms:.4f}"
+            )
+        return decoded_array, delta_rms, max_abs
+
+    def steer_action(
+        self,
+        chunk_id: int,
+        request_id: int,
+        observation: Mapping[str, Any],
+        action_index: int,
+    ) -> FRSSteerResult:
+        cached = self._request_results.get(request_id)
+        if cached is not None:
+            tactile_hash = self._tactile_payload_hash(observation)
+            cached_chunk_id, cached_action_index, cached_hash, result = cached
+            if (chunk_id, action_index, tactile_hash) != (
+                cached_chunk_id,
+                cached_action_index,
+                cached_hash,
+            ):
+                raise ValueError(f"conflicting duplicate FRS request id {request_id}")
+            return result
+
+        self._require_active_chunk(chunk_id)
+        horizon = int(self.policy.config.chunk_size)
+        if not isinstance(action_index, int) or isinstance(action_index, bool):
+            raise ValueError("FRS action_index must be an integer")
+        if not 0 <= action_index < horizon:
+            raise ValueError(
+                f"FRS action_index is outside action horizon [0, {horizon}): {action_index}"
+            )
+        if self._last_action_index is not None and action_index <= self._last_action_index:
+            raise ValueError(
+                "FRS action_index must be strictly increasing for unique requests: "
+                f"{action_index} <= {self._last_action_index}"
+            )
+        if len(self._tactile_sequence) >= horizon:
+            raise ValueError(f"FRS tactile sequence exceeds action horizon {horizon}")
+        tactile_hash = self._tactile_payload_hash(observation)
+        assert self._episode_baseline is not None
+        assert self._action_vla_normalized is not None
+        assert self._x_base is not None
+
+        encode_started_at = time.time()
+        current = self._readonly_array(self._encode_observation(observation))
+        encode_finished_at = time.time()
+        if current.shape != self._episode_baseline.shape:
+            raise ValueError(
+                f"expected tactile tokens {self._episode_baseline.shape}, got {current.shape}"
+            )
+        if not np.isfinite(current).all():
+            raise ValueError("tactile encoder produced NaN or Inf")
+        tactile_sequence = (*self._tactile_sequence, current)
+        tactile = jnp.expand_dims(jnp.asarray(np.stack(tactile_sequence)), axis=0)
+        change = tactile_change_from_tokens(
+            current[None, ...],
+            self._episode_baseline[None, ...],
+        )
+        gate = gate_weights_from_change(
+            change,
+            tau=self.config.gate_tau,
+            temperature=self.config.gate_temperature,
+        )
+
+        decode_started_at = time.time()
+        decoded = decode_actions(
+            self.model,
+            self._x_base,
+            tactile,
+            jnp.asarray(gate, dtype=jnp.float32),
+            num_steps=self.config.decode_steps,
+            solver=self.config.decode_solver,
+        )
+        decoded_array, delta_rms, max_abs = self._validated_decoded_chunk(decoded)
+        decode_finished_at = time.time()
+        diagnostics = FRSDiagnostics(
+            tactile_change=float(change[0]),
+            gate_weight=float(gate[0]),
+            delta_rms=delta_rms,
+            max_normalized_action_abs=max_abs,
+        )
+        selected_normalized = self._readonly_array(decoded_array[0, action_index])
+        selected_action = self._readonly_array(
+            self.policy.preprocessor.unnormalize_actions(selected_normalized)
+        )
+        expected_selected_shape = (int(self.policy.config.action_dim),)
+        if selected_action.shape != expected_selected_shape:
+            raise ValueError(
+                f"robot-space selected action must have shape {expected_selected_shape}, "
+                f"got {selected_action.shape}"
+            )
+        if not np.isfinite(selected_action).all():
+            raise ValueError("robot-space selected action must be finite")
+
+        result = FRSSteerResult(
+            chunk_id=chunk_id,
+            request_id=request_id,
+            action_index=action_index,
+            action_vla_normalized=self._readonly_array(self._action_vla_normalized),
+            x_base=self._readonly_array(self._x_base),
+            decoded_normalized=self._readonly_array(decoded_array),
+            selected_normalized=selected_normalized,
+            selected_action=selected_action,
+            tactile_sequence_length=len(tactile_sequence),
+            diagnostics=diagnostics,
+            encode_started_at=encode_started_at,
+            encode_finished_at=encode_finished_at,
+            decode_started_at=decode_started_at,
+            decode_finished_at=decode_finished_at,
+        )
+        self._tactile_sequence.append(current)
+        self._request_results[request_id] = (chunk_id, action_index, tactile_hash, result)
+        self._last_action_index = action_index
+        self.last_diagnostics = diagnostics
+        self.last_vla_normalized = self._readonly_array(self._action_vla_normalized)
+        self.last_frs_normalized = self._readonly_array(decoded_array)
+        return result
+
+    def _snapshot_live_state(self) -> tuple[Any, ...]:
+        return (
+            self._episode_baseline,
+            self.baseline,
+            self.history,
+            self._active_chunk_id,
+            self._action_vla_normalized,
+            self._action_vla,
+            self._x_base,
+            self._tactile_sequence,
+            self._request_results,
+            self._last_action_index,
+            self.last_diagnostics,
+            self.last_vla_normalized,
+            self.last_frs_normalized,
+        )
+
+    def _restore_live_state(self, snapshot: tuple[Any, ...]) -> None:
+        (
+            self._episode_baseline,
+            self.baseline,
+            self.history,
+            self._active_chunk_id,
+            self._action_vla_normalized,
+            self._action_vla,
+            self._x_base,
+            self._tactile_sequence,
+            self._request_results,
+            self._last_action_index,
+            self.last_diagnostics,
+            self.last_vla_normalized,
+            self.last_frs_normalized,
+        ) = snapshot
+
+    def warmup_all_tactile_lengths(self) -> None:
+        if self._episode_baseline is None:
+            raise RuntimeError("FRS reset_episode() must be called before warmup")
+        snapshot = self._snapshot_live_state()
+        try:
+            horizon = int(self.policy.config.chunk_size)
+            tactile_window = int(self.model.config.tactile_window)
+            if horizon > tactile_window:
+                logging.getLogger(__name__).warning(
+                    "FRS action horizon %d exceeds checkpoint tactile window %d; "
+                    "warming all concrete lengths",
+                    horizon,
+                    tactile_window,
+                )
+            baseline = np.asarray(self._episode_baseline, dtype=np.float32)
+            if self._x_base is None:
+                synthetic_x_base = jnp.zeros(
+                    (
+                        1,
+                        horizon,
+                        int(self.policy.config.action_dim),
+                    ),
+                    dtype=jnp.float32,
+                )
+            else:
+                synthetic_x_base = jnp.asarray(self._x_base, dtype=jnp.float32)
+            baseline_batch = baseline[None, ...]
+            change = tactile_change_from_tokens(baseline_batch, baseline_batch)
+            synthetic_gate = gate_weights_from_change(
+                change,
+                tau=self.config.gate_tau,
+                temperature=self.config.gate_temperature,
+            )
+            for length in range(1, horizon + 1):
+                tactile = jnp.expand_dims(
+                    jnp.asarray(np.stack([baseline] * length)),
+                    axis=0,
+                )
+                warmed = decode_actions(
+                    self.model,
+                    synthetic_x_base,
+                    tactile,
+                    jnp.asarray(synthetic_gate, dtype=jnp.float32),
+                    num_steps=self.config.decode_steps,
+                    solver=self.config.decode_solver,
+                )
+                jax.block_until_ready(warmed)
+        finally:
+            self._restore_live_state(snapshot)
 
     @staticmethod
     def _eval_observation(policy: Any, observation: Mapping[str, Any], task: str) -> EvalObservation:
