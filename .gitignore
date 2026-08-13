@@ -31,6 +31,9 @@ venv/
 ENV/
 env/
 .worktrees/
+.superpowers/
+.hf/
+
 
 # Unit test / coverage
 .pytest_cache/

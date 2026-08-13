@@ -359,6 +359,7 @@ class FRSSteeringPolicy:
         if "tactile_resnet" not in self.encoder.params:
             raise KeyError("tactile encoder checkpoint is missing tactile_resnet params")
         self._validate_contract(policy, source_sample_steps=source_sample_steps)
+
         decoder = self.model.config
         self.history = TactileHistory(
             window=int(decoder.tactile_window),
@@ -890,6 +891,7 @@ class FRSSteeringPolicy:
             image_keys=tuple(policy.config.image_keys),
         )
 
+    # steering entrypoint
     def steer(
         self,
         policy: Any,
@@ -904,9 +906,12 @@ class FRSSteeringPolicy:
         current = self._encode_observation(observation)
         if update_history:
             self.history.append(current)
+
         tactile_seq = self.history.window_tokens()[None, ...]
+        # ?
         change = tactile_change_from_tokens(current[None, ...], self._episode_baseline[None, ...])
         gate = gate_weights_from_change(change, tau=self.config.gate_tau, temperature=self.config.gate_temperature)
+
         eval_observation = self._eval_observation(policy, observation, task)
         x_base = reverse_integrate_actions(
             policy,
@@ -915,6 +920,7 @@ class FRSSteeringPolicy:
             num_steps=self.config.reverse_steps,
             solver=self.config.reverse_solver,
         )
+
         refined = decode_actions(
             self.model,
             x_base,
@@ -925,6 +931,7 @@ class FRSSteeringPolicy:
         )
         refined_np = np.asarray(jax.device_get(refined), dtype=np.float32)
         vla_np = np.asarray(jax.device_get(vla_actions), dtype=np.float32)
+
         if refined_np.shape != vla_np.shape:
             raise ValueError(f"FRS output shape {refined_np.shape} != VLA shape {vla_np.shape}")
         if not np.isfinite(refined_np).all():
@@ -941,6 +948,7 @@ class FRSSteeringPolicy:
                 f"FRS normalized delta safety limit exceeded: {delta_rms:.4f} > "
                 f"{self.config.max_normalized_delta_rms:.4f}"
             )
+
         self.last_diagnostics = FRSDiagnostics(
             tactile_change=float(change[0]),
             gate_weight=float(gate[0]),

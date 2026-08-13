@@ -439,6 +439,8 @@ def _prepare_observation(
     prepared["observation.state"] = np.asarray(observation["observation.state"]).copy()
     return prepared
 
+# problem!
+
 def _predict_chunk(
     policy: Policy,
     observation: Mapping[str, Any],
@@ -452,6 +454,7 @@ def _predict_chunk(
     execution_horizon: int | None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(robot_action, model_space_action)`` each shaped ``[horizon, action_dim]``."""
+
     actions_norm = policy.predict_action_chunk(
         observation,
         task,
@@ -463,12 +466,14 @@ def _predict_chunk(
         inference_delay=inference_delay,
         execution_horizon=execution_horizon,
     )
+
     jax.block_until_ready(actions_norm)
 
     actions = policy.preprocessor.unnormalize_actions(actions_norm)
     expected_shape = (1, policy.config.chunk_size, policy.config.action_dim)
     action = np.asarray(actions)
     action_norm = np.asarray(actions_norm)
+
     if action.shape != expected_shape:
         raise ValueError(f"Expected JAX SmolVLA action shaped {expected_shape}, got {action.shape}")
     action = action[0].astype(np.float32, copy=False)
@@ -1009,6 +1014,8 @@ def run(
             )
             inference_started_at = time.time()
             start = time.perf_counter()
+
+            # key entrypoint
             action, action_norm = _predict_chunk(
                 policy,
                 frame,
@@ -1020,6 +1027,7 @@ def run(
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
             )
+
             inference_ms = (time.perf_counter() - start) * 1000.0
             trace = _build_action_trace_or_none(
                 policy,
@@ -1029,6 +1037,7 @@ def run(
             )
             bridge.send_action(action, obs_seq, trace=trace)
             bridge.receive_action_ack(obs_seq, timeout=action_ack_timeout_s)
+
             if rtc_on:
                 previous_chunk = _remaining_action_chunk(action_norm, steps_per_inference)
             iteration += 1
