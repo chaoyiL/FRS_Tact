@@ -375,6 +375,42 @@ def _active_group_normalized_per_sample(penalty: Array, strength: Array) -> tupl
     return strength * penalty * scale, active
 
 
+def _source_group_normalized_per_sample(
+    penalty: Array,
+    strength: Array,
+    source_indices: Array,
+    *,
+    num_sources: int,
+) -> tuple[Array, Array]:
+    """Normalize an active group independently inside every dataset source."""
+
+    source_indices = jnp.asarray(source_indices, dtype=jnp.int32)
+    ones = jnp.ones_like(strength)
+    counts = jnp.zeros((num_sources,), dtype=strength.dtype).at[source_indices].add(ones)
+    totals = jnp.zeros((num_sources,), dtype=strength.dtype).at[source_indices].add(strength)
+    active = totals > 0.0
+    scales = jnp.where(
+        active,
+        counts / jnp.maximum(totals, jnp.finfo(strength.dtype).tiny),
+        0.0,
+    )
+    return strength * penalty * scales[source_indices], active
+
+
+def source_balanced_mean(values: Array, source_indices: Array, *, num_sources: int) -> Array:
+    """Average samples within each present source, then average sources equally."""
+
+    source_indices = jnp.asarray(source_indices, dtype=jnp.int32)
+    values = jnp.asarray(values)
+    totals = jnp.zeros((num_sources,), dtype=values.dtype).at[source_indices].add(values)
+    counts = jnp.zeros((num_sources,), dtype=values.dtype).at[source_indices].add(
+        jnp.ones_like(values)
+    )
+    active = counts > 0.0
+    means = jnp.where(active, totals / jnp.maximum(counts, 1.0), 0.0)
+    return jnp.sum(means) / jnp.maximum(jnp.sum(active.astype(values.dtype)), 1.0)
+
+
 def gate_preference_ranking_loss_per_sample(
     decoded_action: Array,
     gt_action: Array,
@@ -384,6 +420,8 @@ def gate_preference_ranking_loss_per_sample(
     margin: float,
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
+    source_indices: Array | None = None,
+    num_sources: int = 1,
 ) -> Array:
     """Apply endpoint ranking only in confident low/high gate regions.
 
@@ -405,10 +443,34 @@ def gate_preference_ranking_loss_per_sample(
     low_penalty = jax.nn.relu(mse_pred - mse_gt + float(margin))
     high_strength = weights * (weights >= float(high_gate_threshold))
     low_strength = (1.0 - weights) * (weights <= float(low_gate_threshold))
-    high_term, high_active = _active_group_normalized_per_sample(high_penalty, high_strength)
-    low_term, low_active = _active_group_normalized_per_sample(low_penalty, low_strength)
+    if source_indices is None:
+        high_term, high_active = _active_group_normalized_per_sample(high_penalty, high_strength)
+        low_term, low_active = _active_group_normalized_per_sample(low_penalty, low_strength)
+        active_groups = high_active.astype(high_term.dtype) + low_active.astype(low_term.dtype)
+        return (high_term + low_term) / jnp.maximum(active_groups, 1.0)
+    high_term, high_active = _source_group_normalized_per_sample(
+        high_penalty,
+        high_strength,
+        source_indices,
+        num_sources=num_sources,
+    )
+    low_term, low_active = _source_group_normalized_per_sample(
+        low_penalty,
+        low_strength,
+        source_indices,
+        num_sources=num_sources,
+    )
     active_groups = high_active.astype(high_term.dtype) + low_active.astype(low_term.dtype)
-    return (high_term + low_term) / jnp.maximum(active_groups, 1.0)
+    active_sources = active_groups > 0.0
+    active_source_scale = float(num_sources) / jnp.maximum(
+        jnp.sum(active_sources.astype(high_term.dtype)),
+        1.0,
+    )
+    return (
+        (high_term + low_term)
+        / jnp.maximum(active_groups[source_indices], 1.0)
+        * active_source_scale
+    )
 
 
 def high_gate_repair_loss_per_sample(
@@ -419,6 +481,8 @@ def high_gate_repair_loss_per_sample(
     *,
     margin: float,
     high_gate_threshold: float = 0.7,
+    source_indices: Array | None = None,
+    num_sources: int = 1,
 ) -> Array:
     """Require confident high-gate decodes to beat the frozen VLA baseline."""
 
@@ -431,7 +495,19 @@ def high_gate_repair_loss_per_sample(
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     penalty = jax.nn.relu(mse_gt - mse_vla_gt + float(margin))
     high_strength = weights * (weights >= float(high_gate_threshold))
-    normalized, _ = _active_group_normalized_per_sample(penalty, high_strength)
+    if source_indices is None:
+        normalized, _ = _active_group_normalized_per_sample(penalty, high_strength)
+    else:
+        normalized, active_sources = _source_group_normalized_per_sample(
+            penalty,
+            high_strength,
+            source_indices,
+            num_sources=num_sources,
+        )
+        normalized = normalized * (
+            float(num_sources)
+            / jnp.maximum(jnp.sum(active_sources.astype(normalized.dtype)), 1.0)
+        )
     return normalized
 
 
@@ -454,6 +530,8 @@ def gated_loss_components_per_sample(
     repair_margin: float = 0.0,
     rank_low_gate_threshold: float = 0.3,
     rank_high_gate_threshold: float = 0.7,
+    source_indices: Array | None = None,
+    num_sources: int = 1,
 ) -> dict[str, Array]:
     """Return the five weighted terms whose per-sample sum is the gated loss."""
 
@@ -502,6 +580,8 @@ def gated_loss_components_per_sample(
             margin=rank_margin,
             low_gate_threshold=rank_low_gate_threshold,
             high_gate_threshold=rank_high_gate_threshold,
+            source_indices=source_indices,
+            num_sources=num_sources,
         )
     if repair_weight != 0.0:
         assert decoded is not None
@@ -512,6 +592,8 @@ def gated_loss_components_per_sample(
             gate_weights,
             margin=repair_margin,
             high_gate_threshold=rank_high_gate_threshold,
+            source_indices=source_indices,
+            num_sources=num_sources,
         )
 
     return {
@@ -581,6 +663,8 @@ def gated_flow_matching_loss_per_sample(
         "repair_margin",
         "rank_low_gate_threshold",
         "rank_high_gate_threshold",
+        "source_balanced_loss",
+        "num_sources",
     ),
 )
 def train_step(
@@ -592,6 +676,7 @@ def train_step(
     tactile_seq: Array,
     gate_weights: Array,
     key: Array,
+    source_indices: Array | None = None,
     *,
     loss_mode: str = "gt",
     gate_lambda: float = 1.0,
@@ -604,12 +689,23 @@ def train_step(
     repair_margin: float = 0.0,
     rank_low_gate_threshold: float = 0.3,
     rank_high_gate_threshold: float = 0.7,
+    source_balanced_loss: bool = False,
+    num_sources: int = 1,
 ) -> tuple[Array, dict[str, Array]]:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
     def loss_fn(
         candidate: TactileConditionedFlowDecoder,
     ) -> tuple[Array, dict[str, Array]]:
+        if source_balanced_loss and source_indices is None:
+            raise ValueError("source_indices are required for source-balanced loss")
+
+        def reduce_component(values: Array) -> Array:
+            if source_balanced_loss:
+                assert source_indices is not None
+                return source_balanced_mean(values, source_indices, num_sources=num_sources)
+            return jnp.mean(values)
+
         if loss_mode == "gt":
             flow = flow_matching_loss_per_sample(candidate, x_base, gt_action, t, tactile_seq, gate_weights)
             decode = jnp.zeros_like(flow)
@@ -624,9 +720,9 @@ def train_step(
                     solver=aux_decode_solver,
                 )
             components = {
-                "gt_fm": jnp.mean(flow),
+                "gt_fm": reduce_component(flow),
                 "vla_fm": jnp.asarray(0.0, dtype=flow.dtype),
-                "decode": jnp.mean(decode),
+                "decode": reduce_component(decode),
                 "rank": jnp.asarray(0.0, dtype=flow.dtype),
                 "repair": jnp.asarray(0.0, dtype=flow.dtype),
             }
@@ -634,7 +730,7 @@ def train_step(
             flow = flow_matching_loss_per_sample(candidate, x_base, predicted_action, t, tactile_seq, gate_weights)
             components = {
                 "gt_fm": jnp.asarray(0.0, dtype=flow.dtype),
-                "vla_fm": jnp.mean(flow),
+                "vla_fm": reduce_component(flow),
                 "decode": jnp.asarray(0.0, dtype=flow.dtype),
                 "rank": jnp.asarray(0.0, dtype=flow.dtype),
                 "repair": jnp.asarray(0.0, dtype=flow.dtype),
@@ -658,8 +754,12 @@ def train_step(
                 repair_margin=repair_margin,
                 rank_low_gate_threshold=rank_low_gate_threshold,
                 rank_high_gate_threshold=rank_high_gate_threshold,
+                source_indices=source_indices if source_balanced_loss else None,
+                num_sources=num_sources,
             )
-            components = {name: jnp.mean(per_sample[name]) for name in LOSS_COMPONENT_NAMES}
+            components = {
+                name: reduce_component(per_sample[name]) for name in LOSS_COMPONENT_NAMES
+            }
         else:
             raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
         total = sum(components.values())

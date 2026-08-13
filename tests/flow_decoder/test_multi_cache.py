@@ -15,10 +15,12 @@ from utils.cache import (
 )
 
 
-def _write_cache(path: pathlib.Path, *, offset: int) -> None:
+def _write_cache(path: pathlib.Path, *, offset: int, train_count: int = 2) -> None:
     records = [
-        SampleRecord(offset + 10, 0, "train"),
-        SampleRecord(offset + 11, 0, "train"),
+        *[
+            SampleRecord(offset + 10 + index, 0, "train")
+            for index in range(train_count)
+        ],
         SampleRecord(offset + 20, 1, "val"),
     ]
     arrays = create_cache_arrays(path, records, action_horizon=2, action_dim=2)
@@ -34,7 +36,7 @@ def _write_cache(path: pathlib.Path, *, offset: int) -> None:
             "status": "complete",
             "completed_samples": len(records),
             "sample_count": len(records),
-            "train_sample_count": 2,
+            "train_sample_count": train_count,
             "val_sample_count": 1,
             "action_horizon": 2,
             "action_dim": 2,
@@ -63,3 +65,32 @@ def test_multi_cache_preserves_source_local_indices(tmp_path: pathlib.Path) -> N
     np.testing.assert_array_equal(x_base[:, 0, 0], [0, 1, 1000, 1001])
     np.testing.assert_array_equal(predicted[:, 0, 0], [100, 101, 1100, 1101])
     np.testing.assert_array_equal(gt[:, 0, 0], [200, 201, 1200, 1201])
+
+
+def test_multi_cache_source_balanced_batches_oversample_small_sources(
+    tmp_path: pathlib.Path,
+) -> None:
+    large = tmp_path / "large"
+    small = tmp_path / "small"
+    _write_cache(large, offset=0, train_count=4)
+    _write_cache(small, offset=1000, train_count=1)
+    pairs = MultiCachedPairs([large, small], source_names=["large", "small"])
+
+    assert pairs.source_batch_quotas(4).tolist() == [2, 2]
+    assert pairs.batch_count("train", batch_size=4, source_balanced=True) == 2
+    batches = list(
+        pairs.batches(
+            "train",
+            batch_size=4,
+            shuffle=True,
+            seed=7,
+            source_balanced=True,
+        )
+    )
+    assert len(batches) == 2
+    all_sources = []
+    for indices, *_ in batches:
+        sources, _ = pairs.source_and_local_indices(indices)
+        assert np.bincount(sources, minlength=2).tolist() == [2, 2]
+        all_sources.extend(sources.tolist())
+    assert np.bincount(all_sources, minlength=2).tolist() == [4, 4]

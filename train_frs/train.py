@@ -16,6 +16,26 @@ from typing import Any, Literal
 LossMode = Literal["gt", "predicted", "gated"]
 
 
+def update_early_stop_state(
+    *,
+    improved: bool,
+    evaluation_count: int,
+    no_improve_count: int,
+    patience: int,
+    min_evaluations: int,
+) -> tuple[int, int, bool]:
+    """Advance evaluation-based early stopping and return ``(evals, stale, stop)``."""
+
+    evaluation_count += 1
+    no_improve_count = 0 if improved else no_improve_count + 1
+    should_stop = (
+        patience > 0
+        and evaluation_count >= min_evaluations
+        and no_improve_count >= patience
+    )
+    return evaluation_count, no_improve_count, should_stop
+
+
 def high_gate_rank_statistics(
     mse_gt: Any,
     mse_pred: Any,
@@ -312,6 +332,10 @@ def train_decoder(
     best_low_gate_max_mse_pred: float = 0.01,
     best_min_high_gate_gain: float = 0.0,
     best_min_high_gate_rank_satisfied: float = 0.8,
+    dataset_balanced_sampling: bool = False,
+    dataset_balanced_loss: bool = False,
+    early_stop_patience: int = 0,
+    early_stop_min_evals: int = 0,
 ) -> None:
     import csv
     import json
@@ -416,6 +440,7 @@ def train_decoder(
         "val_min_dataset_rank_satisfied_high_frac",
         "checkpoint_selection_key",
         "checkpoint_selection_feasible",
+        "early_stop_no_improve_evals",
     ]
     gate_bin_metric_names = (
         "n",
@@ -428,6 +453,18 @@ def train_decoder(
     )
     for bin_id, _, _ in GATE_BIN_SPECS:
         history_fields.extend(f"val_gate_bin_{bin_id}_{metric_name}" for metric_name in gate_bin_metric_names)
+    source_metric_names = (
+        "mse_pred_low_w",
+        "gt_gain_high_w",
+        "rank_gap_high_w",
+        "rank_hinge_high_w",
+        "rank_satisfied_high_frac",
+    )
+    for source_index in range(len(dataset_sources or ())):
+        history_fields.extend(
+            f"val_source_{source_index}_{metric_name}"
+            for metric_name in source_metric_names
+        )
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
         row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
@@ -466,6 +503,10 @@ def train_decoder(
         raise ValueError("best_low_gate_max_mse_pred must be non-negative.")
     if not 0.0 <= best_min_high_gate_rank_satisfied <= 1.0:
         raise ValueError("best_min_high_gate_rank_satisfied must be in [0, 1].")
+    if early_stop_patience < 0 or early_stop_min_evals < 0:
+        raise ValueError("early-stop patience and minimum evaluations must be non-negative")
+    if dataset_balanced_loss and not dataset_balanced_sampling:
+        raise ValueError("dataset_balanced_loss requires dataset_balanced_sampling")
     if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
         raise ValueError("rank_weight and repair_weight are only supported with loss_mode='gated'.")
     if eval_every <= 0:
@@ -542,6 +583,12 @@ def train_decoder(
         stored_min_rank_satisfied = float(
             resume_extra.get("best_min_high_gate_rank_satisfied", best_min_high_gate_rank_satisfied)
         )
+        stored_balanced_sampling = bool(
+            resume_extra.get("dataset_balanced_sampling", False)
+        )
+        stored_balanced_loss = bool(
+            resume_extra.get("dataset_balanced_loss", False)
+        )
         if (
             stored_weighting_version != 5
             or stored_rank_weight != rank_weight
@@ -553,6 +600,8 @@ def train_decoder(
             or stored_low_gate_limit != best_low_gate_max_mse_pred
             or stored_min_high_gain != best_min_high_gate_gain
             or stored_min_rank_satisfied != best_min_high_gate_rank_satisfied
+            or stored_balanced_sampling != dataset_balanced_sampling
+            or stored_balanced_loss != dataset_balanced_loss
         ):
             raise ValueError(
                 "Resume checkpoint constraint objective differs from this run: "
@@ -563,14 +612,18 @@ def train_decoder(
                 f"rank_gate=[{stored_rank_low_gate_threshold:g},"
                 f"{stored_rank_high_gate_threshold:g}], "
                 f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}, "
-                f"min_rank_satisfied={stored_min_rank_satisfied:g}) "
+                f"min_rank_satisfied={stored_min_rank_satisfied:g}, "
+                f"balanced_sampling={stored_balanced_sampling}, "
+                f"balanced_loss={stored_balanced_loss}) "
                 "requested="
                 f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
                 f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=5, "
                 f"rank_gate=[{rank_low_gate_threshold:g},{rank_high_gate_threshold:g}], "
                 f"low_gate_limit={best_low_gate_max_mse_pred:g}, "
                 f"min_high_gain={best_min_high_gate_gain:g}, "
-                f"min_rank_satisfied={best_min_high_gate_rank_satisfied:g}). "
+                f"min_rank_satisfied={best_min_high_gate_rank_satisfied:g}, "
+                f"balanced_sampling={dataset_balanced_sampling}, "
+                f"balanced_loss={dataset_balanced_loss}). "
                 "Start a fresh run in a new frs_training.output directory."
             )
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -639,8 +692,29 @@ def train_decoder(
                 "This checkpoint predates explicit gate conditioning. Start a fresh run in a "
                 "new frs_training.output directory instead of resuming it."
             )
+    source_count = len(pairs.sources) if isinstance(pairs, MultiCachedPairs) else 1
+    if (dataset_balanced_sampling or dataset_balanced_loss) and not isinstance(
+        pairs, MultiCachedPairs
+    ):
+        raise ValueError("dataset-balanced sampling/loss requires multiple action caches")
     train_samples = len(pairs.indices("train"))
-    steps_per_epoch = max(1, (train_samples + batch_size - 1) // batch_size)
+    if isinstance(pairs, MultiCachedPairs):
+        steps_per_epoch = pairs.batch_count(
+            "train",
+            batch_size=batch_size,
+            source_balanced=dataset_balanced_sampling,
+        )
+        if dataset_balanced_sampling:
+            source_train_counts = [len(source.indices("train")) for source in pairs.sources]
+            source_quotas = pairs.source_batch_quotas(batch_size).tolist()
+            print(
+                f"source_balanced_batches counts={source_train_counts} "
+                f"per_batch={source_quotas} steps_per_epoch={steps_per_epoch} "
+                f"effective_samples={steps_per_epoch * batch_size}",
+                flush=True,
+            )
+    else:
+        steps_per_epoch = max(1, (train_samples + batch_size - 1) // batch_size)
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch
     total_steps = epochs * steps_per_epoch
     peak_learning_rate = resolve_peak_learning_rate(
@@ -682,6 +756,8 @@ def train_decoder(
         print(
             f"dataloader=precomputed_tactile_embeddings sources={len(dataset_sources or ())} "
             f"cache_root={tactile_embedding_cache_root} "
+            f"dataset_balanced_sampling={dataset_balanced_sampling} "
+            f"dataset_balanced_loss={dataset_balanced_loss} "
             f"eval_every={eval_every} start_epoch={start_epoch} epochs={epochs}"
         )
     else:
@@ -735,6 +811,11 @@ def train_decoder(
         name: (float("inf"),) * 6
         for name in ("best_rank", "best_low_preservation", "best_gain")
     }
+    resume_extra_for_early_stop = (resume_metadata or {}).get("extra_metadata") or {}
+    early_stop_eval_count = int(resume_extra_for_early_stop.get("early_stop_eval_count", 0))
+    early_stop_no_improve = int(
+        resume_extra_for_early_stop.get("early_stop_no_improve_evals", 0)
+    )
     if resume_dir is not None:
         for checkpoint_name in ("best", "best_feasible", *specialist_best_keys):
             checkpoint_path = output_dir / checkpoint_name / CHECKPOINT_NAME
@@ -789,13 +870,28 @@ def train_decoder(
                     name: [] for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
                 }
                 weights: list[int] = []
+                if dataset_balanced_sampling:
+                    training_batches = conditioner.batches(
+                        "train",
+                        batch_size=batch_size,
+                        shuffle=True,
+                        seed=seed + epoch,
+                        source_balanced=True,
+                    )
+                else:
+                    training_batches = conditioner.batches(
+                        "train",
+                        batch_size=batch_size,
+                        shuffle=True,
+                        seed=seed + epoch,
+                    )
                 for batch_number, (
                     indices,
                     x_base_np,
                     predicted_np,
                     gt_action_np,
                     tactile_seq,
-                ) in enumerate(conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)):
+                ) in enumerate(training_batches):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
                     batch_n = len(x_base_np)
                     if loss_mode == "gated":
@@ -806,6 +902,10 @@ def train_decoder(
                     else:
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
+                    if isinstance(pairs, MultiCachedPairs):
+                        batch_source_indices, _ = pairs.source_and_local_indices(indices)
+                    else:
+                        batch_source_indices = np.zeros((batch_n,), dtype=np.int32)
                     loss, loss_components = train_step(
                         model,
                         optimizer,
@@ -815,6 +915,7 @@ def train_decoder(
                         tactile_seq,
                         jnp.asarray(gate_w),
                         step_key,
+                        jnp.asarray(batch_source_indices),
                         loss_mode=loss_mode,
                         gate_lambda=gate_lambda,
                         aux_decode_weight=aux_decode_weight,
@@ -825,6 +926,8 @@ def train_decoder(
                         repair_margin=repair_margin,
                         rank_low_gate_threshold=rank_low_gate_threshold,
                         rank_high_gate_threshold=rank_high_gate_threshold,
+                        source_balanced_loss=dataset_balanced_loss,
+                        num_sources=source_count,
                     )
                     losses.append(float(jax.device_get(loss)))
                     for name in component_losses:
@@ -890,6 +993,14 @@ def train_decoder(
                     "best_min_high_gate_gain": best_min_high_gate_gain,
                     "best_min_high_gate_rank_satisfied": best_min_high_gate_rank_satisfied,
                     "checkpoint_selection_version": 2,
+                    "dataset_balanced_sampling": dataset_balanced_sampling,
+                    "dataset_balanced_loss": dataset_balanced_loss,
+                    "source_count": source_count,
+                    "source_names": list(pairs.source_names) if isinstance(pairs, MultiCachedPairs) else [],
+                    "early_stop_patience": early_stop_patience,
+                    "early_stop_min_evals": early_stop_min_evals,
+                    "early_stop_eval_count": early_stop_eval_count,
+                    "early_stop_no_improve_evals": early_stop_no_improve,
                     "eval_every": eval_every,
                 }
                 if run_eval:
@@ -987,11 +1098,14 @@ def train_decoder(
                             source_low = source_gate <= rank_low_gate_threshold
                             source_high = source_gate >= rank_high_gate_threshold
                             if np.any(source_low):
-                                low_preservation.append(
-                                    float(np.mean(validation.sample_mse_pred[source_mask][source_low]))
+                                source_low_mse = float(
+                                    np.mean(validation.sample_mse_pred[source_mask][source_low])
                                 )
+                                low_preservation.append(source_low_mse)
+                                metrics[f"val_source_{source_index}_mse_pred_low_w"] = source_low_mse
                             else:
                                 missing_confident_low = True
+                                metrics[f"val_source_{source_index}_mse_pred_low_w"] = float("nan")
                             if np.any(source_high):
                                 source_gt_gain = validation.sample_gt_gain[source_mask][source_high]
                                 source_mse_gt = validation.sample_mse_gt[source_mask][source_high]
@@ -1005,8 +1119,18 @@ def train_decoder(
                                 high_rank_violations.append(rank_hinge)
                                 high_rank_gaps.append(rank_gap)
                                 high_rank_satisfied.append(rank_satisfied)
+                                metrics[f"val_source_{source_index}_gt_gain_high_w"] = float(
+                                    np.mean(source_gt_gain)
+                                )
+                                metrics[f"val_source_{source_index}_rank_gap_high_w"] = rank_gap
+                                metrics[f"val_source_{source_index}_rank_hinge_high_w"] = rank_hinge
+                                metrics[
+                                    f"val_source_{source_index}_rank_satisfied_high_frac"
+                                ] = rank_satisfied
                             else:
                                 missing_confident_high = True
+                                for metric_name in source_metric_names[1:]:
+                                    metrics[f"val_source_{source_index}_{metric_name}"] = float("nan")
                         if low_preservation and not missing_confident_low:
                             metrics["val_worst_dataset_mse_pred_low_w"] = max(low_preservation)
                         elif missing_confident_low:
@@ -1033,6 +1157,21 @@ def train_decoder(
                     )
                     metrics["checkpoint_selection_key"] = ",".join(f"{value:.12g}" for value in selection_key)
                     metrics["checkpoint_selection_feasible"] = int(selection_key[0] == 0.0)
+                    selection_improved = selection_key < best_key
+                    (
+                        early_stop_eval_count,
+                        early_stop_no_improve,
+                        should_early_stop,
+                    ) = update_early_stop_state(
+                        improved=selection_improved,
+                        evaluation_count=early_stop_eval_count,
+                        no_improve_count=early_stop_no_improve,
+                        patience=early_stop_patience,
+                        min_evaluations=early_stop_min_evals,
+                    )
+                    metrics["early_stop_no_improve_evals"] = early_stop_no_improve
+                    checkpoint_extra["early_stop_eval_count"] = early_stop_eval_count
+                    checkpoint_extra["early_stop_no_improve_evals"] = early_stop_no_improve
                     specialist_keys = checkpoint_specialist_keys(
                         metrics,
                         high_gate_rank_margin=rank_margin,
@@ -1049,7 +1188,7 @@ def train_decoder(
                         optimizer=optimizer,
                     )
                     saved_checkpoints = ["last"]
-                    if selection_key < best_key:
+                    if selection_improved:
                         best_key = selection_key
                         save_checkpoint(
                             output_dir / "best",
@@ -1128,6 +1267,14 @@ def train_decoder(
                         f"{stratified_msg}{selection_msg}",
                         flush=True,
                     )
+                    if should_early_stop:
+                        print(
+                            f"early stopping at epoch={epoch}: no checkpoint-selection "
+                            f"improvement for {early_stop_no_improve} evaluations "
+                            f"(patience={early_stop_patience}, eval_every={eval_every})",
+                            flush=True,
+                        )
+                        break
                 else:
                     metrics = dict(train_metrics)
                     writer.writerow(_blank_history_row(epoch, **metrics))
@@ -1299,6 +1446,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.8,
         help="Minimum per-dataset high-gate fraction satisfying the GT-preference rank margin.",
     )
+    parser.add_argument(
+        "--dataset-balanced-sampling",
+        action="store_true",
+        help="Oversample sources so every multi-dataset training batch has near-equal source counts.",
+    )
+    parser.add_argument(
+        "--dataset-balanced-loss",
+        action="store_true",
+        help="Average each loss inside each source first, then average sources equally.",
+    )
+    parser.add_argument(
+        "--early-stop-patience",
+        type=int,
+        default=0,
+        help="Stop after this many evaluations without checkpoint-selection improvement; 0 disables.",
+    )
+    parser.add_argument(
+        "--early-stop-min-evals",
+        type=int,
+        default=0,
+        help="Minimum number of evaluations before early stopping is allowed.",
+    )
 
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--depth", type=int, default=6)
@@ -1423,6 +1592,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         best_low_gate_max_mse_pred=args.best_low_gate_max_mse_pred,
         best_min_high_gate_gain=args.best_min_high_gate_gain,
         best_min_high_gate_rank_satisfied=args.best_min_high_gate_rank_satisfied,
+        dataset_balanced_sampling=args.dataset_balanced_sampling,
+        dataset_balanced_loss=args.dataset_balanced_loss,
+        early_stop_patience=args.early_stop_patience,
+        early_stop_min_evals=args.early_stop_min_evals,
     )
 
 

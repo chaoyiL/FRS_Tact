@@ -185,6 +185,10 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         best_min_high_gate_rank_satisfied=float(
             training.get("best_min_high_gate_rank_satisfied", 0.8)
         ),
+        dataset_balanced_sampling=bool(training.get("dataset_balanced_sampling", False)),
+        dataset_balanced_loss=bool(training.get("dataset_balanced_loss", False)),
+        early_stop_patience=int(training.get("early_stop_patience", 0)),
+        early_stop_min_evals=int(training.get("early_stop_min_evals", 0)),
     )
 
 

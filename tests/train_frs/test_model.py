@@ -29,6 +29,7 @@ from train_frs.utils.model import (
     gt_supervised_loss_per_sample,
     high_gate_repair_loss_per_sample,
     make_optimizer,
+    source_balanced_mean,
     three_region_effective_gate_weights,
     train_step,
 )
@@ -225,6 +226,12 @@ class ConditionedDecoderModelTest(unittest.TestCase):
 
     def _tactile_seq(self, key, batch: int, window: int = 3):
         return jax.random.normal(key, (batch, window, 4, 4))
+
+    def test_source_balanced_mean_weights_sources_equally(self):
+        values = jnp.asarray([1.0, 3.0, 10.0], dtype=jnp.float32)
+        sources = jnp.asarray([0, 0, 1], dtype=jnp.int32)
+        balanced = source_balanced_mean(values, sources, num_sources=2)
+        self.assertAlmostEqual(float(balanced), 6.0)
 
     def test_shape_finite_gradient_and_decode(self):
         model = self.make_model()

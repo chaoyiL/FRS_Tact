@@ -22,6 +22,7 @@ from train_frs.train import (
     checkpoint_selection_key,
     checkpoint_specialist_keys,
     high_gate_rank_statistics,
+    update_early_stop_state,
 )
 from train_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
@@ -204,6 +205,22 @@ def test_rank_satisfaction_is_a_feasibility_constraint() -> None:
     )
     assert key[0] == 1.0
     assert key[2] == 1.0
+
+
+def test_early_stop_counts_evaluations_and_resets_on_improvement() -> None:
+    evaluations = 0
+    stale = 0
+    for improved in (True, False, False, True, False, False, False):
+        evaluations, stale, stop = update_early_stop_state(
+            improved=improved,
+            evaluation_count=evaluations,
+            no_improve_count=stale,
+            patience=3,
+            min_evaluations=5,
+        )
+    assert evaluations == 7
+    assert stale == 3
+    assert stop
 
 
 class _SpawnFakeDataset:

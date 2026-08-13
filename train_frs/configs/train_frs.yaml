@@ -115,7 +115,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0813/frs_0813_01
+  output: /workspace/frs_pick_tube_0813/frs_0813_04
   # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -126,8 +126,8 @@ frs_training:
   # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
   gate_tau: 0.4
   gate_temperature: 0.1
-  gate_lambda: 1.0
-  aux_decode_weight: 1.0
+  gate_lambda: 1.5
+  aux_decode_weight: 2.0
   aux_decode_steps: 10
   # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
   # decode loss 同时包含 w_eff*MSE(FRS,GT)+(1-w_eff)*MSE(FRS,VLA)。
@@ -137,7 +137,7 @@ frs_training:
   # Rank/Repair 各自在活跃低/高组内归一化，不再被中间区样本数稀释。
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  rank_weight: 3.0
+  rank_weight: 5.0
   rank_margin: 0.01
   # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
   repair_weight: 2.0
@@ -149,11 +149,15 @@ frs_training:
   # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
   best_min_high_gate_rank_satisfied: 0.8
 
+  # 每个 batch 近似等量抽取 01~05；每项损失先在各数据集内求均值，再对数据集等权平均。
+  dataset_balanced_sampling: true
+  dataset_balanced_loss: true
+
   model_dim: 256
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  learning_rate: 3.0e-4
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
   warmup_epochs: 2
@@ -162,11 +166,14 @@ frs_training:
   lr_schedule: cosine
 
   batch_size: 128
-  epochs: 100
+  epochs: 40
   validation_steps: 10
-  eval_every: 5
+  eval_every: 2
+  # 连续 5 次评估综合 checkpoint key 未改善则停止；至少先完成 5 次评估。
+  early_stop_patience: 5
+  early_stop_min_evals: 5
   seed: 42
   write_plots: true
-  # auto：last/ 存在就续训，否则冷启动；适合整条管线安全重跑。
-  resume: auto
+  # 新的均衡训练目标必须冷启动；不要续训旧的非均衡 checkpoint。
+  resume: false
   resume_from: null

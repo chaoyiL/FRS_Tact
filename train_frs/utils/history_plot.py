@@ -91,6 +91,7 @@ HISTORY_FIELDS = (
     "val_min_dataset_rank_satisfied_high_frac",
     "checkpoint_selection_key",
     "checkpoint_selection_feasible",
+    "early_stop_no_improve_evals",
 ) + tuple(
     f"val_gate_bin_{bin_id}_{metric_name}"
     for bin_id, _, _ in GATE_BIN_SPECS
