@@ -852,8 +852,12 @@ def train_step(
     def loss_fn(
         candidate: TactileConditionedFlowDecoder,
     ) -> tuple[Array, dict[str, Array]]:
-        if source_balanced_loss and source_indices is None:
-            raise ValueError("source_indices are required for source-balanced loss")
+        rank_requires_sources = high_gate_rank_aggregation == "worst_source_cvar"
+        if (source_balanced_loss or rank_requires_sources) and source_indices is None:
+            raise ValueError(
+                "source_indices are required for source-balanced loss or "
+                "worst_source_cvar rank aggregation"
+            )
 
         def reduce_component(values: Array) -> Array:
             if source_balanced_loss:
@@ -909,7 +913,11 @@ def train_step(
                 repair_margin=repair_margin,
                 rank_low_gate_threshold=rank_low_gate_threshold,
                 rank_high_gate_threshold=rank_high_gate_threshold,
-                source_indices=source_indices if source_balanced_loss else None,
+                source_indices=(
+                    source_indices
+                    if source_balanced_loss or rank_requires_sources
+                    else None
+                ),
                 num_sources=num_sources,
                 high_gate_rank_aggregation=high_gate_rank_aggregation,
                 high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,

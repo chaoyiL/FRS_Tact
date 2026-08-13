@@ -520,8 +520,6 @@ def train_decoder(
         raise ValueError("high_gate_rank_hard_fraction must be in (0, 1]")
     if high_gate_rank_worst_beta <= 0.0:
         raise ValueError("high_gate_rank_worst_beta must be positive")
-    if high_gate_rank_aggregation == "worst_source_cvar" and not dataset_balanced_loss:
-        raise ValueError("worst_source_cvar requires dataset_balanced_loss")
     if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
         raise ValueError("rank_weight and repair_weight are only supported with loss_mode='gated'.")
     if eval_every <= 0:

@@ -262,6 +262,49 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         balanced = source_balanced_mean(values, sources, num_sources=2)
         self.assertAlmostEqual(float(balanced), 6.0)
 
+    def test_single_source_cvar_does_not_require_balanced_loss(self):
+        model = self.make_model(gate_conditioning=True)
+        batch_size = 10
+        x_base = jax.random.normal(jax.random.key(70), (batch_size, 6, 3))
+        gt = x_base + 1.0
+        predicted = x_base + 0.1
+        tactile = self._tactile_seq(jax.random.key(71), batch_size)
+        gate = jnp.asarray(
+            [0.95, 0.9, 0.85, 0.8, 0.75, 0.2, 0.15, 0.1, 0.5, 0.6],
+            dtype=jnp.float32,
+        )
+        source_indices = jnp.zeros((batch_size,), dtype=jnp.int32)
+        optimizer = make_optimizer(model, learning_rate=2.5e-5, weight_decay=0.0)
+        loss, components = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            gate,
+            jax.random.key(72),
+            source_indices,
+            jnp.ones((1,), dtype=jnp.float32),
+            loss_mode="gated",
+            gate_lambda=1.5,
+            aux_decode_weight=2.0,
+            aux_decode_steps=2,
+            rank_weight=5.0,
+            rank_margin=0.01,
+            repair_weight=2.0,
+            repair_margin=0.01,
+            rank_low_gate_threshold=0.3,
+            rank_high_gate_threshold=0.7,
+            source_balanced_loss=False,
+            num_sources=1,
+            high_gate_rank_aggregation="worst_source_cvar",
+            high_gate_rank_hard_fraction=0.3,
+            high_gate_rank_worst_beta=20.0,
+        )
+        self.assertTrue(bool(jnp.isfinite(loss)))
+        self.assertGreater(float(components["rank"]), 0.0)
+
     def test_shape_finite_gradient_and_decode(self):
         model = self.make_model()
         x_base = jax.random.normal(jax.random.key(1), (4, 6, 3))

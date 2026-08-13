@@ -8,7 +8,7 @@ import yaml
 from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
 
 
-def test_default_frs_config_is_strict_single_dataset_cold_start() -> None:
+def test_default_frs_config_is_single_dataset_hard_rank_stage2() -> None:
     config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in config["datasets"]] == [
@@ -19,9 +19,11 @@ def test_default_frs_config_is_strict_single_dataset_cold_start() -> None:
     assert training["dataset_balanced_loss"] is False
     assert training["early_stop_patience"] == 5
     assert training["early_stop_min_evals"] == 5
-    assert training["output"].endswith("frs_0813_single_01")
-    assert training["init_from"] is None
-    assert training["high_gate_rank_aggregation"] == "balanced_mean"
+    assert training["output"].endswith("frs_0813_single_01_stage2")
+    assert training["init_from"].endswith("frs_0813_single_01/best_rank")
+    assert training["high_gate_rank_aggregation"] == "worst_source_cvar"
+    assert training["high_gate_rank_hard_fraction"] == 0.3
+    assert training["high_gate_rank_worst_beta"] == 20.0
     assert training["high_gate_rank_source_weights"] == {}
     assert training["resume"] is False
 
