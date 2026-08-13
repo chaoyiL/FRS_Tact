@@ -21,6 +21,7 @@ from train_frs.train import (
     _validate_resume_cache,
     checkpoint_selection_key,
     checkpoint_specialist_keys,
+    high_gate_rank_statistics,
 )
 from train_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
@@ -66,6 +67,7 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
             "val_gt_gain_high_w": 0.03,
             "val_mse_gt_high_w": 0.08,
             "val_mse_pred_high_w": 0.12,
+            "val_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -79,6 +81,7 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
             "val_gt_gain_high_w": 0.05,
             "val_mse_gt_high_w": 0.08,
             "val_mse_pred_high_w": 0.12,
+            "val_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -92,6 +95,7 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
             "val_gt_gain_high_w": 0.04,
             "val_mse_gt_high_w": 0.08,
             "val_mse_pred_high_w": 0.12,
+            "val_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -105,6 +109,7 @@ def test_gated_checkpoint_selection_enforces_preservation_then_maximizes_gain() 
             "val_gt_gain_high_w": 0.05,
             "val_mse_gt_high_w": 0.13,
             "val_mse_pred_high_w": 0.12,
+            "val_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -124,6 +129,8 @@ def test_checkpoint_constraints_do_not_cancel_each_other() -> None:
             "val_mse_pred_low_w": 0.02,
             "val_gt_gain_high_w": 0.03,
             "val_worst_dataset_rank_violation_high_w": 0.0,
+            "val_worst_dataset_rank_gap_high_w": -0.02,
+            "val_min_dataset_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -136,6 +143,8 @@ def test_checkpoint_constraints_do_not_cancel_each_other() -> None:
             "val_mse_pred_low_w": 0.0101,
             "val_gt_gain_high_w": 0.03,
             "val_worst_dataset_rank_violation_high_w": 0.0001,
+            "val_worst_dataset_rank_gap_high_w": -0.0099,
+            "val_min_dataset_rank_satisfied_high_frac": 0.9,
         },
         loss_mode="gated",
         low_gate_max_mse_pred=0.01,
@@ -143,8 +152,10 @@ def test_checkpoint_constraints_do_not_cancel_each_other() -> None:
         high_gate_rank_margin=0.01,
     )
     assert one_failed_constraint[0] == 1.0
-    assert two_failed_constraints[0] == 2.0
-    assert one_failed_constraint < two_failed_constraints
+    assert two_failed_constraints[0] == 1.0
+    assert one_failed_constraint[2] == 1.0
+    assert two_failed_constraints[2] == 2.0
+    assert two_failed_constraints < one_failed_constraint
 
 
 def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
@@ -155,12 +166,44 @@ def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
             "val_gt_gain_high_w": 0.03,
             "val_mse_gt_high_w": 0.08,
             "val_mse_pred_high_w": 0.12,
+            "val_rank_satisfied_high_frac": 0.9,
         },
         high_gate_rank_margin=0.01,
     )
-    assert keys["best_rank"][0] == 0.0
+    assert keys["best_rank"][0] == pytest.approx(-0.04)
     assert keys["best_low_preservation"][0] == 0.005
     assert keys["best_gain"][0] == -0.03
+
+
+def test_high_gate_rank_statistics_do_not_cancel_sample_violations() -> None:
+    violation, signed_gap, satisfied = high_gate_rank_statistics(
+        np.asarray([0.15, 0.03]),
+        np.asarray([0.10, 0.10]),
+        margin=0.01,
+    )
+    assert signed_gap == pytest.approx(-0.01)
+    assert violation == pytest.approx(0.03)
+    assert satisfied == pytest.approx(0.5)
+
+
+def test_rank_satisfaction_is_a_feasibility_constraint() -> None:
+    key = checkpoint_selection_key(
+        {
+            "val_mse": 0.2,
+            "val_mse_pred_low_w": 0.005,
+            "val_gt_gain_high_w": 0.03,
+            "val_worst_dataset_rank_violation_high_w": 0.0,
+            "val_worst_dataset_rank_gap_high_w": -0.02,
+            "val_min_dataset_rank_satisfied_high_frac": 0.79,
+        },
+        loss_mode="gated",
+        low_gate_max_mse_pred=0.01,
+        min_high_gate_gain=0.0,
+        min_high_gate_rank_satisfied=0.8,
+        high_gate_rank_margin=0.01,
+    )
+    assert key[0] == 1.0
+    assert key[2] == 1.0
 
 
 class _SpawnFakeDataset:
