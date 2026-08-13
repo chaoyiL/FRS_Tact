@@ -322,6 +322,7 @@ def train_decoder(
     encode_batch_size: int,
     resume: bool = False,
     resume_from: pathlib.Path | None = None,
+    init_from: pathlib.Path | None = None,
     cache_dirs: Sequence[pathlib.Path] | None = None,
     dataset_sources: Sequence[Mapping[str, Any]] | None = None,
     tactile_embedding_cache_root: pathlib.Path | None = None,
@@ -336,6 +337,10 @@ def train_decoder(
     dataset_balanced_loss: bool = False,
     early_stop_patience: int = 0,
     early_stop_min_evals: int = 0,
+    high_gate_rank_aggregation: str = "balanced_mean",
+    high_gate_rank_hard_fraction: float = 0.3,
+    high_gate_rank_worst_beta: float = 20.0,
+    high_gate_rank_source_weights: Mapping[str, float] | None = None,
 ) -> None:
     import csv
     import json
@@ -507,6 +512,16 @@ def train_decoder(
         raise ValueError("early-stop patience and minimum evaluations must be non-negative")
     if dataset_balanced_loss and not dataset_balanced_sampling:
         raise ValueError("dataset_balanced_loss requires dataset_balanced_sampling")
+    if high_gate_rank_aggregation not in ("balanced_mean", "worst_source_cvar"):
+        raise ValueError(
+            "high_gate_rank_aggregation must be 'balanced_mean' or 'worst_source_cvar'"
+        )
+    if not 0.0 < high_gate_rank_hard_fraction <= 1.0:
+        raise ValueError("high_gate_rank_hard_fraction must be in (0, 1]")
+    if high_gate_rank_worst_beta <= 0.0:
+        raise ValueError("high_gate_rank_worst_beta must be positive")
+    if high_gate_rank_aggregation == "worst_source_cvar" and not dataset_balanced_loss:
+        raise ValueError("worst_source_cvar requires dataset_balanced_loss")
     if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
         raise ValueError("rank_weight and repair_weight are only supported with loss_mode='gated'.")
     if eval_every <= 0:
@@ -515,6 +530,8 @@ def train_decoder(
         raise ValueError(f"tactile_num_tokens must be positive, got {tactile_num_tokens}.")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
+    if resume_dir is not None and init_from is not None:
+        raise ValueError("init_from cannot be combined with resume/resume_from")
     if resume_dir is None:
         existing_artifacts = _existing_run_artifacts(output_dir)
         if existing_artifacts:
@@ -524,6 +541,7 @@ def train_decoder(
             )
     start_epoch = 1
     resume_metadata: dict | None = None
+    init_metadata: dict | None = None
     resumed_opt_state = None
     resumed_opt_step: int | None = None
     if resume_dir is not None:
@@ -543,6 +561,16 @@ def train_decoder(
                 flush=True,
             )
             return
+    elif init_from is not None:
+        init_from = pathlib.Path(init_from).expanduser()
+        if not (init_from / CHECKPOINT_NAME).exists():
+            raise FileNotFoundError(f"Initialization checkpoint not found: {init_from}")
+        model, init_metadata = load_checkpoint(init_from)
+        print(
+            f"initializing model parameters from {init_from} "
+            f"source_epoch={init_metadata.get('epoch')} optimizer=fresh epoch=1",
+            flush=True,
+        )
 
     print(f"jax_devices={jax.devices()}", flush=True)
     if not any(d.platform == "gpu" for d in jax.devices()):
@@ -568,6 +596,32 @@ def train_decoder(
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
         pairs = CachedPairs(cache_dir)
+    source_rank_weight_values = np.ones(
+        (len(pairs.sources) if isinstance(pairs, MultiCachedPairs) else 1,),
+        dtype=np.float32,
+    )
+    if high_gate_rank_source_weights:
+        if not isinstance(pairs, MultiCachedPairs):
+            raise ValueError("high_gate_rank_source_weights requires multi-dataset training")
+        unknown_sources = set(high_gate_rank_source_weights) - set(pairs.source_names)
+        if unknown_sources:
+            raise ValueError(
+                f"high_gate_rank_source_weights contains unknown sources: {sorted(unknown_sources)}"
+            )
+        source_rank_weight_values = np.asarray(
+            [float(high_gate_rank_source_weights.get(name, 1.0)) for name in pairs.source_names],
+            dtype=np.float32,
+        )
+    if np.any(source_rank_weight_values < 0.0) or not np.any(source_rank_weight_values > 0.0):
+        raise ValueError("high-gate rank source weights must be non-negative with at least one positive")
+    if high_gate_rank_aggregation == "worst_source_cvar":
+        print(
+            "high_gate_rank="
+            f"{high_gate_rank_aggregation} hard_fraction={high_gate_rank_hard_fraction:g} "
+            f"worst_beta={high_gate_rank_worst_beta:g} "
+            f"source_weights={source_rank_weight_values.tolist()}",
+            flush=True,
+        )
     if resume_metadata is not None:
         _validate_resume_cache(resume_metadata, pairs.manifest)
         resume_extra = resume_metadata.get("extra_metadata") or {}
@@ -589,8 +643,29 @@ def train_decoder(
         stored_balanced_loss = bool(
             resume_extra.get("dataset_balanced_loss", False)
         )
+        stored_rank_aggregation = str(
+            resume_extra.get("high_gate_rank_aggregation", "balanced_mean")
+        )
+        stored_rank_hard_fraction = float(
+            resume_extra.get("high_gate_rank_hard_fraction", 0.3)
+        )
+        stored_rank_worst_beta = float(
+            resume_extra.get("high_gate_rank_worst_beta", 20.0)
+        )
+        stored_source_rank_weights = np.asarray(
+            resume_extra.get(
+                "high_gate_rank_source_weight_values",
+                np.ones_like(source_rank_weight_values).tolist(),
+            ),
+            dtype=np.float32,
+        )
+        compatible_weighting_version = stored_weighting_version == 6 or (
+            stored_weighting_version == 5
+            and high_gate_rank_aggregation == "balanced_mean"
+            and np.array_equal(source_rank_weight_values, np.ones_like(source_rank_weight_values))
+        )
         if (
-            stored_weighting_version != 5
+            not compatible_weighting_version
             or stored_rank_weight != rank_weight
             or stored_rank_margin != rank_margin
             or stored_repair_weight != repair_weight
@@ -602,6 +677,10 @@ def train_decoder(
             or stored_min_rank_satisfied != best_min_high_gate_rank_satisfied
             or stored_balanced_sampling != dataset_balanced_sampling
             or stored_balanced_loss != dataset_balanced_loss
+            or stored_rank_aggregation != high_gate_rank_aggregation
+            or stored_rank_hard_fraction != high_gate_rank_hard_fraction
+            or stored_rank_worst_beta != high_gate_rank_worst_beta
+            or not np.array_equal(stored_source_rank_weights, source_rank_weight_values)
         ):
             raise ValueError(
                 "Resume checkpoint constraint objective differs from this run: "
@@ -614,18 +693,28 @@ def train_decoder(
                 f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}, "
                 f"min_rank_satisfied={stored_min_rank_satisfied:g}, "
                 f"balanced_sampling={stored_balanced_sampling}, "
-                f"balanced_loss={stored_balanced_loss}) "
+                f"balanced_loss={stored_balanced_loss}, "
+                f"rank_aggregation={stored_rank_aggregation}, "
+                f"rank_hard_fraction={stored_rank_hard_fraction:g}, "
+                f"rank_worst_beta={stored_rank_worst_beta:g}, "
+                f"source_rank_weights={stored_source_rank_weights.tolist()}) "
                 "requested="
                 f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
-                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=5, "
+                f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=6, "
                 f"rank_gate=[{rank_low_gate_threshold:g},{rank_high_gate_threshold:g}], "
                 f"low_gate_limit={best_low_gate_max_mse_pred:g}, "
                 f"min_high_gain={best_min_high_gate_gain:g}, "
                 f"min_rank_satisfied={best_min_high_gate_rank_satisfied:g}, "
                 f"balanced_sampling={dataset_balanced_sampling}, "
-                f"balanced_loss={dataset_balanced_loss}). "
+                f"balanced_loss={dataset_balanced_loss}, "
+                f"rank_aggregation={high_gate_rank_aggregation}, "
+                f"rank_hard_fraction={high_gate_rank_hard_fraction:g}, "
+                f"rank_worst_beta={high_gate_rank_worst_beta:g}, "
+                f"source_rank_weights={source_rank_weight_values.tolist()}). "
                 "Start a fresh run in a new frs_training.output directory."
             )
+    if init_metadata is not None:
+        _validate_resume_cache(init_metadata, pairs.manifest)
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -676,11 +765,18 @@ def train_decoder(
         num_tactile_tokens=tactile_num_tokens,
         gate_conditioning=(loss_mode == "gated"),
     )
-    if resume_metadata is None:
+    if resume_metadata is None and init_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
     else:
-        ckpt_config = DecoderConfig(**resume_metadata["decoder_config"])
+        source_metadata = resume_metadata if resume_metadata is not None else init_metadata
+        assert source_metadata is not None
+        ckpt_config = DecoderConfig(**source_metadata["decoder_config"])
         if dataclasses_asdict_mismatch := _config_diff(ckpt_config, decoder_config):
+            if init_metadata is not None:
+                raise ValueError(
+                    "init_from decoder config differs from this run: "
+                    f"{dataclasses_asdict_mismatch}"
+                )
             print(
                 "warning: CLI decoder config differs from resume checkpoint; "
                 f"keeping checkpoint weights. diffs={dataclasses_asdict_mismatch}",
@@ -916,6 +1012,7 @@ def train_decoder(
                         jnp.asarray(gate_w),
                         step_key,
                         jnp.asarray(batch_source_indices),
+                        jnp.asarray(source_rank_weight_values),
                         loss_mode=loss_mode,
                         gate_lambda=gate_lambda,
                         aux_decode_weight=aux_decode_weight,
@@ -928,6 +1025,9 @@ def train_decoder(
                         rank_high_gate_threshold=rank_high_gate_threshold,
                         source_balanced_loss=dataset_balanced_loss,
                         num_sources=source_count,
+                        high_gate_rank_aggregation=high_gate_rank_aggregation,
+                        high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,
+                        high_gate_rank_worst_beta=high_gate_rank_worst_beta,
                     )
                     losses.append(float(jax.device_get(loss)))
                     for name in component_losses:
@@ -984,7 +1084,7 @@ def train_decoder(
                     "gate_eval_bins": [
                         {"id": bin_id, "lower": lower, "upper": upper} for bin_id, lower, upper in GATE_BIN_SPECS
                     ],
-                    "loss_weighting_version": 5,
+                    "loss_weighting_version": 6,
                     "gate_weight_transform": "saturated_linear_v1",
                     "constraint_reduction": "active_group_weighted_mean_v1",
                     "validation_steps": validation_steps,
@@ -995,6 +1095,11 @@ def train_decoder(
                     "checkpoint_selection_version": 2,
                     "dataset_balanced_sampling": dataset_balanced_sampling,
                     "dataset_balanced_loss": dataset_balanced_loss,
+                    "high_gate_rank_aggregation": high_gate_rank_aggregation,
+                    "high_gate_rank_hard_fraction": high_gate_rank_hard_fraction,
+                    "high_gate_rank_worst_beta": high_gate_rank_worst_beta,
+                    "high_gate_rank_source_weights": dict(high_gate_rank_source_weights or {}),
+                    "high_gate_rank_source_weight_values": source_rank_weight_values.tolist(),
                     "source_count": source_count,
                     "source_names": list(pairs.source_names) if isinstance(pairs, MultiCachedPairs) else [],
                     "early_stop_patience": early_stop_patience,
@@ -1003,6 +1108,9 @@ def train_decoder(
                     "early_stop_no_improve_evals": early_stop_no_improve,
                     "eval_every": eval_every,
                 }
+                if init_metadata is not None and init_from is not None:
+                    checkpoint_extra["initialized_from"] = str(init_from.resolve())
+                    checkpoint_extra["initialized_from_epoch"] = int(init_metadata["epoch"])
                 if run_eval:
                     validation = evaluate_split(
                         model,
@@ -1504,6 +1612,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Resume from an explicit checkpoint directory (overrides --resume).",
     )
     parser.add_argument(
+        "--init-from",
+        type=pathlib.Path,
+        help="Load model parameters only and start a fresh optimizer/run at epoch 1.",
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=8,
@@ -1589,6 +1702,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         encode_batch_size=args.encode_batch_size,
         resume=args.resume,
         resume_from=args.resume_from,
+        init_from=args.init_from,
         best_low_gate_max_mse_pred=args.best_low_gate_max_mse_pred,
         best_min_high_gate_gain=args.best_min_high_gate_gain,
         best_min_high_gate_rank_satisfied=args.best_min_high_gate_rank_satisfied,

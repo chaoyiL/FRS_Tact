@@ -16,6 +16,7 @@ from train_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]
+HighGateRankAggregation = Literal["balanced_mean", "worst_source_cvar"]
 LOSS_COMPONENT_NAMES = (
     "gt_fm",
     "vla_fm",
@@ -411,6 +412,92 @@ def source_balanced_mean(values: Array, source_indices: Array, *, num_sources: i
     return jnp.sum(means) / jnp.maximum(jnp.sum(active.astype(values.dtype)), 1.0)
 
 
+def _source_group_mean(
+    penalty: Array,
+    strength: Array,
+    source_indices: Array,
+    *,
+    num_sources: int,
+) -> tuple[Array, Array]:
+    """Return the equally source-balanced mean and whether any source is active."""
+
+    source_indices = jnp.asarray(source_indices, dtype=jnp.int32)
+    totals = jnp.zeros((num_sources,), dtype=penalty.dtype).at[source_indices].add(
+        penalty * strength
+    )
+    strengths = jnp.zeros((num_sources,), dtype=penalty.dtype).at[source_indices].add(
+        strength
+    )
+    active = strengths > 0.0
+    means = jnp.where(
+        active,
+        totals / jnp.maximum(strengths, jnp.finfo(penalty.dtype).tiny),
+        0.0,
+    )
+    return (
+        jnp.sum(means) / jnp.maximum(jnp.sum(active.astype(penalty.dtype)), 1.0),
+        jnp.any(active),
+    )
+
+
+def high_gate_worst_source_cvar_loss(
+    penalty: Array,
+    strength: Array,
+    source_indices: Array,
+    source_weights: Array,
+    *,
+    num_sources: int,
+    hard_fraction: float,
+    worst_beta: float,
+) -> tuple[Array, Array]:
+    """Smooth worst-source loss over each source's hardest high-gate samples.
+
+    Balanced batches contain either floor(B/D) or ceil(B/D) samples per source.
+    We take a static top-k based on the larger quota so this remains JIT-friendly.
+    Missing high-gate samples are masked and never enter the CVaR mean.  Positive
+    ``source_weights`` act as source priors in the smooth maximum; lowering the
+    prior for an already-easy source keeps it from consuming rank gradients while
+    still allowing it to dominate if it genuinely becomes the worst source.
+    """
+
+    if not 0.0 < hard_fraction <= 1.0:
+        raise ValueError(f"hard_fraction must be in (0, 1], got {hard_fraction}.")
+    if worst_beta <= 0.0:
+        raise ValueError(f"worst_beta must be positive, got {worst_beta}.")
+    if num_sources <= 0:
+        raise ValueError(f"num_sources must be positive, got {num_sources}.")
+
+    source_indices = jnp.asarray(source_indices, dtype=jnp.int32)
+    source_weights = jnp.asarray(source_weights, dtype=penalty.dtype)
+    expected_shape = (num_sources,)
+    if source_weights.shape != expected_shape:
+        raise ValueError(
+            f"source_weights must have shape {expected_shape}, got {source_weights.shape}."
+        )
+    per_source_quota = math.ceil(penalty.shape[0] / num_sources)
+    hard_k = max(1, math.ceil(per_source_quota * hard_fraction))
+    source_ids = jnp.arange(num_sources, dtype=jnp.int32)[:, None]
+    active_mask = (source_indices[None, :] == source_ids) & (strength[None, :] > 0.0)
+    weighted_penalty = penalty[None, :] * strength[None, :]
+    masked = jnp.where(active_mask, weighted_penalty, -jnp.inf)
+    top_values, _ = jax.lax.top_k(masked, hard_k)
+    valid = jnp.isfinite(top_values)
+    source_losses = jnp.sum(jnp.where(valid, top_values, 0.0), axis=1) / jnp.maximum(
+        jnp.sum(valid, axis=1),
+        1.0,
+    )
+    active_sources = jnp.any(valid, axis=1) & (source_weights > 0.0)
+    active_weight = jnp.where(active_sources, source_weights, 0.0)
+    log_prior = jnp.where(active_sources, jnp.log(jnp.maximum(active_weight, 1.0e-12)), -jnp.inf)
+    normalizer = jnp.log(jnp.maximum(jnp.sum(active_weight), 1.0e-12))
+    smooth_worst = (
+        jax.scipy.special.logsumexp(float(worst_beta) * source_losses + log_prior)
+        - normalizer
+    ) / float(worst_beta)
+    any_active = jnp.any(active_sources)
+    return jnp.where(any_active, smooth_worst, 0.0), any_active
+
+
 def gate_preference_ranking_loss_per_sample(
     decoded_action: Array,
     gt_action: Array,
@@ -532,6 +619,10 @@ def gated_loss_components_per_sample(
     rank_high_gate_threshold: float = 0.7,
     source_indices: Array | None = None,
     num_sources: int = 1,
+    high_gate_rank_aggregation: HighGateRankAggregation = "balanced_mean",
+    high_gate_rank_hard_fraction: float = 0.3,
+    high_gate_rank_worst_beta: float = 20.0,
+    source_rank_weights: Array | None = None,
 ) -> dict[str, Array]:
     """Return the five weighted terms whose per-sample sum is the gated loss."""
 
@@ -539,6 +630,11 @@ def gated_loss_components_per_sample(
         raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
     if repair_weight < 0:
         raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
+    if high_gate_rank_aggregation not in ("balanced_mean", "worst_source_cvar"):
+        raise ValueError(
+            "high_gate_rank_aggregation must be 'balanced_mean' or "
+            f"'worst_source_cvar', got {high_gate_rank_aggregation!r}."
+        )
 
     flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
     flow_vla = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, gate_weights)
@@ -572,17 +668,57 @@ def gated_loss_components_per_sample(
         )
     if rank_weight != 0.0:
         assert decoded is not None
-        rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
-            gate_weights,
-            margin=rank_margin,
-            low_gate_threshold=rank_low_gate_threshold,
-            high_gate_threshold=rank_high_gate_threshold,
-            source_indices=source_indices,
-            num_sources=num_sources,
-        )
+        if high_gate_rank_aggregation == "balanced_mean":
+            rank_term = float(rank_weight) * gate_preference_ranking_loss_per_sample(
+                decoded,
+                gt_action,
+                predicted_action,
+                gate_weights,
+                margin=rank_margin,
+                low_gate_threshold=rank_low_gate_threshold,
+                high_gate_threshold=rank_high_gate_threshold,
+                source_indices=source_indices,
+                num_sources=num_sources,
+            )
+        else:
+            if source_indices is None:
+                raise ValueError("worst_source_cvar rank aggregation requires source_indices")
+            mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
+            mse_pred = jnp.mean(jnp.square(decoded - predicted_action), axis=(1, 2))
+            raw_weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+            high_penalty = jax.nn.relu(mse_gt - mse_pred + float(rank_margin))
+            low_penalty = jax.nn.relu(mse_pred - mse_gt + float(rank_margin))
+            high_strength = raw_weights * (
+                raw_weights >= float(rank_high_gate_threshold)
+            )
+            low_strength = (1.0 - raw_weights) * (
+                raw_weights <= float(rank_low_gate_threshold)
+            )
+            low_loss, low_active = _source_group_mean(
+                low_penalty,
+                low_strength,
+                source_indices,
+                num_sources=num_sources,
+            )
+            if source_rank_weights is None:
+                source_rank_weights = jnp.ones((num_sources,), dtype=high_penalty.dtype)
+            high_loss, high_active = high_gate_worst_source_cvar_loss(
+                high_penalty,
+                high_strength,
+                source_indices,
+                source_rank_weights,
+                num_sources=num_sources,
+                hard_fraction=high_gate_rank_hard_fraction,
+                worst_beta=high_gate_rank_worst_beta,
+            )
+            active_groups = low_active.astype(high_penalty.dtype) + high_active.astype(
+                high_penalty.dtype
+            )
+            rank_scalar = float(rank_weight) * (low_loss + high_loss) / jnp.maximum(
+                active_groups,
+                1.0,
+            )
+            rank_term = jnp.full_like(flow_gt, rank_scalar)
     if repair_weight != 0.0:
         assert decoded is not None
         repair_term = float(repair_weight) * high_gate_repair_loss_per_sample(
@@ -624,6 +760,12 @@ def gated_flow_matching_loss_per_sample(
     repair_margin: float = 0.0,
     rank_low_gate_threshold: float = 0.3,
     rank_high_gate_threshold: float = 0.7,
+    high_gate_rank_aggregation: HighGateRankAggregation = "balanced_mean",
+    high_gate_rank_hard_fraction: float = 0.3,
+    high_gate_rank_worst_beta: float = 20.0,
+    source_indices: Array | None = None,
+    source_rank_weights: Array | None = None,
+    num_sources: int = 1,
 ) -> Array:
     """Gated endpoint loss plus preference and absolute-repair constraints."""
 
@@ -645,6 +787,12 @@ def gated_flow_matching_loss_per_sample(
         repair_margin=repair_margin,
         rank_low_gate_threshold=rank_low_gate_threshold,
         rank_high_gate_threshold=rank_high_gate_threshold,
+        source_indices=source_indices,
+        num_sources=num_sources,
+        high_gate_rank_aggregation=high_gate_rank_aggregation,
+        high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,
+        high_gate_rank_worst_beta=high_gate_rank_worst_beta,
+        source_rank_weights=source_rank_weights,
     )
     return sum(components.values())
 
@@ -665,6 +813,9 @@ def gated_flow_matching_loss_per_sample(
         "rank_high_gate_threshold",
         "source_balanced_loss",
         "num_sources",
+        "high_gate_rank_aggregation",
+        "high_gate_rank_hard_fraction",
+        "high_gate_rank_worst_beta",
     ),
 )
 def train_step(
@@ -677,6 +828,7 @@ def train_step(
     gate_weights: Array,
     key: Array,
     source_indices: Array | None = None,
+    source_rank_weights: Array | None = None,
     *,
     loss_mode: str = "gt",
     gate_lambda: float = 1.0,
@@ -691,6 +843,9 @@ def train_step(
     rank_high_gate_threshold: float = 0.7,
     source_balanced_loss: bool = False,
     num_sources: int = 1,
+    high_gate_rank_aggregation: HighGateRankAggregation = "balanced_mean",
+    high_gate_rank_hard_fraction: float = 0.3,
+    high_gate_rank_worst_beta: float = 20.0,
 ) -> tuple[Array, dict[str, Array]]:
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
@@ -756,6 +911,10 @@ def train_step(
                 rank_high_gate_threshold=rank_high_gate_threshold,
                 source_indices=source_indices if source_balanced_loss else None,
                 num_sources=num_sources,
+                high_gate_rank_aggregation=high_gate_rank_aggregation,
+                high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,
+                high_gate_rank_worst_beta=high_gate_rank_worst_beta,
+                source_rank_weights=source_rank_weights,
             )
             components = {
                 name: reduce_component(per_sample[name]) for name in LOSS_COMPONENT_NAMES

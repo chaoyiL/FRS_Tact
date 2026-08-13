@@ -118,6 +118,12 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         )
 
     output_dir = Path(str(training["output"])).expanduser()
+    rank_source_weights = training.get("high_gate_rank_source_weights") or {}
+    if not isinstance(rank_source_weights, Mapping):
+        raise ValueError("frs_training.high_gate_rank_source_weights must be a mapping")
+    rank_source_weights = {
+        str(repo_id): float(weight) for repo_id, weight in rank_source_weights.items()
+    }
     tactile_keys = tuple(str(key) for key in model["tactile_keys"])
     tactile_num_tokens = _positive_int(model, "tactile_num_tokens", len(tactile_keys))
     if tactile_num_tokens != len(tactile_keys):
@@ -173,6 +179,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         resume_from=(
             None if training.get("resume_from") in (None, "") else Path(str(training["resume_from"])).expanduser()
         ),
+        init_from=(
+            None if training.get("init_from") in (None, "") else Path(str(training["init_from"])).expanduser()
+        ),
         cache_dirs=cache_dirs,
         dataset_sources=datasets,
         tactile_embedding_cache_root=Path(str(tactile_cache["root"])).expanduser(),
@@ -189,6 +198,16 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         dataset_balanced_loss=bool(training.get("dataset_balanced_loss", False)),
         early_stop_patience=int(training.get("early_stop_patience", 0)),
         early_stop_min_evals=int(training.get("early_stop_min_evals", 0)),
+        high_gate_rank_aggregation=str(
+            training.get("high_gate_rank_aggregation", "balanced_mean")
+        ),
+        high_gate_rank_hard_fraction=float(
+            training.get("high_gate_rank_hard_fraction", 0.3)
+        ),
+        high_gate_rank_worst_beta=float(
+            training.get("high_gate_rank_worst_beta", 20.0)
+        ),
+        high_gate_rank_source_weights=rank_source_weights,
     )
 
 

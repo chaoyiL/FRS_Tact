@@ -28,11 +28,40 @@ from train_frs.utils.model import (
     gated_loss_components_per_sample,
     gt_supervised_loss_per_sample,
     high_gate_repair_loss_per_sample,
+    high_gate_worst_source_cvar_loss,
     make_optimizer,
     source_balanced_mean,
     three_region_effective_gate_weights,
     train_step,
 )
+
+
+def test_high_gate_worst_source_cvar_downweights_easy_source_prior() -> None:
+    penalty = jnp.asarray([1.0, 0.5, 0.1, 0.8, 0.4, 0.2], dtype=jnp.float32)
+    strength = jnp.ones_like(penalty)
+    sources = jnp.asarray([0, 0, 0, 1, 1, 1], dtype=jnp.int32)
+    equal, active = high_gate_worst_source_cvar_loss(
+        penalty,
+        strength,
+        sources,
+        jnp.asarray([1.0, 1.0], dtype=jnp.float32),
+        num_sources=2,
+        hard_fraction=0.5,
+        worst_beta=20.0,
+    )
+    easy_downweighted, active_weighted = high_gate_worst_source_cvar_loss(
+        penalty,
+        strength,
+        sources,
+        jnp.asarray([1.0, 0.25], dtype=jnp.float32),
+        num_sources=2,
+        hard_fraction=0.5,
+        worst_beta=20.0,
+    )
+    assert bool(active)
+    assert bool(active_weighted)
+    assert float(easy_downweighted) < 0.75
+    assert float(easy_downweighted) > float(equal)
 
 
 @pytest.fixture

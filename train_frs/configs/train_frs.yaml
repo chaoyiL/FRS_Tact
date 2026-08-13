@@ -115,7 +115,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0813/frs_0813_04
+  output: /workspace/frs_pick_tube_0813/frs_0813_05
   # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -139,6 +139,15 @@ frs_training:
   rank_high_gate_threshold: 0.7
   rank_weight: 5.0
   rank_margin: 0.01
+  # 第二阶段只对高 Gate rank 使用困难样本/最差数据集聚合：每个数据集取
+  # rank hinge 最大的约 30%，再用平滑 worst-source 目标重点修复 01/02/04。
+  high_gate_rank_aggregation: worst_source_cvar
+  high_gate_rank_hard_fraction: 0.3
+  high_gate_rank_worst_beta: 20.0
+  # 05 已经是最容易且 rank 最好的数据集，只降低它在高 Gate rank 平滑最坏
+  # 聚合中的先验；其他五项损失以及低 Gate rank 不受影响。
+  high_gate_rank_source_weights:
+    KaiyueChen/pick_tube_05: 0.25
   # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
   repair_weight: 2.0
   repair_margin: 0.01
@@ -157,23 +166,25 @@ frs_training:
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  learning_rate: 1.0e-4
+  # 从 _04/best_gain 做低学习率第二阶段微调，保护已获得的正 gain 和低 Gate 保持。
+  learning_rate: 2.5e-5
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
-  warmup_epochs: 2
+  warmup_epochs: 1
   lr_reference_dim: 256
   min_lr_ratio: 0.1
   lr_schedule: cosine
 
   batch_size: 128
-  epochs: 40
+  epochs: 30
   validation_steps: 10
   eval_every: 2
-  # 连续 5 次评估综合 checkpoint key 未改善则停止；至少先完成 5 次评估。
-  early_stop_patience: 5
-  early_stop_min_evals: 5
+  # 连续 6 次评估综合 checkpoint key 未改善则停止；至少先完成 4 次评估。
+  early_stop_patience: 6
+  early_stop_min_evals: 4
   seed: 42
   write_plots: true
-  # 新的均衡训练目标必须冷启动；不要续训旧的非均衡 checkpoint。
+  # 只加载 _04/best_gain 的模型参数；优化器/LR/epoch/早停全部重新开始。
+  init_from: /workspace/frs_pick_tube_0813/frs_0813_04/best_gain
   resume: false
   resume_from: null
