@@ -95,7 +95,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0813/frs_0813_single_01_stage2
+  output: /workspace/frs_pick_tube_0813/frs_0813_single_01_stage3
   # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -107,7 +107,8 @@ frs_training:
   gate_tau: 0.4
   gate_temperature: 0.1
   gate_lambda: 1.5
-  aux_decode_weight: 2.0
+  # stage3 以绝对端点误差为主：高 Gate 直接回归 GT，低 Gate 直接保持 VLA。
+  aux_decode_weight: 4.0
   aux_decode_steps: 10
   # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
   # decode loss 同时包含 w_eff*MSE(FRS,GT)+(1-w_eff)*MSE(FRS,VLA)。
@@ -117,17 +118,18 @@ frs_training:
   # Rank/Repair 各自在活跃低/高组内归一化，不再被中间区样本数稀释。
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  rank_weight: 5.0
-  rank_margin: 0.01
-  # 第二阶段只强化 pick_tube_01 内高 Gate rank hinge 最大的 30% 困难样本。
-  # 单 source 时 worst_source_cvar 等价于 high-gate top-30% CVaR，不涉及跨数据集加权。
-  high_gate_rank_aggregation: worst_source_cvar
-  high_gate_rank_hard_fraction: 0.3
+  # rank 只保留为弱辅助。它只约束 GT/VLA 的相对距离，不能单独保证绝对接近 GT。
+  rank_weight: 1.0
+  rank_margin: 0.0
+  # 关闭 stage2 的 hard-CVaR；所有有效高 Gate 样本使用普通均值，避免困难/异常样本主导梯度。
+  high_gate_rank_aggregation: balanced_mean
+  # 以下两个值仅供 worst_source_cvar 使用；balanced_mean 下不会参与损失计算。
+  high_gate_rank_hard_fraction: 1.0
   high_gate_rank_worst_beta: 20.0
   high_gate_rank_source_weights: {}
-  # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
-  repair_weight: 2.0
-  repair_margin: 0.01
+  # 强化绝对 repair：高 Gate FRS 至少不能比原始 VLA 更远离 GT。
+  repair_weight: 4.0
+  repair_margin: 0.0
   # best checkpoint：只在可信低区 w<=0.3 检查 VLA 保持、可信高区 w>=0.7 检查 GT gain/rank。
   # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
   best_low_gate_max_mse_pred: 0.01
@@ -143,8 +145,8 @@ frs_training:
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  # 从单数据集第一阶段 best_rank 低学习率微调，保留其较好的 rank 起点。
-  learning_rate: 2.5e-5
+  # 从第一阶段 best_rank 重新微调，不继承已经跑偏的 stage2；进一步降低学习率防止破坏起点。
+  learning_rate: 1.0e-5
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
   warmup_epochs: 1
