@@ -16,28 +16,51 @@ from typing import Any, Literal
 LossMode = Literal["gt", "predicted", "gated"]
 
 
+def high_gate_rank_statistics(
+    mse_gt: Any,
+    mse_pred: Any,
+    *,
+    margin: float,
+) -> tuple[float, float, float]:
+    """Return mean per-sample hinge, signed gap, and satisfied fraction."""
+
+    import numpy as np
+
+    gt = np.asarray(mse_gt, dtype=np.float64)
+    pred = np.asarray(mse_pred, dtype=np.float64)
+    if gt.shape != pred.shape or gt.size == 0:
+        raise ValueError(f"rank arrays must be non-empty and shape-matched: {gt.shape} != {pred.shape}")
+    gap = gt - pred
+    return (
+        float(np.mean(np.maximum(0.0, gap + float(margin)))),
+        float(np.mean(gap)),
+        float(np.mean(gap + float(margin) <= 0.0)),
+    )
+
+
 def checkpoint_selection_key(
     metrics: Mapping[str, Any],
     *,
     loss_mode: LossMode,
     low_gate_max_mse_pred: float,
     min_high_gate_gain: float,
+    min_high_gate_rank_satisfied: float = 0.8,
     high_gate_rank_margin: float = 0.0,
-) -> tuple[float, float, float, float, float, float, float]:
-    """Return a lower-is-better key for best-checkpoint selection.
+) -> tuple[float, ...]:
+    """Return a lower-is-better safety key for best-checkpoint selection.
 
-    Gated runs first enforce preservation of the frozen VLA on low-gate
-    samples, positive repair on high-gate samples, and the high-gate preference
-    ``MSE(FRS, GT) + margin <= MSE(FRS, VLA)``. Constraint violations are compared
-    lexicographically by failed-constraint count and normalized worst violation;
-    they are never summed, so improvement in one constraint cannot numerically
-    cancel regression in another. Among feasible models, larger high-gate gain
-    wins. Non-gated runs retain aggregate-MSE selection.
+    A gated checkpoint is feasible only when it preserves the frozen VLA in
+    every low-gate dataset, repairs toward GT in every high-gate dataset,
+    keeps the mean signed rank gap below the requested margin, and reaches the
+    required per-sample rank success fraction. The mean per-sample hinge remains
+    a ranking objective, so violating samples cannot cancel each other. For
+    infeasible models the worst normalized hard violation is compared before the
+    number of failed constraints.
     """
 
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
     if loss_mode != "gated":
-        return (0.0, aggregate_mse, 0.0, 0.0, 0.0, 0.0, aggregate_mse)
+        return (0.0, aggregate_mse)
     low_mse = float(
         metrics.get(
             "val_worst_dataset_mse_pred_low_w",
@@ -50,32 +73,72 @@ def checkpoint_selection_key(
             metrics.get("val_gt_gain_high_w", float("nan")),
         )
     )
-    if "val_worst_dataset_rank_violation_high_w" in metrics:
-        rank_violation = float(metrics["val_worst_dataset_rank_violation_high_w"])
-    else:
+    rank_hinge = float(
+        metrics.get(
+            "val_worst_dataset_rank_violation_high_w",
+            metrics.get("val_rank_penalty_high_w", float("nan")),
+        )
+    )
+    if not math.isfinite(rank_hinge):
         high_mse_gt = float(metrics.get("val_mse_gt_high_w", float("nan")))
         high_mse_pred = float(metrics.get("val_mse_pred_high_w", float("nan")))
-        rank_violation = (
+        rank_hinge = (
             max(0.0, high_mse_gt - high_mse_pred + float(high_gate_rank_margin))
             if math.isfinite(high_mse_gt) and math.isfinite(high_mse_pred)
             else float("nan")
         )
-    if not all(math.isfinite(value) for value in (low_mse, high_gain, rank_violation)):
-        return (4.0, float("inf"), float("inf"), float("inf"), float("inf"), 0.0, aggregate_mse)
+    rank_gap = float(metrics.get("val_worst_dataset_rank_gap_high_w", float("nan")))
+    if not math.isfinite(rank_gap):
+        high_mse_gt = float(metrics.get("val_mse_gt_high_w", float("nan")))
+        high_mse_pred = float(metrics.get("val_mse_pred_high_w", float("nan")))
+        rank_gap = (
+            high_mse_gt - high_mse_pred
+            if math.isfinite(high_mse_gt) and math.isfinite(high_mse_pred)
+            else float("nan")
+        )
+    rank_satisfied = float(
+        metrics.get(
+            "val_min_dataset_rank_satisfied_high_frac",
+            metrics.get("val_rank_satisfied_high_frac", float("nan")),
+        )
+    )
+    required = (low_mse, high_gain, rank_hinge, rank_gap, rank_satisfied)
+    if not all(math.isfinite(value) for value in required):
+        return (
+            1.0,
+            float("inf"),
+            4.0,
+            float("inf"),
+            float("inf"),
+            float("inf"),
+            float("inf"),
+            float("inf"),
+            0.0,
+            aggregate_mse,
+        )
     low_violation = max(0.0, low_mse - float(low_gate_max_mse_pred))
     gain_violation = max(0.0, float(min_high_gate_gain) - high_gain)
-    failed_count = float(sum(value > 0.0 for value in (low_violation, gain_violation, rank_violation)))
+    rank_gap_violation = max(0.0, rank_gap + float(high_gate_rank_margin))
+    satisfaction_violation = max(0.0, float(min_high_gate_rank_satisfied) - rank_satisfied)
+    hard_violations = (low_violation, gain_violation, rank_gap_violation, satisfaction_violation)
+    failed_count = float(sum(value > 0.0 for value in hard_violations))
     low_scale = max(float(low_gate_max_mse_pred), 1.0e-8)
     constraint_scale = max(abs(float(min_high_gate_gain)), float(high_gate_rank_margin), 1.0e-8)
+    satisfaction_scale = max(float(min_high_gate_rank_satisfied), 1.0e-8)
     low_normalized = low_violation / low_scale
     gain_normalized = gain_violation / constraint_scale
-    rank_normalized = rank_violation / constraint_scale
+    rank_gap_normalized = rank_gap_violation / constraint_scale
+    rank_hinge_normalized = rank_hinge / constraint_scale
+    satisfaction_normalized = satisfaction_violation / satisfaction_scale
     return (
+        float(failed_count > 0.0),
+        max(low_normalized, gain_normalized, rank_gap_normalized, satisfaction_normalized),
         failed_count,
-        max(low_normalized, gain_normalized, rank_normalized),
-        rank_normalized,
+        rank_gap_normalized,
+        satisfaction_normalized,
         low_normalized,
         gain_normalized,
+        rank_hinge_normalized,
         -high_gain,
         aggregate_mse,
     )
@@ -85,7 +148,7 @@ def checkpoint_specialist_keys(
     metrics: Mapping[str, Any],
     *,
     high_gate_rank_margin: float = 0.0,
-) -> dict[str, tuple[float, float, float, float]]:
+) -> dict[str, tuple[float, ...]]:
     """Return independent lower-is-better keys for specialist checkpoints."""
 
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
@@ -101,9 +164,13 @@ def checkpoint_specialist_keys(
             metrics.get("val_gt_gain_high_w", float("nan")),
         )
     )
-    if "val_worst_dataset_rank_violation_high_w" in metrics:
-        rank_violation = float(metrics["val_worst_dataset_rank_violation_high_w"])
-    else:
+    rank_violation = float(
+        metrics.get(
+            "val_worst_dataset_rank_violation_high_w",
+            metrics.get("val_rank_penalty_high_w", float("nan")),
+        )
+    )
+    if not math.isfinite(rank_violation):
         high_mse_gt = float(metrics.get("val_mse_gt_high_w", float("nan")))
         high_mse_pred = float(metrics.get("val_mse_pred_high_w", float("nan")))
         rank_violation = (
@@ -111,13 +178,37 @@ def checkpoint_specialist_keys(
             if math.isfinite(high_mse_gt) and math.isfinite(high_mse_pred)
             else float("nan")
         )
+    rank_gap = float(metrics.get("val_worst_dataset_rank_gap_high_w", float("nan")))
+    if not math.isfinite(rank_gap):
+        high_mse_gt = float(metrics.get("val_mse_gt_high_w", float("nan")))
+        high_mse_pred = float(metrics.get("val_mse_pred_high_w", float("nan")))
+        rank_gap = (
+            high_mse_gt - high_mse_pred
+            if math.isfinite(high_mse_gt) and math.isfinite(high_mse_pred)
+            else float("nan")
+        )
+    rank_satisfied = float(
+        metrics.get(
+            "val_min_dataset_rank_satisfied_high_frac",
+            metrics.get("val_rank_satisfied_high_frac", float("nan")),
+        )
+    )
     low_key = low_mse if math.isfinite(low_mse) else float("inf")
     gain_key = -high_gain if math.isfinite(high_gain) else float("inf")
     rank_key = rank_violation if math.isfinite(rank_violation) else float("inf")
+    rank_gap_key = rank_gap if math.isfinite(rank_gap) else float("inf")
+    rank_satisfied_key = -rank_satisfied if math.isfinite(rank_satisfied) else float("inf")
     return {
-        "best_rank": (rank_key, gain_key, low_key, aggregate_mse),
-        "best_low_preservation": (low_key, rank_key, gain_key, aggregate_mse),
-        "best_gain": (gain_key, rank_key, low_key, aggregate_mse),
+        "best_rank": (rank_gap_key, rank_key, rank_satisfied_key, gain_key, low_key, aggregate_mse),
+        "best_low_preservation": (
+            low_key,
+            rank_key,
+            rank_gap_key,
+            rank_satisfied_key,
+            gain_key,
+            aggregate_mse,
+        ),
+        "best_gain": (gain_key, rank_key, rank_gap_key, rank_satisfied_key, low_key, aggregate_mse),
     }
 
 
@@ -220,6 +311,7 @@ def train_decoder(
     tactile_num_tokens: int = 4,
     best_low_gate_max_mse_pred: float = 0.01,
     best_min_high_gate_gain: float = 0.0,
+    best_min_high_gate_rank_satisfied: float = 0.8,
 ) -> None:
     import csv
     import json
@@ -320,6 +412,8 @@ def train_decoder(
         "val_worst_dataset_mse_pred_low_w",
         "val_min_dataset_gt_gain_high_w",
         "val_worst_dataset_rank_violation_high_w",
+        "val_worst_dataset_rank_gap_high_w",
+        "val_min_dataset_rank_satisfied_high_frac",
         "checkpoint_selection_key",
         "checkpoint_selection_feasible",
     ]
@@ -370,6 +464,8 @@ def train_decoder(
         raise ValueError("rank low-gate threshold must be below the high-gate threshold.")
     if best_low_gate_max_mse_pred < 0:
         raise ValueError("best_low_gate_max_mse_pred must be non-negative.")
+    if not 0.0 <= best_min_high_gate_rank_satisfied <= 1.0:
+        raise ValueError("best_min_high_gate_rank_satisfied must be in [0, 1].")
     if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
         raise ValueError("rank_weight and repair_weight are only supported with loss_mode='gated'.")
     if eval_every <= 0:
@@ -443,6 +539,9 @@ def train_decoder(
         stored_weighting_version = int(resume_extra.get("loss_weighting_version", 1))
         stored_low_gate_limit = float(resume_extra.get("best_low_gate_max_mse_pred", best_low_gate_max_mse_pred))
         stored_min_high_gain = float(resume_extra.get("best_min_high_gate_gain", best_min_high_gate_gain))
+        stored_min_rank_satisfied = float(
+            resume_extra.get("best_min_high_gate_rank_satisfied", best_min_high_gate_rank_satisfied)
+        )
         if (
             stored_weighting_version != 5
             or stored_rank_weight != rank_weight
@@ -453,6 +552,7 @@ def train_decoder(
             or stored_rank_high_gate_threshold != rank_high_gate_threshold
             or stored_low_gate_limit != best_low_gate_max_mse_pred
             or stored_min_high_gain != best_min_high_gate_gain
+            or stored_min_rank_satisfied != best_min_high_gate_rank_satisfied
         ):
             raise ValueError(
                 "Resume checkpoint constraint objective differs from this run: "
@@ -462,13 +562,15 @@ def train_decoder(
                 f"repair_margin={stored_repair_margin:g}, weighting_v={stored_weighting_version}, "
                 f"rank_gate=[{stored_rank_low_gate_threshold:g},"
                 f"{stored_rank_high_gate_threshold:g}], "
-                f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}) "
+                f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}, "
+                f"min_rank_satisfied={stored_min_rank_satisfied:g}) "
                 "requested="
                 f"(rank_weight={rank_weight:g}, rank_margin={rank_margin:g}, "
                 f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=5, "
                 f"rank_gate=[{rank_low_gate_threshold:g},{rank_high_gate_threshold:g}], "
                 f"low_gate_limit={best_low_gate_max_mse_pred:g}, "
-                f"min_high_gain={best_min_high_gate_gain:g}). "
+                f"min_high_gain={best_min_high_gate_gain:g}, "
+                f"min_rank_satisfied={best_min_high_gate_rank_satisfied:g}). "
                 "Start a fresh run in a new frs_training.output directory."
             )
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -627,10 +729,10 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
-    best_key = (float("inf"),) * 7
-    best_feasible_key = (float("inf"),) * 7
+    best_key = (float("inf"),) * 10
+    best_feasible_key = (float("inf"),) * 10
     specialist_best_keys = {
-        name: (float("inf"),) * 4
+        name: (float("inf"),) * 6
         for name in ("best_rank", "best_low_preservation", "best_gain")
     }
     if resume_dir is not None:
@@ -653,6 +755,7 @@ def train_decoder(
                     loss_mode=loss_mode,
                     low_gate_max_mse_pred=best_low_gate_max_mse_pred,
                     min_high_gate_gain=best_min_high_gate_gain,
+                    min_high_gate_rank_satisfied=best_min_high_gate_rank_satisfied,
                     high_gate_rank_margin=rank_margin,
                 )
                 if checkpoint_name == "best":
@@ -785,6 +888,8 @@ def train_decoder(
                     "validation_solver": "euler",
                     "best_low_gate_max_mse_pred": best_low_gate_max_mse_pred,
                     "best_min_high_gate_gain": best_min_high_gate_gain,
+                    "best_min_high_gate_rank_satisfied": best_min_high_gate_rank_satisfied,
+                    "checkpoint_selection_version": 2,
                     "eval_every": eval_every,
                 }
                 if run_eval:
@@ -872,6 +977,8 @@ def train_decoder(
                         low_preservation: list[float] = []
                         high_gains: list[float] = []
                         high_rank_violations: list[float] = []
+                        high_rank_gaps: list[float] = []
+                        high_rank_satisfied: list[float] = []
                         missing_confident_low = False
                         missing_confident_high = False
                         for source_index in range(len(pairs.sources)):
@@ -886,17 +993,18 @@ def train_decoder(
                             else:
                                 missing_confident_low = True
                             if np.any(source_high):
-                                high_gains.append(float(np.mean(validation.sample_gt_gain[source_mask][source_high])))
-                                source_mse_gt_high = float(np.mean(validation.sample_mse_gt[source_mask][source_high]))
-                                source_mse_pred_high = float(
-                                    np.mean(validation.sample_mse_pred[source_mask][source_high])
+                                source_gt_gain = validation.sample_gt_gain[source_mask][source_high]
+                                source_mse_gt = validation.sample_mse_gt[source_mask][source_high]
+                                source_mse_pred = validation.sample_mse_pred[source_mask][source_high]
+                                rank_hinge, rank_gap, rank_satisfied = high_gate_rank_statistics(
+                                    source_mse_gt,
+                                    source_mse_pred,
+                                    margin=rank_margin,
                                 )
-                                high_rank_violations.append(
-                                    max(
-                                        0.0,
-                                        source_mse_gt_high - source_mse_pred_high + rank_margin,
-                                    )
-                                )
+                                high_gains.append(float(np.mean(source_gt_gain)))
+                                high_rank_violations.append(rank_hinge)
+                                high_rank_gaps.append(rank_gap)
+                                high_rank_satisfied.append(rank_satisfied)
                             else:
                                 missing_confident_high = True
                         if low_preservation and not missing_confident_low:
@@ -909,13 +1017,18 @@ def train_decoder(
                             metrics["val_min_dataset_gt_gain_high_w"] = float("nan")
                         if high_rank_violations and not missing_confident_high:
                             metrics["val_worst_dataset_rank_violation_high_w"] = max(high_rank_violations)
+                            metrics["val_worst_dataset_rank_gap_high_w"] = max(high_rank_gaps)
+                            metrics["val_min_dataset_rank_satisfied_high_frac"] = min(high_rank_satisfied)
                         elif missing_confident_high:
                             metrics["val_worst_dataset_rank_violation_high_w"] = float("nan")
+                            metrics["val_worst_dataset_rank_gap_high_w"] = float("nan")
+                            metrics["val_min_dataset_rank_satisfied_high_frac"] = float("nan")
                     selection_key = checkpoint_selection_key(
                         metrics,
                         loss_mode=loss_mode,
                         low_gate_max_mse_pred=best_low_gate_max_mse_pred,
                         min_high_gate_gain=best_min_high_gate_gain,
+                        min_high_gate_rank_satisfied=best_min_high_gate_rank_satisfied,
                         high_gate_rank_margin=rank_margin,
                     )
                     metrics["checkpoint_selection_key"] = ",".join(f"{value:.12g}" for value in selection_key)
@@ -1180,6 +1293,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.0,
         help="Minimum high-gate GT gain for a feasible best checkpoint.",
     )
+    parser.add_argument(
+        "--best-min-high-gate-rank-satisfied",
+        type=float,
+        default=0.8,
+        help="Minimum per-dataset high-gate fraction satisfying the GT-preference rank margin.",
+    )
 
     parser.add_argument("--model-dim", type=int, default=256)
     parser.add_argument("--depth", type=int, default=6)
@@ -1303,6 +1422,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         resume_from=args.resume_from,
         best_low_gate_max_mse_pred=args.best_low_gate_max_mse_pred,
         best_min_high_gate_gain=args.best_min_high_gate_gain,
+        best_min_high_gate_rank_satisfied=args.best_min_high_gate_rank_satisfied,
     )
 
 

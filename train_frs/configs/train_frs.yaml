@@ -14,15 +14,15 @@
 #        --config train_frs/configs/train_frs.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
-checkpoint: /workspace/checkpoints/model/pick_tube_02_3w_jax
+checkpoint: /workspace/checkpoints/model/pick_tube_01_jax
 # checkpoint 本身是本地目录；true 只允许首次补齐 tokenizer 等公共资源。
 allow_download: true
 
 #自动下载冻结的smovla ckpt
 checkpoint_merge:
-  adapter: KaiyueChen/pick_tube_02_3w
+  adapter: KaiyueChen/pick_tube_01
   base: lerobot/smolvla_base
-  output: /workspace/checkpoints/model/pick_tube_02_3w_jax
+  output: /workspace/checkpoints/model/pick_tube_01_jax
   allow_download: true
 
 datasets:
@@ -55,7 +55,7 @@ datasets:
 
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
-  root: /workspace/frs_pick_tube/action_cache_slerpflow
+  root: /workspace/frs_pick_tube_0813/action_cache_slerpflow
   model_sample_steps: 10
   reverse_steps: 20
   reverse_solver: slerpflow
@@ -115,9 +115,9 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube/frs_0809_04
-  # checkpoint chunk_size=10，因此 tactile_window=10/2=5。
-  tactile_window_divisor: 2
+  output: /workspace/frs_pick_tube_0813/frs_0813_01
+  # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
+  tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
   history_stride: 3
 
@@ -146,6 +146,8 @@ frs_training:
   # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
   best_low_gate_max_mse_pred: 0.01
   best_min_high_gate_gain: 0.0
+  # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
+  best_min_high_gate_rank_satisfied: 0.8
 
   model_dim: 256
   depth: 6

@@ -182,6 +182,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_num_tokens=tactile_num_tokens,
         best_low_gate_max_mse_pred=float(training.get("best_low_gate_max_mse_pred", 0.01)),
         best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
+        best_min_high_gate_rank_satisfied=float(
+            training.get("best_min_high_gate_rank_satisfied", 0.8)
+        ),
     )
 
 
