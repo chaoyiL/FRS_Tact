@@ -208,7 +208,6 @@ def _decode_with_tactile(
     pairs: CachedPairs,
     conditioner: TactileConditionedBatches,
     cache_indices: np.ndarray,
-    gate_weights: np.ndarray | None = None,
     *,
     num_steps: int,
     solver: FlowSolver,
@@ -223,7 +222,6 @@ def _decode_with_tactile(
             model,
             x_base,
             tactile_seq,
-            None if gate_weights is None else jnp.asarray(gate_weights),
             num_steps=num_steps,
             solver=solver,
             state=state,
@@ -249,15 +247,11 @@ def _plot_action_trajectories(
         return path
 
     cache_indices = result.cache_indices[positions]
-    selected_gate = (
-        None if result.sample_gate_w is None else result.sample_gate_w[positions]
-    )
     gt_action, predicted_action, decoded = _decode_with_tactile(
         model,
         pairs,
         conditioner,
         cache_indices,
-        selected_gate,
         num_steps=num_steps,
         solver=solver,
     )
@@ -371,24 +365,11 @@ def _plot_episode_action_strips(
     for row, episode_index in enumerate(selected_episodes):
         axis = axes[row, 0]
         cache_indices = _validation_episode_cache_indices(pairs, episode_index)
-        if result.sample_gate_w is None:
-            selected_gate = None
-        else:
-            gate_by_index = {
-                int(index): float(weight)
-                for index, weight in zip(
-                    result.cache_indices, result.sample_gate_w, strict=True
-                )
-            }
-            selected_gate = np.asarray(
-                [gate_by_index[int(index)] for index in cache_indices], dtype=np.float32
-            )
         gt_action, predicted_action, decoded = _decode_with_tactile(
             model,
             pairs,
             conditioner,
             cache_indices,
-            selected_gate,
             num_steps=num_steps,
             solver=solver,
         )

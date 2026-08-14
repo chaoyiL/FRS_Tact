@@ -300,11 +300,6 @@ def evaluate_split(
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
     track_tactile = gate_tau is not None and gate_temperature is not None and bool(conditioner.episode_baselines)
-    if model.config.gate_conditioning and not track_tactile:
-        raise ValueError(
-            "Gate-conditioned checkpoint evaluation requires gate_tau, gate_temperature, "
-            "and episode baseline embeddings."
-        )
 
     for (
         indices,
@@ -322,23 +317,20 @@ def evaluate_split(
             current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
             change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
             gate_w = gate_weights_from_change(change, tau=float(gate_tau), temperature=float(gate_temperature))
-            model_gate = jnp.asarray(gate_w)
         else:
             change = None
             gate_w = None
-            model_gate = None
         state = jnp.asarray(state_np)
         flow_gt = flow_matching_loss_per_sample(
-            model, x_base, gt_action, t, tactile_seq, model_gate, state=state
+            model, x_base, gt_action, t, tactile_seq, state=state
         )
         flow_pred = flow_matching_loss_per_sample(
-            model, x_base, predicted_action, t, tactile_seq, model_gate, state=state
+            model, x_base, predicted_action, t, tactile_seq, state=state
         )
         prediction = decode_actions(
             model,
             x_base,
             tactile_seq,
-            model_gate,
             num_steps=num_steps,
             solver=solver,
             state=state,

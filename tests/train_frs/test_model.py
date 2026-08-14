@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
+import inspect
+import json
 import pathlib
 import tempfile
 import unittest
@@ -84,31 +87,11 @@ def decoder() -> TactileConditionedFlowDecoder:
 
 
 @pytest.fixture
-def gated_decoder() -> TactileConditionedFlowDecoder:
-    return TactileConditionedFlowDecoder(
-        DecoderConfig(
-            action_dim=3,
-            action_horizon=6,
-            tactile_window=3,
-            gru_hidden_dim=8,
-            resnet_embedding_dim=8,
-            model_dim=16,
-            depth=2,
-            num_heads=4,
-            num_tactile_tokens=2,
-            gate_conditioning=True,
-        ),
-        rngs=nnx.Rngs(1),
-    )
-
-
-@pytest.fixture
 def decode_inputs():
     batch_size = 2
     return (
         jax.random.normal(jax.random.key(100), (batch_size, 6, 3)),
         jax.random.normal(jax.random.key(101), (batch_size, 3, 2, 8)),
-        jnp.asarray([0.2, 0.8], dtype=jnp.float32),
     )
 
 
@@ -122,38 +105,20 @@ def integrate_decode_reference(velocity, x_base, *, num_steps: int, solver: str)
 
 @pytest.mark.parametrize("solver", ["euler", "fireflow"])
 def test_cached_condition_decode_matches_recomputed_condition(decoder, decode_inputs, solver):
-    x_base, tactile, gate = decode_inputs
+    x_base, tactile = decode_inputs
     expected = integrate_decode_reference(
-        lambda x_t, t: decoder(x_t, t, tactile, gate),
+        lambda x_t, t: decoder(x_t, t, tactile),
         x_base,
         num_steps=4,
         solver=solver,
     )
-    actual = decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver=solver)
+    actual = decode_actions(decoder, x_base, tactile, num_steps=4, solver=solver)
     np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.parametrize("solver", ["euler", "fireflow"])
-def test_cached_condition_gated_decode_matches_recomputed_condition(gated_decoder, decode_inputs, solver):
-    x_base, tactile, gate = decode_inputs
-    with jax.enable_x64(True):
-        gate = gate.astype(jnp.float64)
-        expected = integrate_decode_reference(
-            lambda x_t, t: gated_decoder(x_t, t, tactile, gate),
-            x_base,
-            num_steps=4,
-            solver=solver,
-        )
-        actual = decode_actions(gated_decoder, x_base, tactile, gate, num_steps=4, solver=solver)
-    # The cached path crosses an NNX JIT boundary while the recomputed reference
-    # remains eager. XLA fusion can therefore change float32 rounding slightly,
-    # especially when a float64 gate is normalized inside the model.
-    np.testing.assert_allclose(actual, expected, rtol=2e-3, atol=3e-4)
-
-
-@pytest.mark.parametrize("solver", ["euler", "fireflow"])
 def test_decode_encodes_tactile_condition_once(decoder, decode_inputs, solver, monkeypatch):
-    x_base, tactile, gate = decode_inputs
+    x_base, tactile = decode_inputs
     original_encode = decoder.encode_tactile_condition
     call_count = 0
 
@@ -163,48 +128,13 @@ def test_decode_encodes_tactile_condition_once(decoder, decode_inputs, solver, m
         return original_encode(tactile_seq)
 
     monkeypatch.setattr(decoder, "encode_tactile_condition", count_encode)
-    decoded = decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver=solver)
+    decoded = decode_actions(decoder, x_base, tactile, num_steps=4, solver=solver)
 
     assert decoded.shape == x_base.shape
     assert call_count == 1
 
-
-@pytest.mark.parametrize("solver", ["euler", "fireflow"])
-def test_gated_decode_casts_weights_and_encodes_tactile_condition_once(
-    gated_decoder,
-    decode_inputs,
-    solver,
-    monkeypatch,
-):
-    x_base, tactile, gate = decode_inputs
-    original_encode = gated_decoder.encode_tactile_condition
-    call_count = 0
-
-    def count_encode(tactile_seq):
-        nonlocal call_count
-        call_count += 1
-        return original_encode(tactile_seq)
-
-    with jax.enable_x64(True):
-        float64_gate = gate.astype(jnp.float64)
-        expected = decode_actions(
-            gated_decoder,
-            x_base,
-            tactile,
-            float64_gate.astype(jnp.float32),
-            num_steps=4,
-            solver=solver,
-        )
-        monkeypatch.setattr(gated_decoder, "encode_tactile_condition", count_encode)
-        actual = decode_actions(gated_decoder, x_base, tactile, float64_gate, num_steps=4, solver=solver)
-
-    assert call_count == 1
-    assert actual.dtype == jnp.float32
-    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
-
-
 def test_decode_validates_solver_before_encoding_tactile_condition(decoder, decode_inputs, monkeypatch):
-    x_base, tactile, gate = decode_inputs
+    x_base, tactile = decode_inputs
     original_encode = decoder.encode_tactile_condition
     call_count = 0
 
@@ -215,9 +145,26 @@ def test_decode_validates_solver_before_encoding_tactile_condition(decoder, deco
 
     monkeypatch.setattr(decoder, "encode_tactile_condition", count_encode)
     with pytest.raises(ValueError, match="solver must be 'euler' or 'fireflow'"):
-        decode_actions(decoder, x_base, tactile, gate, num_steps=4, solver="invalid")
+        decode_actions(decoder, x_base, tactile, num_steps=4, solver="invalid")
 
     assert call_count == 0
+
+
+def test_decoder_has_no_gate_input(decoder):
+    assert "gate_conditioning" not in dataclasses.asdict(decoder.config)
+    assert not hasattr(decoder, "gate_mlp")
+    assert "gate_weights" not in inspect.signature(decoder.__call__).parameters
+    assert "gate_weights" not in inspect.signature(decode_actions).parameters
+
+
+def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
+    save_checkpoint(tmp_path, decoder, epoch=1, metrics={"val_mse": 0.5})
+    metadata_path = tmp_path / "checkpoint.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["decoder_config"]["gate_conditioning"] = True
+    metadata_path.write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="(?i)gate-conditioned.*retrain"):
+        load_checkpoint(tmp_path)
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])
@@ -242,7 +189,6 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self,
         *,
         tactile_window: int = 3,
-        gate_conditioning: bool = False,
         state_conditioning: bool = False,
     ) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
@@ -255,7 +201,6 @@ class ConditionedDecoderModelTest(unittest.TestCase):
                 model_dim=16,
                 depth=2,
                 num_heads=4,
-                gate_conditioning=gate_conditioning,
                 state_dim=5 if state_conditioning else 0,
                 state_conditioning=state_conditioning,
             ),
@@ -266,26 +211,20 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         return jax.random.normal(key, (batch, window, 4, 4))
 
     def test_state_token_conditions_decode_and_can_be_fully_masked(self):
-        model = self.make_model(gate_conditioning=True, state_conditioning=True)
+        model = self.make_model(state_conditioning=True)
         x_base = jax.random.normal(jax.random.key(80), (2, 6, 3))
         tactile = self._tactile_seq(jax.random.key(81), 2)
-        gate = jnp.asarray([0.8, 0.8], dtype=jnp.float32)
         state_a = jnp.tile(jnp.arange(5, dtype=jnp.float32)[None, :], (2, 1))
         state_b = jnp.flip(state_a, axis=1)
 
-        decoded_a = decode_actions(
-            model, x_base, tactile, gate, num_steps=2, state=state_a
-        )
-        decoded_b = decode_actions(
-            model, x_base, tactile, gate, num_steps=2, state=state_b
-        )
+        decoded_a = decode_actions(model, x_base, tactile, num_steps=2, state=state_a)
+        decoded_b = decode_actions(model, x_base, tactile, num_steps=2, state=state_b)
         self.assertGreater(float(jnp.max(jnp.abs(decoded_a - decoded_b))), 1e-6)
 
         dropped_a = decode_actions(
             model,
             x_base,
             tactile,
-            gate,
             num_steps=2,
             state=state_a,
             state_keep_mask=jnp.zeros((2,), dtype=jnp.float32),
@@ -294,7 +233,6 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             model,
             x_base,
             tactile,
-            gate,
             num_steps=2,
             state=state_b,
             state_keep_mask=jnp.zeros((2,), dtype=jnp.float32),
@@ -308,7 +246,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertAlmostEqual(float(balanced), 6.0)
 
     def test_single_source_cvar_does_not_require_balanced_loss(self):
-        model = self.make_model(gate_conditioning=True)
+        model = self.make_model()
         batch_size = 10
         x_base = jax.random.normal(jax.random.key(70), (batch_size, 6, 3))
         gt = x_base + 1.0
@@ -593,7 +531,6 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             model,
             x_base,
             tactile,
-            gate,
             num_steps=3,
             solver="euler",
         )
@@ -614,29 +551,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(components["low_safety"], expected_safety, atol=1e-6)))
         self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
-    def test_explicit_gate_condition_changes_output(self):
-        model = self.make_model(gate_conditioning=True)
-        x_t = jax.random.normal(jax.random.key(30), (2, 6, 3))
-        t = jnp.asarray([0.4, 0.4], dtype=jnp.float32)
-        tactile = self._tactile_seq(jax.random.key(31), 2)
-        with self.assertRaisesRegex(ValueError, "gate_weights are required"):
-            model(x_t, t, tactile)
-        low = model(x_t, t, tactile, jnp.zeros((2,), dtype=jnp.float32))
-        high = model(x_t, t, tactile, jnp.ones((2,), dtype=jnp.float32))
-        self.assertGreater(float(jnp.max(jnp.abs(low - high))), 1e-4)
-
-        decoded = decode_actions(
-            model,
-            x_t,
-            tactile,
-            jnp.asarray([0.2, 0.8], dtype=jnp.float32),
-            num_steps=3,
-            solver="euler",
-        )
-        self.assertEqual(decoded.shape, x_t.shape)
-
     def test_gate_conditioned_evaluation_reports_vla_baseline_and_gain(self):
-        model = self.make_model(gate_conditioning=True)
+        model = self.make_model()
 
         class FakeConditioner:
             episode_baselines = {0: np.zeros((4, 4), dtype=np.float32)}
@@ -802,7 +718,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             repair_weight=0.75,
             repair_margin=0.01,
         )
-        decoded = decode_actions(model, x_base, tactile, gate, num_steps=3)
+        decoded = decode_actions(model, x_base, tactile, num_steps=3)
         rank_penalty = gate_preference_ranking_loss_per_sample(
             decoded,
             gt,
@@ -851,20 +767,6 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["decoder_config"]["tactile_window"], 3)
             self.assertEqual(metadata["decoder_config"]["num_tactile_tokens"], 4)
             self.assertTrue((checkpoint_dir / metadata["params_file"]).is_file())
-
-    def test_gate_conditioned_checkpoint_round_trip(self):
-        model = self.make_model(gate_conditioning=True)
-        x = jnp.ones((2, 6, 3), dtype=jnp.float32)
-        t = jnp.asarray([0.25, 0.75], dtype=jnp.float32)
-        tactile = jnp.ones((2, 3, 4, 4), dtype=jnp.float32)
-        gate = jnp.asarray([0.1, 0.9], dtype=jnp.float32)
-        expected = model(x, t, tactile, gate)
-        with tempfile.TemporaryDirectory() as directory:
-            checkpoint_dir = pathlib.Path(directory)
-            save_checkpoint(checkpoint_dir, model, epoch=1, metrics={"val_mse": 0.5})
-            restored, metadata = load_checkpoint(checkpoint_dir)
-            self.assertTrue(jnp.array_equal(expected, restored(x, t, tactile, gate)))
-            self.assertTrue(metadata["decoder_config"]["gate_conditioning"])
 
     def test_optimizer_state_round_trip(self):
         from train_frs.utils.checkpoint import (

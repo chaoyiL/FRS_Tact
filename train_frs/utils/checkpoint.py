@@ -135,7 +135,12 @@ def load_checkpoint(directory: pathlib.Path) -> tuple[TactileConditionedFlowDeco
 
     with (directory / CHECKPOINT_NAME).open(encoding="utf-8") as file:
         metadata = json.load(file)
-    config = DecoderConfig(**metadata["decoder_config"])
+    raw_config = dict(metadata["decoder_config"])
+    if bool(raw_config.pop("gate_conditioning", False)):
+        raise ValueError(
+            "Gate-conditioned FRS checkpoints are incompatible with decoder input v2; retrain the model."
+        )
+    config = DecoderConfig(**raw_config)
     model = TactileConditionedFlowDecoder(config, rngs=nnx.Rngs(0))
     state, flat_template = _flat_parameter_state(model)
     ordered_paths = sorted(flat_template, key=_path_name)
