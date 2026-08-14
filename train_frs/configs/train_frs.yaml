@@ -36,7 +36,7 @@ datasets:
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
   # cache v3 additionally stores the normalized current observation.state.
-  root: /workspace/frs_pick_tube_05/action_cache_slerpflow_state_v3
+  root: /workspace/frs_pick_tube_05/action_cache_slerpflow_state
   model_sample_steps: 10
   reverse_steps: 20
   reverse_solver: slerpflow
@@ -100,7 +100,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_05/frs_0814_01_state
+  output: /workspace/frs_pick_tube_05/frs_0815_01_state
   # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -112,10 +112,12 @@ frs_training:
   gate_tau: 0.4
   gate_temperature: 0.1
   # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
-  gate_lambda: 0.25
+  gate_lambda: 0.5
   # gated 模式下 aux decode 现在只用于可信高 Gate 的绝对 GT 回归。
   aux_decode_weight: 4.0
   aux_decode_steps: 10
+  # 训练/验证动作 MSE 的正向积分器；与 action_cache.reverse_solver 无关。
+  aux_decode_solver: fireflow
   # 低 Gate 不偏好 GT 或 VLA；只有同时远离两个可接受端点时才产生弱安全 hinge。
   low_gate_safety_weight: 0.5
   low_gate_safety_margin: 0.03

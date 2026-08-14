@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from train_frs.prepare import prepare_cache
+from train_frs.prepare_frs_caches import prepare_cache
 from utils.cache import atomic_write_json, load_manifest, open_cache_arrays
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_frs.yaml"

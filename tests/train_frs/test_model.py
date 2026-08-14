@@ -168,7 +168,7 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
 
 
 def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path, monkeypatch):
-    import train_frs.train as train_module
+    import train_frs.train_frs as train_module
     import train_frs.utils.data as data_module
     import train_frs.utils.metrics as metrics_module
     import train_frs.utils.model as model_module
@@ -270,6 +270,7 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
         gate_lambda=1.0,
         aux_decode_weight=0.0,
         aux_decode_steps=1,
+        aux_decode_solver="euler",
         low_gate_safety_weight=0.0,
         low_gate_safety_margin=0.03,
         rank_weight=0.0,

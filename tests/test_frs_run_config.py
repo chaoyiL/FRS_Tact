@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from train_frs.train_frs import resolve_decode_solver
 from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
 
 
@@ -19,7 +20,7 @@ def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -
     assert training["dataset_balanced_loss"] is False
     assert training["early_stop_patience"] == 5
     assert training["early_stop_min_evals"] == 5
-    assert training["output"].endswith("frs_0814_01_state")
+    assert training["output"].endswith("frs_0815_01_state")
     assert training["init_from"] is None
     model = config["model"]
     assert model["state_conditioning"] is True
@@ -28,6 +29,7 @@ def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -
     assert training["learning_rate"] == 1.0e-4
     assert training["gate_lambda"] == 0.25
     assert training["aux_decode_weight"] == 4.0
+    assert training["aux_decode_solver"] == "fireflow"
     assert training["low_gate_safety_weight"] == 0.5
     assert training["low_gate_safety_margin"] == 0.03
     assert training["best_max_low_gate_unsafe_frac"] == 0.1
@@ -40,6 +42,13 @@ def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -
     assert training["high_gate_rank_worst_beta"] == 20.0
     assert training["high_gate_rank_source_weights"] == {}
     assert training["resume"] is False
+
+
+def test_resolve_decode_solver_accepts_fireflow() -> None:
+    assert resolve_decode_solver("FireFlow") == "fireflow"
+    assert resolve_decode_solver(None) == "euler"
+    with pytest.raises(ValueError, match="decode solver"):
+        resolve_decode_solver("slerpflow")
 
 
 def test_save_run_config_writes_effective_yaml(tmp_path: Path) -> None:

@@ -44,7 +44,8 @@ nearest-endpoint safety hinge, so either a GT-like or VLA-like action remains ac
 ## Multi-dataset evaluation
 
 Evaluate the configured validation splits with the same combined action-cache digest,
-precomputed tactile embeddings, Euler solver, and validation step count used by training:
+precomputed tactile embeddings, the configured decode solver (`frs_training.aux_decode_solver`,
+default Euler), and validation step count used by training:
 
 ```bash
 uv run --no-sync python -m train_frs.evaluate \

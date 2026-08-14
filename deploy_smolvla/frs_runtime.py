@@ -235,7 +235,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
 
 
 def _checkpoint_fingerprint(checkpoint_dir: Path) -> str:
-    """Match the source-checkpoint identity stored by ``train_frs.prepare``."""
+    """Match the source-checkpoint identity stored by ``train_frs.prepare_frs_caches``."""
 
     checkpoint_dir = checkpoint_dir.expanduser().resolve()
     if checkpoint_dir.name == "params":

@@ -10,13 +10,13 @@ import torch
 
 from train_smolvla.configuration import JaxSmolVLAConfig
 from train_frs.compare_frs_reverse_solvers import mean_ratio, summarize_inversion_mse
-from train_frs.prepare import (
+from train_frs.prepare_frs_caches import (
     _ActionCacheRecordDataset,
     _create_batch_loader,
     _prepare_observation_batch,
     _require_finite_cache_batch,
 )
-from train_frs.train import (
+from train_frs.train_frs import (
     _existing_run_artifacts,
     _validate_resume_cache,
     checkpoint_selection_key,

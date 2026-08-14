@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--history-path",
         type=pathlib.Path,
         required=True,
-        help="Path to history.csv produced by train_frs.train.",
+        help="Path to history.csv produced by train_frs.train_frs.",
     )
     parser.add_argument(
         "--output",

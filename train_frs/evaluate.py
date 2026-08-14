@@ -8,6 +8,7 @@ from typing import Any
 
 import numpy as np
 
+from train_frs.train_frs import resolve_decode_solver
 from train_frs.utils.checkpoint import load_checkpoint
 from train_frs.utils.data import (
     CachedTactileEmbeddingBatches,
@@ -481,7 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--decoder-solver",
         choices=("euler", "fireflow"),
         default=None,
-        help="Decoder solver (default: training protocol, currently euler).",
+        help="Decoder solver (default: frs_training.aux_decode_solver, else euler).",
     )
     parser.add_argument("--save-predictions", action="store_true")
     parser.add_argument("--no-plots", action="store_true")
@@ -550,7 +551,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             ),
             batch_size=args.batch_size,
             num_steps=(int(training.get("validation_steps", 10)) if args.num_steps is None else args.num_steps),
-            solver=args.solver or "euler",
+            solver=resolve_decode_solver(args.solver or training.get("aux_decode_solver", "euler")),
             target=args.target,
             save_predictions=args.save_predictions,
             write_plots=not args.no_plots,
@@ -588,7 +589,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         history_stride=args.history_stride,
         batch_size=args.batch_size,
         num_steps=10 if args.num_steps is None else args.num_steps,
-        solver=args.solver or "euler",
+        solver=resolve_decode_solver(args.solver or "euler"),
         target=args.target,
         save_predictions=args.save_predictions,
         write_plots=not args.no_plots,

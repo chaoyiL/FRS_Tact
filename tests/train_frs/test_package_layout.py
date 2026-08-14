@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def test_core_frs_files_live_in_train_frs() -> None:
     expected = {
-        "train.py",
+        "train_frs.py",
         "evaluate.py",
         "plot_history.py",
         "utils/checkpoint.py",
@@ -33,7 +33,7 @@ def test_core_frs_files_live_in_train_frs() -> None:
 
 
 def test_new_core_modules_import_and_old_package_is_gone() -> None:
-    assert importlib.util.find_spec("train_frs.train") is not None
+    assert importlib.util.find_spec("train_frs.train_frs") is not None
     assert importlib.util.find_spec("train_frs.utils.model") is not None
     assert importlib.util.find_spec("tactile_flow_steering") is None
 
@@ -41,7 +41,6 @@ def test_new_core_modules_import_and_old_package_is_gone() -> None:
 def test_frs_entrypoints_live_in_package() -> None:
     expected = {
         "train_frs.py",
-        "prepare.py",
         "prepare_frs_caches.py",
         "compare_frs_reverse_solvers.py",
     }
@@ -51,6 +50,8 @@ def test_frs_entrypoints_live_in_package() -> None:
     assert not (ROOT / "tools" / "prepare_frs_caches.py").exists()
     assert not (ROOT / "tools" / "compare_frs_reverse_solvers.py").exists()
     assert not (ROOT / "prepare.py").exists()
+    assert not (ROOT / "train_frs" / "prepare.py").exists()
+    assert not (ROOT / "train_frs" / "train.py").exists()
 
 
 def test_migrated_cli_files_remain_executable() -> None:
