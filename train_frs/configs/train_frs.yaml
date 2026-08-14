@@ -1,9 +1,9 @@
-# 五个 pick_tube 数据集上的触觉 Flow Steering 训练配置。
+# 仅在 pick_tube_01 上训练的触觉 Flow Steering 配置。
 # 完整管线：
 #   1) uv run --no-sync python tools/merge_smolvla_peft_to_jax.py \
-#        --adapter KaiyueChen/pick_tube_02_3w \
+#        --adapter KaiyueChen/pick_tube_01 \
 #        --base lerobot/smolvla_base \
-#        --output /workspace/checkpoints/pick_tube_02_3w_jax
+#        --output /workspace/checkpoints/model/pick_tube_01_jax
 #   2) uv run --no-sync python -m train_frs.compare_frs_reverse_solvers \
 #        --config train_frs/configs/train_frs.yaml
 #   3) uv run --no-sync python tools/precompute_tactile_embeddings.py \
@@ -29,29 +29,9 @@ datasets:
   - repo_id: KaiyueChen/pick_tube_01
     root: /workspace/lerobot_v30/KaiyueChen/pick_tube_01
     action_key: actions
-    rename_map: &camera_rename
+    rename_map:
       observation.images.camera0: observation.images.camera1
       observation.images.camera1: observation.images.camera2
-
-  - repo_id: KaiyueChen/pick_tube_02
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_02
-    action_key: actions
-    rename_map: *camera_rename
-
-  - repo_id: KaiyueChen/pick_tube_03
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_03
-    action_key: actions
-    rename_map: *camera_rename
-
-  - repo_id: KaiyueChen/pick_tube_04
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_04
-    action_key: actions
-    rename_map: *camera_rename
-
-  - repo_id: KaiyueChen/pick_tube_05
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
-    action_key: actions
-    rename_map: *camera_rename
 
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
@@ -71,7 +51,7 @@ action_cache:
   inference_seed: 0
   split_seed: 42
   val_fraction: 0.1
-  # 30Hz 数据相邻帧高度相关；stride=5 将约 51 万帧压到约 10 万训练样本。
+  # 30Hz 数据相邻帧高度相关；stride=5 降低重复帧对训练的支配。
   frame_stride: 5
   drop_tail_action_chunks: 1
   max_episodes: null
@@ -115,7 +95,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0813/frs_0813_01
+  output: /workspace/frs_pick_tube_0814/frs_0814_single_01_asymmetric
   # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -126,47 +106,67 @@ frs_training:
   # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
   gate_tau: 0.4
   gate_temperature: 0.1
-  gate_lambda: 1.0
-  aux_decode_weight: 1.0
+  # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
+  gate_lambda: 0.25
+  # gated 模式下 aux decode 现在只用于可信高 Gate 的绝对 GT 回归。
+  aux_decode_weight: 4.0
   aux_decode_steps: 10
-  # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
-  # decode loss 同时包含 w_eff*MSE(FRS,GT)+(1-w_eff)*MSE(FRS,VLA)。
-  # 三段式 Gate：低区只做 VLA 排序，高区只做 GT 排序与 repair，中间区不施加排序。
-  # v5: loss 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区纯 VLA、高区纯 GT，
+  # 低 Gate 不偏好 GT 或 VLA；只有同时远离两个可接受端点时才产生弱安全 hinge。
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  # 三段式 Gate：低区只做安全约束，高区做 GT decode/rank/repair，中间区只保留 FM 过渡。
+  # v7: FM 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区弱 VLA、高区纯 GT，
   # 中间区连续过渡；原始 w 仍作为 decoder conditioning，不会丢掉 Gate 强度信息。
-  # Rank/Repair 各自在活跃低/高组内归一化，不再被中间区样本数稀释。
+  # 各约束在自己的活跃 Gate 组内归一化，不被其他 Gate 区域的样本数稀释。
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  rank_weight: 3.0
-  rank_margin: 0.01
-  # 高 w 还必须比原始 VLA→GT baseline 至少降低 0.01 MSE，避免只靠远离 VLA。
+  # rank 仅作用于高 Gate，要求 MSE(FRS,GT) < MSE(FRS,VLA)。
+  rank_weight: 2.0
+  rank_margin: 0.0
+  # 关闭 stage2 的 hard-CVaR；所有有效高 Gate 样本使用普通均值，避免困难/异常样本主导梯度。
+  high_gate_rank_aggregation: balanced_mean
+  # 以下两个值仅供 worst_source_cvar 使用；balanced_mean 下不会参与损失计算。
+  high_gate_rank_hard_fraction: 1.0
+  high_gate_rank_worst_beta: 20.0
+  high_gate_rank_source_weights: {}
+  # 高 Gate FRS 还必须比原始 VLA 更接近 GT，防止只靠远离 VLA 满足 rank。
   repair_weight: 2.0
-  repair_margin: 0.01
-  # best checkpoint：只在可信低区 w<=0.3 检查 VLA 保持、可信高区 w>=0.7 检查 GT gain/rank。
+  repair_margin: 0.0
+  # best checkpoint：低区只检查安全，高区严格检查 GT gain/rank。
   # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
-  best_low_gate_max_mse_pred: 0.01
+  # 低 Gate 中最多允许 10% 样本同时远离 GT/VLA（nearest endpoint MSE > 0.03）。
+  best_max_low_gate_unsafe_frac: 0.1
   best_min_high_gate_gain: 0.0
   # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
   best_min_high_gate_rank_satisfied: 0.8
+
+  # 只有 pick_tube_01，不需要跨数据集均衡采样或均衡损失。
+  dataset_balanced_sampling: false
+  dataset_balanced_loss: false
 
   model_dim: 256
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  learning_rate: 3.0e-4
+  # 从第一阶段 best_rank 重新微调，不继承已经跑偏的 stage2；进一步降低学习率防止破坏起点。
+  learning_rate: 1.0e-5
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
-  warmup_epochs: 2
+  warmup_epochs: 1
   lr_reference_dim: 256
   min_lr_ratio: 0.1
   lr_schedule: cosine
 
   batch_size: 128
-  epochs: 100
+  epochs: 30
   validation_steps: 10
-  eval_every: 5
+  eval_every: 2
+  # 连续 5 次评估综合 checkpoint key 未改善则停止；至少先完成 5 次评估。
+  early_stop_patience: 5
+  early_stop_min_evals: 5
   seed: 42
   write_plots: true
-  # auto：last/ 存在就续训，否则冷启动；适合整条管线安全重跑。
-  resume: auto
+  # 只加载同样仅见过 pick_tube_01 的 best_rank 参数；优化器和 epoch 重新开始。
+  init_from: /workspace/frs_pick_tube_0813/frs_0813_single_01/best_rank
+  resume: false
   resume_from: null

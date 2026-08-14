@@ -564,6 +564,56 @@ class MultiCachedPairs:
         ]
         return np.concatenate(parts).astype(np.int64, copy=False)
 
+    def source_batch_quotas(self, batch_size: int) -> np.ndarray:
+        """Return deterministic near-equal per-source counts for a full batch."""
+
+        source_count = len(self.sources)
+        if batch_size < source_count:
+            raise ValueError(
+                f"source-balanced batch_size must be >= source count: {batch_size} < {source_count}"
+            )
+        base, remainder = divmod(int(batch_size), source_count)
+        quotas = np.full((source_count,), base, dtype=np.int64)
+        quotas[:remainder] += 1
+        return quotas
+
+    def batch_count(
+        self,
+        split: Literal["train", "val"],
+        *,
+        batch_size: int,
+        source_balanced: bool = False,
+    ) -> int:
+        """Return batches yielded for the requested sampling protocol."""
+
+        if not source_balanced:
+            return max(1, (len(self.indices(split)) + batch_size - 1) // batch_size)
+        quotas = self.source_batch_quotas(batch_size)
+        source_counts = np.asarray([len(source.indices(split)) for source in self.sources])
+        if np.any(source_counts == 0):
+            missing = [self.source_names[index] for index in np.flatnonzero(source_counts == 0)]
+            raise ValueError(f"source-balanced split {split!r} has empty sources: {missing}")
+        return int(np.max((source_counts + quotas - 1) // quotas))
+
+    @staticmethod
+    def _repeated_permutations(
+        indices: np.ndarray,
+        *,
+        count: int,
+        rng: np.random.Generator,
+        shuffle: bool,
+    ) -> np.ndarray:
+        """Fill ``count`` positions with complete reshuffled source passes."""
+
+        parts: list[np.ndarray] = []
+        remaining = int(count)
+        while remaining > 0:
+            cycle = rng.permutation(indices) if shuffle else indices
+            take = min(remaining, len(cycle))
+            parts.append(np.asarray(cycle[:take], dtype=np.int64))
+            remaining -= take
+        return np.concatenate(parts)
+
     def batches(
         self,
         split: Literal["train", "val"],
@@ -571,19 +621,49 @@ class MultiCachedPairs:
         batch_size: int,
         shuffle: bool,
         seed: int,
+        source_balanced: bool = False,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}.")
-        indices = self.indices(split)
-        if shuffle:
-            indices = np.random.default_rng(seed).permutation(indices)
+        if source_balanced:
+            quotas = self.source_batch_quotas(batch_size)
+            batch_count = self.batch_count(split, batch_size=batch_size, source_balanced=True)
+            rng = np.random.default_rng(seed)
+            source_streams = []
+            for source_index, (source, quota) in enumerate(
+                zip(self.sources, quotas, strict=True)
+            ):
+                local = source.indices(split) + self._starts[source_index]
+                source_streams.append(
+                    self._repeated_permutations(
+                        local,
+                        count=batch_count * int(quota),
+                        rng=np.random.default_rng(rng.integers(0, np.iinfo(np.int64).max)),
+                        shuffle=shuffle,
+                    ).reshape(batch_count, int(quota))
+                )
+            batch_index_groups = []
+            for batch_index in range(batch_count):
+                batch_indices = np.concatenate(
+                    [stream[batch_index] for stream in source_streams]
+                )
+                if shuffle:
+                    batch_indices = rng.permutation(batch_indices)
+                batch_index_groups.append(batch_indices)
+        else:
+            indices = self.indices(split)
+            if shuffle:
+                indices = np.random.default_rng(seed).permutation(indices)
+            batch_index_groups = [
+                indices[start : start + batch_size]
+                for start in range(0, len(indices), batch_size)
+            ]
         shape = (
             batch_size,
             int(self.manifest["action_horizon"]),
             int(self.manifest["action_dim"]),
         )
-        for start in range(0, len(indices), batch_size):
-            batch_indices = indices[start : start + batch_size]
+        for batch_indices in batch_index_groups:
             batch_n = len(batch_indices)
             x_base = np.empty((batch_n,) + shape[1:], dtype=np.float32)
             predicted = np.empty_like(x_base)

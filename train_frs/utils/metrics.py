@@ -76,6 +76,10 @@ class EvaluationResult:
     rank_satisfied_low_frac: float | None = None
     repair_penalty_high_w: float | None = None
     repair_satisfied_high_frac: float | None = None
+    low_nearest_endpoint_mse: float | None = None
+    low_safety_penalty: float | None = None
+    low_safe_frac: float | None = None
+    low_unsafe_frac: float | None = None
     gate_w_high_mean: float | None = None
     gate_w_low_mean: float | None = None
     tactile_change_high_mean: float | None = None
@@ -131,6 +135,7 @@ def gate_stratified_decode_metrics(
     high_w_threshold: float = 0.7,
     ranking_margin: float = 0.0,
     repair_margin: float = 0.0,
+    low_safety_margin: float = 0.0,
 ) -> dict[str, float | int]:
     """Summarize confident low/high groups; the transition region is excluded."""
 
@@ -138,6 +143,8 @@ def gate_stratified_decode_metrics(
         raise ValueError(f"ranking_margin must be non-negative, got {ranking_margin}.")
     if repair_margin < 0:
         raise ValueError(f"repair_margin must be non-negative, got {repair_margin}.")
+    if low_safety_margin < 0:
+        raise ValueError(f"low_safety_margin must be non-negative, got {low_safety_margin}.")
     if not 0.0 <= low_w_threshold < high_w_threshold <= 1.0:
         raise ValueError(
             "gate thresholds must satisfy 0 <= low < high <= 1, got " f"{low_w_threshold}, {high_w_threshold}."
@@ -164,6 +171,9 @@ def gate_stratified_decode_metrics(
     low_rank_satisfied = mse_pred + float(ranking_margin) <= mse_gt
     high_repair_penalty = np.maximum(mse_gt - mse_vla_gt + float(repair_margin), 0.0)
     high_repair_satisfied = mse_gt + float(repair_margin) <= mse_vla_gt
+    nearest_endpoint = np.minimum(mse_gt, mse_pred)
+    low_safety_penalty = np.maximum(nearest_endpoint - float(low_safety_margin), 0.0)
+    low_safe = nearest_endpoint <= float(low_safety_margin)
     result: dict[str, float | int] = {
         "mse_gt_high_w": _mean_or_nan(mse_gt[high]),
         "mse_gt_low_w": _mean_or_nan(mse_gt[low]),
@@ -181,6 +191,10 @@ def gate_stratified_decode_metrics(
         "rank_satisfied_low_frac": _mean_or_nan(low_rank_satisfied[low]),
         "repair_penalty_high_w": _mean_or_nan(high_repair_penalty[high]),
         "repair_satisfied_high_frac": _mean_or_nan(high_repair_satisfied[high]),
+        "low_nearest_endpoint_mse": _mean_or_nan(nearest_endpoint[low]),
+        "low_safety_penalty": _mean_or_nan(low_safety_penalty[low]),
+        "low_safe_frac": _mean_or_nan(low_safe[low]),
+        "low_unsafe_frac": _mean_or_nan((~low_safe)[low]),
         "gate_w_high_mean": _mean_or_nan(weights[high]),
         "gate_w_low_mean": _mean_or_nan(weights[low]),
         "n_high_w": int(np.count_nonzero(high)),
@@ -265,6 +279,7 @@ def evaluate_split(
     gate_temperature: float | None = None,
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
+    low_safety_margin: float = 0.0,
     rank_low_gate_threshold: float = 0.3,
     rank_high_gate_threshold: float = 0.7,
 ) -> EvaluationResult:
@@ -379,6 +394,7 @@ def evaluate_split(
             high_w_threshold=rank_high_gate_threshold,
             ranking_margin=rank_margin,
             repair_margin=repair_margin,
+            low_safety_margin=low_safety_margin,
         )
         gate_bins = gate_binned_decode_metrics(
             all_mse_gt,
@@ -413,6 +429,10 @@ def evaluate_split(
             "rank_satisfied_low_frac": None,
             "repair_penalty_high_w": None,
             "repair_satisfied_high_frac": None,
+            "low_nearest_endpoint_mse": None,
+            "low_safety_penalty": None,
+            "low_safe_frac": None,
+            "low_unsafe_frac": None,
             "gate_w_high_mean": None,
             "gate_w_low_mean": None,
             "tactile_change_high_mean": None,
@@ -477,6 +497,10 @@ def evaluate_split(
         rank_satisfied_low_frac=stratified["rank_satisfied_low_frac"],  # type: ignore[arg-type]
         repair_penalty_high_w=stratified["repair_penalty_high_w"],  # type: ignore[arg-type]
         repair_satisfied_high_frac=stratified["repair_satisfied_high_frac"],  # type: ignore[arg-type]
+        low_nearest_endpoint_mse=stratified["low_nearest_endpoint_mse"],  # type: ignore[arg-type]
+        low_safety_penalty=stratified["low_safety_penalty"],  # type: ignore[arg-type]
+        low_safe_frac=stratified["low_safe_frac"],  # type: ignore[arg-type]
+        low_unsafe_frac=stratified["low_unsafe_frac"],  # type: ignore[arg-type]
         gate_w_high_mean=stratified["gate_w_high_mean"],  # type: ignore[arg-type]
         gate_w_low_mean=stratified["gate_w_low_mean"],  # type: ignore[arg-type]
         tactile_change_high_mean=stratified["tactile_change_high_mean"],  # type: ignore[arg-type]

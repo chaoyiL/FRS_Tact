@@ -29,6 +29,7 @@ HISTORY_FIELDS = (
     "train_loss_total",
     "train_loss_gt_fm",
     "train_loss_vla_fm",
+    "train_loss_low_safety",
     "train_loss_decode",
     "train_loss_rank",
     "train_loss_repair",
@@ -64,6 +65,10 @@ HISTORY_FIELDS = (
     "val_rank_satisfied_low_frac",
     "val_repair_penalty_high_w",
     "val_repair_satisfied_high_frac",
+    "val_low_nearest_endpoint_mse",
+    "val_low_safety_penalty",
+    "val_low_safe_frac",
+    "val_low_unsafe_frac",
     "val_gate_w",
     "val_gate_active_frac",
     "val_gate_w_high_mean",
@@ -84,13 +89,15 @@ HISTORY_FIELDS = (
     "val_n_high_w",
     "val_n_low_w",
     "val_n_mid_w",
-    "val_worst_dataset_mse_pred_low_w",
+    "val_worst_dataset_low_safety_penalty",
+    "val_worst_dataset_low_unsafe_frac",
     "val_min_dataset_gt_gain_high_w",
     "val_worst_dataset_rank_violation_high_w",
     "val_worst_dataset_rank_gap_high_w",
     "val_min_dataset_rank_satisfied_high_frac",
     "checkpoint_selection_key",
     "checkpoint_selection_feasible",
+    "early_stop_no_improve_evals",
 ) + tuple(
     f"val_gate_bin_{bin_id}_{metric_name}"
     for bin_id, _, _ in GATE_BIN_SPECS
@@ -184,13 +191,17 @@ def plot_training_history(
     if not train_epochs:
         train_epochs, train_total_loss = _finite_series(rows, "train_flow_loss")
     train_component_series = {
-        name: _finite_series(rows, f"train_loss_{name}") for name in ("gt_fm", "vla_fm", "decode", "rank", "repair")
+        name: _finite_series(rows, f"train_loss_{name}")
+        for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
     }
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
     high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
     low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
     high_pred_epochs, mse_pred_high = _finite_series(rows, "val_mse_pred_high_w")
     low_pred_epochs, mse_pred_low = _finite_series(rows, "val_mse_pred_low_w")
+    low_nearest_epochs, mse_low_nearest = _finite_series(
+        rows, "val_low_nearest_endpoint_mse"
+    )
     high_vla_epochs, mse_vla_high = _finite_series(rows, "val_mse_vla_gt_high_w")
     low_vla_epochs, mse_vla_low = _finite_series(rows, "val_mse_vla_gt_low_w")
     high_gain_epochs, gt_gain_high = _finite_series(rows, "val_gt_gain_high_w")
@@ -285,6 +296,7 @@ def plot_training_history(
     component_colors = {
         "gt_fm": "#8172B2",
         "vla_fm": "#CCB974",
+        "low_safety": "#55A868",
         "decode": "#64B5CD",
         "rank": "#C44E52",
         "repair": "#937860",
@@ -355,6 +367,16 @@ def plot_training_history(
                     linewidth=2.0,
                     color="#64B5CD",
                     marker="D",
+                    markersize=5,
+                )
+            if low_nearest_epochs:
+                axes[row].plot(
+                    low_nearest_epochs,
+                    mse_low_nearest,
+                    label="val_nearest_endpoint (w<=0.3)",
+                    linewidth=2.0,
+                    color="#55A868",
+                    marker="P",
                     markersize=5,
                 )
             if high_vla_epochs:

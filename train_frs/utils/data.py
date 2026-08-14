@@ -395,7 +395,10 @@ class TactileConditionedBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
+        source_balanced: bool = False,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        if source_balanced:
+            raise ValueError("source-balanced sampling requires multi-dataset cached embeddings")
         yield from self.pairs.batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
 
     def batches(
@@ -405,9 +408,16 @@ class TactileConditionedBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
+        source_balanced: bool = False,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
         pair_batches = list(
-            self._iter_pair_batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
+            self._iter_pair_batches(
+                split,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                source_balanced=source_balanced,
+            )
         )
         if not pair_batches:
             return
@@ -632,8 +642,13 @@ class CachedTactileEmbeddingBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
+        source_balanced: bool = False,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
         for indices, x_base, predicted, gt_action in self.pairs.batches(
-            split, batch_size=batch_size, shuffle=shuffle, seed=seed
+            split,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            seed=seed,
+            source_balanced=source_balanced,
         ):
             yield indices, x_base, predicted, gt_action, self.encode_cache_indices(indices)

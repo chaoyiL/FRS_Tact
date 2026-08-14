@@ -118,6 +118,12 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         )
 
     output_dir = Path(str(training["output"])).expanduser()
+    rank_source_weights = training.get("high_gate_rank_source_weights") or {}
+    if not isinstance(rank_source_weights, Mapping):
+        raise ValueError("frs_training.high_gate_rank_source_weights must be a mapping")
+    rank_source_weights = {
+        str(repo_id): float(weight) for repo_id, weight in rank_source_weights.items()
+    }
     tactile_keys = tuple(str(key) for key in model["tactile_keys"])
     tactile_num_tokens = _positive_int(model, "tactile_num_tokens", len(tactile_keys))
     if tactile_num_tokens != len(tactile_keys):
@@ -140,6 +146,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_lambda=float(training.get("gate_lambda", 1.0)),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
+        low_gate_safety_weight=float(training.get("low_gate_safety_weight", 0.0)),
+        low_gate_safety_margin=float(training.get("low_gate_safety_margin", 0.03)),
         rank_weight=float(training.get("rank_weight", 0.0)),
         rank_margin=float(training.get("rank_margin", 0.0)),
         repair_weight=float(training.get("repair_weight", 0.0)),
@@ -173,6 +181,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         resume_from=(
             None if training.get("resume_from") in (None, "") else Path(str(training["resume_from"])).expanduser()
         ),
+        init_from=(
+            None if training.get("init_from") in (None, "") else Path(str(training["init_from"])).expanduser()
+        ),
         cache_dirs=cache_dirs,
         dataset_sources=datasets,
         tactile_embedding_cache_root=Path(str(tactile_cache["root"])).expanduser(),
@@ -180,11 +191,27 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
         tactile_num_tokens=tactile_num_tokens,
-        best_low_gate_max_mse_pred=float(training.get("best_low_gate_max_mse_pred", 0.01)),
+        best_max_low_gate_unsafe_frac=float(
+            training.get("best_max_low_gate_unsafe_frac", 0.1)
+        ),
         best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
         best_min_high_gate_rank_satisfied=float(
             training.get("best_min_high_gate_rank_satisfied", 0.8)
         ),
+        dataset_balanced_sampling=bool(training.get("dataset_balanced_sampling", False)),
+        dataset_balanced_loss=bool(training.get("dataset_balanced_loss", False)),
+        early_stop_patience=int(training.get("early_stop_patience", 0)),
+        early_stop_min_evals=int(training.get("early_stop_min_evals", 0)),
+        high_gate_rank_aggregation=str(
+            training.get("high_gate_rank_aggregation", "balanced_mean")
+        ),
+        high_gate_rank_hard_fraction=float(
+            training.get("high_gate_rank_hard_fraction", 0.3)
+        ),
+        high_gate_rank_worst_beta=float(
+            training.get("high_gate_rank_worst_beta", 20.0)
+        ),
+        high_gate_rank_source_weights=rank_source_weights,
     )
 
 
