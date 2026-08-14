@@ -4,13 +4,28 @@ import json
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from flax import nnx
 
 import train_frs.evaluate as evaluate_module
 from train_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
 
-def test_gated_checkpoint_evaluation_reports_gate_labels_without_decoder_gate_input(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("loss_mode", "gate_metadata", "build_episode_baselines", "expect_gate_strata"),
+    [
+        ("gated", {"gate_tau": 0.5, "gate_temperature": 0.1}, True, True),
+        ("gt", {}, False, False),
+    ],
+)
+def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
+    tmp_path,
+    monkeypatch,
+    loss_mode,
+    gate_metadata,
+    build_episode_baselines,
+    expect_gate_strata,
+):
     model = TactileConditionedFlowDecoder(
         DecoderConfig(
             action_dim=1,
@@ -46,8 +61,10 @@ def test_gated_checkpoint_evaluation_reports_gate_labels_without_decoder_gate_in
 
         def __init__(self, pairs, **kwargs):
             del pairs
-            assert kwargs["build_episode_baselines"] is True
-            self.episode_baselines = {0: np.zeros((1, 4), dtype=np.float32)}
+            assert kwargs["build_episode_baselines"] is build_episode_baselines
+            self.episode_baselines = (
+                {0: np.zeros((1, 4), dtype=np.float32)} if build_episode_baselines else {}
+            )
 
         def batches(self, split, *, batch_size, shuffle, seed):
             del batch_size, shuffle, seed
@@ -79,9 +96,8 @@ def test_gated_checkpoint_evaluation_reports_gate_labels_without_decoder_gate_in
                 "epoch": 1,
                 "extra_metadata": {
                     "cache_records_sha256": "test-digest",
-                    "loss_mode": "gated",
-                    "gate_tau": 0.5,
-                    "gate_temperature": 0.1,
+                    "loss_mode": loss_mode,
+                    **gate_metadata,
                 },
             },
         ),
@@ -111,9 +127,16 @@ def test_gated_checkpoint_evaluation_reports_gate_labels_without_decoder_gate_in
         image_cache_size=0,
     )
 
-    assert metrics["n_high_w"] == 1
-    assert metrics["n_low_w"] == 1
-    assert "gate_w_mean" in metrics
     written_metrics = json.loads((tmp_path / "output" / "metrics.json").read_text())
-    assert written_metrics["n_high_w"] == 1
-    assert written_metrics["n_low_w"] == 1
+    if expect_gate_strata:
+        assert metrics["n_high_w"] == 1
+        assert metrics["n_low_w"] == 1
+        assert "gate_w_mean" in metrics
+        assert written_metrics["n_high_w"] == 1
+        assert written_metrics["n_low_w"] == 1
+    else:
+        assert "n_high_w" not in metrics
+        assert "n_low_w" not in metrics
+        assert "gate_w_mean" not in metrics
+        assert "n_high_w" not in written_metrics
+        assert "n_low_w" not in written_metrics
