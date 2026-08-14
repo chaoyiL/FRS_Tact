@@ -112,7 +112,7 @@ frs_training:
   gate_tau: 0.4
   gate_temperature: 0.1
   # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
-  gate_lambda: 0.5
+  gate_lambda: 0
   # gated 模式下 aux decode 现在只用于可信高 Gate 的绝对 GT 回归。
   aux_decode_weight: 4.0
   aux_decode_steps: 10

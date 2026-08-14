@@ -9,12 +9,19 @@ ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube}"
 
 log() { echo "[frs] $*"; }
+warn() { echo "[frs] 警告：$*" >&2; }
 fail() { echo "[frs] 错误：$*" >&2; exit 1; }
 trap 'status=$?; echo "[frs] 训练链路失败，退出码 ${status}" >&2; exit "${status}"' ERR
 
 if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
+fi
+# Hugging Face sends HF_TOKEN in an HTTP header, which only accepts ASCII.
+# Ignore placeholders such as "你的token" instead of crashing deep inside urllib3.
+if [[ -n "${HF_TOKEN:-}" && ! "${HF_TOKEN}" =~ ^hf_[A-Za-z0-9]+$ ]]; then
+    warn "忽略格式无效的 HF_TOKEN；请使用 hf_ 开头的 ASCII token，或执行 unset HF_TOKEN"
+    unset HF_TOKEN
 fi
 # Progress is piped through tee below.  Disable Python's block buffering so
 # long JAX stages and per-batch cache progress remain visible in real time.
@@ -31,6 +38,24 @@ elif [[ -x "${HOME}/.local/bin/uv" ]]; then
 else
     fail "找不到 uv；请先运行 scripts/setup_env.sh"
 fi
+
+# setup_env.sh may have been interrupted after writing .env.frs but before
+# syncing its external virtualenv.  Prefer that environment when usable;
+# otherwise fall back to a complete project-local .venv.
+CONFIGURED_PYTHON="${UV_PROJECT_ENVIRONMENT:-}/bin/python"
+LOCAL_VENV="${PROJECT_ROOT}/.venv"
+if [[ -n "${UV_PROJECT_ENVIRONMENT:-}" ]] \
+    && { [[ ! -x "${CONFIGURED_PYTHON}" ]] \
+        || ! "${CONFIGURED_PYTHON}" -c 'import yaml, jax, flax, torch' >/dev/null 2>&1; }; then
+    if [[ -x "${LOCAL_VENV}/bin/python" ]] \
+        && "${LOCAL_VENV}/bin/python" -c 'import yaml, jax, flax, torch' >/dev/null 2>&1; then
+        warn "配置环境 ${UV_PROJECT_ENVIRONMENT} 不完整，自动改用 ${LOCAL_VENV}"
+        export UV_PROJECT_ENVIRONMENT="${LOCAL_VENV}"
+    else
+        fail "配置环境 ${UV_PROJECT_ENVIRONMENT} 不完整，项目 .venv 也不可用；请运行 scripts/setup_env.sh"
+    fi
+fi
+
 [[ -f "${CONFIG_PATH}" ]] || fail "配置不存在：${CONFIG_PATH}"
 
 mapfile -t SETTINGS < <(
