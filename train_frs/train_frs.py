@@ -146,6 +146,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_lambda=float(training.get("gate_lambda", 1.0)),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
+        low_gate_safety_weight=float(training.get("low_gate_safety_weight", 0.0)),
+        low_gate_safety_margin=float(training.get("low_gate_safety_margin", 0.03)),
         rank_weight=float(training.get("rank_weight", 0.0)),
         rank_margin=float(training.get("rank_margin", 0.0)),
         repair_weight=float(training.get("repair_weight", 0.0)),
@@ -189,7 +191,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
         tactile_num_tokens=tactile_num_tokens,
-        best_low_gate_max_mse_pred=float(training.get("best_low_gate_max_mse_pred", 0.01)),
+        best_max_low_gate_unsafe_frac=float(
+            training.get("best_max_low_gate_unsafe_frac", 0.1)
+        ),
         best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
         best_min_high_gate_rank_satisfied=float(
             training.get("best_min_high_gate_rank_satisfied", 0.8)

@@ -8,7 +8,7 @@ import yaml
 from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
 
 
-def test_default_frs_config_is_single_dataset_absolute_repair_stage3() -> None:
+def test_default_frs_config_is_single_dataset_asymmetric_gate_objective() -> None:
     config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in config["datasets"]] == [
@@ -19,13 +19,17 @@ def test_default_frs_config_is_single_dataset_absolute_repair_stage3() -> None:
     assert training["dataset_balanced_loss"] is False
     assert training["early_stop_patience"] == 5
     assert training["early_stop_min_evals"] == 5
-    assert training["output"].endswith("frs_0813_single_01_stage3")
+    assert training["output"].endswith("frs_0814_single_01_asymmetric")
     assert training["init_from"].endswith("frs_0813_single_01/best_rank")
     assert training["learning_rate"] == 1.0e-5
+    assert training["gate_lambda"] == 0.25
     assert training["aux_decode_weight"] == 4.0
-    assert training["repair_weight"] == 4.0
+    assert training["low_gate_safety_weight"] == 0.5
+    assert training["low_gate_safety_margin"] == 0.03
+    assert training["best_max_low_gate_unsafe_frac"] == 0.1
+    assert training["repair_weight"] == 2.0
     assert training["repair_margin"] == 0.0
-    assert training["rank_weight"] == 1.0
+    assert training["rank_weight"] == 2.0
     assert training["rank_margin"] == 0.0
     assert training["high_gate_rank_aggregation"] == "balanced_mean"
     assert training["high_gate_rank_hard_fraction"] == 1.0

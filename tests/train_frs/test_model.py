@@ -29,6 +29,7 @@ from train_frs.utils.model import (
     gt_supervised_loss_per_sample,
     high_gate_repair_loss_per_sample,
     high_gate_worst_source_cvar_loss,
+    low_gate_safety_loss_per_sample,
     make_optimizer,
     source_balanced_mean,
     three_region_effective_gate_weights,
@@ -366,6 +367,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             np.asarray([0.8, 0.9, 0.1, 0.2]),
             ranking_margin=0.01,
             repair_margin=0.01,
+            low_safety_margin=0.35,
         )
         self.assertEqual(out["n_high_w"], 2)
         self.assertEqual(out["n_low_w"], 2)
@@ -387,8 +389,12 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertAlmostEqual(float(out["rank_satisfied_low_frac"]), 1.0)
         self.assertAlmostEqual(float(out["repair_penalty_high_w"]), 0.0)
         self.assertAlmostEqual(float(out["repair_satisfied_high_frac"]), 1.0)
+        self.assertAlmostEqual(float(out["low_nearest_endpoint_mse"]), 0.35)
+        self.assertAlmostEqual(float(out["low_safety_penalty"]), 0.025)
+        self.assertAlmostEqual(float(out["low_safe_frac"]), 0.5)
+        self.assertAlmostEqual(float(out["low_unsafe_frac"]), 0.5)
 
-    def test_gate_preference_ranking_loss_selects_endpoint_by_gate(self):
+    def test_gate_preference_ranking_loss_only_constrains_high_gate(self):
         gt = jnp.asarray([[[0.0]], [[0.0]]], dtype=jnp.float32)
         predicted = jnp.asarray([[[1.0]], [[1.0]]], dtype=jnp.float32)
         wrongly_ordered = jnp.asarray([[[0.8]], [[0.2]]], dtype=jnp.float32)
@@ -400,7 +406,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate,
             margin=0.01,
         )
-        np.testing.assert_allclose(penalty, np.asarray([0.61, 0.61]), atol=1e-6)
+        np.testing.assert_allclose(penalty, np.asarray([1.22, 0.0]), atol=1e-6)
 
         correctly_ordered = jnp.asarray([[[0.2]], [[0.8]]], dtype=jnp.float32)
         zero_penalty = gate_preference_ranking_loss_per_sample(
@@ -429,6 +435,23 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             margin=0.01,
         )
         self.assertAlmostEqual(float(jnp.mean(padded_penalty)), float(jnp.mean(penalty)), places=6)
+
+    def test_low_gate_safety_accepts_either_endpoint_and_rejects_neither(self):
+        gt = jnp.asarray([[[0.0]], [[0.0]], [[0.0]]], dtype=jnp.float32)
+        predicted = jnp.asarray([[[1.0]], [[1.0]], [[1.0]]], dtype=jnp.float32)
+        decoded = jnp.asarray([[[0.2]], [[2.0]], [[2.0]]], dtype=jnp.float32)
+        gate = jnp.asarray([0.1, 0.2, 0.9], dtype=jnp.float32)
+        penalty = low_gate_safety_loss_per_sample(
+            decoded,
+            gt,
+            predicted,
+            gate,
+            tolerance=0.1,
+        )
+        self.assertAlmostEqual(float(penalty[0]), 0.0)
+        self.assertGreater(float(penalty[1]), 0.0)
+        self.assertAlmostEqual(float(penalty[2]), 0.0)
+        self.assertAlmostEqual(float(jnp.mean(penalty)), 0.72 / 1.7, places=6)
 
     def test_three_region_effective_gate_saturates_confident_regions(self):
         effective = three_region_effective_gate_weights(
@@ -497,6 +520,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate_lambda=1.2,
             aux_decode_weight=0.7,
             aux_decode_steps=3,
+            low_gate_safety_weight=0.2,
+            low_gate_safety_margin=0.05,
             rank_weight=0.5,
             rank_margin=0.01,
             repair_weight=0.75,
@@ -513,6 +538,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             gate_lambda=1.2,
             aux_decode_weight=0.7,
             aux_decode_steps=3,
+            low_gate_safety_weight=0.2,
+            low_gate_safety_margin=0.05,
             rank_weight=0.5,
             rank_margin=0.01,
             repair_weight=0.75,
@@ -527,10 +554,20 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             solver="euler",
         )
         mse_gt = jnp.mean(jnp.square(decoded - gt), axis=(1, 2))
-        mse_vla = jnp.mean(jnp.square(decoded - predicted), axis=(1, 2))
-        expected_decode = 0.7 * (gate * mse_gt + (1.0 - gate) * mse_vla)
-        self.assertEqual(set(components), {"gt_fm", "vla_fm", "decode", "rank", "repair"})
+        expected_decode = jnp.zeros_like(mse_gt).at[2].set(0.7 * 3.0 * mse_gt[2])
+        expected_safety = 0.2 * low_gate_safety_loss_per_sample(
+            decoded,
+            gt,
+            predicted,
+            gate,
+            tolerance=0.05,
+        )
+        self.assertEqual(
+            set(components),
+            {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"},
+        )
         self.assertTrue(bool(jnp.allclose(components["decode"], expected_decode, atol=1e-6)))
+        self.assertTrue(bool(jnp.allclose(components["low_safety"], expected_safety, atol=1e-6)))
         self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
     def test_explicit_gate_condition_changes_output(self):
@@ -680,7 +717,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_weight=1.0,
             aux_decode_steps=4,
         )
-        expected = 0.5 * loss_star + 2.0 * 0.5 * loss_stop
+        flow_star = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
+        expected = 0.5 * flow_star + 2.0 * 0.5 * loss_stop
         self.assertTrue(bool(jnp.allclose(gated_half, expected, atol=1e-5)))
 
     def test_gated_loss_adds_weighted_preference_and_repair_constraints(self):

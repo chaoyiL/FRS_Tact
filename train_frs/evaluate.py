@@ -93,6 +93,7 @@ def evaluate_decoder(
     gate_temperature = float(extra["gate_temperature"]) if track_gate else None
     rank_margin = float(extra.get("rank_margin", 0.0)) if track_gate else 0.0
     repair_margin = float(extra.get("repair_margin", 0.0)) if track_gate else 0.0
+    low_safety_margin = float(extra.get("low_gate_safety_margin", 0.0)) if track_gate else 0.0
     rank_low_gate_threshold = float(extra.get("rank_low_gate_threshold", 0.3))
     rank_high_gate_threshold = float(extra.get("rank_high_gate_threshold", 0.7))
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -160,6 +161,7 @@ def evaluate_decoder(
             gate_temperature=gate_temperature,
             rank_margin=rank_margin,
             repair_margin=repair_margin,
+            low_safety_margin=low_safety_margin,
             rank_low_gate_threshold=rank_low_gate_threshold,
             rank_high_gate_threshold=rank_high_gate_threshold,
         )
@@ -208,6 +210,10 @@ def evaluate_decoder(
                     "rank_satisfied_low_frac": float(result.rank_satisfied_low_frac),
                     "repair_penalty_high_w": float(result.repair_penalty_high_w),
                     "repair_satisfied_high_frac": float(result.repair_satisfied_high_frac),
+                    "low_nearest_endpoint_mse": float(result.low_nearest_endpoint_mse),
+                    "low_safety_penalty": float(result.low_safety_penalty),
+                    "low_safe_frac": float(result.low_safe_frac),
+                    "low_unsafe_frac": float(result.low_unsafe_frac),
                     "gate_w_mean": float(result.gate_w),
                     "gate_active_frac": float(result.gate_active_frac),
                     "gate_w_high_mean": float(result.gate_w_high_mean),
@@ -265,6 +271,19 @@ def evaluate_decoder(
                     if np.any(source_low):
                         source_metrics["mse_pred_low_w"] = float(np.mean(source_mse_pred[source_low]))
                         source_metrics["gt_gain_low_w"] = float(np.mean((source_vla_gt - source_mse_gt)[source_low]))
+                        source_nearest = np.minimum(
+                            source_mse_gt[source_low],
+                            source_mse_pred[source_low],
+                        )
+                        source_metrics["low_nearest_endpoint_mse"] = float(
+                            np.mean(source_nearest)
+                        )
+                        source_metrics["low_safety_penalty"] = float(
+                            np.mean(np.maximum(source_nearest - low_safety_margin, 0.0))
+                        )
+                        source_metrics["low_unsafe_frac"] = float(
+                            np.mean(source_nearest > low_safety_margin)
+                        )
                     source_metrics["gate_bins"] = gate_binned_decode_metrics(
                         source_mse_gt,
                         source_mse_pred,

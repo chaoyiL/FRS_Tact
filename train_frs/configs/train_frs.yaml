@@ -95,7 +95,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0813/frs_0813_single_01_stage3
+  output: /workspace/frs_pick_tube_0814/frs_0814_single_01_asymmetric
   # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -106,20 +106,22 @@ frs_training:
   # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
   gate_tau: 0.4
   gate_temperature: 0.1
-  gate_lambda: 1.5
-  # stage3 以绝对端点误差为主：高 Gate 直接回归 GT，低 Gate 直接保持 VLA。
+  # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
+  gate_lambda: 0.25
+  # gated 模式下 aux decode 现在只用于可信高 Gate 的绝对 GT 回归。
   aux_decode_weight: 4.0
   aux_decode_steps: 10
-  # 高 w 强制红线 mse_gt 低于蓝线 mse_pred；低 w 强制相反关系。
-  # decode loss 同时包含 w_eff*MSE(FRS,GT)+(1-w_eff)*MSE(FRS,VLA)。
-  # 三段式 Gate：低区只做 VLA 排序，高区只做 GT 排序与 repair，中间区不施加排序。
-  # v5: loss 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区纯 VLA、高区纯 GT，
+  # 低 Gate 不偏好 GT 或 VLA；只有同时远离两个可接受端点时才产生弱安全 hinge。
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  # 三段式 Gate：低区只做安全约束，高区做 GT decode/rank/repair，中间区只保留 FM 过渡。
+  # v7: FM 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区弱 VLA、高区纯 GT，
   # 中间区连续过渡；原始 w 仍作为 decoder conditioning，不会丢掉 Gate 强度信息。
-  # Rank/Repair 各自在活跃低/高组内归一化，不再被中间区样本数稀释。
+  # 各约束在自己的活跃 Gate 组内归一化，不被其他 Gate 区域的样本数稀释。
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  # rank 只保留为弱辅助。它只约束 GT/VLA 的相对距离，不能单独保证绝对接近 GT。
-  rank_weight: 1.0
+  # rank 仅作用于高 Gate，要求 MSE(FRS,GT) < MSE(FRS,VLA)。
+  rank_weight: 2.0
   rank_margin: 0.0
   # 关闭 stage2 的 hard-CVaR；所有有效高 Gate 样本使用普通均值，避免困难/异常样本主导梯度。
   high_gate_rank_aggregation: balanced_mean
@@ -127,12 +129,13 @@ frs_training:
   high_gate_rank_hard_fraction: 1.0
   high_gate_rank_worst_beta: 20.0
   high_gate_rank_source_weights: {}
-  # 强化绝对 repair：高 Gate FRS 至少不能比原始 VLA 更远离 GT。
-  repair_weight: 4.0
+  # 高 Gate FRS 还必须比原始 VLA 更接近 GT，防止只靠远离 VLA 满足 rank。
+  repair_weight: 2.0
   repair_margin: 0.0
-  # best checkpoint：只在可信低区 w<=0.3 检查 VLA 保持、可信高区 w>=0.7 检查 GT gain/rank。
+  # best checkpoint：低区只检查安全，高区严格检查 GT gain/rank。
   # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
-  best_low_gate_max_mse_pred: 0.01
+  # 低 Gate 中最多允许 10% 样本同时远离 GT/VLA（nearest endpoint MSE > 0.03）。
+  best_max_low_gate_unsafe_frac: 0.1
   best_min_high_gate_gain: 0.0
   # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
   best_min_high_gate_rank_satisfied: 0.8

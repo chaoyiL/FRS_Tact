@@ -39,6 +39,7 @@ The default checkpoint is `<frs_training.output>/best`; results are written to
 `<frs_training.output>/evaluation`. `metrics.json` includes aggregate and per-dataset metrics,
 while `per_sample.csv` records the source and source-local cache index.
 
-`history.csv` records the complete objective as `train_loss_total` and its five weighted terms:
-`train_loss_gt_fm`, `train_loss_vla_fm`, `train_loss_decode`, `train_loss_rank`, and
-`train_loss_repair`. `train_flow_loss` remains as a backward-compatible alias for the total.
+`history.csv` records the complete objective as `train_loss_total` and its six weighted terms:
+`train_loss_gt_fm`, `train_loss_vla_fm`, `train_loss_low_safety`, `train_loss_decode`,
+`train_loss_rank`, and `train_loss_repair`. `train_flow_loss` remains as a
+backward-compatible alias for the total.
