@@ -247,7 +247,6 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
         config=types.SimpleNamespace(
             action_horizon=2,
             action_dim=1,
-            gate_conditioning=False,
             num_tactile_tokens=4,
             tactile_window=2,
             resnet_embedding_dim=3,
