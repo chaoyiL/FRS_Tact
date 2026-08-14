@@ -27,7 +27,7 @@ rename_map:
 frs:
   enabled: true
   steering_protection_interval_s: null
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0813_04_best_gain
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0814_01_state_best_rank
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:
@@ -38,12 +38,10 @@ frs:
 
   # 必须与训练 checkpoint metadata 一致。
   history_stride: 3
-  gate_tau: 0.4
-  gate_temperature: 0.1
   reverse_steps: 20
   reverse_solver: slerpflow
   decode_steps: 10
-  decode_solver: euler
+  decode_solver: fireflow
 
   # 防止误用另一份基础 SmolVLA。复制 checkpoint 时需保留文件 mtime（如 rsync -a）。
   verify_source_checkpoint_fingerprint: false

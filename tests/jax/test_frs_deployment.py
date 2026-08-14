@@ -510,8 +510,6 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
     runtime.policy = PerActionSource()
     runtime.config = SimpleNamespace(
         tactile_keys=("left", "right"),
-        gate_tau=0.2,
-        gate_temperature=0.1,
         decode_steps=3,
         decode_solver="euler",
         max_normalized_action_abs=8.0,
@@ -535,8 +533,8 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
         value = float(np.asarray(observation["left"]).reshape(-1)[0])
         return np.full((2, 3), value, dtype=np.float32)
 
-    def decode(model, x_base, tactile, gate, *, num_steps, solver):
-        del model, gate
+    def decode(model, x_base, tactile, *, num_steps, solver, **kwargs):
+        del model, kwargs
         assert num_steps == 3
         assert solver == "euler"
         runtime.decode_calls += 1
@@ -553,13 +551,6 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
         lambda current, baseline: jnp.asarray(
             [float(np.mean(np.asarray(current) - np.asarray(baseline)))],
             dtype=jnp.float32,
-        ),
-    )
-    monkeypatch.setattr(
-        frs_runtime_module,
-        "gate_weights_from_change",
-        lambda change, *, tau, temperature: jnp.asarray(
-            [float(change[0]) + tau + temperature], dtype=jnp.float32
         ),
     )
     return runtime
@@ -960,7 +951,7 @@ def test_chunk_boundary_clears_sequence_cache_and_index_state(per_action_runtime
     assert per_action_runtime.decode_input_shapes[-1] == (1, 1, 2, 3)
 
 
-def test_gate_uses_newest_current_token_and_protected_episode_baseline(
+def test_tactile_change_uses_newest_current_token_and_protected_episode_baseline(
     per_action_runtime,
     monkeypatch,
 ) -> None:
@@ -1082,7 +1073,7 @@ def test_warmup_preserves_deep_active_state_content_and_identity(
 
 @pytest.mark.parametrize(
     "failure_kind",
-    ("gate", "decoder", "unnormalize-exception", "unnormalize-shape", "unnormalize-nonfinite"),
+    ("decoder", "unnormalize-exception", "unnormalize-shape", "unnormalize-nonfinite"),
 )
 def test_unique_steer_late_failures_leave_all_live_state_unchanged(
     per_action_runtime,
@@ -1090,7 +1081,7 @@ def test_unique_steer_late_failures_leave_all_live_state_unchanged(
     failure_kind: str,
 ) -> None:
     start_per_action_chunk(per_action_runtime)
-    sentinel_diagnostics = frs_runtime_module.FRSDiagnostics(0.1, 0.2, 0.3, 0.4)
+    sentinel_diagnostics = frs_runtime_module.FRSDiagnostics(0.1, 0.3, 0.4)
     per_action_runtime.last_diagnostics = sentinel_diagnostics
     per_action_runtime.last_vla_normalized = per_action_runtime._readonly_array(
         np.full((1, 4, 2), 11.0, dtype=np.float32)
@@ -1099,14 +1090,7 @@ def test_unique_steer_late_failures_leave_all_live_state_unchanged(
         np.full((1, 4, 2), 12.0, dtype=np.float32)
     )
 
-    if failure_kind == "gate":
-        monkeypatch.setattr(
-            frs_runtime_module,
-            "gate_weights_from_change",
-            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("gate failed")),
-        )
-        match = "gate failed"
-    elif failure_kind == "decoder":
+    if failure_kind == "decoder":
         monkeypatch.setattr(
             frs_runtime_module,
             "decode_actions",
@@ -1209,8 +1193,8 @@ def test_warmup_restores_active_state_even_when_decode_fails(
 def test_deploy_frs_config_uses_project_local_downloads() -> None:
     config = remote_client.load_config(FRS_CONFIG)
     root = ROOT / "checkpoints"
-    assert Path(config["checkpoint"]) == root / "model/pick_tube_02_3w_jax"
-    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0809_02"
+    assert Path(config["checkpoint"]) == root / "model/pick_tube_01_jax"
+    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0814_01_state_best_rank"
     assert Path(config["frs"]["tactile_encoder_checkpoint"]) == (
         root / "encoder/encoder_ckpt_0809"
     )
@@ -1220,13 +1204,15 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
     config = remote_client.load_config(FRS_CONFIG)
 
     assert config["observation"]["data_type"] == "vitac"
-    assert config["control"]["control_frequency"] == 5.0
-    assert config["control"]["steps_per_inference"] == 10
+    assert config["control"]["control_frequency"] == 10.0
+    assert config["control"]["steps_per_inference"] == 20
     assert config["control"]["steps_per_inference"] == config["control"]["action_horizon"]
     assert config["frs"]["steering_protection_interval_s"] is None
     assert config["frs"]["history_stride"] == 3
     assert config["frs"]["reverse_solver"] == "slerpflow"
-    assert config["frs"]["decode_solver"] == "euler"
+    assert config["frs"]["decode_solver"] == "fireflow"
+    assert "gate_tau" not in config["frs"]
+    assert "gate_temperature" not in config["frs"]
 
 
 def test_frs_server_config_advertises_explicit_v1_fields() -> None:
@@ -1313,8 +1299,6 @@ def test_frs_config_accepts_null_or_nonnegative_finite_protection_interval(
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
             "history_stride": 1,
-            "gate_tau": 0.2,
-            "gate_temperature": 0.1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1338,8 +1322,6 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
         "tactile_encoder_checkpoint": str(encoder_checkpoint),
         "tactile_keys": ["left"],
         "history_stride": 1,
-        "gate_tau": 0.2,
-        "gate_temperature": 0.1,
         "reverse_steps": 1,
         "reverse_solver": "euler",
         "decode_steps": 1,
@@ -1350,6 +1332,12 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
     parsed = frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
 
     assert parsed.steering_protection_interval_s == 0.25
+    assert not hasattr(parsed, "gate_tau")
+    assert not hasattr(parsed, "gate_temperature")
+
+    raw["gate_tau"] = 0.4
+    with pytest.raises(ValueError, match="Deprecated"):
+        frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
 
 
 @pytest.mark.parametrize(
@@ -1364,8 +1352,6 @@ def test_frs_config_rejects_invalid_protection_interval(value: object) -> None:
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
             "history_stride": 1,
-            "gate_tau": 0.2,
-            "gate_temperature": 0.1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1388,8 +1374,6 @@ def test_frs_config_requires_full_horizon_steps_per_inference() -> None:
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
             "history_stride": 1,
-            "gate_tau": 0.2,
-            "gate_temperature": 0.1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1401,6 +1385,36 @@ def test_frs_config_requires_full_horizon_steps_per_inference() -> None:
 
     with pytest.raises(ValueError, match="steps_per_inference.*action_horizon"):
         frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_frs_config_rejects_deprecated_gate_values() -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": 1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+            "gate_tau": 0.4,
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="Deprecated"):
+        frs_runtime_module.validate_frs_config_section(config)
+
+
+@pytest.mark.parametrize("key", ("gate_tau", "gate_temperature"))
+def test_disabled_frs_config_rejects_deprecated_gate_values(key: str) -> None:
+    with pytest.raises(ValueError, match="Deprecated"):
+        frs_runtime_module.validate_frs_config_section(
+            {"frs": {"enabled": False, key: 0.4}}
+        )
 
 
 def test_trace_v2_chunk_copies_and_freezes_source_base_and_timing() -> None:
@@ -1438,7 +1452,7 @@ def test_trace_v2_steer_records_request_decode_selection_timing_and_diagnostics(
         selected_normalized=np.asarray([6.0], dtype=np.float32),
         selected_action=np.asarray([60.0], dtype=np.float32),
         tactile_sequence_length=2,
-        diagnostics=FRSDiagnostics(0.25, 0.75, 2.0, 6.0),
+        diagnostics=FRSDiagnostics(0.25, 2.0, 6.0),
         encode_started_at=101.0,
         encode_finished_at=101.1,
         decode_started_at=101.2,
@@ -1473,7 +1487,6 @@ def test_trace_v2_steer_records_request_decode_selection_timing_and_diagnostics(
         "decode_finished_at": 101.4,
         "frs_diagnostics": {
             "tactile_change": 0.25,
-            "gate_weight": 0.75,
             "delta_rms": 2.0,
             "max_normalized_action_abs": 6.0,
         },
@@ -1485,6 +1498,8 @@ def test_trace_v2_steer_records_request_decode_selection_timing_and_diagnostics(
     for key in ("decoded_normalized", "selected_normalized", "selected_action"):
         assert trace[key].flags.writeable is False
         assert not np.shares_memory(trace[key], getattr(result, key))
+    assert not hasattr(result.diagnostics, "gate_weight")
+    assert "gate_weight" not in trace["frs_diagnostics"]
 
 
 def test_trace_v2_builder_exception_is_fail_open(caplog: pytest.LogCaptureFixture) -> None:
@@ -1556,8 +1571,6 @@ def test_frs_runtime_retains_vla_and_refined_normalized_chunks(
     runtime = object.__new__(FRSRuntime)
     runtime.config = SimpleNamespace(
         tactile_keys=("left",),
-        gate_tau=0.2,
-        gate_temperature=0.1,
         reverse_steps=2,
         reverse_solver="euler",
         decode_steps=2,
@@ -1572,25 +1585,34 @@ def test_frs_runtime_retains_vla_and_refined_normalized_chunks(
         window_tokens=lambda: np.zeros((1, 1, 1), dtype=np.float32),
     )
     runtime._encode_observation = lambda observation: np.ones((1, 1), dtype=np.float32)
-    runtime._eval_observation = lambda policy, observation, task: object()
-    runtime.model = object()
+    eval_observation = SimpleNamespace(state=jnp.asarray([[0.5]], dtype=jnp.float32))
+    runtime._eval_observation = lambda policy, observation, task: eval_observation
+    runtime.model = SimpleNamespace(config=SimpleNamespace(state_conditioning=True))
 
     monkeypatch.setattr(
         "deploy_smolvla.frs_runtime.tactile_change_from_tokens",
         lambda current, baseline: jnp.asarray([0.25], dtype=jnp.float32),
     )
     monkeypatch.setattr(
-        "deploy_smolvla.frs_runtime.gate_weights_from_change",
-        lambda change, *, tau, temperature: jnp.asarray([0.75], dtype=jnp.float32),
-    )
-    monkeypatch.setattr(
         "deploy_smolvla.frs_runtime.reverse_integrate_actions",
         lambda *args, **kwargs: args[2],
     )
-    monkeypatch.setattr(
-        "deploy_smolvla.frs_runtime.decode_actions",
-        lambda *args, **kwargs: args[1] + 1.0,
-    )
+    def decode(
+        model,
+        x_base,
+        tactile,
+        *,
+        num_steps,
+        solver,
+        state=None,
+    ):
+        assert model is runtime.model
+        assert num_steps == 2
+        assert solver == "euler"
+        assert state is eval_observation.state
+        return x_base + 1.0
+
+    monkeypatch.setattr("deploy_smolvla.frs_runtime.decode_actions", decode)
 
     vla = jnp.asarray([[[1.0], [2.0]]], dtype=jnp.float32)
     refined = runtime.steer(object(), {}, "task", vla)
@@ -1611,7 +1633,6 @@ def test_action_trace_contains_complete_vla_frs_chunks_timestamps_and_diagnostic
         last_frs_normalized=np.asarray([[[3.0], [4.0]]], dtype=np.float32),
         last_diagnostics=SimpleNamespace(
             tactile_change=0.25,
-            gate_weight=0.75,
             delta_rms=2.0,
             max_normalized_action_abs=4.0,
         ),
@@ -1633,7 +1654,6 @@ def test_action_trace_contains_complete_vla_frs_chunks_timestamps_and_diagnostic
     assert trace["inference_finished_at"] == 100.75
     assert trace["frs_diagnostics"] == {
         "tactile_change": 0.25,
-        "gate_weight": 0.75,
         "delta_rms": 2.0,
         "max_normalized_action_abs": 4.0,
     }
@@ -1652,7 +1672,6 @@ def test_action_trace_failure_is_omitted_without_raising() -> None:
         last_frs_normalized=np.asarray([[[2.0]]], dtype=np.float32),
         last_diagnostics=SimpleNamespace(
             tactile_change=0.25,
-            gate_weight=0.75,
             delta_rms=1.0,
             max_normalized_action_abs=2.0,
         ),
@@ -1692,8 +1711,6 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
     runtime.config = SimpleNamespace(
         tactile_keys=("left", "right", "left_1", "right_1"),
         history_stride=3,
-        gate_tau=0.2,
-        gate_temperature=0.1,
         decode_steps=10,
         decode_solver="euler",
         reverse_steps=20,
@@ -1708,20 +1725,14 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
             num_tactile_tokens=4,
             resnet_embedding_dim=512,
             tactile_window=10,
-            gate_conditioning=True,
         )
     )
     runtime.metadata = {
         "extra_metadata": {
             "loss_mode": "gated",
-            "loss_weighting_version": 4,
-            "rank_low_gate_threshold": 0.3,
-            "rank_high_gate_threshold": 0.7,
+            "decoder_input_version": 2,
             "history_stride": 3,
             "tactile_window": 10,
-            "gate_conditioning": True,
-            "gate_tau": 0.2,
-            "gate_temperature": 0.1,
             "validation_steps": 10,
             "validation_solver": "euler",
             "cache_configuration": {
@@ -1746,12 +1757,21 @@ def test_frs_contract_accepts_matching_training_metadata() -> None:
     runtime._validate_contract(policy, source_sample_steps=10)
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
-def test_frs_contract_accepts_supported_loss_versions(version: int) -> None:
+def test_frs_contract_allows_deployment_solver_to_differ_from_validation_solver() -> None:
     runtime, policy = _contract_runtime()
-    runtime.metadata["extra_metadata"]["loss_weighting_version"] = version
+    runtime.config.decode_solver = "fireflow"
+    runtime.metadata["extra_metadata"]["validation_solver"] = "euler"
 
     runtime._validate_contract(policy, source_sample_steps=10)
+
+
+@pytest.mark.parametrize("version", [0, 1, 3, "2", 2.0, True, None])
+def test_frs_contract_rejects_invalid_decoder_input_versions(version: object) -> None:
+    runtime, policy = _contract_runtime()
+    runtime.metadata["extra_metadata"]["decoder_input_version"] = version
+
+    with pytest.raises(ValueError, match="decoder_input_version"):
+        runtime._validate_contract(policy, source_sample_steps=10)
 
 
 def test_frs_contract_accepts_matching_state_conditioning() -> None:

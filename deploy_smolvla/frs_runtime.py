@@ -22,7 +22,7 @@ from tactile_encoder.utils.checkpoint import load_tactile_encoder
 from tactile_encoder.utils.model import tactile_clip_config_from_dict
 from tactile_encoder.utils.resnet import encode_resnet18
 from train_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
-from train_frs.utils.data import gate_weights_from_change, tactile_change_from_tokens
+from train_frs.utils.data import tactile_change_from_tokens
 from train_frs.utils.model import decode_actions
 from train_vtsmolvla.preprocessing import prepare_tactile_batch
 from utils.integration import REVERSE_INTEGRATION_VERSION
@@ -32,7 +32,6 @@ from utils.source_model import reverse_integrate_actions
 @dataclass(frozen=True)
 class FRSDiagnostics:
     tactile_change: float
-    gate_weight: float
     delta_rms: float
     max_normalized_action_abs: float
 
@@ -71,8 +70,6 @@ class FRSConfig:
     tactile_encoder_checkpoint: Path
     tactile_keys: tuple[str, ...]
     history_stride: int
-    gate_tau: float
-    gate_temperature: float
     reverse_steps: int
     reverse_solver: str
     decode_steps: int
@@ -111,14 +108,19 @@ def _steering_protection_interval(value: Any) -> float | None:
     return interval
 
 
+def _reject_deprecated_gate_config(raw: Mapping[str, Any]) -> None:
+    deprecated = {"gate_tau", "gate_temperature"}.intersection(raw)
+    if deprecated:
+        raise ValueError(f"Deprecated FRS gate config values: {sorted(deprecated)}")
+
+
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
+    _reject_deprecated_gate_config(raw)
     required = (
         "checkpoint",
         "tactile_encoder_checkpoint",
         "tactile_keys",
         "history_stride",
-        "gate_tau",
-        "gate_temperature",
         "reverse_steps",
         "reverse_solver",
         "decode_steps",
@@ -141,7 +143,6 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     history_stride = int(raw["history_stride"])
     reverse_steps = int(raw["reverse_steps"])
     decode_steps = int(raw["decode_steps"])
-    gate_temperature = float(raw["gate_temperature"])
     max_action_abs = float(raw.get("max_normalized_action_abs", 8.0))
     max_delta_rms = float(raw.get("max_normalized_delta_rms", 4.0))
     steering_protection_interval_s = _steering_protection_interval(
@@ -149,8 +150,6 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     )
     if min(history_stride, reverse_steps, decode_steps) <= 0:
         raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
-    if gate_temperature <= 0:
-        raise ValueError("frs.gate_temperature must be positive")
     if max_action_abs <= 0 or max_delta_rms <= 0:
         raise ValueError("FRS normalized-action safety limits must be positive")
     reverse_solver = str(raw["reverse_solver"])
@@ -169,8 +168,6 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         ),
         tactile_keys=tactile_keys,
         history_stride=history_stride,
-        gate_tau=float(raw["gate_tau"]),
-        gate_temperature=gate_temperature,
         reverse_steps=reverse_steps,
         reverse_solver=reverse_solver,
         decode_steps=decode_steps,
@@ -190,6 +187,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         return
     if not isinstance(raw, Mapping):
         raise ValueError("frs must be a mapping")
+    _reject_deprecated_gate_config(raw)
     if raw.get("enabled", True) is False:
         return
     for key in (
@@ -197,8 +195,6 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         "tactile_encoder_checkpoint",
         "tactile_keys",
         "history_stride",
-        "gate_tau",
-        "gate_temperature",
         "reverse_steps",
         "reverse_solver",
         "decode_steps",
@@ -220,8 +216,6 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         <= 0
     ):
         raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
-    if float(raw["gate_temperature"]) <= 0:
-        raise ValueError("frs.gate_temperature must be positive")
     if str(raw["reverse_solver"]) not in {"euler", "fireflow", "slerpflow"}:
         raise ValueError("frs.reverse_solver must be euler, fireflow, or slerpflow")
     if str(raw["decode_solver"]) not in {"euler", "fireflow"}:
@@ -393,27 +387,20 @@ class FRSSteeringPolicy:
         _require_equal(decoder.resnet_embedding_dim, self.embedding_dim, "resnet_embedding_dim")
         if bool(getattr(decoder, "state_conditioning", False)):
             _require_equal(decoder.state_dim, int(policy.config.state_dim), "state_dim")
-        if not bool(decoder.gate_conditioning):
-            raise ValueError("FRS checkpoint must have explicit gate conditioning enabled")
-
         extra = self.metadata.get("extra_metadata")
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
         _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
-        loss_weighting_version = int(extra.get("loss_weighting_version", 0))
-        if loss_weighting_version not in {2, 3, 4, 5, 6, 7}:
+        decoder_input_version = extra.get("decoder_input_version")
+        if (
+            not isinstance(decoder_input_version, int)
+            or isinstance(decoder_input_version, bool)
+            or decoder_input_version != 2
+        ):
             raise ValueError(
-                "unsupported FRS loss_weighting_version: "
-                f"{loss_weighting_version}; expected one of 2, 3, 4, 5, 6, 7"
+                "FRS checkpoint mismatch for decoder_input_version: "
+                f"{decoder_input_version!r} != 2"
             )
-        if loss_weighting_version >= 4:
-            low_threshold = float(extra.get("rank_low_gate_threshold", -1.0))
-            high_threshold = float(extra.get("rank_high_gate_threshold", -1.0))
-            if not 0.0 <= low_threshold < 0.5 < high_threshold <= 1.0:
-                raise ValueError(
-                    "invalid v4+ three-region gate thresholds: "
-                    f"low={low_threshold}, high={high_threshold}"
-                )
         _require_equal(
             int(extra.get("history_stride", 0)),
             self.config.history_stride,
@@ -424,24 +411,18 @@ class FRSSteeringPolicy:
             decoder.tactile_window,
             "tactile_window",
         )
-        _require_equal(bool(extra.get("gate_conditioning", False)), True, "gate_conditioning")
         _require_equal(
             bool(extra.get("state_conditioning", False)),
             bool(getattr(decoder, "state_conditioning", False)),
             "state_conditioning",
-        )
-        _require_equal(float(extra.get("gate_tau")), self.config.gate_tau, "gate_tau")
-        _require_equal(
-            float(extra.get("gate_temperature")),
-            self.config.gate_temperature,
-            "gate_temperature",
         )
         _require_equal(
             int(extra.get("validation_steps", 0)),
             self.config.decode_steps,
             "decode_steps",
         )
-        _require_equal(extra.get("validation_solver"), self.config.decode_solver, "decode_solver")
+        # ``validation_solver`` records how the training run selected/evaluated
+        # this checkpoint. It is provenance, not a runtime decoder constraint.
 
         source_configs = _source_cache_configurations(extra)
         deployed_fingerprint = None
@@ -779,13 +760,6 @@ class FRSSteeringPolicy:
             current[None, ...],
             self._episode_baseline[None, ...],
         )
-        # TODO: 考虑去掉 Gate 输入
-        gate = gate_weights_from_change(
-            change,
-            tau=self.config.gate_tau,
-            temperature=self.config.gate_temperature,
-        )
-
         decode_started_at = time.time()
         decode_kwargs: dict[str, Any] = {}
         normalized_state = self._normalized_state(observation)
@@ -795,7 +769,6 @@ class FRSSteeringPolicy:
             self.model,
             self._x_base_device,
             tactile,
-            jnp.asarray(gate, dtype=jnp.float32),
             num_steps=self.config.decode_steps,
             solver=self.config.decode_solver,
             **decode_kwargs,
@@ -804,7 +777,6 @@ class FRSSteeringPolicy:
         decode_finished_at = time.time()
         diagnostics = FRSDiagnostics(
             tactile_change=float(change[0]),
-            gate_weight=float(gate[0]),
             delta_rms=delta_rms,
             max_normalized_action_abs=max_abs,
         )
@@ -911,13 +883,6 @@ class FRSSteeringPolicy:
                 )
             else:
                 synthetic_x_base = jnp.asarray(self._x_base, dtype=jnp.float32)
-            baseline_batch = baseline[None, ...]
-            change = tactile_change_from_tokens(baseline_batch, baseline_batch)
-            synthetic_gate = gate_weights_from_change(
-                change,
-                tau=self.config.gate_tau,
-                temperature=self.config.gate_temperature,
-            )
             for length in range(1, horizon + 1):
                 tactile = jnp.expand_dims(
                     jnp.asarray(np.stack([baseline] * length)),
@@ -932,7 +897,6 @@ class FRSSteeringPolicy:
                     self.model,
                     synthetic_x_base,
                     tactile,
-                    jnp.asarray(synthetic_gate, dtype=jnp.float32),
                     num_steps=self.config.decode_steps,
                     solver=self.config.decode_solver,
                     **warmup_kwargs,
@@ -970,9 +934,7 @@ class FRSSteeringPolicy:
             self.history.append(current)
 
         tactile_seq = self.history.window_tokens()[None, ...]
-        # ?
         change = tactile_change_from_tokens(current[None, ...], self._episode_baseline[None, ...])
-        gate = gate_weights_from_change(change, tau=self.config.gate_tau, temperature=self.config.gate_temperature)
 
         eval_observation = self._eval_observation(policy, observation, task)
         x_base = reverse_integrate_actions(
@@ -990,7 +952,6 @@ class FRSSteeringPolicy:
             self.model,
             x_base,
             jnp.asarray(tactile_seq, dtype=jnp.float32),
-            jnp.asarray(gate, dtype=jnp.float32),
             num_steps=self.config.decode_steps,
             solver=self.config.decode_solver,
             **legacy_decode_kwargs,
@@ -1017,7 +978,6 @@ class FRSSteeringPolicy:
 
         self.last_diagnostics = FRSDiagnostics(
             tactile_change=float(change[0]),
-            gate_weight=float(gate[0]),
             delta_rms=delta_rms,
             max_normalized_action_abs=max_abs,
         )

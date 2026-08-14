@@ -570,8 +570,6 @@ def _write_protocol_run_config(path: Path, *, frs_enabled: bool) -> Path:
             "tactile_encoder_checkpoint": "unused-tactile",
             "tactile_keys": ["tactile"],
             "history_stride": 1,
-            "gate_tau": 0.1,
-            "gate_temperature": 0.2,
             "reverse_steps": 2,
             "reverse_solver": "euler",
             "decode_steps": 2,

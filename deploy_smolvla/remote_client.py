@@ -586,7 +586,6 @@ def _build_frs_steer_trace(
         "decode_finished_at": float(result.decode_finished_at),
         "frs_diagnostics": {
             "tactile_change": float(diagnostics.tactile_change),
-            "gate_weight": float(diagnostics.gate_weight),
             "delta_rms": float(diagnostics.delta_rms),
             "max_normalized_action_abs": float(diagnostics.max_normalized_action_abs),
         },
@@ -807,7 +806,6 @@ def _build_action_trace(
         "inference_finished_at": float(inference_wall_end_s),
         "frs_diagnostics": {
             "tactile_change": float(diagnostics.tactile_change),
-            "gate_weight": float(diagnostics.gate_weight),
             "delta_rms": float(diagnostics.delta_rms),
             "max_normalized_action_abs": float(diagnostics.max_normalized_action_abs),
         },
@@ -1124,7 +1122,6 @@ def run(
                     diag = frs_runtime.last_diagnostics
                     frs_status = (
                         f" tactile_change={diag.tactile_change:.4f}"
-                        f" gate={diag.gate_weight:.4f}"
                         f" frs_delta_rms={diag.delta_rms:.4f}"
                     )
                 print(
