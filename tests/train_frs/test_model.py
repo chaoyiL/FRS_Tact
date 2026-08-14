@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import dataclasses
 import inspect
 import json
@@ -168,27 +167,150 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
         load_checkpoint(tmp_path)
 
 
-def test_training_checkpoint_metadata_declares_gate_training_only():
-    train_source = pathlib.Path(__file__).parents[2] / "train_frs" / "train.py"
-    module = ast.parse(train_source.read_text(encoding="utf-8"))
-    checkpoint_assignment = next(
-        node
-        for node in ast.walk(module)
-        if isinstance(node, ast.Assign)
-        and any(
-            isinstance(target, ast.Name) and target.id == "checkpoint_extra"
-            for target in node.targets
-        )
-    )
-    assert isinstance(checkpoint_assignment.value, ast.Dict)
-    entries = {
-        key.value: value.value
-        for key, value in zip(checkpoint_assignment.value.keys, checkpoint_assignment.value.values)
-        if isinstance(key, ast.Constant) and isinstance(key.value, str) and isinstance(value, ast.Constant)
-    }
+def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path, monkeypatch):
+    import train_frs.train as train_module
+    import train_frs.utils.data as data_module
+    import train_frs.utils.metrics as metrics_module
+    import train_frs.utils.model as model_module
+    import utils.cache as cache_module
 
-    assert entries["decoder_input_version"] == 2
-    assert "gate_conditioning" not in entries
+    class FakePairs:
+        manifest = {
+            "action_horizon": 2,
+            "action_dim": 1,
+            "state_dim": 0,
+            "records_sha256": "test-digest",
+            "configuration": {"dataset_repo_id": "owner/data"},
+        }
+
+        def __init__(self, cache_dir):
+            del cache_dir
+
+        def indices(self, split):
+            assert split == "train"
+            return np.asarray([0], dtype=np.int64)
+
+    class FakeConditioner:
+        resnet_embedding_dim = 4
+
+        def __init__(self, pairs, **kwargs):
+            del pairs
+            assert kwargs["build_episode_baselines"] is True
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "train"
+            yield (
+                np.asarray([0], dtype=np.int64),
+                np.zeros((1, 2, 1), dtype=np.float32),
+                np.zeros((1, 2, 1), dtype=np.float32),
+                np.ones((1, 2, 1), dtype=np.float32),
+                np.zeros((1, 0), dtype=np.float32),
+                jnp.ones((1, 2, 1, 4), dtype=jnp.float32),
+            )
+
+        def tactile_change_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([0.9], dtype=np.float32)
+
+        def close(self):
+            return None
+
+    validation = type(
+        "Validation",
+        (),
+        {
+            "target": "gt",
+            "flow_loss": 0.0,
+            "mse": 0.0,
+            "rmse": 0.0,
+            "mae": 0.0,
+            "flow_loss_gt": 0.0,
+            "mse_gt": 0.0,
+            "rmse_gt": 0.0,
+            "mae_gt": 0.0,
+            "flow_loss_pred": 0.0,
+            "mse_pred": 0.0,
+            "rmse_pred": 0.0,
+            "mae_pred": 0.0,
+            "mse_vla_gt": 0.0,
+            "gt_gain": 0.0,
+            "relative_gt_error": 0.0,
+            "n_high_w": None,
+            "gate_bin_metrics": None,
+        },
+    )()
+
+    monkeypatch.setattr(cache_module, "CachedPairs", FakePairs)
+    monkeypatch.setattr(data_module, "TactileConditionedBatches", FakeConditioner)
+    monkeypatch.setattr(
+        model_module,
+        "train_step",
+        lambda *args, **kwargs: (
+            jnp.asarray(0.0),
+            {
+                name: jnp.asarray(0.0)
+                for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+            },
+        ),
+    )
+    monkeypatch.setattr(metrics_module, "evaluate_split", lambda *args, **kwargs: validation)
+
+    train_module.train_decoder(
+        cache_dir=tmp_path / "cache",
+        tactile_encoder_dir=tmp_path,
+        output_dir=tmp_path / "output",
+        dataset_repo_id="owner/data",
+        dataset_root=None,
+        tactile_window_divisor=1,
+        history_stride=1,
+        loss_mode="gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+        gate_lambda=1.0,
+        aux_decode_weight=0.0,
+        aux_decode_steps=1,
+        low_gate_safety_weight=0.0,
+        low_gate_safety_margin=0.03,
+        rank_weight=0.0,
+        rank_margin=0.0,
+        repair_weight=0.0,
+        repair_margin=0.0,
+        rank_low_gate_threshold=0.3,
+        rank_high_gate_threshold=0.7,
+        state_conditioning=False,
+        state_dropout_rate=0.0,
+        model_dim=4,
+        depth=1,
+        num_heads=1,
+        mlp_ratio=1,
+        learning_rate=1.0e-3,
+        weight_decay=0.0,
+        grad_clip_norm=None,
+        warmup_epochs=0,
+        lr_reference_dim=None,
+        min_learning_rate_ratio=0.1,
+        cosine_decay=False,
+        batch_size=1,
+        epochs=1,
+        validation_steps=1,
+        eval_every=1,
+        seed=0,
+        write_plots=False,
+        num_workers=0,
+        prefetch_batches=1,
+        load_threads=1,
+        pipeline_prefetch=1,
+        image_cache_size=0,
+        encode_batch_size=1,
+        tactile_num_tokens=1,
+    )
+
+    metadata = json.loads((tmp_path / "output" / "last" / "checkpoint.json").read_text())
+    extra_metadata = metadata["extra_metadata"]
+    assert extra_metadata["decoder_input_version"] == 2
+    assert extra_metadata["loss_weighting_version"] == 7
+    assert "gate_conditioning" not in extra_metadata
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])
