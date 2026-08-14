@@ -93,7 +93,7 @@ def evaluate_decoder(
     loss_mode = str(extra.get("loss_mode", "gt"))
     if target is None:
         target = "predicted" if loss_mode == "predicted" else "gt"
-    track_gate = loss_mode == "gated" or bool(model.config.gate_conditioning)
+    track_gate = loss_mode == "gated"
     gate_tau = float(extra["gate_tau"]) if track_gate else None
     gate_temperature = float(extra["gate_temperature"]) if track_gate else None
     rank_margin = float(extra.get("rank_margin", 0.0)) if track_gate else 0.0

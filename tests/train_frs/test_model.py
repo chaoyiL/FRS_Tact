@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import dataclasses
 import inspect
 import json
@@ -165,6 +166,29 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
     metadata_path.write_text(json.dumps(metadata))
     with pytest.raises(ValueError, match="(?i)gate-conditioned.*retrain"):
         load_checkpoint(tmp_path)
+
+
+def test_training_checkpoint_metadata_declares_gate_training_only():
+    train_source = pathlib.Path(__file__).parents[2] / "train_frs" / "train.py"
+    module = ast.parse(train_source.read_text(encoding="utf-8"))
+    checkpoint_assignment = next(
+        node
+        for node in ast.walk(module)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "checkpoint_extra"
+            for target in node.targets
+        )
+    )
+    assert isinstance(checkpoint_assignment.value, ast.Dict)
+    entries = {
+        key.value: value.value
+        for key, value in zip(checkpoint_assignment.value.keys, checkpoint_assignment.value.values)
+        if isinstance(key, ast.Constant) and isinstance(key.value, str) and isinstance(value, ast.Constant)
+    }
+
+    assert entries["decoder_input_version"] == 2
+    assert "gate_conditioning" not in entries
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])
@@ -551,7 +575,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(components["low_safety"], expected_safety, atol=1e-6)))
         self.assertTrue(bool(jnp.allclose(total, sum(components.values()), atol=1e-6)))
 
-    def test_gate_conditioned_evaluation_reports_vla_baseline_and_gain(self):
+    def test_gate_supervision_evaluation_reports_vla_baseline_and_gain(self):
         model = self.make_model()
 
         class FakeConditioner:

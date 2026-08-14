@@ -806,7 +806,6 @@ def train_decoder(
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
         num_tactile_tokens=tactile_num_tokens,
-        gate_conditioning=(loss_mode == "gated"),
         state_dim=int(pairs.manifest.get("state_dim", 0)),
         state_conditioning=state_conditioning,
     )
@@ -828,11 +827,6 @@ def train_decoder(
                 flush=True,
             )
         # ``model`` already loaded above.
-        if loss_mode == "gated" and not model.config.gate_conditioning:
-            raise ValueError(
-                "This checkpoint predates explicit gate conditioning. Start a fresh run in a "
-                "new frs_training.output directory instead of resuming it."
-            )
     source_count = len(pairs.sources) if isinstance(pairs, MultiCachedPairs) else 1
     if (dataset_balanced_sampling or dataset_balanced_loss) and not isinstance(
         pairs, MultiCachedPairs
@@ -1131,7 +1125,7 @@ def train_decoder(
                     "gate_tau": gate_tau,
                     "gate_temperature": gate_temperature,
                     "gate_lambda": gate_lambda,
-                    "gate_conditioning": bool(model.config.gate_conditioning),
+                    "decoder_input_version": 2,
                     "state_conditioning": bool(model.config.state_conditioning),
                     "state_dim": int(model.config.state_dim),
                     "state_dropout_rate": state_dropout_rate,
