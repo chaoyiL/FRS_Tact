@@ -298,7 +298,7 @@ Expected: the pre-existing checkpoint, FireFlow, and solver-contract changes rem
 
 - [ ] **Step 1: Write failing modality tests**
 
-Assert the default intervention set is exactly tactile-only and decode callbacks take two inputs:
+Assert the default intervention set is exactly tactile-only and decode callbacks keep robot state while dropping gate input:
 
 ```python
 assert {item.name for item in DEFAULT_INTERVENTIONS} == {
@@ -311,7 +311,8 @@ assert {item.name for item in DEFAULT_INTERVENTIONS} == {
     "drop_sensor_3",
 }
 
-def decode(x_base, tactile):
+def decode(x_base, tactile, state):
+    assert state.shape[0] == x_base.shape[0]
     return x_base
 ```
 
@@ -339,22 +340,30 @@ Expected: gate interventions remain or decode callbacks still require a gate inp
 
 - [ ] **Step 3: Make interventions tactile-only**
 
-Remove gate entries and the `gate_` branch. Change decode boundaries to:
+Remove gate entries and the `gate_` branch. Include state in `EvaluationContext.batches()` and change decode boundaries to:
 
 ```python
-def _decode_checked(decode_fn, x_base, tactile):
-    prediction = np.asarray(decode_fn(x_base.copy(), tactile), dtype=np.float32)
+def _decode_checked(decode_fn, x_base, tactile, state):
+    prediction = np.asarray(
+        decode_fn(x_base.copy(), tactile, state),
+        dtype=np.float32,
+    )
     if prediction.shape != x_base.shape:
         raise ValueError(
             f"decode output shape {prediction.shape} does not match action shape {x_base.shape}"
         )
     return prediction
 
-full = _decode_checked(decode_fn, fixed_x_base, tactile)
-predictions[name] = _decode_checked(decode_fn, fixed_x_base, changed.tactile)
+full = _decode_checked(decode_fn, fixed_x_base, tactile, state)
+predictions[name] = _decode_checked(
+    decode_fn,
+    fixed_x_base,
+    changed.tactile,
+    state,
+)
 ```
 
-Continue calculating original and recomputed gate labels only for `sample_error_rows`; never pass them to `decode_actions`. Require `loss_mode=gated` and `decoder_input_version=2` when loading the evaluation context.
+Continue calculating original and recomputed gate labels only for `sample_error_rows`; never pass them to `decode_actions`. Forward `state` to `decode_actions`. Require `loss_mode=gated` and `decoder_input_version=2` when loading the evaluation context.
 
 - [ ] **Step 4: Run modality tests and verify GREEN**
 
