@@ -1746,10 +1746,20 @@ def test_frs_contract_accepts_matching_training_metadata() -> None:
     runtime._validate_contract(policy, source_sample_steps=10)
 
 
-@pytest.mark.parametrize("version", [2, 3, 4, 5])
+@pytest.mark.parametrize("version", [2, 3, 4, 5, 6, 7])
 def test_frs_contract_accepts_supported_loss_versions(version: int) -> None:
     runtime, policy = _contract_runtime()
     runtime.metadata["extra_metadata"]["loss_weighting_version"] = version
+
+    runtime._validate_contract(policy, source_sample_steps=10)
+
+
+def test_frs_contract_accepts_matching_state_conditioning() -> None:
+    runtime, policy = _contract_runtime()
+    runtime.model.config.state_conditioning = True
+    runtime.model.config.state_dim = 20
+    runtime.metadata["extra_metadata"]["state_conditioning"] = True
+    policy.config.state_dim = 20
 
     runtime._validate_contract(policy, source_sample_steps=10)
 

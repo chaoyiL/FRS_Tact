@@ -216,6 +216,7 @@ def _decode_with_tactile(
     x_base = jnp.asarray(pairs.arrays["x_base"][cache_indices])
     gt_action = np.asarray(pairs.arrays["gt_action"][cache_indices], dtype=np.float32)
     predicted_action = np.asarray(pairs.arrays["target"][cache_indices], dtype=np.float32)
+    state = jnp.asarray(pairs.arrays["state"][cache_indices])
     tactile_seq = conditioner.encode_cache_indices(cache_indices)
     decoded = np.asarray(
         decode_actions(
@@ -225,6 +226,7 @@ def _decode_with_tactile(
             None if gate_weights is None else jnp.asarray(gate_weights),
             num_steps=num_steps,
             solver=solver,
+            state=state,
         ),
         dtype=np.float32,
     )

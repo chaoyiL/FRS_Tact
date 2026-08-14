@@ -238,7 +238,13 @@ def test_tactile_encoder_rejects_empty_sequence(decoder):
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
-    def make_model(self, *, tactile_window: int = 3, gate_conditioning: bool = False) -> TactileConditionedFlowDecoder:
+    def make_model(
+        self,
+        *,
+        tactile_window: int = 3,
+        gate_conditioning: bool = False,
+        state_conditioning: bool = False,
+    ) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
             DecoderConfig(
                 action_dim=3,
@@ -250,12 +256,50 @@ class ConditionedDecoderModelTest(unittest.TestCase):
                 depth=2,
                 num_heads=4,
                 gate_conditioning=gate_conditioning,
+                state_dim=5 if state_conditioning else 0,
+                state_conditioning=state_conditioning,
             ),
             rngs=nnx.Rngs(0),
         )
 
     def _tactile_seq(self, key, batch: int, window: int = 3):
         return jax.random.normal(key, (batch, window, 4, 4))
+
+    def test_state_token_conditions_decode_and_can_be_fully_masked(self):
+        model = self.make_model(gate_conditioning=True, state_conditioning=True)
+        x_base = jax.random.normal(jax.random.key(80), (2, 6, 3))
+        tactile = self._tactile_seq(jax.random.key(81), 2)
+        gate = jnp.asarray([0.8, 0.8], dtype=jnp.float32)
+        state_a = jnp.tile(jnp.arange(5, dtype=jnp.float32)[None, :], (2, 1))
+        state_b = jnp.flip(state_a, axis=1)
+
+        decoded_a = decode_actions(
+            model, x_base, tactile, gate, num_steps=2, state=state_a
+        )
+        decoded_b = decode_actions(
+            model, x_base, tactile, gate, num_steps=2, state=state_b
+        )
+        self.assertGreater(float(jnp.max(jnp.abs(decoded_a - decoded_b))), 1e-6)
+
+        dropped_a = decode_actions(
+            model,
+            x_base,
+            tactile,
+            gate,
+            num_steps=2,
+            state=state_a,
+            state_keep_mask=jnp.zeros((2,), dtype=jnp.float32),
+        )
+        dropped_b = decode_actions(
+            model,
+            x_base,
+            tactile,
+            gate,
+            num_steps=2,
+            state=state_b,
+            state_keep_mask=jnp.zeros((2,), dtype=jnp.float32),
+        )
+        self.assertTrue(bool(jnp.allclose(dropped_a, dropped_b, atol=1e-6)))
 
     def test_source_balanced_mean_weights_sources_equally(self):
         values = jnp.asarray([1.0, 3.0, 10.0], dtype=jnp.float32)
@@ -604,6 +648,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
                     np.zeros((2, 6, 3), dtype=np.float32),
                     np.zeros((2, 6, 3), dtype=np.float32),
                     np.ones((2, 6, 3), dtype=np.float32),
+                    np.ones((2, 5), dtype=np.float32),
                     jnp.ones((2, 3, 4, 4), dtype=jnp.float32),
                 )
 

@@ -582,6 +582,7 @@ def prepare_cache(
     digest = records_digest(records)
     manifest_path = cache_dir / MANIFEST_NAME
     action_dim = model.action_dim
+    state_dim = int(model.config.state_dim)
     drop_frames = int(drop_tail_action_chunks) * action_horizon
     if drop_frames > 0:
         print(
@@ -609,6 +610,7 @@ def prepare_cache(
             records,
             action_horizon=action_horizon,
             action_dim=action_dim,
+            state_dim=state_dim,
         )
         completed = 0
         manifest = {
@@ -622,6 +624,7 @@ def prepare_cache(
             "val_episodes": list(val_episodes),
             "action_horizon": action_horizon,
             "action_dim": action_dim,
+            "state_dim": state_dim,
             "configuration": configuration,
             "records_sha256": digest,
         }
@@ -668,16 +671,19 @@ def prepare_cache(
         valid = pending["valid"]
         predicted_actions, x_base = jax.device_get(pending["predicted"]), jax.device_get(pending["x_base"])
         gt_actions = pending["gt_action"]
+        states = pending["state"]
         noise = pending["noise"]
         predicted_actions = np.asarray(predicted_actions[:valid], dtype=np.float32)
         x_base = np.asarray(x_base[:valid], dtype=np.float32)
         gt_actions = np.asarray(gt_actions[:valid], dtype=np.float32)
+        states = np.asarray(jax.device_get(states[:valid]), dtype=np.float32)
         noise = np.asarray(jax.device_get(noise[:valid]), dtype=np.float32)
         batch_inversion_mse = inversion_mse(x_base, noise)
         _require_finite_cache_batch(
             predicted_actions=predicted_actions,
             x_base=x_base,
             gt_actions=gt_actions,
+            states=states,
             noise=noise,
             inversion_mse=batch_inversion_mse,
         )
@@ -685,6 +691,7 @@ def prepare_cache(
         arrays["target"][start:stop] = predicted_actions
         arrays["x_base"][start:stop] = x_base
         arrays["gt_action"][start:stop] = gt_actions
+        arrays["state"][start:stop] = states
         arrays["inversion_mse"][start:stop] = batch_inversion_mse
         manifest["completed_samples"] = stop
         batches_since_flush += 1
@@ -769,6 +776,7 @@ def prepare_cache(
             "predicted": predicted_actions,
             "x_base": x_base,
             "gt_action": gt_action_batch,
+            "state": observation_batch.state,
             "noise": noise,
         }
     del loader_iterator
@@ -787,7 +795,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Precompute SmolVLA predicted actions, reverse-integrated x_base, "
-            "and dataset ground-truth actions."
+            "dataset ground-truth actions, and normalized current robot state."
         ),
     )
     add_eval_data_arguments(parser, required=True)

@@ -7,6 +7,7 @@ import tempfile
 import numpy as np
 
 from utils.cache import CACHE_VERSION
+from utils.cache import close_cache_arrays
 from utils.cache import SampleRecord
 from utils.cache import atomic_write_json
 from utils.cache import create_cache_arrays
@@ -74,6 +75,8 @@ class EpisodeSplitTest(unittest.TestCase):
             reopened["x_base"][1] = 9.0
             flush_arrays(reopened)
             self.assertTrue(np.all(np.load(cache_dir / "x_base.npy")[1] == 9.0))
+            close_cache_arrays(reopened)
+            close_cache_arrays(arrays)
 
     def test_finalize_partial_cache_truncates_and_resplits(self):
         records = [
@@ -89,6 +92,7 @@ class EpisodeSplitTest(unittest.TestCase):
             arrays["target"][:] = arrays["x_base"][:] + 1.0
             arrays["inversion_mse"][:] = np.asarray([1.0, 2.0, 3.0, 0.0], dtype=np.float32)
             flush_arrays(arrays)
+            close_cache_arrays(arrays)
             atomic_write_json(
                 cache_dir / "manifest.json",
                 {
@@ -112,6 +116,7 @@ class EpisodeSplitTest(unittest.TestCase):
             self.assertEqual(manifest["train_sample_count"] + manifest["val_sample_count"], 3)
             self.assertEqual(set(manifest["train_episodes"]) & set(manifest["val_episodes"]), set())
             self.assertAlmostEqual(manifest["mean_source_inversion_mse"], 2.0)
+            close_cache_arrays(reopened)
 
     def test_trim_episode_tail_drops_k_action_horizons(self):
         indices = list(range(120))
@@ -145,6 +150,7 @@ class EpisodeSplitTest(unittest.TestCase):
             arrays["gt_action"][:] = 0.0
             arrays["x_base"][:] = 1.0
             arrays["inversion_mse"][:] = np.asarray([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
+            arrays["state"][:] = np.asarray([[10.0], [20.0], [30.0], [40.0]], dtype=np.float32)
             flush_arrays(arrays)
             atomic_write_json(
                 source / "manifest.json",
@@ -159,6 +165,7 @@ class EpisodeSplitTest(unittest.TestCase):
                     "val_episodes": [1],
                     "action_horizon": 2,
                     "action_dim": 2,
+                    "state_dim": 1,
                     "configuration": {},
                     "records_sha256": "unused",
                     "mean_source_inversion_mse": 0.25,
@@ -174,11 +181,14 @@ class EpisodeSplitTest(unittest.TestCase):
             self.assertEqual(manifest["filter"]["dropped_sample_count"], 1)
             self.assertEqual(list(kept["dataset_index"]), [10, 20, 40])
             self.assertTrue(np.allclose(kept["inversion_mse"], [0.1, 0.2, 0.4]))
+            self.assertTrue(np.allclose(kept["state"][:, 0], [10.0, 20.0, 40.0]))
             self.assertEqual(manifest["train_sample_count"], 2)
             self.assertEqual(manifest["val_sample_count"], 1)
 
             with self.assertRaises(FileExistsError):
                 write_cache_subset(source, output, [0, 1, 3])
+            close_cache_arrays(kept)
+            close_cache_arrays(arrays)
 
 
 if __name__ == "__main__":

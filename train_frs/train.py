@@ -313,6 +313,8 @@ def train_decoder(
     repair_margin: float,
     rank_low_gate_threshold: float,
     rank_high_gate_threshold: float,
+    state_conditioning: bool,
+    state_dropout_rate: float,
     model_dim: int,
     depth: int,
     num_heads: int,
@@ -554,6 +556,8 @@ def train_decoder(
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
     if tactile_num_tokens <= 0:
         raise ValueError(f"tactile_num_tokens must be positive, got {tactile_num_tokens}.")
+    if not 0.0 <= state_dropout_rate < 1.0:
+        raise ValueError("state_dropout_rate must be in [0, 1).")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
     if resume_dir is not None and init_from is not None:
@@ -660,6 +664,7 @@ def train_decoder(
         stored_rank_low_gate_threshold = float(resume_extra.get("rank_low_gate_threshold", 0.5))
         stored_rank_high_gate_threshold = float(resume_extra.get("rank_high_gate_threshold", 0.5))
         stored_weighting_version = int(resume_extra.get("loss_weighting_version", 1))
+        stored_state_dropout_rate = float(resume_extra.get("state_dropout_rate", 0.0))
         stored_low_gate_limit = float(
             resume_extra.get(
                 "best_max_low_gate_unsafe_frac",
@@ -701,6 +706,7 @@ def train_decoder(
             or stored_repair_margin != repair_margin
             or stored_low_safety_weight != low_gate_safety_weight
             or stored_low_safety_margin != low_gate_safety_margin
+            or stored_state_dropout_rate != state_dropout_rate
             or stored_rank_low_gate_threshold != rank_low_gate_threshold
             or stored_rank_high_gate_threshold != rank_high_gate_threshold
             or stored_low_gate_limit != best_max_low_gate_unsafe_frac
@@ -721,6 +727,7 @@ def train_decoder(
                 f"repair_margin={stored_repair_margin:g}, weighting_v={stored_weighting_version}, "
                 f"low_safety_weight={stored_low_safety_weight:g}, "
                 f"low_safety_margin={stored_low_safety_margin:g}, "
+                f"state_dropout_rate={stored_state_dropout_rate:g}, "
                 f"rank_gate=[{stored_rank_low_gate_threshold:g},"
                 f"{stored_rank_high_gate_threshold:g}], "
                 f"low_gate_limit={stored_low_gate_limit:g}, min_high_gain={stored_min_high_gain:g}, "
@@ -736,6 +743,7 @@ def train_decoder(
                 f"repair_weight={repair_weight:g}, repair_margin={repair_margin:g}, weighting_v=7, "
                 f"low_safety_weight={low_gate_safety_weight:g}, "
                 f"low_safety_margin={low_gate_safety_margin:g}, "
+                f"state_dropout_rate={state_dropout_rate:g}, "
                 f"rank_gate=[{rank_low_gate_threshold:g},{rank_high_gate_threshold:g}], "
                 f"low_unsafe_frac_limit={best_max_low_gate_unsafe_frac:g}, "
                 f"min_high_gain={best_min_high_gate_gain:g}, "
@@ -799,6 +807,8 @@ def train_decoder(
         mlp_ratio=mlp_ratio,
         num_tactile_tokens=tactile_num_tokens,
         gate_conditioning=(loss_mode == "gated"),
+        state_dim=int(pairs.manifest.get("state_dim", 0)),
+        state_conditioning=state_conditioning,
     )
     if resume_metadata is None and init_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
@@ -881,7 +891,9 @@ def train_decoder(
         f"tactile_window={tactile_window} "
         f"(action_horizon={action_horizon} / divisor={tactile_window_divisor}) "
         f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
-        f"(frozen ResNet + trainable shared GRU)"
+        f"state_dim={model.config.state_dim} state_conditioning={model.config.state_conditioning} "
+        f"state_dropout={state_dropout_rate:g} "
+        f"(frozen ResNet + trainable shared GRU/state MLP)"
     )
     if use_cached_embeddings:
         print(
@@ -1026,6 +1038,7 @@ def train_decoder(
                     x_base_np,
                     predicted_np,
                     gt_action_np,
+                    state_np,
                     tactile_seq,
                 ) in enumerate(training_batches):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
@@ -1053,6 +1066,8 @@ def train_decoder(
                         step_key,
                         jnp.asarray(batch_source_indices),
                         jnp.asarray(source_rank_weight_values),
+                        state=jnp.asarray(state_np),
+                        state_dropout_rate=state_dropout_rate,
                         loss_mode=loss_mode,
                         gate_lambda=gate_lambda,
                         aux_decode_weight=aux_decode_weight,
@@ -1117,6 +1132,9 @@ def train_decoder(
                     "gate_temperature": gate_temperature,
                     "gate_lambda": gate_lambda,
                     "gate_conditioning": bool(model.config.gate_conditioning),
+                    "state_conditioning": bool(model.config.state_conditioning),
+                    "state_dim": int(model.config.state_dim),
+                    "state_dropout_rate": state_dropout_rate,
                     "aux_decode_weight": aux_decode_weight,
                     "aux_decode_steps": aux_decode_steps,
                     "low_gate_safety_weight": low_gate_safety_weight,
@@ -1506,7 +1524,8 @@ def _config_diff(left: object, right: object) -> dict[str, tuple[object, object]
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train tactile GRU + cross-attn flow decoder " "(frozen ResNet features; loss-mode gt / predicted / gated)."
+            "Train tactile/state cross-attention flow decoder "
+            "(frozen tactile ResNet features; loss-mode gt / predicted / gated)."
         )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
@@ -1628,6 +1647,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.7,
         help="Apply GT-preference rank/repair losses only when w is at or above this value.",
+    )
+    parser.add_argument(
+        "--state-conditioning",
+        action="store_true",
+        help="Condition FRS on the normalized current observation.state token.",
+    )
+    parser.add_argument(
+        "--state-dropout-rate",
+        type=float,
+        default=0.0,
+        help="Training-only probability of masking the complete state token.",
     )
     parser.add_argument(
         "--best-max-low-gate-unsafe-frac",
@@ -1772,6 +1802,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         repair_margin=args.repair_margin,
         rank_low_gate_threshold=args.rank_low_gate_threshold,
         rank_high_gate_threshold=args.rank_high_gate_threshold,
+        state_conditioning=args.state_conditioning,
+        state_dropout_rate=args.state_dropout_rate,
         model_dim=args.model_dim,
         depth=args.depth,
         num_heads=args.num_heads,

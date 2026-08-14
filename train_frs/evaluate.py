@@ -79,6 +79,11 @@ def evaluate_decoder(
     actual_shape = (model.config.action_horizon, model.config.action_dim)
     if actual_shape != expected_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_shape} != {expected_shape}.")
+    cache_state_dim = int(pairs.manifest.get("state_dim", 0))
+    if model.config.state_conditioning and model.config.state_dim != cache_state_dim:
+        raise ValueError(
+            f"Checkpoint/cache state shape mismatch: {model.config.state_dim} != {cache_state_dim}."
+        )
 
     extra = checkpoint_metadata.get("extra_metadata") or {}
     if tactile_window_divisor is None:
@@ -424,7 +429,7 @@ def evaluate_decoder(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Evaluate tactile GRU-conditioned flow decoder. "
+            "Evaluate tactile/state-conditioned flow decoder. "
             "Primary metrics follow --target; mse_gt and mse_pred are always reported."
         )
     )

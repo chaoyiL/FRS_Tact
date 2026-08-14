@@ -311,6 +311,7 @@ def evaluate_split(
         x_base_np,
         predicted_np,
         gt_action_np,
+        state_np,
         tactile_seq,
     ) in conditioner.batches(split, batch_size=batch_size, shuffle=False, seed=0):
         x_base = jnp.asarray(x_base_np)
@@ -326,8 +327,13 @@ def evaluate_split(
             change = None
             gate_w = None
             model_gate = None
-        flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, model_gate)
-        flow_pred = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, model_gate)
+        state = jnp.asarray(state_np)
+        flow_gt = flow_matching_loss_per_sample(
+            model, x_base, gt_action, t, tactile_seq, model_gate, state=state
+        )
+        flow_pred = flow_matching_loss_per_sample(
+            model, x_base, predicted_action, t, tactile_seq, model_gate, state=state
+        )
         prediction = decode_actions(
             model,
             x_base,
@@ -335,6 +341,7 @@ def evaluate_split(
             model_gate,
             num_steps=num_steps,
             solver=solver,
+            state=state,
         )
         mse_gt, mae_gt = _per_sample_errors(prediction, gt_action)
         mse_pred, mae_pred = _per_sample_errors(prediction, predicted_action)

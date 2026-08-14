@@ -391,6 +391,8 @@ class FRSSteeringPolicy:
             "num_tactile_tokens",
         )
         _require_equal(decoder.resnet_embedding_dim, self.embedding_dim, "resnet_embedding_dim")
+        if bool(getattr(decoder, "state_conditioning", False)):
+            _require_equal(decoder.state_dim, int(policy.config.state_dim), "state_dim")
         if not bool(decoder.gate_conditioning):
             raise ValueError("FRS checkpoint must have explicit gate conditioning enabled")
 
@@ -399,10 +401,10 @@ class FRSSteeringPolicy:
             raise ValueError("FRS checkpoint is missing extra_metadata")
         _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
         loss_weighting_version = int(extra.get("loss_weighting_version", 0))
-        if loss_weighting_version not in {2, 3, 4, 5}:
+        if loss_weighting_version not in {2, 3, 4, 5, 6, 7}:
             raise ValueError(
                 "unsupported FRS loss_weighting_version: "
-                f"{loss_weighting_version}; expected one of 2, 3, 4, 5"
+                f"{loss_weighting_version}; expected one of 2, 3, 4, 5, 6, 7"
             )
         if loss_weighting_version >= 4:
             low_threshold = float(extra.get("rank_low_gate_threshold", -1.0))
@@ -423,6 +425,11 @@ class FRSSteeringPolicy:
             "tactile_window",
         )
         _require_equal(bool(extra.get("gate_conditioning", False)), True, "gate_conditioning")
+        _require_equal(
+            bool(extra.get("state_conditioning", False)),
+            bool(getattr(decoder, "state_conditioning", False)),
+            "state_conditioning",
+        )
         _require_equal(float(extra.get("gate_tau")), self.config.gate_tau, "gate_tau")
         _require_equal(
             float(extra.get("gate_temperature")),
@@ -491,6 +498,27 @@ class FRSSteeringPolicy:
             jnp.asarray(images, dtype=jnp.float32),
         )
         return np.asarray(jax.device_get(embeddings), dtype=np.float32)
+
+    def _uses_state(self) -> bool:
+        return bool(
+            getattr(getattr(self.model, "config", None), "state_conditioning", False)
+        )
+
+    def _normalized_state(self, observation: Mapping[str, Any]) -> jax.Array | None:
+        if not self._uses_state():
+            return None
+        if "observation.state" not in observation:
+            raise ValueError("robot observation is missing FRS observation.state")
+        state = jnp.asarray(observation["observation.state"], dtype=jnp.float32)
+        if state.ndim == 1:
+            state = state[None, :]
+        expected = (1, int(self.model.config.state_dim))
+        if state.shape != expected:
+            raise ValueError(f"FRS state must have shape {expected}, got {state.shape}")
+        state = self.policy.preprocessor.normalize_state(state)
+        if not bool(jnp.all(jnp.isfinite(state))):
+            raise ValueError("normalized FRS state contains NaN or Inf")
+        return state
 
     @staticmethod
     def _readonly_array(value: Any) -> np.ndarray:
@@ -658,6 +686,12 @@ class FRSSteeringPolicy:
             payload = contiguous.tobytes(order="C")
             digest.update(len(payload).to_bytes(8, "big"))
             digest.update(payload)
+        if self._uses_state():
+            state = np.ascontiguousarray(np.asarray(observation["observation.state"]))
+            payload = state.tobytes(order="C")
+            digest.update(b"observation.state")
+            digest.update(state.dtype.str.encode())
+            digest.update(payload)
         return digest.digest()
 
     def _validated_decoded_chunk(self, decoded: Any) -> tuple[np.ndarray, float, float]:
@@ -753,6 +787,10 @@ class FRSSteeringPolicy:
         )
 
         decode_started_at = time.time()
+        decode_kwargs: dict[str, Any] = {}
+        normalized_state = self._normalized_state(observation)
+        if normalized_state is not None:
+            decode_kwargs["state"] = normalized_state
         decoded = decode_actions(
             self.model,
             self._x_base_device,
@@ -760,6 +798,7 @@ class FRSSteeringPolicy:
             jnp.asarray(gate, dtype=jnp.float32),
             num_steps=self.config.decode_steps,
             solver=self.config.decode_solver,
+            **decode_kwargs,
         )
         decoded_array, delta_rms, max_abs = self._validated_decoded_chunk(decoded)
         decode_finished_at = time.time()
@@ -884,6 +923,11 @@ class FRSSteeringPolicy:
                     jnp.asarray(np.stack([baseline] * length)),
                     axis=0,
                 )
+                warmup_kwargs: dict[str, Any] = {}
+                if self._uses_state():
+                    warmup_kwargs["state"] = jnp.zeros(
+                        (1, int(self.model.config.state_dim)), dtype=jnp.float32
+                    )
                 warmed = decode_actions(
                     self.model,
                     synthetic_x_base,
@@ -891,6 +935,7 @@ class FRSSteeringPolicy:
                     jnp.asarray(synthetic_gate, dtype=jnp.float32),
                     num_steps=self.config.decode_steps,
                     solver=self.config.decode_solver,
+                    **warmup_kwargs,
                 )
                 jax.block_until_ready(warmed)
         finally:
@@ -938,6 +983,9 @@ class FRSSteeringPolicy:
             solver=self.config.reverse_solver,
         )
 
+        legacy_decode_kwargs: dict[str, Any] = {}
+        if self._uses_state():
+            legacy_decode_kwargs["state"] = eval_observation.state
         refined = decode_actions(
             self.model,
             x_base,
@@ -945,6 +993,7 @@ class FRSSteeringPolicy:
             jnp.asarray(gate, dtype=jnp.float32),
             num_steps=self.config.decode_steps,
             solver=self.config.decode_solver,
+            **legacy_decode_kwargs,
         )
         refined_np = np.asarray(jax.device_get(refined), dtype=np.float32)
         vla_np = np.asarray(jax.device_get(vla_actions), dtype=np.float32)

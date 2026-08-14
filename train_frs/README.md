@@ -25,6 +25,15 @@ uv run --no-sync python -m train_frs.train_frs \
 Training outputs, datasets, action caches, tactile embedding caches, encoder checkpoints, and
 merged SmolVLA checkpoints remain external resources configured by the YAML.
 
+The current state-conditioned pipeline stores the frozen VLA preprocessor's normalized
+current `observation.state` in action-cache v3. FRS maps it to one cross-attention token and
+concatenates that token with the four tactile-history tokens. `model.state_dropout_rate`
+masks the entire state token during training only; evaluation and deployment always use it.
+
+For gated training, confident high-gate samples receive direct GT decode, GT-over-VLA rank,
+and absolute repair constraints. Confident low-gate samples use only the weaker
+nearest-endpoint safety hinge, so either a GT-like or VLA-like action remains acceptable.
+
 ## Multi-dataset evaluation
 
 Evaluate the configured validation splits with the same combined action-cache digest,

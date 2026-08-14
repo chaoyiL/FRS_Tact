@@ -8,20 +8,24 @@ import yaml
 from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
 
 
-def test_default_frs_config_is_single_dataset_asymmetric_gate_objective() -> None:
+def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -> None:
     config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in config["datasets"]] == [
-        "KaiyueChen/pick_tube_01"
+        "KaiyueChen/pick_tube_05"
     ]
     training = config["frs_training"]
     assert training["dataset_balanced_sampling"] is False
     assert training["dataset_balanced_loss"] is False
     assert training["early_stop_patience"] == 5
     assert training["early_stop_min_evals"] == 5
-    assert training["output"].endswith("frs_0814_single_01_asymmetric")
-    assert training["init_from"].endswith("frs_0813_single_01/best_rank")
-    assert training["learning_rate"] == 1.0e-5
+    assert training["output"].endswith("frs_0814_01_state")
+    assert training["init_from"] is None
+    model = config["model"]
+    assert model["state_conditioning"] is True
+    assert model["state_dropout_rate"] == 0.1
+    assert config["action_cache"]["root"].endswith("action_cache_slerpflow_state_v3")
+    assert training["learning_rate"] == 1.0e-4
     assert training["gate_lambda"] == 0.25
     assert training["aux_decode_weight"] == 4.0
     assert training["low_gate_safety_weight"] == 0.5

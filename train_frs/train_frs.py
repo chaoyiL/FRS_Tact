@@ -154,6 +154,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         repair_margin=float(training.get("repair_margin", 0.0)),
         rank_low_gate_threshold=float(training.get("rank_low_gate_threshold", 0.3)),
         rank_high_gate_threshold=float(training.get("rank_high_gate_threshold", 0.7)),
+        state_conditioning=bool(model.get("state_conditioning", False)),
+        state_dropout_rate=float(model.get("state_dropout_rate", 0.0)),
         model_dim=_positive_int(training, "model_dim", 256),
         depth=_positive_int(training, "depth", 6),
         num_heads=_positive_int(training, "num_heads", 4),

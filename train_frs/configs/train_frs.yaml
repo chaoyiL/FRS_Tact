@@ -1,4 +1,4 @@
-# 仅在 pick_tube_01 上训练的触觉 Flow Steering 配置。
+# 用冻结的 pick_tube_01 VLA，在未参与其训练的 pick_tube_05 上训练 FRS。
 # 完整管线：
 #   1) uv run --no-sync python tools/merge_smolvla_peft_to_jax.py \
 #        --adapter KaiyueChen/pick_tube_01 \
@@ -26,8 +26,8 @@ checkpoint_merge:
   allow_download: true
 
 datasets:
-  - repo_id: KaiyueChen/pick_tube_01
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_01
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
     action_key: actions
     rename_map:
       observation.images.camera0: observation.images.camera1
@@ -35,7 +35,8 @@ datasets:
 
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
-  root: /workspace/frs_pick_tube_0813/action_cache_slerpflow
+  # cache v3 additionally stores the normalized current observation.state.
+  root: /workspace/frs_pick_tube_05/action_cache_slerpflow_state_v3
   model_sample_steps: 10
   reverse_steps: 20
   reverse_solver: slerpflow
@@ -70,7 +71,7 @@ reverse_solver_ab:
 tactile_embedding_cache:
   enabled: true
   # Encoder-specific cache root: do not reuse embeddings produced by encoder_ckpt_06.
-  root: /workspace/frs_pick_tube/tactile_embeddings_encoder0809
+  root: /workspace/frs_pick_tube_05/tactile_embeddings_encoder0809
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -91,12 +92,16 @@ model:
   tactile_embedding_dim: 512
   tactile_num_tokens: 4
   tactile_image_size: 224
+  # 第一版 state conditioning：当前时刻 normalized observation.state → 1 个 token。
+  state_conditioning: true
+  # 仅训练时整 token 随机屏蔽；验证和部署始终使用 state。
+  state_dropout_rate: 0.1
 
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_0814/frs_0814_single_01_asymmetric
-  # pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
+  output: /workspace/frs_pick_tube_05/frs_0814_01_state
+  # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
   history_stride: 3
@@ -140,7 +145,7 @@ frs_training:
   # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
   best_min_high_gate_rank_satisfied: 0.8
 
-  # 只有 pick_tube_01，不需要跨数据集均衡采样或均衡损失。
+  # 只有 pick_tube_05，不需要跨数据集均衡采样或均衡损失。
   dataset_balanced_sampling: false
   dataset_balanced_loss: false
 
@@ -148,8 +153,8 @@ frs_training:
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  # 从第一阶段 best_rank 重新微调，不继承已经跑偏的 stage2；进一步降低学习率防止破坏起点。
-  learning_rate: 1.0e-5
+  # state token 改变参数树并从头训练；恢复冷启动使用的学习率。
+  learning_rate: 1.0e-4
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
   warmup_epochs: 1
@@ -166,7 +171,7 @@ frs_training:
   early_stop_min_evals: 5
   seed: 42
   write_plots: true
-  # 只加载同样仅见过 pick_tube_01 的 best_rank 参数；优化器和 epoch 重新开始。
-  init_from: /workspace/frs_pick_tube_0813/frs_0813_single_01/best_rank
+  # state token 改变参数树；必须冷启动，不能加载旧 tactile-only FRS。
+  init_from: null
   resume: false
   resume_from: null

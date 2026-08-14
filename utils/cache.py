@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 import numpy as np
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 MANIFEST_NAME = "manifest.json"
 X_BASE_NAME = "x_base.npy"
 TARGET_NAME = "predicted_actions.npy"
@@ -19,6 +19,7 @@ DATASET_INDEX_NAME = "dataset_indices.npy"
 EPISODE_INDEX_NAME = "episode_indices.npy"
 SPLIT_NAME = "split.npy"
 INVERSION_MSE_NAME = "inversion_mse.npy"
+STATE_NAME = "states.npy"
 ARRAY_FILENAMES = {
     "x_base": X_BASE_NAME,
     "target": TARGET_NAME,
@@ -27,6 +28,7 @@ ARRAY_FILENAMES = {
     "episode_index": EPISODE_INDEX_NAME,
     "split": SPLIT_NAME,
     "inversion_mse": INVERSION_MSE_NAME,
+    "state": STATE_NAME,
 }
 
 
@@ -131,7 +133,10 @@ def create_cache_arrays(
     *,
     action_horizon: int,
     action_dim: int,
+    state_dim: int = 1,
 ) -> dict[str, np.memmap]:
+    if state_dim <= 0:
+        raise ValueError(f"state_dim must be positive, got {state_dim}.")
     cache_dir.mkdir(parents=True, exist_ok=True)
     count = len(records)
     shape = (count, action_horizon, action_dim)
@@ -151,6 +156,9 @@ def create_cache_arrays(
         "inversion_mse": np.lib.format.open_memmap(
             cache_dir / INVERSION_MSE_NAME, mode="w+", dtype=np.float32, shape=(count,)
         ),
+        "state": np.lib.format.open_memmap(
+            cache_dir / STATE_NAME, mode="w+", dtype=np.float32, shape=(count, state_dim)
+        ),
     }
     arrays["dataset_index"][:] = [record.dataset_index for record in records]
     arrays["episode_index"][:] = [record.episode_index for record in records]
@@ -168,6 +176,7 @@ def open_cache_arrays(cache_dir: pathlib.Path, *, mode: str = "r") -> dict[str, 
         "episode_index": np.load(cache_dir / EPISODE_INDEX_NAME, mmap_mode=mode),
         "split": np.load(cache_dir / SPLIT_NAME, mmap_mode=mode),
         "inversion_mse": np.load(cache_dir / INVERSION_MSE_NAME, mmap_mode=mode),
+        "state": np.load(cache_dir / STATE_NAME, mmap_mode=mode),
     }
 
 
@@ -176,6 +185,15 @@ def flush_arrays(arrays: dict[str, np.ndarray]) -> None:
         flush = getattr(array, "flush", None)
         if flush is not None:
             flush()
+
+
+def close_cache_arrays(arrays: dict[str, np.ndarray]) -> None:
+    """Close NumPy memmap handles, primarily for safe replacement on Windows."""
+
+    for array in arrays.values():
+        mapping = getattr(array, "_mmap", None)
+        if mapping is not None:
+            mapping.close()
 
 
 def records_from_arrays(arrays: dict[str, np.ndarray], *, count: int) -> list[SampleRecord]:
@@ -209,9 +227,14 @@ def truncate_cache_arrays(cache_dir: pathlib.Path, *, count: int) -> None:
             f"Cannot truncate cache to {count} samples; arrays are too short: {too_short}."
         )
     if all(length == count for length in lengths.values()):
+        close_cache_arrays(arrays)
         return
+    snapshots = {
+        key: np.array(arrays[key][:count], copy=True) for key in ARRAY_FILENAMES
+    }
+    close_cache_arrays(arrays)
     for key, filename in ARRAY_FILENAMES.items():
-        _atomic_save_array(cache_dir / filename, np.asarray(arrays[key][:count]))
+        _atomic_save_array(cache_dir / filename, snapshots[key])
 
 
 def finalize_partial_cache(
@@ -392,13 +415,15 @@ def write_cache_subset(
 
     action_horizon = int(source_manifest["action_horizon"])
     action_dim = int(source_manifest["action_dim"])
+    state_dim = int(source_manifest.get("state_dim", source["state"].shape[-1]))
     arrays = create_cache_arrays(
         output_dir,
         records,
         action_horizon=action_horizon,
         action_dim=action_dim,
+        state_dim=state_dim,
     )
-    for key in ("x_base", "target", "gt_action", "inversion_mse"):
+    for key in ("x_base", "target", "gt_action", "inversion_mse", "state"):
         arrays[key][:] = np.asarray(source[key][keep], dtype=arrays[key].dtype)
     flush_arrays(arrays)
 
@@ -415,6 +440,7 @@ def write_cache_subset(
         "val_episodes": val_episodes,
         "action_horizon": action_horizon,
         "action_dim": action_dim,
+        "state_dim": state_dim,
         "configuration": dict(source_manifest.get("configuration", {})),
         "records_sha256": records_digest(records),
         "mean_source_inversion_mse": float(np.mean(np.asarray(arrays["inversion_mse"]))),
@@ -443,7 +469,7 @@ class CachedPairs:
         batch_size: int,
         shuffle: bool,
         seed: int,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}.")
         indices = self.indices(split)
@@ -456,6 +482,7 @@ class CachedPairs:
                 np.asarray(self.arrays["x_base"][batch_indices], dtype=np.float32),
                 np.asarray(self.arrays["target"][batch_indices], dtype=np.float32),
                 np.asarray(self.arrays["gt_action"][batch_indices], dtype=np.float32),
+                np.asarray(self.arrays["state"][batch_indices], dtype=np.float32),
             )
 
 
@@ -488,6 +515,7 @@ class MultiCachedPairs:
 
         action_horizon = int(self.sources[0].manifest["action_horizon"])
         action_dim = int(self.sources[0].manifest["action_dim"])
+        state_dim = int(self.sources[0].arrays["state"].shape[-1])
         for name, source in zip(self.source_names, self.sources, strict=True):
             shape = (
                 int(source.manifest["action_horizon"]),
@@ -496,6 +524,11 @@ class MultiCachedPairs:
             if shape != (action_horizon, action_dim):
                 raise ValueError(
                     f"action shape mismatch for {name}: {shape} != {(action_horizon, action_dim)}"
+                )
+            source_state_dim = int(source.arrays["state"].shape[-1])
+            if source_state_dim != state_dim:
+                raise ValueError(
+                    f"state shape mismatch for {name}: {source_state_dim} != {state_dim}"
                 )
 
         counts = np.asarray(
@@ -519,6 +552,7 @@ class MultiCachedPairs:
             ),
             "action_horizon": action_horizon,
             "action_dim": action_dim,
+            "state_dim": state_dim,
             "records_sha256": digest.hexdigest(),
             "configuration": {
                 "sources": [
@@ -622,7 +656,7 @@ class MultiCachedPairs:
         shuffle: bool,
         seed: int,
         source_balanced: bool = False,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         if batch_size <= 0:
             raise ValueError(f"batch_size must be positive, got {batch_size}.")
         if source_balanced:
@@ -668,6 +702,7 @@ class MultiCachedPairs:
             x_base = np.empty((batch_n,) + shape[1:], dtype=np.float32)
             predicted = np.empty_like(x_base)
             gt_action = np.empty_like(x_base)
+            state = np.empty((batch_n, int(self.manifest["state_dim"])), dtype=np.float32)
             source_indices, local_indices = self.source_and_local_indices(batch_indices)
             for source_index in np.unique(source_indices):
                 positions = np.flatnonzero(source_indices == source_index)
@@ -676,4 +711,5 @@ class MultiCachedPairs:
                 x_base[positions] = np.asarray(arrays["x_base"][local], dtype=np.float32)
                 predicted[positions] = np.asarray(arrays["target"][local], dtype=np.float32)
                 gt_action[positions] = np.asarray(arrays["gt_action"][local], dtype=np.float32)
-            yield batch_indices, x_base, predicted, gt_action
+                state[positions] = np.asarray(arrays["state"][local], dtype=np.float32)
+            yield batch_indices, x_base, predicted, gt_action, state

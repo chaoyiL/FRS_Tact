@@ -1,4 +1,4 @@
-"""Tactile-conditioned flow matching decoder with shared trainable GRU + cross-attention."""
+"""Tactile/state-conditioned flow decoder with GRU and cross-attention."""
 
 from __future__ import annotations
 
@@ -41,6 +41,8 @@ class DecoderConfig:
     num_heads: int = 4
     mlp_ratio: int = 4
     num_tactile_tokens: int = 4
+    state_dim: int = 0
+    state_conditioning: bool = False
     # False keeps checkpoints created before explicit gate conditioning
     # loadable with their original parameter tree.
     gate_conditioning: bool = False
@@ -64,6 +66,10 @@ class DecoderConfig:
             raise ValueError("All decoder dimensions must be positive.")
         if self.model_dim % self.num_heads:
             raise ValueError(f"model_dim ({self.model_dim}) must be divisible by num_heads ({self.num_heads}).")
+        if self.state_dim < 0:
+            raise ValueError("state_dim must be non-negative.")
+        if self.state_conditioning and self.state_dim <= 0:
+            raise ValueError("state_dim must be positive when state_conditioning is enabled.")
 
     @property
     def tactile_token_dim(self) -> int:
@@ -123,7 +129,7 @@ class SharedTactileGRU(nnx.Module):
 
 
 class ConditionedTransformerBlock(nnx.Module):
-    """Self-attn on action tokens, then cross-attn to tactile tokens, then MLP."""
+    """Self-attn on action tokens, then cross-attn to condition tokens, then MLP."""
 
     def __init__(self, dim: int, num_heads: int, mlp_ratio: int, *, rngs: nnx.Rngs):
         self.norm_self = nnx.LayerNorm(dim, rngs=rngs)
@@ -163,7 +169,7 @@ class ConditionedTransformerBlock(nnx.Module):
 
 
 class TactileConditionedFlowDecoder(nnx.Module):
-    """v_theta(x_t, t, tactile_seq, gate_w) with tactile and optional gate conditioning."""
+    """Flow decoder conditioned on tactile history, optional state, and gate."""
 
     def __init__(self, config: DecoderConfig, *, rngs: nnx.Rngs):
         self.config = config
@@ -177,6 +183,10 @@ class TactileConditionedFlowDecoder(nnx.Module):
             rngs=rngs,
         )
         self.tactile_proj = nnx.Linear(config.gru_hidden_dim, config.model_dim, rngs=rngs)
+        if config.state_conditioning:
+            self.state_norm = nnx.LayerNorm(config.state_dim, rngs=rngs)
+            self.state_fc1 = nnx.Linear(config.state_dim, config.model_dim, rngs=rngs)
+            self.state_fc2 = nnx.Linear(config.model_dim, config.model_dim, rngs=rngs)
         self.blocks = nnx.List(
             [
                 ConditionedTransformerBlock(config.model_dim, config.num_heads, config.mlp_ratio, rngs=rngs)
@@ -211,6 +221,34 @@ class TactileConditionedFlowDecoder(nnx.Module):
         """Encode tactile history into cross-attention conditioning tokens."""
 
         return self.tactile_proj(self.encode_tactile_tokens(tactile_seq))
+
+    def encode_condition(
+        self,
+        tactile_seq: Array,
+        state: Array | None = None,
+        state_keep_mask: Array | None = None,
+    ) -> Array:
+        """Return tactile tokens with an optional normalized-current-state token."""
+
+        tactile = self.encode_tactile_condition(tactile_seq)
+        if not self.config.state_conditioning:
+            return tactile
+        if state is None:
+            raise ValueError("state is required by this state-conditioned checkpoint.")
+        state = jnp.asarray(state, dtype=jnp.float32)
+        expected = (tactile.shape[0], self.config.state_dim)
+        if state.shape != expected:
+            raise ValueError(f"Expected state shape {expected}, got {state.shape}.")
+        state_token = self.state_fc2(nnx.silu(self.state_fc1(self.state_norm(state))))
+        if state_keep_mask is not None:
+            state_keep_mask = jnp.asarray(state_keep_mask, dtype=state_token.dtype)
+            if state_keep_mask.shape != (tactile.shape[0],):
+                raise ValueError(
+                    f"Expected state_keep_mask shape {(tactile.shape[0],)}, "
+                    f"got {state_keep_mask.shape}."
+                )
+            state_token = state_token * state_keep_mask[:, None]
+        return jnp.concatenate((state_token[:, None, :], tactile), axis=1)
 
     def _validated_action_gate_weights(
         self,
@@ -264,8 +302,11 @@ class TactileConditionedFlowDecoder(nnx.Module):
         t: Array,
         tactile_seq: Array,
         gate_weights: Array | None = None,
+        *,
+        state: Array | None = None,
+        state_keep_mask: Array | None = None,
     ) -> Array:
-        condition = self.encode_tactile_condition(tactile_seq)
+        condition = self.encode_condition(tactile_seq, state, state_keep_mask)
         return self.velocity_from_condition(x_t, t, condition, gate_weights)
 
 
@@ -276,11 +317,21 @@ def flow_matching_loss_per_sample(
     t: Array,
     tactile_seq: Array,
     gate_weights: Array | None = None,
+    *,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
 ) -> Array:
     t_view = t[:, None, None]
     x_t = (1.0 - t_view) * x_base + t_view * target
     target_velocity = target - x_base
-    predicted_velocity = model(x_t, t, tactile_seq, gate_weights)
+    predicted_velocity = model(
+        x_t,
+        t,
+        tactile_seq,
+        gate_weights,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
     return jnp.mean(jnp.square(predicted_velocity - target_velocity), axis=(1, 2))
 
 
@@ -293,6 +344,8 @@ def decode_mse_per_sample(
     *,
     num_steps: int,
     solver: FlowSolver = "euler",
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
 ) -> Array:
     """Per-sample MSE between integrated decode(x_base) and ``target``."""
 
@@ -303,6 +356,8 @@ def decode_mse_per_sample(
         gate_weights,
         num_steps=num_steps,
         solver=solver,
+        state=state,
+        state_keep_mask=state_keep_mask,
     )
     return jnp.mean(jnp.square(decoded - target), axis=(1, 2))
 
@@ -318,10 +373,21 @@ def gt_supervised_loss_per_sample(
     aux_decode_weight: float,
     aux_decode_steps: int,
     aux_decode_solver: FlowSolver = "euler",
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
 ) -> Array:
     """Per-sample ``FM(gt) + λ_aux MSE(decode, gt)``."""
 
-    flow = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
+    flow = flow_matching_loss_per_sample(
+        model,
+        x_base,
+        gt_action,
+        t,
+        tactile_seq,
+        gate_weights,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
     if aux_decode_weight == 0.0:
         return flow
     decode_mse = decode_mse_per_sample(
@@ -332,6 +398,8 @@ def gt_supervised_loss_per_sample(
         gate_weights,
         num_steps=aux_decode_steps,
         solver=aux_decode_solver,
+        state=state,
+        state_keep_mask=state_keep_mask,
     )
     return flow + float(aux_decode_weight) * decode_mse
 
@@ -636,6 +704,8 @@ def gated_loss_components_per_sample(
     tactile_seq: Array,
     gate_weights: Array,
     *,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
     gate_lambda: float,
     aux_decode_weight: float = 1.0,
     aux_decode_steps: int = 10,
@@ -675,8 +745,26 @@ def gated_loss_components_per_sample(
             f"'worst_source_cvar', got {high_gate_rank_aggregation!r}."
         )
 
-    flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq, gate_weights)
-    flow_vla = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq, gate_weights)
+    flow_gt = flow_matching_loss_per_sample(
+        model,
+        x_base,
+        gt_action,
+        t,
+        tactile_seq,
+        gate_weights,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
+    flow_vla = flow_matching_loss_per_sample(
+        model,
+        x_base,
+        predicted_action,
+        t,
+        tactile_seq,
+        gate_weights,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
     effective_weights = three_region_effective_gate_weights(
         gate_weights,
         low_gate_threshold=rank_low_gate_threshold,
@@ -702,6 +790,8 @@ def gated_loss_components_per_sample(
             gate_weights,
             num_steps=aux_decode_steps,
             solver=aux_decode_solver,
+            state=state,
+            state_keep_mask=state_keep_mask,
         )
     if aux_decode_weight != 0.0:
         assert decoded is not None
@@ -808,6 +898,8 @@ def gated_flow_matching_loss_per_sample(
     tactile_seq: Array,
     gate_weights: Array,
     *,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
     gate_lambda: float,
     aux_decode_weight: float = 1.0,
     aux_decode_steps: int = 10,
@@ -837,6 +929,8 @@ def gated_flow_matching_loss_per_sample(
         t,
         tactile_seq,
         gate_weights,
+        state=state,
+        state_keep_mask=state_keep_mask,
         gate_lambda=gate_lambda,
         aux_decode_weight=aux_decode_weight,
         aux_decode_steps=aux_decode_steps,
@@ -880,6 +974,7 @@ def gated_flow_matching_loss_per_sample(
         "high_gate_rank_aggregation",
         "high_gate_rank_hard_fraction",
         "high_gate_rank_worst_beta",
+        "state_dropout_rate",
     ),
 )
 def train_step(
@@ -894,6 +989,8 @@ def train_step(
     source_indices: Array | None = None,
     source_rank_weights: Array | None = None,
     *,
+    state: Array | None = None,
+    state_dropout_rate: float = 0.0,
     loss_mode: str = "gt",
     gate_lambda: float = 1.0,
     aux_decode_weight: float = 1.0,
@@ -913,7 +1010,19 @@ def train_step(
     high_gate_rank_hard_fraction: float = 0.3,
     high_gate_rank_worst_beta: float = 20.0,
 ) -> tuple[Array, dict[str, Array]]:
-    t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
+    if not 0.0 <= state_dropout_rate < 1.0:
+        raise ValueError(f"state_dropout_rate must be in [0, 1), got {state_dropout_rate}.")
+    time_key, state_dropout_key = jax.random.split(key)
+    t = jax.random.uniform(time_key, (x_base.shape[0],), minval=0.0, maxval=1.0)
+    state_keep_mask = None
+    if model.config.state_conditioning:
+        if state is None:
+            raise ValueError("state is required when state_conditioning is enabled")
+        state_keep_mask = jax.random.bernoulli(
+            state_dropout_key,
+            p=1.0 - float(state_dropout_rate),
+            shape=(x_base.shape[0],),
+        )
 
     def loss_fn(
         candidate: TactileConditionedFlowDecoder,
@@ -932,7 +1041,16 @@ def train_step(
             return jnp.mean(values)
 
         if loss_mode == "gt":
-            flow = flow_matching_loss_per_sample(candidate, x_base, gt_action, t, tactile_seq, gate_weights)
+            flow = flow_matching_loss_per_sample(
+                candidate,
+                x_base,
+                gt_action,
+                t,
+                tactile_seq,
+                gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
+            )
             decode = jnp.zeros_like(flow)
             if aux_decode_weight != 0.0:
                 decode = float(aux_decode_weight) * decode_mse_per_sample(
@@ -943,6 +1061,8 @@ def train_step(
                     gate_weights,
                     num_steps=aux_decode_steps,
                     solver=aux_decode_solver,
+                    state=state,
+                    state_keep_mask=state_keep_mask,
                 )
             components = {
                 "gt_fm": reduce_component(flow),
@@ -953,7 +1073,16 @@ def train_step(
                 "repair": jnp.asarray(0.0, dtype=flow.dtype),
             }
         elif loss_mode == "predicted":
-            flow = flow_matching_loss_per_sample(candidate, x_base, predicted_action, t, tactile_seq, gate_weights)
+            flow = flow_matching_loss_per_sample(
+                candidate,
+                x_base,
+                predicted_action,
+                t,
+                tactile_seq,
+                gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
+            )
             components = {
                 "gt_fm": jnp.asarray(0.0, dtype=flow.dtype),
                 "vla_fm": reduce_component(flow),
@@ -971,6 +1100,8 @@ def train_step(
                 t,
                 tactile_seq,
                 gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
                 gate_lambda=gate_lambda,
                 aux_decode_weight=aux_decode_weight,
                 aux_decode_steps=aux_decode_steps,
@@ -1050,13 +1181,15 @@ def _decode_actions_jitted(
     x_base: Array,
     tactile_seq: Array,
     gate_weights: Array | None,
+    state: Array | None,
+    state_keep_mask: Array | None,
     *,
     num_steps: int,
     solver: FlowSolver,
 ) -> Array:
     """Single compiled unit: tactile conditioning + ODE integration."""
 
-    tactile_condition = model.encode_tactile_condition(tactile_seq)
+    tactile_condition = model.encode_condition(tactile_seq, state, state_keep_mask)
     if solver == "fireflow":
         return fireflow_integrate_velocity(
             lambda x, t: model.velocity_from_condition(x, t, tactile_condition, gate_weights),
@@ -1082,6 +1215,8 @@ def decode_actions(
     *,
     num_steps: int,
     solver: FlowSolver = "euler",
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
 ) -> Array:
     if num_steps <= 0:
         raise ValueError(f"num_steps must be positive, got {num_steps}.")
@@ -1092,6 +1227,8 @@ def decode_actions(
         x_base,
         tactile_seq,
         gate_weights,
+        state,
+        state_keep_mask,
         num_steps=num_steps,
         solver=solver,
     )
