@@ -37,9 +37,9 @@ def _decode_checked(
     decode_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
     x_base: np.ndarray,
     tactile: np.ndarray,
-    gate: np.ndarray,
+    state: np.ndarray,
 ) -> np.ndarray:
-    prediction = np.asarray(decode_fn(x_base.copy(), tactile, gate), dtype=np.float32)
+    prediction = np.asarray(decode_fn(x_base.copy(), tactile, state), dtype=np.float32)
     if prediction.shape != x_base.shape:
         raise ValueError(f"decode output shape {prediction.shape} does not match action shape {x_base.shape}")
     return prediction
@@ -47,7 +47,17 @@ def _decode_checked(
 
 def evaluate_batches(
     *,
-    batches: Iterable[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Sequence[Mapping[str, object]]]],
+    batches: Iterable[
+        tuple[
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            np.ndarray,
+            Sequence[Mapping[str, object]],
+        ]
+    ],
     baseline_fn: Callable[[np.ndarray], np.ndarray],
     decode_fn: Callable[[np.ndarray, np.ndarray, np.ndarray], np.ndarray],
     tau: float,
@@ -63,11 +73,12 @@ def evaluate_batches(
     if "full" in intervention_names:
         raise ValueError("'full' is reserved for the unmodified tactile condition")
 
-    for indices, x_base, vla, gt, tactile, metadata in batches:
+    for indices, x_base, vla, gt, state, tactile, metadata in batches:
         indices = np.asarray(indices, dtype=np.int64)
         x_base = np.asarray(x_base, dtype=np.float32)
         vla = np.asarray(vla, dtype=np.float32)
         gt = np.asarray(gt, dtype=np.float32)
+        state = np.asarray(state, dtype=np.float32)
         tactile = np.asarray(tactile, dtype=np.float32)
         baseline = np.asarray(baseline_fn(indices), dtype=np.float32)
         if len(metadata) != len(indices):
@@ -80,7 +91,7 @@ def evaluate_batches(
         original_change = tactile_change_from_tokens(tactile[:, -1], baseline)
         original_gate = gate_weights_from_change(original_change, tau=tau, temperature=temperature)
         fixed_x_base = x_base.copy()
-        full = _decode_checked(decode_fn, fixed_x_base, tactile, original_gate)
+        full = _decode_checked(decode_fn, fixed_x_base, tactile, state)
         predictions: dict[str, np.ndarray] = {"full": full}
         gates: dict[str, np.ndarray] = {"full": original_gate}
         for name in intervention_names:
@@ -92,7 +103,7 @@ def evaluate_batches(
                 tau=tau,
                 temperature=temperature,
             )
-            predictions[name] = _decode_checked(decode_fn, fixed_x_base, changed.tactile, changed.gate)
+            predictions[name] = _decode_checked(decode_fn, fixed_x_base, changed.tactile, state)
             gates[name] = changed.gate
         rows.extend(
             sample_error_rows(
@@ -124,7 +135,7 @@ class EvaluationContext:
     provenance: Mapping[str, Any]
 
     def batches(self, *, split: str, batch_size: int):
-        for indices, x_base, vla, gt, tactile in self.conditioner.batches(
+        for indices, x_base, vla, gt, state, tactile in self.conditioner.batches(
             split, batch_size=batch_size, shuffle=False, seed=0
         ):
             source_indices, local_indices = self.pairs.source_and_local_indices(indices)
@@ -148,7 +159,15 @@ class EvaluationContext:
                     strict=True,
                 )
             ]
-            yield indices, x_base, vla, gt, np.asarray(tactile, dtype=np.float32), metadata
+            yield (
+                indices,
+                x_base,
+                vla,
+                gt,
+                np.asarray(state, dtype=np.float32),
+                np.asarray(tactile, dtype=np.float32),
+                metadata,
+            )
 
     def baselines(self, indices: np.ndarray) -> np.ndarray:
         source_indices, _ = self.pairs.source_and_local_indices(indices)
@@ -168,7 +187,7 @@ class EvaluationContext:
         self,
         x_base: np.ndarray,
         tactile: np.ndarray,
-        gate: np.ndarray,
+        state: np.ndarray,
         *,
         num_steps: int,
         solver: str,
@@ -180,9 +199,9 @@ class EvaluationContext:
                 self.model,
                 x_base,
                 tactile,
-                gate,
                 num_steps=num_steps,
                 solver=solver,
+                state=state,
             ),
             dtype=np.float32,
         )
@@ -305,8 +324,10 @@ def load_evaluation_context(
     actual_action_shape = (int(model.config.action_horizon), int(model.config.action_dim))
     if actual_action_shape != expected_action_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_action_shape} != {expected_action_shape}.")
-    if str(extra.get("loss_mode")) != "gated" or not bool(model.config.gate_conditioning):
-        raise ValueError("modality evaluation requires a gate-conditioned checkpoint trained with loss_mode=gated")
+    if str(extra.get("loss_mode")) != "gated" or extra.get("decoder_input_version") != 2:
+        raise ValueError(
+            "modality evaluation requires loss_mode=gated and decoder_input_version=2"
+        )
     try:
         gate_tau = float(extra["gate_tau"])
         gate_temperature = float(extra["gate_temperature"])
@@ -436,8 +457,8 @@ def evaluate_from_config(
         rows = evaluate_batches(
             batches=context.batches(split=split, batch_size=batch_size),
             baseline_fn=context.baselines,
-            decode_fn=lambda x, tactile, gate: context.decode(
-                x, tactile, gate, num_steps=resolved_steps, solver=solver
+            decode_fn=lambda x, tactile, state: context.decode(
+                x, tactile, state, num_steps=resolved_steps, solver=solver
             ),
             tau=context.gate_tau,
             temperature=context.gate_temperature,

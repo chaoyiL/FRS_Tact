@@ -47,7 +47,7 @@ def gate_weights_from_change(
 
 @dataclass(frozen=True)
 class Intervention:
-    """A named tactile or gate counterfactual."""
+    """A named tactile counterfactual."""
 
     name: str
 
@@ -57,9 +57,6 @@ DEFAULT_INTERVENTIONS = (
     Intervention("baseline_recomputed"),
     Intervention("current_only"),
     *(Intervention(f"drop_sensor_{sensor}") for sensor in range(4)),
-    Intervention("gate_0.0"),
-    Intervention("gate_0.5"),
-    Intervention("gate_1.0"),
 )
 
 
@@ -80,7 +77,7 @@ def apply_intervention(
     temperature,
     sensor_count=4,
 ):
-    """Return a counterfactual tactile window and its gate weights."""
+    """Return a counterfactual tactile window and its reporting gate labels."""
 
     if isinstance(name, Intervention):
         name = name.name
@@ -110,13 +107,6 @@ def apply_intervention(
         if not 0 <= sensor < min(sensor_count, tactile.shape[2]):
             raise ValueError(f"sensor index out of range: {sensor}")
         result[:, :, sensor, :] = baseline[:, None, sensor, :]
-    elif name.startswith("gate_"):
-        gate_value = float(name.removeprefix("gate_"))
-        if not np.isfinite(gate_value) or not 0.0 <= gate_value <= 1.0:
-            raise ValueError(
-                f"gate intervention value must be finite and within [0, 1], got {gate_value}"
-            )
-        gate[:] = gate_value
     else:
         raise ValueError(f"unsupported intervention: {name}")
     if recomputed:

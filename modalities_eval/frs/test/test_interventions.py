@@ -49,7 +49,7 @@ def test_fixed_window_interventions_preserve_original_gate():
     assert current_only.recomputed_gate is False
 
 
-def test_sensor_and_gate_interventions_replace_only_target_values():
+def test_sensor_intervention_replaces_only_target_values():
     tactile = np.arange(1 * 2 * 4 * 2, dtype=np.float32).reshape(1, 2, 4, 2)
     baseline = np.full((1, 4, 2), -1.0, dtype=np.float32)
     original_gate = np.array([0.8], dtype=np.float32)
@@ -57,16 +57,11 @@ def test_sensor_and_gate_interventions_replace_only_target_values():
     dropped = apply_intervention(
         "drop_sensor_2", tactile, baseline, original_gate, tau=0.4, temperature=0.1
     )
-    gated = apply_intervention(
-        "gate_0.25", tactile, baseline, original_gate, tau=0.4, temperature=0.1
-    )
-
     np.testing.assert_array_equal(
         dropped.tactile[:, :, 2, :], np.repeat(baseline[:, None, 2, :], 2, axis=1)
     )
     np.testing.assert_array_equal(dropped.tactile[:, :, :2, :], tactile[:, :, :2, :])
-    np.testing.assert_array_equal(gated.tactile, tactile)
-    np.testing.assert_array_equal(gated.gate, np.array([0.25], dtype=np.float32))
+    np.testing.assert_array_equal(dropped.gate, original_gate)
 
 
 def test_interventions_validate_input_and_expose_default_names():
@@ -75,14 +70,14 @@ def test_interventions_validate_input_and_expose_default_names():
     gate = np.array([0.5], dtype=np.float32)
 
     assert all(isinstance(item, Intervention) for item in DEFAULT_INTERVENTIONS)
-    assert {item.name for item in DEFAULT_INTERVENTIONS} >= {
+    assert {item.name for item in DEFAULT_INTERVENTIONS} == {
         "baseline_fixed",
         "baseline_recomputed",
         "current_only",
         "drop_sensor_0",
+        "drop_sensor_1",
+        "drop_sensor_2",
         "drop_sensor_3",
-        "gate_0.0",
-        "gate_1.0",
     }
     with pytest.raises(ValueError, match="expected tactile"):
         apply_intervention("baseline_fixed", tactile[:, 0], baseline, gate, tau=0.4, temperature=0.1)
@@ -90,6 +85,8 @@ def test_interventions_validate_input_and_expose_default_names():
         apply_intervention("drop_sensor_4", tactile, baseline, gate, tau=0.4, temperature=0.1)
     with pytest.raises(ValueError, match="unsupported intervention"):
         apply_intervention("unknown", tactile, baseline, gate, tau=0.4, temperature=0.1)
+    with pytest.raises(ValueError, match="unsupported intervention"):
+        apply_intervention("gate_0.5", tactile, baseline, gate, tau=0.4, temperature=0.1)
 
 
 def test_interventions_validate_gate_batch_and_actual_sensor_dimension():
@@ -161,12 +158,12 @@ def test_interventions_reject_empty_tactile_windows():
         )
 
 
-@pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-0.1", "1.1"])
-def test_gate_interventions_reject_nonfinite_or_out_of_range_values(value):
+@pytest.mark.parametrize("value", ["0.0", "0.5", "1.0", "nan", "inf", "-inf", "-0.1", "1.1"])
+def test_gate_interventions_are_unsupported(value):
     tactile = np.zeros((1, 2, 4, 2), dtype=np.float32)
     baseline = np.zeros((1, 4, 2), dtype=np.float32)
 
-    with pytest.raises(ValueError, match=r"finite.*\[0, 1\]"):
+    with pytest.raises(ValueError, match="unsupported intervention"):
         apply_intervention(
             f"gate_{value}",
             tactile,

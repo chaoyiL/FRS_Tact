@@ -12,10 +12,13 @@ from modalities_eval.frs.interventions import DEFAULT_INTERVENTIONS
 
 def test_evaluate_batches_keeps_x_base_fixed_for_every_condition():
     seen = []
+    state = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
 
-    def decode(x_base, tactile, gate):
+    def decode(x_base, tactile, received_state):
+        assert received_state.shape[0] == x_base.shape[0]
+        np.testing.assert_array_equal(received_state, state)
         seen.append(np.array(x_base))
-        return x_base + gate[:, None, None]
+        return x_base
 
     indices = np.array([4, 7], dtype=np.int64)
     x_base = np.arange(4, dtype=np.float32).reshape(2, 1, 2)
@@ -47,7 +50,7 @@ def test_evaluate_batches_keeps_x_base_fixed_for_every_condition():
     )
 
     rows = evaluate_batches(
-        batches=[(indices, x_base, vla, gt, tactile, metadata)],
+        batches=[(indices, x_base, vla, gt, state, tactile, metadata)],
         baseline_fn=lambda received_indices: baselines,
         decode_fn=decode,
         tau=0.4,
@@ -92,15 +95,16 @@ def test_evaluate_batches_rejects_decode_outputs_that_require_broadcasting():
                     action,
                     action,
                     action,
+                    np.ones((1, 2), dtype=np.float32),
                     tactile,
                     [{"episode_index": 1, "dataset_index": 1}],
                 )
             ],
             baseline_fn=lambda indices: np.ones((len(indices), 4, 1), dtype=np.float32),
-            decode_fn=lambda x_base, tactile, gate: np.zeros((1, 1), dtype=np.float32),
+            decode_fn=lambda x_base, tactile, state: np.zeros((1, 1), dtype=np.float32),
             tau=0.4,
             temperature=0.1,
-            interventions=("gate_0.0",),
+            interventions=("baseline_fixed",),
         )
 
 
@@ -131,6 +135,7 @@ def test_evaluate_from_config_uses_config_validation_steps_without_loading_repor
                 np.zeros((1, 1, 1), dtype=np.float32),
                 np.ones((1, 1, 1), dtype=np.float32),
                 np.zeros((1, 1, 1), dtype=np.float32),
+                np.ones((1, 2), dtype=np.float32),
                 np.ones((1, 2, 4, 1), dtype=np.float32),
                 [{"episode_index": 3, "dataset_index": 9, "source": "fake"}],
             )
@@ -138,7 +143,8 @@ def test_evaluate_from_config_uses_config_validation_steps_without_loading_repor
         def baselines(self, indices):
             return np.ones((len(indices), 4, 1), dtype=np.float32)
 
-        def decode(self, x_base, tactile, gate, *, num_steps, solver):
+        def decode(self, x_base, tactile, state, *, num_steps, solver):
+            assert state.shape == (len(x_base), 2)
             decode_steps.append((num_steps, solver))
             return x_base
 
@@ -176,7 +182,7 @@ def test_evaluate_from_config_uses_config_validation_steps_without_loading_repor
     result = evaluate.evaluate_from_config(
         config_path=tmp_path / "train.yaml",
         batch_size=2,
-        interventions=("gate_0.0",),
+        interventions=("baseline_fixed",),
         bootstrap_samples=11,
         bootstrap_seed=5,
         allow_unverified_provenance=True,
@@ -230,6 +236,7 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
                 np.zeros((1, 1, 1), dtype=np.float32),
                 np.ones((1, 1, 1), dtype=np.float32),
                 np.zeros((1, 1, 1), dtype=np.float32),
+                np.ones((1, 2), dtype=np.float32),
                 np.ones((1, 2, 4, 3), dtype=np.float32),
             )
 
@@ -240,7 +247,7 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
         config=types.SimpleNamespace(
             action_horizon=2,
             action_dim=1,
-            gate_conditioning=True,
+            gate_conditioning=False,
             num_tactile_tokens=4,
             tactile_window=2,
             resnet_embedding_dim=3,
@@ -270,6 +277,7 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
         "cache_records_sha256": "cache-digest",
         "cache_configuration": {"reverse_solver": "fireflow", "source_policy": "vla-a"},
         "loss_mode": "gated",
+        "decoder_input_version": 2,
         "gate_tau": 0.4,
         "gate_temperature": 0.1,
         "rank_low_gate_threshold": 0.2,
@@ -318,6 +326,7 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
     assert context.default_num_steps == 17
     assert calls["source_names"] == ["source/a"]
     assert calls["conditioner"][1]["history_stride"] == 3
+    np.testing.assert_array_equal(batch[4], np.ones((1, 2), dtype=np.float32))
     assert batch[-1] == [
         {
             "cache_index": 5,
@@ -356,6 +365,15 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
             allow_unverified_provenance=True,
         )
     checkpoint_extra["rank_low_gate_threshold"] = 0.2
+
+    for invalid_version in (1, None, "2"):
+        checkpoint_extra["decoder_input_version"] = invalid_version
+        with pytest.raises(ValueError, match="decoder_input_version"):
+            evaluate.load_evaluation_context(
+                config_path=tmp_path / "train.yaml",
+                allow_unverified_provenance=True,
+            )
+    checkpoint_extra["decoder_input_version"] = 2
 
     calls.pop("closed", None)
     config["frs_training"]["validation_steps"] = 0
