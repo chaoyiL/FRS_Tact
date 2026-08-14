@@ -33,7 +33,9 @@ uses the same resampled episode draws.
 `w` is a training-only supervision and reporting label.  Every evaluation
 decode uses decoder input v2—the action base, tactile tokens, and optional
 state token—and never passes `w` or a gate value.  Checkpoints must therefore
-declare `decoder_input_version: 2`.
+declare `decoder_input_version: 2`.  Legacy checkpoints with
+`decoder_config.gate_conditioning: true` are incompatible, are not converted
+automatically, and must be retrained before evaluation.
 
 `contribution` is `MSE(condition) - MSE(full)`.  A positive contribution means
 the intervention made the decoded action less accurate than the full tactile

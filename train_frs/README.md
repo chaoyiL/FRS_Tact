@@ -33,7 +33,9 @@ masks the entire state token during training only; evaluation and deployment alw
 The training-time `w` (gate) value is a supervision and reporting label only. Decoder input
 v2 accepts the action base, tactile tokens, and optional state token; it never accepts raw
 `w` or a gate value. Deployment therefore requires checkpoints declaring
-`decoder_input_version: 2` and supplies no gate input.
+`decoder_input_version: 2` and supplies no gate input. Legacy checkpoints with
+`decoder_config.gate_conditioning: true` are incompatible with decoder input v2;
+they are not migrated automatically and must be retrained.
 
 For gated training, confident high-gate samples receive direct GT decode, GT-over-VLA rank,
 and absolute repair constraints. Confident low-gate samples use only the weaker
