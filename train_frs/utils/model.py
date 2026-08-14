@@ -707,6 +707,36 @@ def decode_fireflow(
     )
 
 
+@partial(nnx.jit, static_argnames=("num_steps", "solver"))
+def _decode_actions_jitted(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    tactile_seq: Array,
+    gate_weights: Array | None,
+    *,
+    num_steps: int,
+    solver: FlowSolver,
+) -> Array:
+    """Single compiled unit: tactile conditioning + ODE integration."""
+
+    tactile_condition = model.encode_tactile_condition(tactile_seq)
+    if solver == "fireflow":
+        return fireflow_integrate_velocity(
+            lambda x, t: model.velocity_from_condition(x, t, tactile_condition, gate_weights),
+            x_base,
+            num_steps=num_steps,
+        )
+
+    batch_size = x_base.shape[0]
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
+
+    def body(step: int, x_t: Array) -> Array:
+        t = jnp.full((batch_size,), step * dt, dtype=jnp.float32)
+        return x_t + dt * model.velocity_from_condition(x_t, t, tactile_condition, gate_weights)
+
+    return jax.lax.fori_loop(0, num_steps, body, jnp.asarray(x_base, dtype=jnp.float32))
+
+
 def decode_actions(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -716,12 +746,18 @@ def decode_actions(
     num_steps: int,
     solver: FlowSolver = "euler",
 ) -> Array:
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be positive, got {num_steps}.")
     if solver not in ("euler", "fireflow"):
         raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
-    tactile_condition = model.encode_tactile_condition(tactile_seq)
-    if solver == "euler":
-        return decode_euler(model, x_base, tactile_condition, gate_weights, num_steps=num_steps)
-    return decode_fireflow(model, x_base, tactile_condition, gate_weights, num_steps=num_steps)
+    return _decode_actions_jitted(
+        model,
+        x_base,
+        tactile_seq,
+        gate_weights,
+        num_steps=num_steps,
+        solver=solver,
+    )
 
 
 def resolve_peak_learning_rate(

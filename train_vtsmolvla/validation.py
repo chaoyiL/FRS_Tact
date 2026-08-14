@@ -272,6 +272,38 @@ class _VTValidationExtension(CheckpointValidationExtension):
 _VT_EXTENSION = _VTValidationExtension()
 
 
+def contract_from_checkpoint(path: str | Path) -> CheckpointContract:
+    """Infer the deployment contract from a checkpoint's ``config.json``."""
+
+    from train_smolvla.validation import _load_json, _parse_config
+
+    checkpoint = Path(path).expanduser().resolve()
+    issues: list[str] = []
+    raw = _load_json(checkpoint / "config.json", issues)
+    if raw is None:
+        detail = "; ".join(issues) if issues else "config.json is missing"
+        raise ValueError(f"cannot infer checkpoint contract from {checkpoint}: {detail}")
+    parsed = _parse_config(raw, issues, _VT_EXTENSION)
+    if issues:
+        raise ValueError(
+            "cannot infer checkpoint contract from "
+            f"{checkpoint}:\n" + "\n".join(f"- {issue}" for issue in issues)
+        )
+    contract = parsed.as_contract(_VT_EXTENSION)
+    if contract is None:
+        raise ValueError(f"cannot infer checkpoint contract from {checkpoint}: incomplete config")
+    if not isinstance(contract, CheckpointContract):
+        contract = CheckpointContract(
+            state_dim=contract.state_dim,
+            action_dim=contract.action_dim,
+            chunk_size=contract.chunk_size,
+            image_keys=contract.image_keys,
+            lora_rank=contract.lora_rank,
+            vlm_lora_target_modules=contract.vlm_lora_target_modules,
+        )
+    return contract
+
+
 def validate_checkpoint(
     path: str | Path,
     *,
@@ -291,6 +323,7 @@ def validate_checkpoint(
 __all__ = [
     "CheckpointContract",
     "CheckpointValidationReport",
+    "contract_from_checkpoint",
     "contract_from_config",
     "validate_checkpoint",
 ]

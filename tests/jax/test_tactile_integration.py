@@ -245,9 +245,11 @@ def test_offline_checkpoint_resolution_fails_before_policy_or_robot_connection(
     assert events == ["resolve"]
 
 
-def test_default_deployment_config_pins_a_self_consistent_visual_contract() -> None:
+def test_default_deployment_config_infers_contract_from_checkpoint() -> None:
+    from train_vtsmolvla.validation import contract_from_checkpoint
+
     config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
-    contract = remote_client._checkpoint_contract(config, config["control"])
+    checkpoint = Path(str(config["checkpoint"])).expanduser()
 
     assert isinstance(config["checkpoint"], str) and config["checkpoint"]
     assert config["revision"] is None
@@ -255,6 +257,25 @@ def test_default_deployment_config_pins_a_self_consistent_visual_contract() -> N
     assert config["connection"]["token"] is None
     assert config["connection"]["token_env"] == "VB_ROBOT_TOKEN"
     assert config["connection"]["require_token"] is True
+    assert config.get("checkpoint_contract") in (None, {})
+    assert config["rename_map"] == {
+        "observation.images.camera0": "observation.images.camera1",
+        "observation.images.camera1": "observation.images.camera2",
+    }
+    assert config["observation"]["data_type"] == "vision"
+    assert config["observation"]["single_arm_mode"] is False
+    assert config["control"]["action_horizon"] == 10
+
+    if not checkpoint.is_dir():
+        pytest.skip(f"default deployment checkpoint unavailable: {checkpoint}")
+
+    inferred = contract_from_checkpoint(checkpoint)
+    contract = remote_client._checkpoint_contract(
+        config,
+        config["control"],
+        inferred=inferred,
+    )
+    assert contract == inferred
     assert contract.state_dim == 20
     assert contract.action_dim == 20
     assert contract.chunk_size == 10
@@ -263,20 +284,64 @@ def test_default_deployment_config_pins_a_self_consistent_visual_contract() -> N
         "observation.images.camera2",
     )
     assert contract.tactile_keys == ()
-    assert contract.tactile_embedding_dim == 512
     assert contract.tactile_num_tokens == 0
     assert contract.tactile_proj_mode == "frozen"
     assert contract.lora_rank == 0
     assert contract.vlm_lora_target_modules == ()
-    assert config["rename_map"] == {
-        "observation.images.camera0": "observation.images.camera1",
-        "observation.images.camera1": "observation.images.camera2",
-    }
-    assert config["observation"]["data_type"] == "vision"
-    assert config["observation"]["single_arm_mode"] is False
-    assert config["control"]["action_horizon"] == 10
-    assert config["control"]["steps_per_inference"] == 10
 
+
+def test_checkpoint_contract_overrides_only_provided_fields() -> None:
+    from train_vtsmolvla.validation import CheckpointContract
+
+    inferred = CheckpointContract(
+        state_dim=20,
+        action_dim=20,
+        chunk_size=10,
+        image_keys=("observation.images.camera1", "observation.images.camera2"),
+        tactile_keys=(),
+        tactile_embedding_dim=512,
+        tactile_num_tokens=0,
+        lora_rank=0,
+        vlm_lora_target_modules=(),
+    )
+    config = {
+        "checkpoint_contract": {
+            "lora_rank": 8,
+            "vlm_lora_target_modules": ["q_proj"],
+        }
+    }
+    contract = remote_client._checkpoint_contract(
+        config,
+        {"action_horizon": 10},
+        inferred=inferred,
+    )
+    assert contract.state_dim == 20
+    assert contract.chunk_size == 10
+    assert contract.lora_rank == 8
+    assert contract.vlm_lora_target_modules == ("q_proj",)
+    assert contract.image_keys == inferred.image_keys
+
+
+def test_checkpoint_contract_can_be_omitted_when_inferred() -> None:
+    from train_vtsmolvla.validation import CheckpointContract
+
+    inferred = CheckpointContract(
+        state_dim=4,
+        action_dim=2,
+        chunk_size=5,
+        image_keys=("rgb",),
+        tactile_keys=(),
+        tactile_embedding_dim=512,
+        tactile_num_tokens=0,
+        lora_rank=0,
+        vlm_lora_target_modules=(),
+    )
+    contract = remote_client._checkpoint_contract(
+        {},
+        {"action_horizon": 5},
+        inferred=inferred,
+    )
+    assert contract == inferred
 
 @pytest.mark.parametrize("steps_per_inference", [True, 10.5, "10"])
 def test_load_config_rejects_non_integer_steps_per_inference(
@@ -523,6 +588,7 @@ def _run_protocol_fixture(
     frs_enabled: bool,
     fail_frs_receive: bool = False,
     fail_begin_chunk: bool = False,
+    fail_stop_send: bool = False,
 ) -> tuple[Path, list[tuple[object, ...]], list[np.ndarray]]:
     events: list[tuple[object, ...]] = []
     sent_actions: list[np.ndarray] = []
@@ -633,6 +699,8 @@ def _run_protocol_fixture(
         @staticmethod
         def send_state(state: str) -> None:
             events.append((state,))
+            if state == "stop" and fail_stop_send:
+                raise ConnectionError("bridge already closed")
 
         @staticmethod
         def send_action(action: np.ndarray, obs_seq: int, *, trace: object) -> None:
@@ -722,6 +790,24 @@ def test_frs_receive_failure_sends_stop_and_closes_bridge(
         remote_client.run(config_path)
 
     assert ("receive_frs", 1) in events
+    assert events[-2:] == [("stop",), ("close",)]
+
+
+def test_frs_disconnect_during_stop_does_not_mask_receive_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path, events, _ = _run_protocol_fixture(
+        tmp_path,
+        monkeypatch,
+        frs_enabled=True,
+        fail_frs_receive=True,
+        fail_stop_send=True,
+    )
+
+    with pytest.raises(TimeoutError, match="FRS receive timed out"):
+        remote_client.run(config_path)
+
     assert events[-2:] == [("stop",), ("close",)]
 
 

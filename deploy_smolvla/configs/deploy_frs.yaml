@@ -5,7 +5,7 @@
 #   bash ./deploy_smolvla/scripts/start_frs.sh --check
 
 # FRS 训练 action cache 时使用的同一份“合并后的”视觉 SmolVLA JAX checkpoint。
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_02_3w_jax
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax
 revision: null
 allow_download: false
 seed: 0
@@ -14,18 +14,8 @@ jit: true
 num_steps: 10
 
 # 这里描述的是基础 SmolVLA，而不是单独的 FRS 触觉输入。
-checkpoint_contract:
-  state_dim: 20
-  action_dim: 20
-  chunk_size: 10
-  image_keys:
-    - observation.images.camera1
-    - observation.images.camera2
-  tactile_keys: []
-  tactile_embedding_dim: 512
-  tactile_num_tokens: 0
-  lora_rank: 0
-  vlm_lora_target_modules: []
+# 默认从基础 checkpoint 的 config.json 自动推断；需要时可覆盖个别字段。
+checkpoint_contract: {}
 
 # 机器人观测 key -> 基础 SmolVLA checkpoint 的模型 key。
 rename_map:
@@ -37,7 +27,7 @@ rename_map:
 frs:
   enabled: true
   steering_protection_interval_s: null
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0809_02
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0813_04_best_gain
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:
@@ -83,10 +73,10 @@ observation:
 
 control:
   # 训练数据是 30 Hz；FRS v1 逐 action 重定向，完整协商 horizon 不截断执行。
-  control_frequency: 30.0
+  control_frequency: 10.0
   controller_frequency: 80.0
-  action_horizon: 10
-  steps_per_inference: 10
+  action_horizon: 20
+  steps_per_inference: 20
   # 当前 FRS reverse 不支持 RTC 拼接；基础 checkpoint 必须关闭 RTC。
   inference_delay: null
   execution_horizon: null

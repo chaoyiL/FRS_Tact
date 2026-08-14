@@ -22,7 +22,11 @@ import yaml
 from train_smolvla import JaxSmolVLAPolicy
 from train_smolvla.checkpoint import resolve_checkpoint
 from train_vtsmolvla import VTJaxSmolVLAPolicy
-from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
+from train_vtsmolvla.validation import (
+    CheckpointContract,
+    contract_from_checkpoint,
+    validate_checkpoint,
+)
 
 from .bridge_client import RobotBridgeClient
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
@@ -227,22 +231,44 @@ def _resolve_checkpoint(value: str, config_path: Path) -> str:
 def _checkpoint_contract(
     config: Mapping[str, Any],
     control: Mapping[str, Any],
+    *,
+    inferred: CheckpointContract | None = None,
 ) -> CheckpointContract:
-    """Parse the explicit robot/checkpoint boundary; never trust checkpoint metadata alone."""
+    """Build the deployment contract from checkpoint metadata with optional YAML overrides.
+
+    When ``inferred`` is provided (normal deploy path), missing/null YAML fields keep the
+    checkpoint values. When ``inferred`` is omitted, the YAML must still supply a full
+    contract (kept for unit tests and fixtures).
+    """
 
     raw = config.get("checkpoint_contract")
+    if raw is None:
+        raw = {}
     if not isinstance(raw, Mapping):
-        raise ValueError("Missing YAML section: checkpoint_contract")
+        raise ValueError("checkpoint_contract must be a mapping when provided")
+
+    def has_override(key: str) -> bool:
+        return key in raw and raw[key] is not None
 
     def integer(key: str, *, allow_zero: bool = False) -> int:
-        value = int(_required(raw, key, "checkpoint_contract"))
+        if has_override(key):
+            value = int(raw[key])
+        elif inferred is not None:
+            value = int(getattr(inferred, key))
+        else:
+            value = int(_required(raw, key, "checkpoint_contract"))
         if value < 0 or (value == 0 and not allow_zero):
             qualifier = "non-negative" if allow_zero else "positive"
             raise ValueError(f"checkpoint_contract.{key} must be {qualifier}")
         return value
 
     def string_tuple(key: str, *, allow_empty: bool = False) -> tuple[str, ...]:
-        value = _required(raw, key, "checkpoint_contract")
+        if has_override(key):
+            value = raw[key]
+        elif inferred is not None:
+            return tuple(getattr(inferred, key))
+        else:
+            value = _required(raw, key, "checkpoint_contract")
         if (
             not isinstance(value, list | tuple)
             or (not value and not allow_empty)
@@ -253,8 +279,11 @@ def _checkpoint_contract(
         return tuple(value)
 
     tactile_num_tokens = integer("tactile_num_tokens", allow_zero=True)
-    tactile_proj_mode = raw.get("tactile_proj_mode")
-    if tactile_proj_mode is None:
+    if has_override("tactile_proj_mode"):
+        tactile_proj_mode = raw["tactile_proj_mode"]
+    elif inferred is not None and inferred.tactile_proj_mode is not None:
+        tactile_proj_mode = inferred.tactile_proj_mode
+    else:
         tactile_proj_mode = "full" if tactile_num_tokens else "frozen"
     if not isinstance(tactile_proj_mode, str) or tactile_proj_mode not in {
         "frozen",
@@ -279,9 +308,9 @@ def _checkpoint_contract(
     )
     if contract.chunk_size != int(control["action_horizon"]):
         raise ValueError(
-            f"checkpoint_contract.chunk_size={contract.chunk_size} does not match "
+            f"checkpoint chunk_size/contract.chunk_size={contract.chunk_size} does not match "
             f"control.action_horizon={control['action_horizon']}"
-    )
+        )
     if contract.tactile_num_tokens != len(contract.tactile_keys):
         raise ValueError("checkpoint_contract.tactile_num_tokens must equal the number of tactile_keys")
     overlap = sorted(set(contract.image_keys) & set(contract.tactile_keys))
@@ -295,9 +324,11 @@ def _load_validated_policy(
     *,
     revision: str | None,
     allow_download: bool,
-    expected: CheckpointContract,
     rename_map: Mapping[str, str] | None,
+    config: Mapping[str, Any] | None = None,
+    control: Mapping[str, Any] | None = None,
     base_sidecars: str | Path | None = None,
+    expected: CheckpointContract | None = None,
 ) -> Policy:
     """Resolve and validate a snapshot before materializing any model tensors."""
 
@@ -306,6 +337,22 @@ def _load_validated_policy(
         revision=revision,
         local_files_only=not allow_download,
     )
+    if expected is None:
+        if config is None or control is None:
+            raise ValueError("config and control are required when expected is omitted")
+        inferred = None
+        if (snapshot / "config.json").is_file():
+            inferred = contract_from_checkpoint(snapshot)
+        expected = _checkpoint_contract(config, control, inferred=inferred)
+        print(
+            "[client] Checkpoint contract: "
+            f"state_dim={expected.state_dim} "
+            f"action_dim={expected.action_dim} "
+            f"chunk_size={expected.chunk_size} "
+            f"images={list(expected.image_keys)} "
+            f"lora_rank={expected.lora_rank} "
+            f"vlm_lora={list(expected.vlm_lora_target_modules)}"
+        )
     validate_checkpoint(
         snapshot,
         expected=expected,
@@ -572,9 +619,12 @@ def _run_frs_protocol(
 ) -> None:
     """Run the strictly ordered, server-directed FRS steering protocol."""
 
+    print("[client] Running FRS steering protocol.")
+
     completed_chunks = 0
     previous_chunk_id: int | None = None
     while max_chunks <= 0 or completed_chunks < max_chunks:
+
         chunk_start = bridge.receive_frs_message(observation_timeout_s)
         if not isinstance(chunk_start, FRSChunkStart):
             raise RuntimeError(
@@ -598,6 +648,8 @@ def _run_frs_protocol(
             empty_cameras=empty_cameras,
             required_image_keys=steering_policy.tactile_keys,
         )
+
+        # 在一个 Chunk 的 Steering 之前做准备
         ready = steering_policy.begin_chunk(
             chunk_start.chunk_id,
             initial_observation,
@@ -611,6 +663,8 @@ def _run_frs_protocol(
                 "FRS chunk ready id does not match chunk start: "
                 f"{ready.chunk_id} != {chunk_start.chunk_id}"
             )
+        print("[client] FRS chunk is ready.")
+
         bridge.send_frs_chunk_ready(
             chunk_start.obs_seq,
             chunk_start.chunk_id,
@@ -618,17 +672,23 @@ def _run_frs_protocol(
         )
 
         while True:
+            # 接收服务端发送的 FRS 消息，包括：
+            # 当前 Action Chunk 编号；Chunk 是否结束；观测量 等信息
             message = bridge.receive_frs_message(observation_timeout_s)
+            print('[client] message type: ', type(message).__name__)
             if isinstance(message, FRSChunkEnd):
                 if message.chunk_id != chunk_start.chunk_id:
                     raise RuntimeError(
                         "FRS chunk end chunk id does not match active chunk: "
                         f"{message.chunk_id} != {chunk_start.chunk_id}"
                     )
+                print("[client] Chunk end.")
                 steering_policy.end_chunk(chunk_start.chunk_id)
                 previous_chunk_id = chunk_start.chunk_id
                 completed_chunks += 1
                 break
+            print("[client] Received message: ", message.chunk_id, message.request_id, message.action_index)
+
             if not isinstance(message, FRSSteerRequest):
                 raise RuntimeError(
                     "expected FRS steer request or chunk end, received "
@@ -640,6 +700,7 @@ def _run_frs_protocol(
                     f"{message.chunk_id} != {chunk_start.chunk_id}"
                 )
 
+            # 准备观测量
             request_observation = _prepare_observation(
                 dict(message.observation),
                 state_dim=state_dim,
@@ -647,6 +708,9 @@ def _run_frs_protocol(
                 empty_cameras=empty_cameras,
                 required_image_keys=steering_policy.tactile_keys,
             )
+            # 开始推理
+            print("[client] Steering action.")
+            time_start = time.time()
             result = steering_policy.steer_action(
                 message.chunk_id,
                 message.request_id,
@@ -665,12 +729,15 @@ def _run_frs_protocol(
                     f"{result_ids} != {request_ids}"
                 )
             selected_action = np.asarray(result.selected_action)
+
             expected_shape = (int(steering_policy.policy.config.action_dim),)
             if selected_action.shape != expected_shape:
                 raise RuntimeError(
                     "FRS selected action must have shape "
                     f"{expected_shape}, got {selected_action.shape}"
                 )
+            
+            # 发送推理结果
             bridge.send_frs_steer_action(
                 message.chunk_id,
                 message.request_id,
@@ -678,8 +745,14 @@ def _run_frs_protocol(
                 selected_action,
                 trace=_build_trace_or_none(_build_frs_steer_trace, result, message),
             )
+            time_end = time.time()
+            print("[client] Steering action finished in ", time_end - time_start, " seconds")
+            # 结束推理
 
-            acknowledgement = bridge.receive_frs_message(action_ack_timeout_s)
+            acknowledgement = bridge.receive_frs_message(action_ack_timeout_s) # 机器人端回执
+            print("[client] Received acknowledgement: ", acknowledgement) 
+            print()
+
             if not isinstance(acknowledgement, FRSSteerAck):
                 raise RuntimeError(
                     "expected FRS steer acknowledgement, received "
@@ -824,7 +897,6 @@ def run(
     allow_download = bool(config.get("allow_download", False))
     revision = config.get("revision")
     revision = None if revision is None else str(revision)
-    expected_contract = _checkpoint_contract(config, control)
     seed = int(config.get("seed", 0))
     jit = bool(config.get("jit", True))
     num_steps = config.get("num_steps")
@@ -836,7 +908,8 @@ def run(
         checkpoint,
         revision=revision,
         allow_download=allow_download,
-        expected=expected_contract,
+        config=config,
+        control=control,
         rename_map=rename_map,
     )
     print(f"[client] JAX backend: {jax.default_backend()}")
@@ -952,6 +1025,7 @@ def run(
             empty_cameras=empty_cameras,
             required_image_keys=robot_tactile_keys,
         )
+
         if frs_runtime is not None:
             frs_runtime.reset_episode(warmup_frame)
             frs_runtime.warmup_all_tactile_lengths()
@@ -961,6 +1035,7 @@ def run(
                 f"window={frs_runtime.model.config.tactile_window} "
                 f"stride={frs_runtime.config.history_stride}"
             )
+            
         for warmup_index in range(warmup_runs):
             start = time.perf_counter()
             _predict_chunk(
@@ -1063,7 +1138,10 @@ def run(
     finally:
         observation_saver.close()
         try:
-            bridge.send_state("stop")
+            try:
+                bridge.send_state("stop")
+            except Exception as exc:
+                print(f"[client] Could not send STOP because the bridge is closed: {exc}")
         finally:
             bridge.close()
         print("[client] Stopped")

@@ -6,7 +6,7 @@
 
 # ---- 模型 ----
 # 本地 checkpoint 目录，或 Hugging Face model id
-checkpoint: /home/typhon/models/wjstx/smolvla-ckpt/10/checkpoint-00030000
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_02_3w_jax
 # 本地 checkpoint 不使用 Hugging Face revision。
 revision: null
 # checkpoint 和 SmolVLM tokenizer 均从本地文件/缓存加载。
@@ -15,25 +15,9 @@ seed: 0
 jit: true
 # 可选：覆盖 Euler denoising steps；null 表示用 checkpoint 里的 num_steps
 num_steps: null
-# 部署端在加载模型、连接机器人之前用这份独立合约验证 checkpoint。
-checkpoint_contract:
-  state_dim: 20
-  action_dim: 20
-  chunk_size: 10
-  image_keys:
-    - observation.images.camera1
-    - observation.images.camera2
-  tactile_keys: []
-    # - observation.images.tactile_left_0
-    # - observation.images.tactile_right_0
-    # - observation.images.tactile_left_1
-    # - observation.images.tactile_right_1
-  tactile_embedding_dim: 512
-  tactile_num_tokens: 0
-  lora_rank: 16
-  vlm_lora_target_modules:
-    - q_proj
-    - v_proj
+# 合约默认从 checkpoint config.json 自动推断；这里只写需要覆盖的字段。
+# 不需要覆盖时可写成 {} 或删掉整段。
+checkpoint_contract: {}
 # 机器人观测 key -> checkpoint 期望的特征名；不需要可留空 {}
 rename_map: {
   observation.images.camera0: observation.images.camera1,
@@ -67,7 +51,7 @@ observation:
 
 # ---- 控制 ----
 control:
-  control_frequency: 20.0
+  control_frequency: 5.0
   controller_frequency: 80.0
   # 必须与 checkpoint.chunk_size 一致：模型每次预测 20 步 action chunk
   action_horizon: 10

@@ -187,6 +187,7 @@ class JaxSmolVLAPolicy:
         if not bool(jnp.isfinite(actions).all()):
             raise ValueError("normalized_actions must be finite")
         batch = self.preprocessor.prepare(observation, task)
+        # print("[JaxSmolVLAPolicy] Reverse integration started.")
         result = reverse_integrate_prepared_actions(
             self,
             batch,

@@ -521,6 +521,7 @@ class FRSSteeringPolicy:
         self._action_vla_normalized: np.ndarray | None = None
         self._action_vla: np.ndarray | None = None
         self._x_base: np.ndarray | None = None
+        self._x_base_device: jax.Array | None = None
         self._tactile_sequence: list[np.ndarray] = []
         self._request_results: dict[int, tuple[int, int, bytes, FRSSteerResult]] = {}
         self._last_action_index: int | None = None
@@ -573,6 +574,8 @@ class FRSSteeringPolicy:
         self._action_vla_normalized = normalized_array
         self._action_vla = action_array
         self._x_base = x_base_array
+        # Keep reverse-flow base on device so each steer avoids a host→device copy.
+        self._x_base_device = jnp.asarray(x_base_array, dtype=jnp.float32)
 
     def _make_chunk_ready(self, started: float, finished: float) -> FRSChunkReady:
         assert self._active_chunk_id is not None
@@ -608,6 +611,8 @@ class FRSSteeringPolicy:
             num_steps=num_steps,
             normalized=True,
         )
+        # print("[frs] Forward prediction finished.")
+
         x_base = self.policy.reverse_action_chunk(
             initial_observation,
             task,
@@ -615,6 +620,8 @@ class FRSSteeringPolicy:
             num_steps=self.config.reverse_steps,
             solver=self.config.reverse_solver,
         )
+        # print("[frs] Reversal integration finished.")
+
         self._activate_chunk(chunk_id, normalized, x_base)
         return self._make_chunk_ready(started, time.time())
 
@@ -655,7 +662,9 @@ class FRSSteeringPolicy:
 
     def _validated_decoded_chunk(self, decoded: Any) -> tuple[np.ndarray, float, float]:
         assert self._action_vla_normalized is not None
-        decoded_array = self._readonly_array(decoded)
+        # One host sync for the full chunk; callers reuse this array instead of
+        # issuing another device_get for selected rows / public copies.
+        decoded_array = np.asarray(jax.device_get(decoded), dtype=np.float32)
         expected = (
             1,
             int(self.policy.config.chunk_size),
@@ -719,6 +728,7 @@ class FRSSteeringPolicy:
         assert self._episode_baseline is not None
         assert self._action_vla_normalized is not None
         assert self._x_base is not None
+        assert self._x_base_device is not None
 
         encode_started_at = time.time()
         current = self._readonly_array(self._encode_observation(observation))
@@ -735,6 +745,7 @@ class FRSSteeringPolicy:
             current[None, ...],
             self._episode_baseline[None, ...],
         )
+        # TODO: 考虑去掉 Gate 输入
         gate = gate_weights_from_change(
             change,
             tau=self.config.gate_tau,
@@ -744,7 +755,7 @@ class FRSSteeringPolicy:
         decode_started_at = time.time()
         decoded = decode_actions(
             self.model,
-            self._x_base,
+            self._x_base_device,
             tactile,
             jnp.asarray(gate, dtype=jnp.float32),
             num_steps=self.config.decode_steps,
@@ -758,6 +769,8 @@ class FRSSteeringPolicy:
             delta_rms=delta_rms,
             max_normalized_action_abs=max_abs,
         )
+        # Hot path: only the selected action leaves as a fresh public buffer.
+        # Full-chunk fields are isolated once from the single host sync above.
         selected_normalized = self._immutable_public_array(decoded_array[0, action_index])
         selected_action = self._immutable_public_array(
             self.policy.preprocessor.unnormalize_actions(selected_normalized)
@@ -804,6 +817,7 @@ class FRSSteeringPolicy:
             self._action_vla_normalized,
             self._action_vla,
             self._x_base,
+            self._x_base_device,
             self._tactile_sequence,
             self._request_results,
             self._last_action_index,
@@ -821,6 +835,7 @@ class FRSSteeringPolicy:
             self._action_vla_normalized,
             self._action_vla,
             self._x_base,
+            self._x_base_device,
             self._tactile_sequence,
             self._request_results,
             self._last_action_index,
@@ -844,7 +859,9 @@ class FRSSteeringPolicy:
                     tactile_window,
                 )
             baseline = np.asarray(self._episode_baseline, dtype=np.float32)
-            if self._x_base is None:
+            if self._x_base_device is not None:
+                synthetic_x_base = self._x_base_device
+            elif self._x_base is None:
                 synthetic_x_base = jnp.zeros(
                     (
                         1,

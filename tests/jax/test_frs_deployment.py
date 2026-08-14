@@ -1220,7 +1220,7 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
     config = remote_client.load_config(FRS_CONFIG)
 
     assert config["observation"]["data_type"] == "vitac"
-    assert config["control"]["control_frequency"] == 30.0
+    assert config["control"]["control_frequency"] == 5.0
     assert config["control"]["steps_per_inference"] == 10
     assert config["control"]["steps_per_inference"] == config["control"]["action_horizon"]
     assert config["frs"]["steering_protection_interval_s"] is None
