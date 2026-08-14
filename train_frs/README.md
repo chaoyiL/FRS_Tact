@@ -30,6 +30,11 @@ current `observation.state` in action-cache v3. FRS maps it to one cross-attenti
 concatenates that token with the four tactile-history tokens. `model.state_dropout_rate`
 masks the entire state token during training only; evaluation and deployment always use it.
 
+The training-time `w` (gate) value is a supervision and reporting label only. Decoder input
+v2 accepts the action base, tactile tokens, and optional state token; it never accepts raw
+`w` or a gate value. Deployment therefore requires checkpoints declaring
+`decoder_input_version: 2` and supplies no gate input.
+
 For gated training, confident high-gate samples receive direct GT decode, GT-over-VLA rank,
 and absolute repair constraints. Confident low-gate samples use only the weaker
 nearest-endpoint safety hinge, so either a GT-like or VLA-like action remains acceptable.

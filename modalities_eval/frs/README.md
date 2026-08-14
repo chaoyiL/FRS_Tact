@@ -1,6 +1,6 @@
 # FRS modality intervention evaluation
 
-Run the modality evaluation against a trained gated FRS checkpoint:
+Run the modality evaluation against a trained FRS checkpoint with gated-training provenance:
 
 ```bash
 PYTHONPATH=.:src:tests uv run --no-sync python -m modalities_eval.frs.evaluate \
@@ -27,15 +27,13 @@ condition/source/episode group.  The plot reports 95% confidence intervals
 from an episode-cluster bootstrap, so repeated samples from an episode remain
 together when resampled.  The bootstrap preserves row-weighted means: it
 resamples episode clusters and divides selected per-cluster sums by selected
-row counts.  Within each condition and gate stratum, every metric uses the
-same resampled episode draws.
+row counts.  Within each condition and training-label stratum, every metric
+uses the same resampled episode draws.
 
-Gate strata use the checkpoint's ranking thresholds and always classify the
-original gate, never a counterfactual gate: `low` is
-`original_gate <= rank_low_gate_threshold`, `transition` lies strictly between
-the thresholds, and `high` is
-`original_gate >= rank_high_gate_threshold`.  Each condition in `summary.json`
-records both thresholds under `gate_thresholds`.
+`w` is a training-only supervision and reporting label.  Every evaluation
+decode uses decoder input v2—the action base, tactile tokens, and optional
+state token—and never passes `w` or a gate value.  Checkpoints must therefore
+declare `decoder_input_version: 2`.
 
 `contribution` is `MSE(condition) - MSE(full)`.  A positive contribution means
 the intervention made the decoded action less accurate than the full tactile
@@ -43,13 +41,9 @@ input, which is evidence that the removed or altered tactile information was
 helpful for that sample.  A negative value means the intervention was more
 accurate under this metric; it is not by itself evidence of causality.
 
-The two baseline interventions separate tactile content from gate behavior:
-
-- `baseline_fixed` replaces the tactile window with the episode baseline and
-  keeps the gate computed from the original tactile observation.
-- `baseline_recomputed` makes the same tactile replacement but recomputes the
-  gate from the altered window.  Its result includes both the missing tactile
-  content and the gate response to that change.
+Baseline interventions replace the tactile window with the episode baseline.
+They affect the decoder only through tactile content; `w` is a reporting label
+and never a decoder input.
 
 The `val` split is exploratory only: use it to inspect interventions and choose
 follow-up hypotheses, not as a final confirmatory result.  Confirm claims on a
