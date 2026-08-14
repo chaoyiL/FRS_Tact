@@ -366,13 +366,19 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
         )
     checkpoint_extra["rank_low_gate_threshold"] = 0.2
 
-    for invalid_version in (1, None, "2"):
+    for invalid_version in (1, "2", 2.0, True):
         checkpoint_extra["decoder_input_version"] = invalid_version
         with pytest.raises(ValueError, match="decoder_input_version"):
             evaluate.load_evaluation_context(
                 config_path=tmp_path / "train.yaml",
                 allow_unverified_provenance=True,
             )
+    checkpoint_extra.pop("decoder_input_version")
+    with pytest.raises(ValueError, match="decoder_input_version"):
+        evaluate.load_evaluation_context(
+            config_path=tmp_path / "train.yaml",
+            allow_unverified_provenance=True,
+        )
     checkpoint_extra["decoder_input_version"] = 2
 
     calls.pop("closed", None)

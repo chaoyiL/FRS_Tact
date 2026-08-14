@@ -324,7 +324,13 @@ def load_evaluation_context(
     actual_action_shape = (int(model.config.action_horizon), int(model.config.action_dim))
     if actual_action_shape != expected_action_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_action_shape} != {expected_action_shape}.")
-    if str(extra.get("loss_mode")) != "gated" or extra.get("decoder_input_version") != 2:
+    decoder_input_version = extra.get("decoder_input_version")
+    if (
+        str(extra.get("loss_mode")) != "gated"
+        or not isinstance(decoder_input_version, int)
+        or isinstance(decoder_input_version, bool)
+        or decoder_input_version != 2
+    ):
         raise ValueError(
             "modality evaluation requires loss_mode=gated and decoder_input_version=2"
         )
