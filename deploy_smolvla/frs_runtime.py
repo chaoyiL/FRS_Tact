@@ -346,12 +346,23 @@ class FRSSteeringPolicy:
             raise ValueError("FRS deployment requires adapt_to_pi_aloha=false")
 
         self.model, self.metadata = load_frs_checkpoint(self.config.checkpoint)
-        self.encoder = load_tactile_encoder(self.config.tactile_encoder_checkpoint)
-        encoder_config = tactile_clip_config_from_dict(self.encoder.metadata["tactile_clip_config"])
-        self.embedding_dim = int(encoder_config.embedding_dim)
-        self.image_size = int(encoder_config.tactile_image_size)
-        if "tactile_resnet" not in self.encoder.params:
-            raise KeyError("tactile encoder checkpoint is missing tactile_resnet params")
+        self.encoder = None
+        if self.model.config.tactile_encoder_trainable:
+            self.embedding_dim = int(self.model.config.resnet_embedding_dim)
+            self.image_size = int(self.model.config.tactile_image_size)
+        else:
+            self.encoder = load_tactile_encoder(
+                self.config.tactile_encoder_checkpoint
+            )
+            encoder_config = tactile_clip_config_from_dict(
+                self.encoder.metadata["tactile_clip_config"]
+            )
+            self.embedding_dim = int(encoder_config.embedding_dim)
+            self.image_size = int(encoder_config.tactile_image_size)
+            if "tactile_resnet" not in self.encoder.params:
+                raise KeyError(
+                    "tactile encoder checkpoint is missing tactile_resnet params"
+                )
         self._validate_contract(policy, source_sample_steps=source_sample_steps)
 
         decoder = self.model.config
@@ -364,16 +375,27 @@ class FRSSteeringPolicy:
         self._episode_baseline: np.ndarray | None = None
         self._clear_chunk_state()
 
-        def encode(params: Any, images: jax.Array) -> jax.Array:
-            embeddings, _ = encode_resnet18(
-                params,
-                images,
-                train=False,
-                embedding_dim=self.embedding_dim,
-            )
-            return embeddings
+        if self.model.config.tactile_encoder_trainable:
+            from flax import nnx
 
-        self._encode_tactile = jax.jit(encode)
+            @nnx.jit
+            def encode_embedded(model: Any, images: jax.Array) -> jax.Array:
+                return model.encode_tactile_images(
+                    images[None, None, ...]
+                )[0, 0]
+
+            self._encode_tactile = encode_embedded
+        else:
+            def encode_external(params: Any, images: jax.Array) -> jax.Array:
+                embeddings, _ = encode_resnet18(
+                    params,
+                    images,
+                    train=False,
+                    embedding_dim=self.embedding_dim,
+                )
+                return embeddings
+
+            self._encode_tactile = jax.jit(encode_external)
 
     def _validate_contract(self, policy: Any, *, source_sample_steps: int) -> None:
         decoder = self.model.config
@@ -474,10 +496,15 @@ class FRSSteeringPolicy:
             [prepare_tactile_batch(observation[key], self.image_size) for key in self.config.tactile_keys],
             axis=0,
         )
-        embeddings = self._encode_tactile(
-            self.encoder.params["tactile_resnet"],
-            jnp.asarray(images, dtype=jnp.float32),
-        )
+        image_array = jnp.asarray(images, dtype=jnp.float32)
+        if self.model.config.tactile_encoder_trainable:
+            embeddings = self._encode_tactile(self.model, image_array)
+        else:
+            assert self.encoder is not None
+            embeddings = self._encode_tactile(
+                self.encoder.params["tactile_resnet"],
+                image_array,
+            )
         return np.asarray(jax.device_get(embeddings), dtype=np.float32)
 
     def _uses_state(self) -> bool:

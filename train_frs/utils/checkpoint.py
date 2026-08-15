@@ -23,7 +23,10 @@ CHECKPOINT_NAME = "checkpoint.json"
 
 
 def _flat_parameter_state(model: TactileConditionedFlowDecoder):
-    state = nnx.state(model, nnx.Param)
+    # Save all model variables. Trainable tactile checkpoints additionally carry
+    # BatchNorm running statistics (nnx.BatchStat), while legacy checkpoints only
+    # contain nnx.Param and therefore retain the same parameter paths.
+    state = nnx.state(model)
     return state, traverse_util.flatten_dict(state.to_pure_dict())
 
 

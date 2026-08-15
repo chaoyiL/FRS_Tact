@@ -67,7 +67,8 @@ reverse_solver_ab:
   # SlerpFlow 全局 mean inversion MSE 不得高于 FireFlow。
   max_mean_ratio: 1.0
 
-# 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
+# 每帧保存四路初始 ResNet embedding [4, 512]，仅用于生成稳定的 Gate 标签。
+# FRS 前向会重新解码原始触觉图像，并端到端微调 checkpoint 内的 ResNet。
 tactile_embedding_cache:
   enabled: true
   # Encoder-specific cache root: do not reuse embeddings produced by encoder_ckpt_06.
@@ -79,11 +80,11 @@ tactile_embedding_cache:
   precompute_video_backend: torchcodec
   precompute_flush_every: 20
 
-# 这里只供 tactile embedding 预计算和 FRS loader 做一致性校验。
+# ResNet 从该 checkpoint 初始化，随后作为 FRS 参数参与训练并写入 FRS checkpoint。
 model:
   use_tactile_encoder: true
   tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
-  freeze_tactile_encoder: true
+  freeze_tactile_encoder: false
   tactile_keys:
     - observation.images.tactile_left_0
     - observation.images.tactile_right_0
@@ -100,7 +101,7 @@ model:
 frs_training:
   # Explicit gate_w conditioning changes the decoder parameter tree; keep this
   # experiment separate from checkpoints trained with the hidden gate label.
-  output: /workspace/frs_pick_tube_05/frs_0815_01_state
+  output: /workspace/frs_pick_tube_05/frs_0815_03_all_encoders
   # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
@@ -112,7 +113,7 @@ frs_training:
   gate_tau: 0.4
   gate_temperature: 0.1
   # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
-  gate_lambda: 0
+  gate_lambda: 0.25
   # gated 模式下 aux decode 现在只用于可信高 Gate 的绝对 GT 回归。
   aux_decode_weight: 4.0
   aux_decode_steps: 10
@@ -164,7 +165,16 @@ frs_training:
   min_lr_ratio: 0.1
   lr_schedule: cosine
 
-  batch_size: 128
+  # 原始图像端到端反传显存开销远高于 embedding cache。
+  batch_size: 64
+  # ResNet 分块前向并重计算激活，控制 B*T*4 张 224x224 图像的峰值显存。
+  tactile_encode_microbatch_size: 8
+  # Spawn workers decode tactile video while the GPU trains the previous batch.
+  num_workers: 8
+  prefetch_batches: 8
+  pipeline_prefetch: 4
+  load_threads: 8
+  image_cache_size: 8192
   epochs: 30
   validation_steps: 10
   eval_every: 2

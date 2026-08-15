@@ -12,7 +12,9 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 from flax import nnx
+from flax import traverse_util
 
+from tactile_encoder.utils.resnet import init_resnet18_params
 from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
 from train_frs.utils.metrics import (
     evaluate_split,
@@ -213,6 +215,10 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
             del indices, current_tokens
             return np.asarray([0.9], dtype=np.float32)
 
+        def gate_current_tokens(self, indices, tactile_input):
+            del indices
+            return np.asarray(tactile_input[:, -1, :, :], dtype=np.float32)
+
         def close(self):
             return None
 
@@ -329,6 +335,72 @@ def test_tactile_encoder_rejects_empty_sequence(decoder):
     tactile = jnp.ones((2, 0, 2, 8), dtype=jnp.float32)
     with pytest.raises(ValueError, match="at least one time step"):
         decoder.encode_tactile_tokens(tactile)
+
+
+def test_raw_tactile_and_state_encoders_receive_gradients_and_checkpoint(
+    tmp_path,
+):
+    config = DecoderConfig(
+        action_dim=2,
+        action_horizon=2,
+        tactile_window=1,
+        gru_hidden_dim=4,
+        resnet_embedding_dim=4,
+        model_dim=8,
+        depth=1,
+        num_heads=2,
+        num_tactile_tokens=2,
+        state_dim=3,
+        state_conditioning=True,
+        tactile_encoder_trainable=True,
+        tactile_image_size=16,
+        tactile_encode_microbatch_size=2,
+    )
+    resnet_variables = init_resnet18_params(
+        jax.random.key(200),
+        image_size=16,
+        embedding_dim=4,
+    )
+    model = TactileConditionedFlowDecoder(
+        config,
+        rngs=nnx.Rngs(201),
+        tactile_resnet_variables=resnet_variables,
+    )
+    images = jax.random.uniform(
+        jax.random.key(202),
+        (1, 1, 2, 16, 16, 3),
+    )
+    state = jax.random.normal(jax.random.key(203), (1, 3))
+    x_t = jax.random.normal(jax.random.key(204), (1, 2, 2))
+    t = jnp.asarray([0.5], dtype=jnp.float32)
+
+    def loss_fn(candidate):
+        return jnp.mean(jnp.square(candidate(x_t, t, images, state=state)))
+
+    _, gradients = nnx.value_and_grad(loss_fn)(model)
+    flat_gradients = traverse_util.flatten_dict(gradients.to_pure_dict())
+    tactile_gradients = [
+        value
+        for path, value in flat_gradients.items()
+        if "tactile_resnet_params" in "/".join(str(part) for part in path)
+    ]
+    state_gradients = [
+        value
+        for path, value in flat_gradients.items()
+        if "state_fc" in "/".join(str(part) for part in path)
+    ]
+    assert tactile_gradients
+    assert state_gradients
+    assert any(bool(jnp.any(jnp.abs(value) > 0)) for value in tactile_gradients)
+    assert any(bool(jnp.any(jnp.abs(value) > 0)) for value in state_gradients)
+
+    expected = model.encode_tactile_images(images)
+    save_checkpoint(tmp_path, model, epoch=1, metrics={"val_mse": 0.0})
+    restored, metadata = load_checkpoint(tmp_path)
+    actual = restored.encode_tactile_images(images)
+    np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-6)
+    assert metadata["decoder_config"]["tactile_encoder_trainable"] is True
+    assert any("tactile_resnet_batch_stats" in path for path in metadata["parameter_paths"])
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):

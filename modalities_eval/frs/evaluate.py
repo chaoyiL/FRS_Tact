@@ -399,6 +399,14 @@ def load_evaluation_context(
         embedding_dim=_positive_int(model_config, "tactile_embedding_dim", 512),
         image_size=_positive_int(model_config, "tactile_image_size", 224),
         build_episode_baselines=True,
+        return_raw_images=bool(
+            getattr(model.config, "tactile_encoder_trainable", False)
+        ),
+        num_workers=int(training.get("num_workers", 8)),
+        prefetch_batches=int(training.get("prefetch_batches", 8)),
+        pipeline_prefetch=int(training.get("pipeline_prefetch", 4)),
+        load_threads=int(training.get("load_threads", 8)),
+        image_cache_size=int(training.get("image_cache_size", 8192)),
     )
     try:
         if conditioner.resnet_embedding_dim != int(model.config.resnet_embedding_dim):

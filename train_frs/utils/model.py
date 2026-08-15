@@ -11,7 +11,9 @@ import jax
 import jax.numpy as jnp
 import optax
 from flax import nnx
+from flax.core import FrozenDict
 
+from tactile_encoder.utils.resnet import encode_resnet18, init_resnet18_params
 from train_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
@@ -43,6 +45,9 @@ class DecoderConfig:
     num_tactile_tokens: int = 4
     state_dim: int = 0
     state_conditioning: bool = False
+    tactile_encoder_trainable: bool = False
+    tactile_image_size: int = 224
+    tactile_encode_microbatch_size: int = 8
 
     def __post_init__(self) -> None:
         if (
@@ -67,6 +72,10 @@ class DecoderConfig:
             raise ValueError("state_dim must be non-negative.")
         if self.state_conditioning and self.state_dim <= 0:
             raise ValueError("state_dim must be positive when state_conditioning is enabled.")
+        if self.tactile_encoder_trainable and self.tactile_image_size <= 0:
+            raise ValueError("tactile_image_size must be positive for a trainable tactile encoder.")
+        if self.tactile_encode_microbatch_size <= 0:
+            raise ValueError("tactile_encode_microbatch_size must be positive.")
 
     @property
     def tactile_token_dim(self) -> int:
@@ -165,11 +174,56 @@ class ConditionedTransformerBlock(nnx.Module):
         return x + self.fc2(nnx.gelu(self.fc1(mlp_normalized)))
 
 
+def _as_nnx_variable_tree(
+    tree: dict | FrozenDict,
+    variable_type: type[nnx.Variable],
+) -> nnx.Dict:
+    """Recursively make a Linen variable tree visible to NNX transforms."""
+
+    return nnx.Dict(
+        {
+            str(name): (
+                _as_nnx_variable_tree(value, variable_type)
+                if isinstance(value, (dict, FrozenDict))
+                else variable_type(value)
+            )
+            for name, value in tree.items()
+        }
+    )
+
+
 class TactileConditionedFlowDecoder(nnx.Module):
     """Flow decoder conditioned on tactile history and optional state."""
 
-    def __init__(self, config: DecoderConfig, *, rngs: nnx.Rngs):
+    def __init__(
+        self,
+        config: DecoderConfig,
+        *,
+        rngs: nnx.Rngs,
+        tactile_resnet_variables: dict | None = None,
+    ):
         self.config = config
+        if config.tactile_encoder_trainable:
+            if tactile_resnet_variables is None:
+                tactile_resnet_variables = init_resnet18_params(
+                    jax.random.key(0),
+                    image_size=config.tactile_image_size,
+                    embedding_dim=config.resnet_embedding_dim,
+                )
+            missing = {"params", "batch_stats"} - set(tactile_resnet_variables)
+            if missing:
+                raise KeyError(f"Tactile ResNet variables are missing: {sorted(missing)}")
+            self.tactile_resnet_params = _as_nnx_variable_tree(
+                tactile_resnet_variables["params"],
+                nnx.Param,
+            )
+            # BatchNorm running statistics are checkpointed model state but are
+            # intentionally excluded from AdamW. Fine-tuning uses them in inference
+            # mode so small FRS batches do not corrupt the pretrained statistics.
+            self.tactile_resnet_batch_stats = _as_nnx_variable_tree(
+                tactile_resnet_variables["batch_stats"],
+                nnx.BatchStat,
+            )
         self.action_in = nnx.Linear(config.action_dim, config.model_dim, rngs=rngs)
         self.time_mlp = TimeMLP(config.model_dim, rngs=rngs)
         self.tactile_gru = SharedTactileGRU(
@@ -190,6 +244,100 @@ class TactileConditionedFlowDecoder(nnx.Module):
         )
         self.out_norm = nnx.LayerNorm(config.model_dim, rngs=rngs)
         self.action_out = nnx.Linear(config.model_dim, config.action_dim, rngs=rngs)
+
+    def encode_tactile_images(self, tactile_images: Array) -> Array:
+        """``[B,T,N,H,W,C] → [B,T,N,D]`` through the trainable ResNet."""
+
+        if not self.config.tactile_encoder_trainable:
+            raise ValueError("This checkpoint does not contain a trainable tactile encoder.")
+        if tactile_images.ndim != 6:
+            raise ValueError(
+                "Expected tactile images [B,T,N,H,W,C], got "
+                f"{tactile_images.shape}."
+            )
+        batch_size, time_steps, num_streams, height, width, channels = (
+            tactile_images.shape
+        )
+        if num_streams != self.config.num_tactile_tokens:
+            raise ValueError(
+                f"Expected {self.config.num_tactile_tokens} tactile streams, "
+                f"got {num_streams}."
+            )
+        expected_image_shape = (
+            self.config.tactile_image_size,
+            self.config.tactile_image_size,
+            3,
+        )
+        if (height, width, channels) != expected_image_shape:
+            raise ValueError(
+                f"Expected tactile image shape {expected_image_shape}, "
+                f"got {(height, width, channels)}."
+            )
+
+        flat = jnp.asarray(tactile_images).reshape(
+            batch_size * time_steps * num_streams,
+            height,
+            width,
+            channels,
+        )
+        microbatch_size = min(
+            self.config.tactile_encode_microbatch_size,
+            flat.shape[0],
+        )
+        padding = (-flat.shape[0]) % microbatch_size
+        if padding:
+            flat = jnp.pad(flat, ((0, padding), (0, 0), (0, 0), (0, 0)))
+        chunks = flat.reshape(
+            -1,
+            microbatch_size,
+            height,
+            width,
+            channels,
+        )
+        variables = {
+            "params": nnx.to_pure_dict(nnx.state(self.tactile_resnet_params)),
+            "batch_stats": nnx.to_pure_dict(
+                nnx.state(self.tactile_resnet_batch_stats)
+            ),
+        }
+
+        @jax.checkpoint
+        def encode_chunk(images: Array) -> Array:
+            integer_input = jnp.issubdtype(images.dtype, jnp.integer)
+            images = jnp.asarray(images, dtype=jnp.float32)
+            if integer_input:
+                images = images / 255.0
+            embeddings, _ = encode_resnet18(
+                variables,
+                images,
+                train=False,
+                embedding_dim=self.config.resnet_embedding_dim,
+            )
+            return embeddings
+
+        encoded = jax.lax.map(encode_chunk, chunks).reshape(
+            -1,
+            self.config.resnet_embedding_dim,
+        )
+        encoded = encoded[: batch_size * time_steps * num_streams]
+        return encoded.reshape(
+            batch_size,
+            time_steps,
+            num_streams,
+            self.config.resnet_embedding_dim,
+        )
+
+    def encode_tactile_input(self, tactile_input: Array) -> Array:
+        """Accept cached embeddings or raw images and return embedding sequences."""
+
+        if tactile_input.ndim == 4:
+            return jnp.asarray(tactile_input, dtype=jnp.float32)
+        if tactile_input.ndim == 6:
+            return self.encode_tactile_images(tactile_input)
+        raise ValueError(
+            "Expected tactile embeddings [B,T,N,D] or images [B,T,N,H,W,C], "
+            f"got {tactile_input.shape}."
+        )
 
     def encode_tactile_tokens(self, tactile_seq: Array) -> Array:
         """``[B, T, N, D] → [B, N, H]`` via shared GRU over each sensor stream."""
@@ -215,6 +363,7 @@ class TactileConditionedFlowDecoder(nnx.Module):
     def encode_tactile_condition(self, tactile_seq: Array) -> Array:
         """Encode tactile history into cross-attention conditioning tokens."""
 
+        tactile_seq = self.encode_tactile_input(tactile_seq)
         return self.tactile_proj(self.encode_tactile_tokens(tactile_seq))
 
     def encode_condition(
@@ -1000,13 +1149,16 @@ def train_step(
                 return source_balanced_mean(values, source_indices, num_sources=num_sources)
             return jnp.mean(values)
 
+        # Raw-image mode is expensive: encode the ResNet exactly once, then reuse
+        # its differentiable embeddings across both FM endpoints and ODE decode.
+        tactile_embeddings = candidate.encode_tactile_input(tactile_seq)
         if loss_mode == "gt":
             flow = flow_matching_loss_per_sample(
                 candidate,
                 x_base,
                 gt_action,
                 t,
-                tactile_seq,
+                tactile_embeddings,
                 state=state,
                 state_keep_mask=state_keep_mask,
             )
@@ -1016,7 +1168,7 @@ def train_step(
                     candidate,
                     x_base,
                     gt_action,
-                    tactile_seq,
+                    tactile_embeddings,
                     num_steps=aux_decode_steps,
                     solver=aux_decode_solver,
                     state=state,
@@ -1036,7 +1188,7 @@ def train_step(
                 x_base,
                 predicted_action,
                 t,
-                tactile_seq,
+                tactile_embeddings,
                 state=state,
                 state_keep_mask=state_keep_mask,
             )
@@ -1055,7 +1207,7 @@ def train_step(
                 gt_action,
                 predicted_action,
                 t,
-                tactile_seq,
+                tactile_embeddings,
                 gate_weights,
                 state=state,
                 state_keep_mask=state_keep_mask,
@@ -1184,6 +1336,16 @@ def decode_actions(
         num_steps=num_steps,
         solver=solver,
     )
+
+
+@nnx.jit
+def encode_tactile_embeddings(
+    model: TactileConditionedFlowDecoder,
+    tactile_input: Array,
+) -> Array:
+    """Encode raw tactile images once for reuse by evaluation objectives."""
+
+    return model.encode_tactile_input(tactile_input)
 
 
 def resolve_peak_learning_rate(

@@ -1,4 +1,4 @@
-"""Online tactile conditioning: frozen ResNet window features for a trainable GRU."""
+"""Tactile image/embedding batches for end-to-end FRS training."""
 
 from __future__ import annotations
 
@@ -151,6 +151,7 @@ class TactileConditionedBatches:
         prefetch_batches: int = 8,
         load_threads: int = 16,
         pipeline_prefetch: int = 4,
+        return_raw_images: bool = False,
     ):
         if tactile_window <= 0:
             raise ValueError(f"tactile_window must be positive, got {tactile_window}.")
@@ -177,6 +178,7 @@ class TactileConditionedBatches:
         self.load_threads = int(load_threads)
         self.pipeline_prefetch = int(pipeline_prefetch)
         self.image_cache_size = int(image_cache_size)
+        self.return_raw_images = bool(return_raw_images)
         config = tactile_clip_config_from_dict(self.bundle.metadata["tactile_clip_config"])
         self.resnet_embedding_dim = int(config.embedding_dim)
         self.image_size = int(config.tactile_image_size)
@@ -351,6 +353,28 @@ class TactileConditionedBatches:
         change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
         return gate_weights_from_change(change, tau=tau, temperature=temperature)
 
+    def gate_current_tokens(
+        self,
+        cache_indices: Sequence[int],
+        tactile_input: np.ndarray | Array,
+    ) -> np.ndarray:
+        """Return stable pretrained-encoder tokens used only to derive Gate labels."""
+
+        del cache_indices
+        tactile_input = np.asarray(tactile_input)
+        if tactile_input.ndim == 4:
+            return np.asarray(tactile_input[:, -1, :, :], dtype=np.float32)
+        if tactile_input.ndim != 6:
+            raise ValueError(
+                "Expected tactile embeddings [B,T,N,D] or images [B,T,N,H,W,C], "
+                f"got {tactile_input.shape}."
+            )
+        current_images = tactile_input[:, -1:, ...]
+        return np.asarray(
+            self._encode_window_images(current_images)[:, 0, :, :],
+            dtype=np.float32,
+        )
+
     def _samples_for_cache_indices(
         self, cache_indices: Sequence[int]
     ) -> list[tuple[int, int]]:
@@ -440,8 +464,12 @@ class TactileConditionedBatches:
 
             image_iter = prefetch_iterator(_produce(), buffer_size=self.pipeline_prefetch)
             for indices, x_base, predicted, gt_action, state, images in image_iter:
-                tactile_seq = self._encode_window_images(images)
-                yield indices, x_base, predicted, gt_action, state, tactile_seq
+                tactile_input = (
+                    images
+                    if getattr(self, "return_raw_images", False)
+                    else self._encode_window_images(images)
+                )
+                yield indices, x_base, predicted, gt_action, state, tactile_input
             return
 
         def _produce_local() -> Iterator[
@@ -455,12 +483,16 @@ class TactileConditionedBatches:
             _produce_local(),
             buffer_size=self.pipeline_prefetch,
         ):
-            tactile_seq = self._encode_window_images(images)
-            yield indices, x_base, predicted, gt_action, state, tactile_seq
+            tactile_input = (
+                images
+                if getattr(self, "return_raw_images", False)
+                else self._encode_window_images(images)
+            )
+            yield indices, x_base, predicted, gt_action, state, tactile_input
 
 
 class CachedTactileEmbeddingBatches:
-    """Source-aware FRS batches backed by precomputed frozen ResNet embeddings."""
+    """Source-aware FRS batches with stable Gate caches and optional raw images."""
 
     def __init__(
         self,
@@ -475,6 +507,12 @@ class CachedTactileEmbeddingBatches:
         embedding_dim: int,
         image_size: int,
         build_episode_baselines: bool = False,
+        return_raw_images: bool = False,
+        image_cache_size: int = 8192,
+        load_threads: int = 16,
+        num_workers: int = 0,
+        prefetch_batches: int = 8,
+        pipeline_prefetch: int = 4,
     ):
         if len(sources) != len(pairs.sources):
             raise ValueError(
@@ -482,16 +520,31 @@ class CachedTactileEmbeddingBatches:
             )
         if tactile_window <= 0 or history_stride <= 0:
             raise ValueError("tactile_window and history_stride must be positive")
+        if num_workers < 0:
+            raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+        if prefetch_batches <= 0 or pipeline_prefetch <= 0:
+            raise ValueError("prefetch_batches and pipeline_prefetch must be positive")
         self.pairs = pairs
         self.sources = tuple(dict(source) for source in sources)
         self.tactile_window = int(tactile_window)
         self.history_stride = int(history_stride)
         self.resnet_embedding_dim = int(embedding_dim)
         self.image_size = int(image_size)
+        self.image_cache_size = int(image_cache_size)
         self.tactile_keys = tuple(str(key) for key in tactile_keys)
         self.repo_id = tuple(str(source["repo_id"]) for source in self.sources)
+        self.return_raw_images = bool(return_raw_images)
+        self.load_threads = int(load_threads)
+        self.num_workers = int(num_workers)
+        self.prefetch_batches = int(prefetch_batches)
+        self.pipeline_prefetch = int(pipeline_prefetch)
+        if self.load_threads <= 0:
+            raise ValueError("load_threads must be positive")
         self._embedding_caches: list[TactileEmbeddingCache] = []
         self._episode_starts: list[np.ndarray] = []
+        self._image_datasets: list[Any] = []
+        self._source_tactile_keys: list[tuple[str, ...]] = []
+        self._mp_loader: MpTactileWindowLoader | None = None
         self.episode_baselines: dict[tuple[int, int], np.ndarray] = {}
 
         for source_index, source in enumerate(self.sources):
@@ -512,6 +565,18 @@ class CachedTactileEmbeddingBatches:
                     metadata.camera_keys,
                 )
             )
+            if self.return_raw_images:
+                # ImageOnlyLeRobotDataset exposes canonical keys; source-specific
+                # raw keys are resolved internally when frames are decoded.
+                self._source_tactile_keys.append(tuple(TACTILE_KEYS))
+                if self.num_workers <= 1:
+                    self._image_datasets.append(
+                        create_image_dataset(
+                            repo_id,
+                            image_size=self.image_size,
+                            cache_size=image_cache_size,
+                        ).dataset
+                    )
             cache = TactileEmbeddingCache(
                 tactile_cache_dir(tactile_cache_root, repo_id),
                 repo_id=repo_id,
@@ -538,9 +603,23 @@ class CachedTactileEmbeddingBatches:
             )
         if build_episode_baselines:
             self.build_episode_baseline_embeddings()
+        if self.return_raw_images and self.num_workers > 1:
+            self._mp_loader = MpTactileWindowLoader(
+                repo_ids=self.repo_id,
+                image_size=self.image_size,
+                image_cache_size=self.image_cache_size,
+                tactile_window=self.tactile_window,
+                history_stride=self.history_stride,
+                num_workers=self.num_workers,
+                prefetch_batches=self.prefetch_batches,
+                load_threads=self.load_threads,
+            )
+            self._mp_loader.start()
 
     def close(self) -> None:
-        return
+        if self._mp_loader is not None:
+            self._mp_loader.close()
+            self._mp_loader = None
 
     def _source_episode_frames(
         self, cache_indices: Sequence[int] | np.ndarray
@@ -593,6 +672,70 @@ class CachedTactileEmbeddingBatches:
         # Gating consumes the current tokens with NumPy before the single upload.
         return output
 
+    def _samples_for_cache_indices(
+        self, cache_indices: Sequence[int] | np.ndarray
+    ) -> list[tuple[int, int, int]]:
+        global_indices = np.asarray(cache_indices, dtype=np.int64)
+        source_indices, local_indices = self.pairs.source_and_local_indices(
+            global_indices
+        )
+        samples: list[tuple[int, int, int]] = []
+        for source_index, local_index in zip(source_indices, local_indices, strict=True):
+            source = self.pairs.sources[int(source_index)]
+            samples.append(
+                (
+                    int(source_index),
+                    int(source.arrays["dataset_index"][local_index]),
+                    int(source.arrays["episode_index"][local_index]),
+                )
+            )
+        return samples
+
+    def load_window_images(
+        self,
+        cache_indices: Sequence[int] | np.ndarray,
+    ) -> np.ndarray:
+        """Decode source-aware raw tactile windows as uint8 model inputs."""
+
+        if not self.return_raw_images:
+            raise RuntimeError("Raw tactile image loading is not enabled.")
+        if not self._image_datasets:
+            raise RuntimeError("In-process tactile image datasets were not opened.")
+        global_indices = np.asarray(cache_indices, dtype=np.int64)
+        source_indices, local_indices = self.pairs.source_and_local_indices(
+            global_indices
+        )
+        output: np.ndarray | None = None
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            source = self.pairs.sources[int(source_index)]
+            local = local_indices[positions]
+            samples = [
+                (
+                    int(source.arrays["dataset_index"][index]),
+                    int(source.arrays["episode_index"][index]),
+                )
+                for index in local
+            ]
+            images = load_tactile_windows(
+                self._image_datasets[int(source_index)],
+                samples,
+                tactile_window=self.tactile_window,
+                history_stride=self.history_stride,
+                tactile_keys=self._source_tactile_keys[int(source_index)],
+                load_threads=self.load_threads,
+                as_float=False,
+            )
+            if output is None:
+                output = np.empty(
+                    (len(global_indices),) + images.shape[1:],
+                    dtype=np.uint8,
+                )
+            output[positions] = images
+        if output is None:
+            raise ValueError("cache_indices must be non-empty")
+        return output
+
     def build_episode_baseline_embeddings(self) -> dict[tuple[int, int], np.ndarray]:
         baselines: dict[tuple[int, int], np.ndarray] = {}
         for source_index, (starts, cache) in enumerate(
@@ -635,6 +778,33 @@ class CachedTactileEmbeddingBatches:
         change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
         return gate_weights_from_change(change, tau=tau, temperature=temperature)
 
+    def gate_current_tokens(
+        self,
+        cache_indices: Sequence[int],
+        tactile_input: np.ndarray | Array,
+    ) -> np.ndarray:
+        """Read immutable pretrained tokens so Gate labels do not drift."""
+
+        del tactile_input
+        source_indices, windows = self._window_indices(cache_indices)
+        output = np.empty(
+            (
+                len(windows),
+                len(self.tactile_keys),
+                self.resnet_embedding_dim,
+            ),
+            dtype=np.float32,
+        )
+        current_frames = windows[:, -1]
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            cache = self._embedding_caches[int(source_index)]
+            output[positions] = cache.get_many(current_frames[positions]).astype(
+                np.float32,
+                copy=False,
+            )
+        return output
+
     def batches(
         self,
         split: SplitName,
@@ -644,11 +814,52 @@ class CachedTactileEmbeddingBatches:
         seed: int,
         source_balanced: bool = False,
     ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
-        for indices, x_base, predicted, gt_action, state in self.pairs.batches(
-            split,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            seed=seed,
-            source_balanced=source_balanced,
-        ):
-            yield indices, x_base, predicted, gt_action, state, self.encode_cache_indices(indices)
+        if not self.return_raw_images:
+            for indices, x_base, predicted, gt_action, state in self.pairs.batches(
+                split,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                source_balanced=source_balanced,
+            ):
+                yield indices, x_base, predicted, gt_action, state, self.encode_cache_indices(indices)
+            return
+
+        pair_batches = list(
+            self.pairs.batches(
+                split,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                seed=seed,
+                source_balanced=source_balanced,
+            )
+        )
+        if not pair_batches:
+            return
+        loader = self._mp_loader
+        if loader is not None:
+            sample_batches = [
+                self._samples_for_cache_indices(indices) for indices, *_ in pair_batches
+            ]
+
+            def _produce_mp() -> Iterator[
+                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            ]:
+                for pair_batch, images in zip(
+                    pair_batches,
+                    loader.iter_image_batches(sample_batches),
+                    strict=True,
+                ):
+                    indices, x_base, predicted, gt_action, state = pair_batch
+                    yield indices, x_base, predicted, gt_action, state, images
+
+            yield from prefetch_iterator(_produce_mp(), buffer_size=self.pipeline_prefetch)
+            return
+
+        def _produce_local() -> Iterator[
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ]:
+            for indices, x_base, predicted, gt_action, state in pair_batches:
+                yield indices, x_base, predicted, gt_action, state, self.load_window_images(indices)
+
+        yield from prefetch_iterator(_produce_local(), buffer_size=self.pipeline_prefetch)

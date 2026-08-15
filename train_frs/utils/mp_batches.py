@@ -20,6 +20,64 @@ import numpy as np
 _STOP = None
 
 
+def decode_tactile_window_batch(
+    datasets: Sequence[Any],
+    samples: Sequence[tuple[int, ...]],
+    *,
+    tactile_window: int,
+    history_stride: int,
+    tactile_keys: Sequence[str],
+    load_threads: int,
+) -> np.ndarray:
+    """Decode one batch of tactile windows, including mixed-source 3-tuples."""
+
+    from train_frs.utils.window_io import load_tactile_windows
+
+    if not samples:
+        raise ValueError("samples must be non-empty")
+    sample_width = len(samples[0])
+    if sample_width == 2:
+        if len(datasets) != 1:
+            raise ValueError("2-tuple samples require exactly one dataset")
+        return load_tactile_windows(
+            datasets[0],
+            samples,  # type: ignore[arg-type]
+            tactile_window=tactile_window,
+            history_stride=history_stride,
+            tactile_keys=tactile_keys,
+            load_threads=load_threads,
+            as_float=False,
+        )
+    if sample_width != 3:
+        raise ValueError(f"samples must be 2- or 3-tuples, got width {sample_width}")
+    if not datasets:
+        raise ValueError("datasets must be non-empty for mixed-source samples")
+
+    output: np.ndarray | None = None
+    source_indices = np.asarray([sample[0] for sample in samples], dtype=np.int64)
+    for source_index in np.unique(source_indices):
+        source_i = int(source_index)
+        if source_i < 0 or source_i >= len(datasets):
+            raise IndexError(f"source index {source_i} is out of range for {len(datasets)} datasets")
+        positions = np.flatnonzero(source_indices == source_i)
+        subset = [(int(samples[i][1]), int(samples[i][2])) for i in positions.tolist()]
+        images = load_tactile_windows(
+            datasets[source_i],
+            subset,
+            tactile_window=tactile_window,
+            history_stride=history_stride,
+            tactile_keys=tactile_keys,
+            load_threads=load_threads,
+            as_float=False,
+        )
+        if output is None:
+            output = np.empty((len(samples),) + images.shape[1:], dtype=np.uint8)
+        output[positions] = images
+    if output is None:
+        raise ValueError("samples must be non-empty")
+    return output
+
+
 def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     """Top-level worker entry (must be picklable for spawn)."""
 
@@ -33,26 +91,31 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
         from tactile_encoder.utils.image_dataset import create_image_dataset
 
         window_io = importlib.import_module("train_frs.utils.window_io")
-        TACTILE_KEYS = window_io.TACTILE_KEYS
-        load_tactile_windows = window_io.load_tactile_windows
-
-        repo_id = init["repo_id"]
+        tactile_keys = window_io.TACTILE_KEYS
+        repo_ids = tuple(init.get("repo_ids") or (init["repo_id"],))
         image_size = int(init["image_size"])
         cache_size = int(init["cache_size"])
         tactile_window = int(init["tactile_window"])
         history_stride = int(init["history_stride"])
         load_threads = max(1, int(init.get("load_threads", 8)))
-        print(f"worker pid={os.getpid()} opening dataset {repo_id!r}...", flush=True)
-        dataset = create_image_dataset(
-            repo_id,
-            image_size=image_size,
-            cache_size=cache_size,
-        ).dataset
+        datasets = []
+        for repo_id in repo_ids:
+            print(f"worker pid={os.getpid()} opening dataset {repo_id!r}...", flush=True)
+            datasets.append(
+                create_image_dataset(
+                    repo_id,
+                    image_size=image_size,
+                    cache_size=cache_size,
+                ).dataset
+            )
         if "jax" in sys.modules:
             raise RuntimeError(
                 "light import path unexpectedly pulled jax into an mp worker"
             )
-        print(f"worker pid={os.getpid()} ready (jax_imported=False)", flush=True)
+        print(
+            f"worker pid={os.getpid()} ready (jax_imported=False, sources={len(datasets)})",
+            flush=True,
+        )
     except Exception as exc:  # noqa: BLE001 — surface init failure to parent
         result_q.put(("__init__", None, f"worker init failed: {exc}\n{traceback.format_exc()}"))
         return
@@ -63,14 +126,13 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
             break
         batch_id, samples = item
         try:
-            images = load_tactile_windows(
-                dataset,
+            images = decode_tactile_window_batch(
+                datasets,
                 samples,
                 tactile_window=tactile_window,
                 history_stride=history_stride,
-                tactile_keys=TACTILE_KEYS,
+                tactile_keys=tactile_keys,
                 load_threads=load_threads,
-                as_float=False,
             )
             result_q.put((batch_id, images, None))
         except Exception as exc:  # noqa: BLE001 — return error to parent
@@ -83,7 +145,8 @@ class MpTactileWindowLoader:
     def __init__(
         self,
         *,
-        repo_id: str,
+        repo_id: str | None = None,
+        repo_ids: Sequence[str] | None = None,
         image_size: int,
         image_cache_size: int,
         tactile_window: int,
@@ -96,8 +159,14 @@ class MpTactileWindowLoader:
 
         if num_workers <= 1:
             raise ValueError("MpTactileWindowLoader requires num_workers > 1.")
-        if not repo_id:
-            raise ValueError("MpTactileWindowLoader requires repo_id.")
+        if repo_ids is None:
+            if not repo_id:
+                raise ValueError("MpTactileWindowLoader requires repo_id or repo_ids.")
+            repo_ids = (str(repo_id),)
+        else:
+            repo_ids = tuple(str(value) for value in repo_ids)
+            if not repo_ids:
+                raise ValueError("repo_ids must be non-empty.")
 
         self._num_workers = int(num_workers)
         self._prefetch = max(1, int(prefetch_batches))
@@ -109,7 +178,8 @@ class MpTactileWindowLoader:
         self._task_q = self._ctx.Queue(maxsize=max(self._num_workers * 2, self._prefetch * 2))
         self._result_q = self._ctx.Queue(maxsize=max(self._num_workers * 2, self._prefetch * 2))
         init = {
-            "repo_id": repo_id,
+            "repo_id": repo_ids[0],
+            "repo_ids": repo_ids,
             "image_size": self._image_size,
             "cache_size": self._worker_cache,
             "tactile_window": int(tactile_window),
@@ -170,7 +240,7 @@ class MpTactileWindowLoader:
 
     def iter_image_batches(
         self,
-        batch_samples: Sequence[Sequence[tuple[int, int]]],
+        batch_samples: Sequence[Sequence[tuple[int, ...]]],
     ) -> Iterator[np.ndarray]:
         """Yield uint8 windows ``[B, T, 4, H, W, C]`` for each sample batch."""
 

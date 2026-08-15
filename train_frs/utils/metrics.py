@@ -13,6 +13,7 @@ from train_frs.utils.model import (
     FlowSolver,
     TactileConditionedFlowDecoder,
     decode_actions,
+    encode_tactile_embeddings,
     flow_matching_loss_per_sample,
 )
 
@@ -307,30 +308,42 @@ def evaluate_split(
         predicted_np,
         gt_action_np,
         state_np,
-        tactile_seq,
+        tactile_input,
     ) in conditioner.batches(split, batch_size=batch_size, shuffle=False, seed=0):
         x_base = jnp.asarray(x_base_np)
         gt_action = jnp.asarray(gt_action_np)
         predicted_action = jnp.asarray(predicted_np)
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
         if track_tactile:
-            current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+            gate_token_fn = getattr(conditioner, "gate_current_tokens", None)
+            current_tokens = (
+                gate_token_fn(indices, tactile_input)
+                if gate_token_fn is not None
+                else np.asarray(
+                    tactile_input[:, -1, :, :],
+                    dtype=np.float32,
+                )
+            )
             change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
             gate_w = gate_weights_from_change(change, tau=float(gate_tau), temperature=float(gate_temperature))
         else:
             change = None
             gate_w = None
         state = jnp.asarray(state_np)
+        tactile_input = encode_tactile_embeddings(
+            model,
+            jnp.asarray(tactile_input),
+        )
         flow_gt = flow_matching_loss_per_sample(
-            model, x_base, gt_action, t, tactile_seq, state=state
+            model, x_base, gt_action, t, tactile_input, state=state
         )
         flow_pred = flow_matching_loss_per_sample(
-            model, x_base, predicted_action, t, tactile_seq, state=state
+            model, x_base, predicted_action, t, tactile_input, state=state
         )
         prediction = decode_actions(
             model,
             x_base,
-            tactile_seq,
+            tactile_input,
             num_steps=num_steps,
             solver=solver,
             state=state,

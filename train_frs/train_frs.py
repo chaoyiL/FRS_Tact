@@ -366,6 +366,8 @@ def train_decoder(
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
     tactile_num_tokens: int = 4,
+    train_tactile_encoder: bool = False,
+    tactile_encode_microbatch_size: int = 8,
     best_max_low_gate_unsafe_frac: float = 0.1,
     best_min_high_gate_gain: float = 0.0,
     best_min_high_gate_rank_satisfied: float = 0.8,
@@ -574,6 +576,8 @@ def train_decoder(
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
     if tactile_num_tokens <= 0:
         raise ValueError(f"tactile_num_tokens must be positive, got {tactile_num_tokens}.")
+    if tactile_encode_microbatch_size <= 0:
+        raise ValueError("tactile_encode_microbatch_size must be positive.")
     if not 0.0 <= state_dropout_rate < 1.0:
         raise ValueError("state_dropout_rate must be in [0, 1).")
 
@@ -796,6 +800,12 @@ def train_decoder(
             embedding_dim=tactile_embedding_dim,
             image_size=tactile_image_size,
             build_episode_baselines=(loss_mode == "gated"),
+            return_raw_images=train_tactile_encoder,
+            image_cache_size=image_cache_size,
+            load_threads=load_threads,
+            num_workers=num_workers,
+            prefetch_batches=prefetch_batches,
+            pipeline_prefetch=pipeline_prefetch,
         )
     else:
         conditioner = TactileConditionedBatches(
@@ -812,6 +822,7 @@ def train_decoder(
             pipeline_prefetch=pipeline_prefetch,
             image_cache_size=image_cache_size,
             encode_batch_size=encode_batch_size,
+            return_raw_images=train_tactile_encoder,
         )
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
@@ -826,9 +837,26 @@ def train_decoder(
         num_tactile_tokens=tactile_num_tokens,
         state_dim=int(pairs.manifest.get("state_dim", 0)),
         state_conditioning=state_conditioning,
+        tactile_encoder_trainable=train_tactile_encoder,
+        tactile_image_size=tactile_image_size,
+        tactile_encode_microbatch_size=tactile_encode_microbatch_size,
     )
     if resume_metadata is None and init_metadata is None:
-        model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
+        tactile_resnet_variables = None
+        if train_tactile_encoder:
+            from tactile_encoder.utils.checkpoint import load_tactile_encoder
+
+            encoder_bundle = load_tactile_encoder(tactile_encoder_dir)
+            tactile_resnet_variables = encoder_bundle.params.get("tactile_resnet")
+            if not isinstance(tactile_resnet_variables, Mapping):
+                raise KeyError(
+                    "Tactile encoder checkpoint is missing tactile_resnet variables."
+                )
+        model = TactileConditionedFlowDecoder(
+            decoder_config,
+            rngs=nnx.Rngs(seed),
+            tactile_resnet_variables=tactile_resnet_variables,
+        )
     else:
         source_metadata = resume_metadata if resume_metadata is not None else init_metadata
         assert source_metadata is not None
@@ -845,6 +873,13 @@ def train_decoder(
                 flush=True,
             )
         # ``model`` already loaded above.
+    if model.config.tactile_encoder_trainable != train_tactile_encoder:
+        raise ValueError(
+            "Checkpoint/config tactile encoder mode mismatch: "
+            f"checkpoint trainable={model.config.tactile_encoder_trainable}, "
+            f"requested trainable={train_tactile_encoder}. Start a fresh run "
+            "with a matching model.freeze_tactile_encoder value."
+        )
     source_count = len(pairs.sources) if isinstance(pairs, MultiCachedPairs) else 1
     if (dataset_balanced_sampling or dataset_balanced_loss) and not isinstance(
         pairs, MultiCachedPairs
@@ -905,11 +940,19 @@ def train_decoder(
         f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
         f"state_dim={model.config.state_dim} state_conditioning={model.config.state_conditioning} "
         f"state_dropout={state_dropout_rate:g} "
-        f"(frozen ResNet + trainable shared GRU/state MLP)"
+        f"(trainable ResNet={model.config.tactile_encoder_trainable}, "
+        "shared GRU=True, state MLP=True)"
     )
     if use_cached_embeddings:
+        image_loader = (
+            f"raw_images workers={num_workers} prefetch_batches={prefetch_batches} "
+            f"load_threads={load_threads} pipeline_prefetch={pipeline_prefetch} "
+            f"image_cache_size={image_cache_size}"
+            if train_tactile_encoder
+            else "precomputed_tactile_embeddings"
+        )
         print(
-            f"dataloader=precomputed_tactile_embeddings sources={len(dataset_sources or ())} "
+            f"dataloader={image_loader} sources={len(dataset_sources or ())} "
             f"cache_root={tactile_embedding_cache_root} "
             f"dataset_balanced_sampling={dataset_balanced_sampling} "
             f"dataset_balanced_loss={dataset_balanced_loss} "
@@ -1054,12 +1097,24 @@ def train_decoder(
                     predicted_np,
                     gt_action_np,
                     state_np,
-                    tactile_seq,
+                    tactile_input,
                 ) in enumerate(training_batches):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
                     batch_n = len(x_base_np)
                     if loss_mode == "gated":
-                        current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+                        gate_token_fn = getattr(
+                            conditioner,
+                            "gate_current_tokens",
+                            None,
+                        )
+                        current_tokens = (
+                            gate_token_fn(indices, tactile_input)
+                            if gate_token_fn is not None
+                            else np.asarray(
+                                tactile_input[:, -1, :, :],
+                                dtype=np.float32,
+                            )
+                        )
                         change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
                         gate_w = gate_weights_from_change(change, tau=gate_tau, temperature=gate_temperature)
                         batch_gate_w = float(np.mean(gate_w))
@@ -1076,7 +1131,7 @@ def train_decoder(
                         jnp.asarray(x_base_np),
                         jnp.asarray(gt_action_np),
                         jnp.asarray(predicted_np),
-                        tactile_seq,
+                        jnp.asarray(tactile_input),
                         jnp.asarray(gate_w),
                         step_key,
                         jnp.asarray(batch_source_indices),
@@ -1151,6 +1206,12 @@ def train_decoder(
                     "state_conditioning": bool(model.config.state_conditioning),
                     "state_dim": int(model.config.state_dim),
                     "state_dropout_rate": state_dropout_rate,
+                    "tactile_encoder_trainable": bool(
+                        model.config.tactile_encoder_trainable
+                    ),
+                    "state_encoder_trainable": bool(
+                        model.config.state_conditioning
+                    ),
                     "aux_decode_weight": aux_decode_weight,
                     "aux_decode_steps": aux_decode_steps,
                     "aux_decode_solver": aux_decode_solver,
@@ -1778,7 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--load-threads",
         type=int,
-        default=16,
+        default=8,
         help="Per-process threads for unique-frame decode within a batch.",
     )
     parser.add_argument(
@@ -1971,6 +2032,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         str(repo_id): float(weight) for repo_id, weight in rank_source_weights.items()
     }
     tactile_keys = tuple(str(key) for key in model["tactile_keys"])
+    train_tactile_encoder = not bool(model.get("freeze_tactile_encoder", True))
     tactile_num_tokens = _positive_int(model, "tactile_num_tokens", len(tactile_keys))
     if tactile_num_tokens != len(tactile_keys):
         raise ValueError(
@@ -2020,12 +2082,22 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         eval_every=_positive_int(training, "eval_every", 5),
         seed=int(training.get("seed", 42)),
         write_plots=bool(training.get("write_plots", True)),
-        num_workers=0,
-        prefetch_batches=1,
-        load_threads=1,
-        pipeline_prefetch=1,
-        image_cache_size=0,
-        encode_batch_size=1,
+        num_workers=int(
+            training.get("num_workers", 8 if train_tactile_encoder else 0)
+        ),
+        prefetch_batches=_positive_int(
+            training,
+            "prefetch_batches",
+            8 if train_tactile_encoder else 1,
+        ),
+        load_threads=_positive_int(training, "load_threads", 8),
+        pipeline_prefetch=_positive_int(
+            training,
+            "pipeline_prefetch",
+            4 if train_tactile_encoder else 1,
+        ),
+        image_cache_size=int(training.get("image_cache_size", 8192)),
+        encode_batch_size=_positive_int(training, "encode_batch_size", 64),
         resume=resolve_resume_mode(training.get("resume", False), output_dir=output_dir),
         resume_from=(
             None if training.get("resume_from") in (None, "") else Path(str(training["resume_from"])).expanduser()
@@ -2040,6 +2112,12 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
         tactile_num_tokens=tactile_num_tokens,
+        train_tactile_encoder=train_tactile_encoder,
+        tactile_encode_microbatch_size=_positive_int(
+            training,
+            "tactile_encode_microbatch_size",
+            8,
+        ),
         best_max_low_gate_unsafe_frac=float(
             training.get("best_max_low_gate_unsafe_frac", 0.1)
         ),

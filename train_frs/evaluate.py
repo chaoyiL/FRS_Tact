@@ -129,6 +129,12 @@ def evaluate_decoder(
             embedding_dim=tactile_embedding_dim,
             image_size=tactile_image_size,
             build_episode_baselines=track_gate,
+            return_raw_images=model.config.tactile_encoder_trainable,
+            image_cache_size=image_cache_size,
+            load_threads=load_threads,
+            num_workers=num_workers,
+            prefetch_batches=prefetch_batches,
+            pipeline_prefetch=pipeline_prefetch,
         )
     else:
         assert isinstance(pairs, CachedPairs)
@@ -146,6 +152,7 @@ def evaluate_decoder(
             pipeline_prefetch=pipeline_prefetch,
             image_cache_size=image_cache_size,
             encode_batch_size=encode_batch_size,
+            return_raw_images=model.config.tactile_encoder_trainable,
         )
     try:
         if conditioner.resnet_embedding_dim != model.config.resnet_embedding_dim:
@@ -460,7 +467,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override history stride (default: value stored in checkpoint metadata).",
     )
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Defaults to frs_training.batch_size with --config, otherwise 64.",
+    )
     parser.add_argument(
         "--num-steps",
         type=int,
@@ -488,11 +500,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-plots", action="store_true")
     parser.add_argument("--num-trajectory-samples", type=int, default=6)
     parser.add_argument("--num-episode-strips", type=int, default=6)
-    parser.add_argument("--num-workers", type=int, default=8)
-    parser.add_argument("--prefetch-batches", type=int, default=8)
-    parser.add_argument("--load-threads", type=int, default=16)
-    parser.add_argument("--pipeline-prefetch", type=int, default=4)
-    parser.add_argument("--image-cache-size", type=int, default=8192)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--prefetch-batches", type=int, default=None)
+    parser.add_argument("--load-threads", type=int, default=None)
+    parser.add_argument("--pipeline-prefetch", type=int, default=None)
+    parser.add_argument("--image-cache-size", type=int, default=None)
     parser.add_argument("--encode-batch-size", type=int, default=256)
     return parser
 
@@ -549,7 +561,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             history_stride=(
                 int(training.get("history_stride", 3)) if args.history_stride is None else args.history_stride
             ),
-            batch_size=args.batch_size,
+            batch_size=(
+                int(training.get("batch_size", 64))
+                if args.batch_size is None
+                else args.batch_size
+            ),
             num_steps=(int(training.get("validation_steps", 10)) if args.num_steps is None else args.num_steps),
             solver=resolve_decode_solver(args.solver or training.get("aux_decode_solver", "euler")),
             target=args.target,
@@ -557,11 +573,31 @@ def main(argv: Sequence[str] | None = None) -> None:
             write_plots=not args.no_plots,
             num_trajectory_samples=args.num_trajectory_samples,
             num_episode_strips=args.num_episode_strips,
-            num_workers=args.num_workers,
-            prefetch_batches=args.prefetch_batches,
-            load_threads=args.load_threads,
-            pipeline_prefetch=args.pipeline_prefetch,
-            image_cache_size=args.image_cache_size,
+            num_workers=(
+                args.num_workers
+                if args.num_workers is not None
+                else int(training.get("num_workers", 8))
+            ),
+            prefetch_batches=(
+                args.prefetch_batches
+                if args.prefetch_batches is not None
+                else int(training.get("prefetch_batches", 8))
+            ),
+            load_threads=(
+                args.load_threads
+                if args.load_threads is not None
+                else int(training.get("load_threads", 8))
+            ),
+            pipeline_prefetch=(
+                args.pipeline_prefetch
+                if args.pipeline_prefetch is not None
+                else int(training.get("pipeline_prefetch", 4))
+            ),
+            image_cache_size=(
+                args.image_cache_size
+                if args.image_cache_size is not None
+                else int(training.get("image_cache_size", 8192))
+            ),
             encode_batch_size=args.encode_batch_size,
         )
         return
@@ -587,7 +623,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         dataset_root=args.dataset_root,
         tactile_window_divisor=args.tactile_window_divisor,
         history_stride=args.history_stride,
-        batch_size=args.batch_size,
+        batch_size=64 if args.batch_size is None else args.batch_size,
         num_steps=10 if args.num_steps is None else args.num_steps,
         solver=resolve_decode_solver(args.solver or "euler"),
         target=args.target,
@@ -595,11 +631,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         write_plots=not args.no_plots,
         num_trajectory_samples=args.num_trajectory_samples,
         num_episode_strips=args.num_episode_strips,
-        num_workers=args.num_workers,
-        prefetch_batches=args.prefetch_batches,
-        load_threads=args.load_threads,
-        pipeline_prefetch=args.pipeline_prefetch,
-        image_cache_size=args.image_cache_size,
+        num_workers=8 if args.num_workers is None else args.num_workers,
+        prefetch_batches=8 if args.prefetch_batches is None else args.prefetch_batches,
+        load_threads=8 if args.load_threads is None else args.load_threads,
+        pipeline_prefetch=4 if args.pipeline_prefetch is None else args.pipeline_prefetch,
+        image_cache_size=8192 if args.image_cache_size is None else args.image_cache_size,
         encode_batch_size=args.encode_batch_size,
     )
 

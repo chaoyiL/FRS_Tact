@@ -25,6 +25,17 @@ uv run --no-sync python -m train_frs.train_frs \
 Training outputs, datasets, action caches, tactile embedding caches, encoder checkpoints, and
 merged SmolVLA checkpoints remain external resources configured by the YAML.
 
+Set `model.freeze_tactile_encoder: false` to fine-tune every FRS conditioner end to end.
+In this mode, training loads raw tactile windows, initializes the ResNet from
+`model.tactile_encoder_path`, and stores the fine-tuned ResNet inside each FRS checkpoint.
+The shared tactile GRU and optional state normalization/MLP are always trainable. Precomputed
+tactile embeddings remain an immutable source for Gate labels, preventing the labels from
+drifting as the ResNet changes. Use a substantially smaller batch size than cached-embedding
+training; `frs_training.tactile_encode_microbatch_size` controls ResNet activation memory.
+Raw-image training should set `frs_training.num_workers` greater than 1 so spawn workers
+decode tactile video while the GPU trains the previous batch; `prefetch_batches` and
+`pipeline_prefetch` keep those decoded windows queued ahead of the train step.
+
 The current state-conditioned pipeline stores the frozen VLA preprocessor's normalized
 current `observation.state` in action-cache v3. FRS maps it to one cross-attention token and
 concatenates that token with the four tactile-history tokens. `model.state_dropout_rate`
