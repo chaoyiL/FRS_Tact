@@ -88,7 +88,7 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     import sys
 
     try:
-        from tactile_encoder.utils.image_dataset import create_image_dataset
+        from train_encoder.utils.image_dataset import create_image_dataset
 
         window_io = importlib.import_module("train_frs.utils.window_io")
         tactile_keys = window_io.TACTILE_KEYS

@@ -1,7 +1,7 @@
 import unittest
 
-from tactile_encoder.train import _early_stop_state_after_eval
-from tactile_encoder.train import _val_improved
+from train_encoder.train import _early_stop_state_after_eval
+from train_encoder.train import _val_improved
 
 
 class EarlyStopTrackingTests(unittest.TestCase):

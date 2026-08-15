@@ -844,7 +844,7 @@ def train_decoder(
     if resume_metadata is None and init_metadata is None:
         tactile_resnet_variables = None
         if train_tactile_encoder:
-            from tactile_encoder.utils.checkpoint import load_tactile_encoder
+            from train_encoder.utils.checkpoint import load_tactile_encoder
 
             encoder_bundle = load_tactile_encoder(tactile_encoder_dir)
             tactile_resnet_variables = encoder_bundle.params.get("tactile_resnet")
@@ -2014,6 +2014,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"config.{name} must be a mapping")
     if not action_cache.get("root") or not tactile_cache.get("root"):
         raise ValueError("action_cache.root and tactile_embedding_cache.root are required")
+    from train_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
+
+    prepare_tactile_embeddings_from_config(config)
     encoder_dir = Path(str(model["tactile_encoder_path"])).expanduser()
     if not encoder_dir.is_dir():
         raise FileNotFoundError(f"tactile encoder does not exist: {encoder_dir}")

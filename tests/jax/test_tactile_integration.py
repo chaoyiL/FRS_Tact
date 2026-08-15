@@ -635,6 +635,7 @@ def _run_protocol_fixture(
             self.config = SimpleNamespace(
                 checkpoint="unused-frs",
                 tactile_window_divisor=1,
+                history_stride=1,
                 steering_protection_interval_s=None,
             )
             self.model = SimpleNamespace(config=SimpleNamespace(tactile_window=3))

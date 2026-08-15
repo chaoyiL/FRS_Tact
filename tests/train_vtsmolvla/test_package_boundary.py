@@ -19,7 +19,7 @@ def test_legacy_mixed_package_and_lazy_exports_are_gone():
     import importlib.util
 
     assert importlib.util.find_spec("lerobot.policies.smolvla_jax") is None
-    source = (ROOT / "src/lerobot/policies/__init__.py").read_text(encoding="utf-8")
+    source = (ROOT / "lerobot/policies/__init__.py").read_text(encoding="utf-8")
     assert ".smolvla_jax" not in source
 
 

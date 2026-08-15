@@ -84,7 +84,7 @@ def test_repository_has_no_legacy_smolvla_imports() -> None:
 
 def test_legacy_smolvla_source_and_removed_training_entrypoints_are_gone() -> None:
     legacy_paths = (
-        ROOT / "src/lerobot/policies/smolvla_jax",
+        ROOT / "lerobot/policies/smolvla_jax",
         ROOT / "tools/train_smolvla_jax.py",
         ROOT / "tools/train_vtsmolvla_jax.py",
         ROOT / "configs/train_smolvla_jax.yaml",

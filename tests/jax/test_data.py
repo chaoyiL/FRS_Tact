@@ -274,7 +274,7 @@ def test_preprocessor_accepts_cached_tactile_embeddings() -> None:
 
 def test_tactile_preprocessing_matches_encoder_for_non_square_bchw() -> None:
     from train_vtsmolvla.preprocessing import prepare_tactile_batch
-    from tactile_encoder.utils.image_dataset import parse_image_to_unit
+    from train_encoder.utils.image_dataset import parse_image_to_unit
 
     image = np.arange(3 * 5 * 9, dtype=np.uint8).reshape(3, 5, 9)
     batch = np.stack((image, np.flip(image, axis=-1)), axis=0)

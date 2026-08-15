@@ -5,7 +5,7 @@ from collections.abc import Mapping, Sequence
 import jax
 import jax.numpy as jnp
 from flax import traverse_util
-from tactile_encoder.utils.resnet import encode_resnet18
+from train_encoder.utils.resnet import encode_resnet18
 
 from train_smolvla.modeling import JaxSmolVLA, Params, PrefixContext
 

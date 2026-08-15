@@ -52,7 +52,7 @@ modules = sorted(
 )
 for module_name in modules:
     importlib.import_module(module_name)
-for forbidden_prefix in ("tactile_encoder", "train_vtsmolvla"):
+for forbidden_prefix in ("train_encoder", "train_vtsmolvla"):
     loaded = sorted(
         name
         for name in sys.modules
@@ -79,8 +79,8 @@ def test_visual_production_sources_have_no_forbidden_coupling():
     for path in package_dir.rglob("*.py"):
         source = path.read_text(encoding="utf-8")
         assert "lerobot.policies.smolvla_jax" not in source, path
-        assert "from tactile_encoder" not in source, path
-        assert "import tactile_encoder" not in source, path
+        assert "from train_encoder" not in source, path
+        assert "import train_encoder" not in source, path
         assert ".tactile_cache" not in source, path
         tree = ast.parse(source, filename=str(path))
         imported_modules: set[str] = set()

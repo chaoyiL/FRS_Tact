@@ -13,9 +13,9 @@ import numpy as np
 from flax import traverse_util
 
 from utils.cache import atomic_write_json
-from tactile_encoder.utils.model import TactileClipConfig
-from tactile_encoder.utils.model import encode_tactile_embedding
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
+from train_encoder.utils.model import TactileClipConfig
+from train_encoder.utils.model import encode_tactile_embedding
+from train_encoder.utils.model import tactile_clip_config_from_dict
 
 PARAMS_NAME = "params.npz"
 OPT_STATE_NAME = "opt_state.npz"

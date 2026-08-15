@@ -69,14 +69,9 @@ with Path(sys.argv[1]).open(encoding="utf-8") as file:
 merge = cfg.get("checkpoint_merge") or {}
 training = cfg.get("frs_training") or {}
 checkpoint = Path(str(cfg.get("checkpoint", ""))).expanduser().resolve()
-merge_output = Path(str(merge.get("output", cfg.get("checkpoint", "")))).expanduser().resolve()
-if checkpoint != merge_output:
-    raise ValueError(
-        f"checkpoint_merge.output must equal checkpoint: {merge_output} != {checkpoint}"
-    )
 print(merge.get("adapter", ""))
 print(merge.get("base", "lerobot/smolvla_base"))
-print(merge.get("output", cfg.get("checkpoint", "")))
+print(str(checkpoint))
 print("1" if merge.get("allow_download", True) else "0")
 print(training.get("output", ""))
 print((cfg.get("model") or {}).get("tactile_encoder_path", ""))
@@ -140,10 +135,7 @@ log "合并/检查 SmolVLA PEFT checkpoint"
 log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
 "${UV_BIN}" run --no-sync python -m train_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
 
-log "预计算/补齐全部配置数据集的 tactile embeddings"
-"${UV_BIN}" run --no-sync python tools/precompute_tactile_embeddings.py --config "${CONFIG_PATH}"
-
-log "生成/补齐全部配置数据集的 SmolVLA action caches"
+log "生成/补齐 tactile embedding caches 与 SmolVLA action caches"
 # JAX/XLA 0.8.3's generic Triton GEMM emitter cannot tile one SmolVLA prefix
 # projection on H100.  Use the cuBLAS GEMM path for cache preparation only.
 # Training starts as a separate command below with its normal XLA configuration.

@@ -20,10 +20,10 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from tactile_encoder.utils.checkpoint import load_tactile_encoder
-from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.model import encode_resnet18
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
+from train_encoder.utils.checkpoint import load_tactile_encoder
+from train_encoder.utils.image_dataset import create_image_dataset
+from train_encoder.utils.model import encode_resnet18
+from train_encoder.utils.model import tactile_clip_config_from_dict
 
 TACTILE_KEYS = (
     "tactile_left_0",
@@ -218,7 +218,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output",
         type=pathlib.Path,
-        default=pathlib.Path("tactile_encoder/outputs/tact_similarity.png"),
+        default=pathlib.Path("train_encoder/outputs/tact_similarity.png"),
         help="Output PNG path.",
     )
     parser.add_argument("--episode-index", type=int, default=0)

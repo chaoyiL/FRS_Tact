@@ -91,7 +91,7 @@ dependencies = [
     "torchcodec>=0.3.0,<0.12.0; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')) or (sys_platform == 'darwin' and platform_machine == 'arm64')",
     "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
     "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
-    # SmolVLA tokenizer + FlaxCLIPModel (tactile_encoder); Flax removed in transformers 5+
+    # SmolVLA tokenizer + FlaxCLIPModel (train_encoder); Flax removed in transformers 5+
     "transformers>=4.57.0,<5.0.0",
     # SmolVLA JAX + local CUDA 12
     "jax[cuda12-local]>=0.6.2,<0.9.0",
@@ -130,10 +130,11 @@ torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.packages.find]
-where = ["src", "."]
-include = ["lerobot*", "deploy*", "tactile_encoder*", "utils*", "modalities_eval*", "train_smolvla*", "train_vtsmolvla*", "train_frs*"]
+where = ["."]
+include = ["lerobot*", "deploy*", "train_encoder*", "utils*", "modalities_eval*", "train_smolvla*", "train_vtsmolvla*", "train_frs*"]
 
 [tool.setuptools.package-data]
+train_encoder = ["configs/*.yaml"]
 train_frs = ["README.md", "configs/*.yaml", "scripts/*.sh"]
 train_smolvla = ["README.md", "configs/*.yaml", "scripts/*.sh"]
 train_vtsmolvla = ["README.md", "configs/*.yaml", "scripts/*.sh"]
@@ -176,7 +177,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["lerobot"]
+known-first-party = ["lerobot", "train_encoder"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -192,7 +193,7 @@ docstring-code-format = true
 exclude_dirs = [
     "tests",
     "benchmarks",
-    "src/lerobot/datasets/push_dataset_to_hub",
+    "lerobot/datasets/push_dataset_to_hub",
 ]
 skips = ["B101", "B311", "B404", "B603", "B615"]
 
@@ -231,7 +232,7 @@ default.extend-ignore-identifiers-re = [
 # fail-under = 80
 # output-format = "term-missing"
 # color = true
-# paths = ["src/lerobot"]
+# paths = ["lerobot"]
 
 # TODO: Enable mypy gradually module by module across multiple PRs
 # Uncomment [tool.mypy] first, then uncomment individual module overrides as they get proper type annotations

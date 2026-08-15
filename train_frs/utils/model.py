@@ -13,7 +13,7 @@ import optax
 from flax import nnx
 from flax.core import FrozenDict
 
-from tactile_encoder.utils.resnet import encode_resnet18, init_resnet18_params
+from train_encoder.utils.resnet import encode_resnet18, init_resnet18_params
 from train_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
@@ -48,6 +48,8 @@ class DecoderConfig:
     tactile_encoder_trainable: bool = False
     tactile_image_size: int = 224
     tactile_encode_microbatch_size: int = 8
+    use_gru: bool = True
+    zero_tactile_tokens: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -79,9 +81,9 @@ class DecoderConfig:
 
     @property
     def tactile_token_dim(self) -> int:
-        """Cross-attn token feature size (== GRU hidden dim)."""
+        """Token feature size before the model-dim projection."""
 
-        return self.gru_hidden_dim
+        return self.gru_hidden_dim if self.use_gru else self.resnet_embedding_dim
 
 
 def sinusoidal_embedding(x: Array, dim: int, max_period: float = 10_000.0) -> Array:
@@ -226,12 +228,16 @@ class TactileConditionedFlowDecoder(nnx.Module):
             )
         self.action_in = nnx.Linear(config.action_dim, config.model_dim, rngs=rngs)
         self.time_mlp = TimeMLP(config.model_dim, rngs=rngs)
-        self.tactile_gru = SharedTactileGRU(
-            config.resnet_embedding_dim,
-            config.gru_hidden_dim,
-            rngs=rngs,
-        )
-        self.tactile_proj = nnx.Linear(config.gru_hidden_dim, config.model_dim, rngs=rngs)
+        if config.use_gru:
+            self.tactile_gru = SharedTactileGRU(
+                config.resnet_embedding_dim,
+                config.gru_hidden_dim,
+                rngs=rngs,
+            )
+            tactile_proj_in = config.gru_hidden_dim
+        else:
+            tactile_proj_in = config.resnet_embedding_dim
+        self.tactile_proj = nnx.Linear(tactile_proj_in, config.model_dim, rngs=rngs)
         if config.state_conditioning:
             self.state_norm = nnx.LayerNorm(config.state_dim, rngs=rngs)
             self.state_fc1 = nnx.Linear(config.state_dim, config.model_dim, rngs=rngs)
@@ -340,7 +346,11 @@ class TactileConditionedFlowDecoder(nnx.Module):
         )
 
     def encode_tactile_tokens(self, tactile_seq: Array) -> Array:
-        """``[B, T, N, D] → [B, N, H]`` via shared GRU over each sensor stream."""
+        """``[B, T, N, D] → [B, N, token_dim]``.
+
+        With GRU, each sensor stream is reduced over time. Without GRU, the
+        current (last) frame's ResNet embeddings are returned unchanged.
+        """
 
         if tactile_seq.ndim != 4:
             raise ValueError(f"Expected tactile_seq with shape [B, T, N, D], got {tactile_seq.shape}.")
@@ -353,6 +363,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
             raise ValueError(
                 f"Expected resnet_embedding_dim={self.config.resnet_embedding_dim}, " f"got {embedding_dim}."
             )
+        if not self.config.use_gru:
+            return tactile_seq[:, -1, :, :]
         # [B, T, N, D] -> [B, N, T, D] -> [B * N, T, D]
         sequences = jnp.transpose(tactile_seq, (0, 2, 1, 3)).reshape(
             batch_size * num_streams, time_steps, embedding_dim
@@ -375,6 +387,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
         """Return tactile tokens with an optional normalized-current-state token."""
 
         tactile = self.encode_tactile_condition(tactile_seq)
+        if self.config.zero_tactile_tokens:
+            tactile = jnp.zeros_like(tactile)
         if not self.config.state_conditioning:
             return tactile
         if state is None:

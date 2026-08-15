@@ -10,10 +10,10 @@ import numpy as np
 
 from utils.cache import SampleRecord
 from utils.cache import split_episodes
-from tactile_encoder.utils.image_dataset import ImageDatasetInfo
-from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.image_dataset import episode_count
-from tactile_encoder.utils.image_dataset import indices_for_episode
+from train_encoder.utils.image_dataset import ImageDatasetInfo
+from train_encoder.utils.image_dataset import create_image_dataset
+from train_encoder.utils.image_dataset import episode_count
+from train_encoder.utils.image_dataset import indices_for_episode
 
 # Per-wrist pairing: left wrist camera + tactile_*_0; right wrist camera + tactile_*_1.
 DEFAULT_LEFT_TACTILE_IMAGE_KEYS = ("tactile_left_0", "tactile_right_0")
@@ -445,7 +445,7 @@ def batches(
     if loader == "mp" and (mp_loader is not None or worker_count > 1):
         if mp_loader is None and not dataset_repo_ids:
             raise ValueError("batches(loader='mp') requires dataset_repo_ids.")
-        from tactile_encoder.utils.mp_batches import iter_mp_batches
+        from train_encoder.utils.mp_batches import iter_mp_batches
 
         yield from iter_mp_batches(
             repo_ids=dataset_repo_ids or (),

@@ -9,13 +9,13 @@ import jax.numpy as jnp
 import optax
 from flax import linen as nn
 
-from tactile_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
-from tactile_encoder.utils.clip_backend import DEFAULT_CLIP_MICROBATCH
-from tactile_encoder.utils.clip_backend import encode_clip_images
-from tactile_encoder.utils.masking import random_patch_zero
-from tactile_encoder.utils.metrics import l2_normalize
-from tactile_encoder.utils.resnet import encode_resnet18
-from tactile_encoder.utils.resnet import init_resnet18_params
+from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
+from train_encoder.utils.clip_backend import DEFAULT_CLIP_MICROBATCH
+from train_encoder.utils.clip_backend import encode_clip_images
+from train_encoder.utils.masking import random_patch_zero
+from train_encoder.utils.metrics import l2_normalize
+from train_encoder.utils.resnet import encode_resnet18
+from train_encoder.utils.resnet import init_resnet18_params
 
 Array = jax.Array
 
@@ -829,3 +829,45 @@ def make_train_step(
 
     # Donate params/opt_state/memory_bank buffers so the next step can reuse their memory.
     return jax.jit(step, donate_argnums=(0, 1, 5))
+
+
+def make_learning_rate_schedule(
+    *,
+    learning_rate: float,
+    warmup_steps: int,
+    total_steps: int,
+    min_learning_rate_ratio: float = 0.1,
+    cosine_decay: bool = True,
+) -> optax.Schedule | float:
+    if total_steps <= 0:
+        raise ValueError(f"total_steps must be positive, got {total_steps}.")
+    if warmup_steps < 0:
+        raise ValueError(f"warmup_steps must be non-negative, got {warmup_steps}.")
+    if not 0.0 <= min_learning_rate_ratio <= 1.0:
+        raise ValueError(f"min_learning_rate_ratio must be in [0, 1], got {min_learning_rate_ratio}.")
+
+    end_value = learning_rate * min_learning_rate_ratio
+    if not cosine_decay:
+        if warmup_steps <= 0:
+            return learning_rate
+        return optax.warmup_constant_schedule(
+            init_value=0.0,
+            peak_value=learning_rate,
+            warmup_steps=warmup_steps,
+        )
+
+    if warmup_steps > 0:
+        return optax.warmup_cosine_decay_schedule(
+            init_value=0.0,
+            peak_value=learning_rate,
+            warmup_steps=warmup_steps,
+            decay_steps=total_steps,
+            end_value=end_value,
+        )
+    if min_learning_rate_ratio == 1.0:
+        return learning_rate
+    return optax.cosine_decay_schedule(
+        init_value=learning_rate,
+        decay_steps=total_steps,
+        alpha=min_learning_rate_ratio,
+    )

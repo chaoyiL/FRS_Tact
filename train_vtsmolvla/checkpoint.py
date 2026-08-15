@@ -54,8 +54,8 @@ def initialize_tactile_fusion_params(
 
     output = dict(params)
     if not any(name.startswith(_TACTILE_ENCODER_PREFIX) for name in output):
-        from tactile_encoder.utils.checkpoint import load_tactile_encoder
-        from tactile_encoder.utils.model import tactile_clip_config_from_dict
+        from train_encoder.utils.checkpoint import load_tactile_encoder
+        from train_encoder.utils.model import tactile_clip_config_from_dict
 
         bundle = load_tactile_encoder(config.tactile_encoder_path)
         tactile_cfg = tactile_clip_config_from_dict(bundle.metadata["tactile_clip_config"])

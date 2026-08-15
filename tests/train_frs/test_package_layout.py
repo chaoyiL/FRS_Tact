@@ -158,5 +158,4 @@ def test_launcher_uses_new_module_paths() -> None:
     assert "python -m train_frs.compare_frs_reverse_solvers" in launcher
     assert "python -m train_frs.prepare_frs_caches" in launcher
     assert "python -m train_frs.train_frs" in launcher
-    assert "tools/precompute_tactile_embeddings.py" in launcher
     assert "tools/merge_smolvla_peft_to_jax.py" in launcher

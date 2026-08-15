@@ -18,9 +18,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from modalities_eval.utils import EvalObservation
-from tactile_encoder.utils.checkpoint import load_tactile_encoder
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
-from tactile_encoder.utils.resnet import encode_resnet18
+from train_encoder.utils.checkpoint import load_tactile_encoder
+from train_encoder.utils.model import tactile_clip_config_from_dict
+from train_encoder.utils.resnet import encode_resnet18
 from train_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
 from train_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
 from train_frs.utils.model import decode_actions
@@ -70,6 +70,7 @@ class FRSConfig:
     tactile_encoder_checkpoint: Path
     tactile_keys: tuple[str, ...]
     tactile_window_divisor: int
+    history_stride: int
     reverse_steps: int
     reverse_solver: str
     decode_steps: int
@@ -108,15 +109,36 @@ def _steering_protection_interval(value: Any) -> float | None:
     return interval
 
 
+def _positive_history_stride(raw: Mapping[str, Any]) -> int:
+    if "history_stride" not in raw:
+        return 1
+    stride = int(raw["history_stride"])
+    if stride <= 0:
+        raise ValueError("frs.history_stride must be positive")
+    return stride
+
+
+def strided_unpadded_tokens(
+    frames: Sequence[np.ndarray],
+    *,
+    window: int,
+    stride: int,
+) -> tuple[np.ndarray, ...]:
+    """Select up to ``window`` frames walking backward by ``stride`` without padding."""
+
+    if window <= 0 or stride <= 0:
+        raise ValueError("window and stride must be positive")
+    if not frames:
+        raise ValueError("tactile history is empty")
+    current = len(frames) - 1
+    max_offset = min(window - 1, current // stride)
+    return tuple(frames[current - offset * stride] for offset in range(max_offset, -1, -1))
+
+
 def _reject_deprecated_gate_config(raw: Mapping[str, Any]) -> None:
     deprecated = {"gate_tau", "gate_temperature"}.intersection(raw)
     if deprecated:
         raise ValueError(f"Deprecated FRS gate config values: {sorted(deprecated)}")
-    if "history_stride" in raw:
-        raise ValueError(
-            "frs.history_stride is unused; deployment uses consecutive tactile frames. "
-            "Remove it from the config."
-        )
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -146,6 +168,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         raise ValueError("frs.tactile_keys must not contain duplicates")
 
     tactile_window_divisor = int(raw["tactile_window_divisor"])
+    history_stride = _positive_history_stride(raw)
     reverse_steps = int(raw["reverse_steps"])
     decode_steps = int(raw["decode_steps"])
     max_action_abs = float(raw.get("max_normalized_action_abs", 8.0))
@@ -153,9 +176,9 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     steering_protection_interval_s = _steering_protection_interval(
         raw.get("steering_protection_interval_s")
     )
-    if min(tactile_window_divisor, reverse_steps, decode_steps) <= 0:
+    if min(tactile_window_divisor, history_stride, reverse_steps, decode_steps) <= 0:
         raise ValueError(
-            "frs tactile_window_divisor/reverse_steps/decode_steps must be positive"
+            "frs tactile_window_divisor/history_stride/reverse_steps/decode_steps must be positive"
         )
     if max_action_abs <= 0 or max_delta_rms <= 0:
         raise ValueError("FRS normalized-action safety limits must be positive")
@@ -175,6 +198,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         ),
         tactile_keys=tactile_keys,
         tactile_window_divisor=tactile_window_divisor,
+        history_stride=history_stride,
         reverse_steps=reverse_steps,
         reverse_solver=reverse_solver,
         decode_steps=decode_steps,
@@ -217,13 +241,14 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     if (
         min(
             int(raw["tactile_window_divisor"]),
+            _positive_history_stride(raw),
             int(raw["reverse_steps"]),
             int(raw["decode_steps"]),
         )
         <= 0
     ):
         raise ValueError(
-            "frs tactile_window_divisor/reverse_steps/decode_steps must be positive"
+            "frs tactile_window_divisor/history_stride/reverse_steps/decode_steps must be positive"
         )
     if str(raw["reverse_solver"]) not in {"euler", "fireflow", "slerpflow"}:
         raise ValueError("frs.reverse_solver must be euler, fireflow, or slerpflow")
@@ -382,7 +407,7 @@ class FRSSteeringPolicy:
         decoder = self.model.config
         self.history = TactileHistory(
             window=int(decoder.tactile_window),
-            stride=1,
+            stride=int(self.config.history_stride),
             token_shape=(len(self.config.tactile_keys), self.embedding_dim),
         )
         self.baseline: np.ndarray | None = None
@@ -797,9 +822,12 @@ class FRSSteeringPolicy:
         if not np.isfinite(current).all():
             raise ValueError("tactile encoder produced NaN or Inf")
         window = self.resolved_tactile_window()
-        tactile_sequence = (*self._tactile_sequence, current)
-        if len(tactile_sequence) > window:
-            tactile_sequence = tactile_sequence[-window:]
+        stride = int(self.config.history_stride)
+        stored = (*self._tactile_sequence, current)
+        keep = (window - 1) * stride + 1
+        if len(stored) > keep:
+            stored = stored[-keep:]
+        tactile_sequence = strided_unpadded_tokens(stored, window=window, stride=stride)
         tactile = jnp.expand_dims(jnp.asarray(np.stack(tactile_sequence)), axis=0)
         change = tactile_change_from_tokens(
             current[None, ...],
@@ -856,7 +884,7 @@ class FRSSteeringPolicy:
             decode_started_at=decode_started_at,
             decode_finished_at=decode_finished_at,
         )
-        self._tactile_sequence = list(tactile_sequence)
+        self._tactile_sequence = list(stored)
         self._request_results[request_id] = (chunk_id, action_index, tactile_hash, result)
         self._last_action_index = action_index
         self.last_diagnostics = diagnostics

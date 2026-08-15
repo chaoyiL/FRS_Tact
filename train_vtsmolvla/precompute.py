@@ -25,9 +25,9 @@ from train_vtsmolvla.tactile_cache import (
     load_tactile_cache_metadata,
     tactile_cache_dir,
 )
-from tactile_encoder.utils.checkpoint import load_tactile_encoder
-from tactile_encoder.utils.image_dataset import parse_image_to_uint8
-from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
+from train_encoder.utils.checkpoint import load_tactile_encoder
+from train_encoder.utils.image_dataset import parse_image_to_uint8
+from train_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train.yaml"
 
@@ -111,17 +111,22 @@ def _load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def _cache_settings(config: Mapping[str, Any], args: argparse.Namespace) -> tuple[Path, np.dtype]:
+def _cache_settings(
+    config: Mapping[str, Any],
+    *,
+    output_root: Path | None = None,
+    dtype: str | None = None,
+) -> tuple[Path, np.dtype]:
     cache_config = config.get("tactile_embedding_cache") or {}
     if not isinstance(cache_config, Mapping):
         raise ValueError("tactile_embedding_cache 必须是 mapping")
-    root = args.output_root or cache_config.get("root")
+    root = output_root or cache_config.get("root")
     if not root:
         raise ValueError("请在 YAML 设置 tactile_embedding_cache.root 或传 --output-root")
-    dtype = np.dtype(args.dtype or cache_config.get("dtype", "float16"))
-    if dtype not in (np.dtype(np.float16), np.dtype(np.float32)):
-        raise ValueError(f"embedding cache 只支持 float16/float32，收到 {dtype}")
-    return Path(root), dtype
+    resolved_dtype = np.dtype(dtype or cache_config.get("dtype", "float16"))
+    if resolved_dtype not in (np.dtype(np.float16), np.dtype(np.float32)):
+        raise ValueError(f"embedding cache 只支持 float16/float32，收到 {resolved_dtype}")
+    return Path(root).expanduser(), resolved_dtype
 
 
 def _precompute_source(
@@ -316,44 +321,54 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    config = _load_config(args.config)
+def precompute_from_config(
+    config: Mapping[str, Any],
+    *,
+    output_root: Path | None = None,
+    dtype: str | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+    prefetch_factor: int | None = None,
+    video_backend: str | None = None,
+    flush_every: int | None = None,
+    overwrite: bool = False,
+    require_use_tactile_encoder: bool = True,
+) -> Path:
     cache_config = config.get("tactile_embedding_cache") or {}
     if not isinstance(cache_config, Mapping):
         raise ValueError("tactile_embedding_cache 必须是 mapping")
-    batch_size = int(
-        cache_config.get("precompute_batch_size", 128)
-        if args.batch_size is None
-        else args.batch_size
+    resolved_batch_size = int(
+        cache_config.get("precompute_batch_size", 128) if batch_size is None else batch_size
     )
-    num_workers = int(
-        args.num_workers
-        if args.num_workers is not None
-        else cache_config.get("precompute_num_workers", 4)
+    resolved_num_workers = int(
+        cache_config.get("precompute_num_workers", 4) if num_workers is None else num_workers
     )
-    prefetch_factor = int(
+    resolved_prefetch_factor = int(
         cache_config.get("precompute_prefetch_factor", 2)
-        if args.prefetch_factor is None
-        else args.prefetch_factor
+        if prefetch_factor is None
+        else prefetch_factor
     )
-    video_backend = args.video_backend or cache_config.get(
+    resolved_video_backend = video_backend or cache_config.get(
         "precompute_video_backend", "torchcodec"
     )
-    flush_every = int(
-        cache_config.get("precompute_flush_every", 20)
-        if args.flush_every is None
-        else args.flush_every
+    resolved_flush_every = int(
+        cache_config.get("precompute_flush_every", 20) if flush_every is None else flush_every
     )
-    if min(batch_size, prefetch_factor, flush_every) <= 0 or num_workers < 0:
+    if min(resolved_batch_size, resolved_prefetch_factor, resolved_flush_every) <= 0 or resolved_num_workers < 0:
         raise ValueError("batch/prefetch/flush 必须为正数，num_workers 不能为负数")
     model_config = config.get("model") or {}
-    if not bool(model_config.get("use_tactile_encoder", False)):
+    if not isinstance(model_config, Mapping):
+        raise ValueError("config.model 必须是 mapping")
+    if require_use_tactile_encoder and not bool(model_config.get("use_tactile_encoder", False)):
         raise ValueError("model.use_tactile_encoder 必须为 true")
     for key in ("tactile_encoder_path", "tactile_keys"):
         if not model_config.get(key):
             raise ValueError(f"model.{key} 是必填项")
-    cache_root, cache_dtype = _cache_settings(config, args)
+    cache_root, cache_dtype = _cache_settings(
+        config,
+        output_root=output_root,
+        dtype=dtype,
+    )
     encoder_bundle = load_tactile_encoder(model_config["tactile_encoder_path"])
     if "tactile_resnet" not in encoder_bundle.params:
         raise KeyError("tactile encoder checkpoint 缺少 tactile_resnet")
@@ -361,7 +376,7 @@ def main() -> None:
     print(f"JAX devices={jax.devices()}", flush=True)
     print(
         f"cache_root={cache_root.resolve()} dtype={cache_dtype.name} "
-        f"batch={batch_size} workers={num_workers}",
+        f"batch={resolved_batch_size} workers={resolved_num_workers}",
         flush=True,
     )
     for source in parse_dataset_sources(config):
@@ -371,13 +386,29 @@ def main() -> None:
             encoder_bundle=encoder_bundle,
             cache_root=cache_root,
             cache_dtype=cache_dtype,
-            batch_size=batch_size,
-            num_workers=num_workers,
-            prefetch_factor=prefetch_factor,
-            video_backend=video_backend,
-            flush_every=flush_every,
-            overwrite=args.overwrite,
+            batch_size=resolved_batch_size,
+            num_workers=resolved_num_workers,
+            prefetch_factor=resolved_prefetch_factor,
+            video_backend=resolved_video_backend,
+            flush_every=resolved_flush_every,
+            overwrite=overwrite,
         )
+    return cache_root
+
+
+def main() -> None:
+    args = parse_args()
+    precompute_from_config(
+        _load_config(args.config),
+        output_root=args.output_root,
+        dtype=args.dtype,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+        video_backend=args.video_backend,
+        flush_every=args.flush_every,
+        overwrite=args.overwrite,
+    )
 
 
 if __name__ == "__main__":

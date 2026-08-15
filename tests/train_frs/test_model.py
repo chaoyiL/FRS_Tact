@@ -14,7 +14,7 @@ import pytest
 from flax import nnx
 from flax import traverse_util
 
-from tactile_encoder.utils.resnet import init_resnet18_params
+from train_encoder.utils.resnet import init_resnet18_params
 from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
 from train_frs.utils.metrics import (
     evaluate_split,

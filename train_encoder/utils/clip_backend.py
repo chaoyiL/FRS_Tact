@@ -6,7 +6,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
-from tactile_encoder.utils.metrics import l2_normalize
+from train_encoder.utils.metrics import l2_normalize
 
 Array = jax.Array
 

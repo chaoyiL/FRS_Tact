@@ -5,15 +5,15 @@ import unittest
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_encoder.utils.data import FutureRecord
-from tactile_encoder.utils.data import batches
-from tactile_encoder.utils.data import resolve_data_keys
-from tactile_encoder.utils.metrics import l2_normalize
-from tactile_encoder.utils.metrics import pooled_retrieval_metrics_by_side
-from tactile_encoder.utils.metrics import retrieval_metrics_by_side
-from tactile_encoder.utils.model import TactileClipConfig
-from tactile_encoder.utils.model import _filter_bank_logits_hard_negatives
-from tactile_encoder.utils.model import symmetric_contrastive_loss
+from train_encoder.utils.data import FutureRecord
+from train_encoder.utils.data import batches
+from train_encoder.utils.data import resolve_data_keys
+from train_encoder.utils.metrics import l2_normalize
+from train_encoder.utils.metrics import pooled_retrieval_metrics_by_side
+from train_encoder.utils.metrics import retrieval_metrics_by_side
+from train_encoder.utils.model import TactileClipConfig
+from train_encoder.utils.model import _filter_bank_logits_hard_negatives
+from train_encoder.utils.model import symmetric_contrastive_loss
 
 
 class FakeImageDataset:

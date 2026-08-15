@@ -18,8 +18,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from tactile_encoder.utils.data import DataKeys
-    from tactile_encoder.utils.data import FutureRecord
+    from train_encoder.utils.data import DataKeys
+    from train_encoder.utils.data import FutureRecord
 
 # Sentinel: stop workers.
 _STOP = None
@@ -33,9 +33,9 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     try:
-        from tactile_encoder.utils.data import load_pair
-        from tactile_encoder.utils.data import stack_pairs
-        from tactile_encoder.utils.image_dataset import create_image_dataset
+        from train_encoder.utils.data import load_pair
+        from train_encoder.utils.data import stack_pairs
+        from train_encoder.utils.image_dataset import create_image_dataset
 
         repo_ids = init["repo_ids"]
         image_size = int(init["image_size"])

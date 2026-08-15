@@ -1,6 +1,6 @@
 # Tactile encoder 对比预训练配置。改这里即可，不必手敲一长串 CLI。
 # 运行:
-#   uv run python -m tactile_encoder.train --config configs/train_tactile_encoder.yaml
+#   uv run python -m train_encoder.train --config train_encoder/configs/train.yaml
 # CLI 同名参数可覆盖 YAML（例如 --epochs 50）。
 
 # ---- 数据集 / 输出 ----

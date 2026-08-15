@@ -129,15 +129,6 @@ def compare_from_config(
     *,
     no_fail: bool = False,
 ) -> dict[str, Any]:
-    checkpoint = Path(str(config["checkpoint"])).expanduser().resolve()
-    merge_config = config.get("checkpoint_merge") or {}
-    if not isinstance(merge_config, Mapping):
-        raise ValueError("config.checkpoint_merge must be a mapping")
-    merge_output = Path(str(merge_config.get("output", checkpoint))).expanduser().resolve()
-    if checkpoint != merge_output:
-        raise ValueError(
-            f"checkpoint_merge.output must equal checkpoint: {merge_output} != {checkpoint}"
-        )
     settings = config.get("reverse_solver_ab") or {}
     if not isinstance(settings, Mapping):
         raise ValueError("config.reverse_solver_ab must be a mapping")

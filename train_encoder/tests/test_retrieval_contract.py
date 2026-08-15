@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from tactile_encoder.evaluate_retrieval import build_parser
-from tactile_encoder.utils.data import FutureRecord
-from tactile_encoder.utils.data import future_records_digest
+from train_encoder.evaluate_retrieval import build_parser
+from train_encoder.utils.data import FutureRecord
+from train_encoder.utils.data import future_records_digest
 
 
 def test_split_cli_defaults_defer_to_checkpoint_metadata() -> None:

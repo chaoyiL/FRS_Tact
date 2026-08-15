@@ -12,35 +12,32 @@ import numpy as np
 import optax
 import yaml
 
-from utils.model import make_learning_rate_schedule
+from train_encoder.evaluate_retrieval import evaluate_records
+from train_encoder.utils.checkpoint import CHECKPOINT_NAME
+from train_encoder.utils.checkpoint import load_checkpoint
+from train_encoder.utils.checkpoint import load_train_state
+from train_encoder.utils.checkpoint import save_checkpoint
+from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
+from train_encoder.utils.clip_backend import DEFAULT_CLIP_MODEL_ID
+from train_encoder.utils.clip_backend import ClipBackend
+from train_encoder.utils.data import batches
+from train_encoder.utils.data import batch_uint8_to_float32
+from train_encoder.utils.data import build_future_records
+from train_encoder.utils.data import future_records_digest
+from train_encoder.utils.data import history_dataset_indices
+from train_encoder.utils.data import resolve_data_keys
+from train_encoder.utils.image_dataset import create_image_dataset
+from train_encoder.utils.model import TactileClipConfig
+from train_encoder.utils.masking import resolve_eval_rgb_mask
+from train_encoder.utils.model import init_memory_bank
+from train_encoder.utils.model import init_trainable_params
+from train_encoder.utils.model import make_learning_rate_schedule
+from train_encoder.utils.model import make_train_step
+from train_encoder.utils.prefetch import prefetch_iterator
+from train_encoder.utils.visualize import plot_training_history
 
-from tactile_encoder.evaluate_retrieval import evaluate_records
-from tactile_encoder.utils.checkpoint import CHECKPOINT_NAME
-from tactile_encoder.utils.checkpoint import load_checkpoint
-from tactile_encoder.utils.checkpoint import load_train_state
-from tactile_encoder.utils.checkpoint import save_checkpoint
-from tactile_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
-from tactile_encoder.utils.clip_backend import DEFAULT_CLIP_MODEL_ID
-from tactile_encoder.utils.clip_backend import ClipBackend
-from tactile_encoder.utils.data import batches
-from tactile_encoder.utils.data import batch_uint8_to_float32
-from tactile_encoder.utils.data import build_future_records
-from tactile_encoder.utils.data import future_records_digest
-from tactile_encoder.utils.data import history_dataset_indices
-from tactile_encoder.utils.data import resolve_data_keys
-from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.model import TactileClipConfig
-from tactile_encoder.utils.masking import resolve_eval_rgb_mask
-from tactile_encoder.utils.model import init_memory_bank
-from tactile_encoder.utils.model import init_trainable_params
-from tactile_encoder.utils.model import make_train_step
-from tactile_encoder.utils.prefetch import prefetch_iterator
-from tactile_encoder.utils.visualize import plot_training_history
 
-
-DEFAULT_CONFIG = (
-    pathlib.Path(__file__).resolve().parents[1] / "configs" / "train_tactile_encoder.yaml"
-)
+DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent / "configs" / "train.yaml"
 
 
 HISTORY_FIELDS = [
@@ -473,7 +470,7 @@ def train(
     mp_loader = None
     train_workers = 1 if preload_images else num_workers
     if effective_loader == "mp" and train_workers > 1:
-        from tactile_encoder.utils.mp_batches import MpBatchLoader
+        from train_encoder.utils.mp_batches import MpBatchLoader
 
         # Keep workers alive across epochs so each process does not re-open Arrow.
         mp_loader = MpBatchLoader(

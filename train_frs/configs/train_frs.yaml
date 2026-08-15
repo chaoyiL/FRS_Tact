@@ -6,15 +6,13 @@
 #        --output /workspace/checkpoints/model/pick_tube_01_jax
 #   2) uv run --no-sync python -m train_frs.compare_frs_reverse_solvers \
 #        --config train_frs/configs/train_frs.yaml
-#   3) uv run --no-sync python tools/precompute_tactile_embeddings.py \
+#   3) uv run --no-sync python -m train_frs.prepare_frs_caches \
 #        --config train_frs/configs/train_frs.yaml
-#   4) uv run --no-sync python -m train_frs.prepare_frs_caches \
-#        --config train_frs/configs/train_frs.yaml
-#   5) uv run --no-sync python -m train_frs.train_frs \
+#   4) uv run --no-sync python -m train_frs.train_frs \
 #        --config train_frs/configs/train_frs.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
-checkpoint: /workspace/checkpoints/model/pick_tube_01_jax
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax
 # checkpoint 本身是本地目录；true 只允许首次补齐 tokenizer 等公共资源。
 allow_download: true
 
@@ -27,7 +25,7 @@ checkpoint_merge:
 
 datasets:
   - repo_id: KaiyueChen/pick_tube_05
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+    root: /home/typhon/lerobot_v30/KaiyueChen/pick_tube_05
     action_key: actions
     rename_map:
       observation.images.camera0: observation.images.camera1
@@ -36,7 +34,7 @@ datasets:
 # SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
 action_cache:
   # cache v3 additionally stores the normalized current observation.state.
-  root: /workspace/frs_pick_tube_05/action_cache_slerpflow_state
+  root: ~/FRS_Tact/cache/pick_tube_05/action_cache
   model_sample_steps: 10
   reverse_steps: 20
   reverse_solver: slerpflow
@@ -61,7 +59,7 @@ action_cache:
 # 在生成完整 action cache 前，用相同样本和 seed 比较 FireFlow/SlerpFlow。
 reverse_solver_ab:
   enabled: false
-  root: /workspace/frs_pick_tube/reverse_solver_ab_k20
+  root: ~/FRS_Tact/cache/pick_tube_05/reverse_solver_ab_k20
   max_samples_per_dataset: 512
   max_episodes: null
   # SlerpFlow 全局 mean inversion MSE 不得高于 FireFlow。
@@ -72,7 +70,7 @@ reverse_solver_ab:
 tactile_embedding_cache:
   enabled: true
   # Encoder-specific cache root: do not reuse embeddings produced by encoder_ckpt_06.
-  root: /workspace/frs_pick_tube_05/tactile_embeddings_encoder0809
+  root: ~/FRS_Tact/cache/pick_tube_05/tactile_embeddings
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -83,7 +81,7 @@ tactile_embedding_cache:
 # ResNet 从该 checkpoint 初始化，随后作为 FRS 参数参与训练并写入 FRS checkpoint。
 model:
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
+  tactile_encoder_path: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
   freeze_tactile_encoder: false
   tactile_keys:
     - observation.images.tactile_left_0

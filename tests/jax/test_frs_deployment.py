@@ -511,6 +511,7 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
     runtime.config = SimpleNamespace(
         tactile_keys=("left", "right"),
         tactile_window_divisor=1,
+        history_stride=1,
         decode_steps=3,
         decode_solver="euler",
         max_normalized_action_abs=8.0,
@@ -1282,7 +1283,7 @@ def test_deploy_frs_config_uses_project_local_downloads() -> None:
     config = remote_client.load_config(FRS_CONFIG)
     root = ROOT / "checkpoints"
     assert Path(config["checkpoint"]) == root / "model/pick_tube_01_jax"
-    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0815_03_all_encoders/best"
+    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_lambda_05/best"
     assert Path(config["frs"]["tactile_encoder_checkpoint"]) == (
         root / "encoder/encoder_ckpt_0809"
     )
@@ -1296,7 +1297,7 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
     assert config["control"]["steps_per_inference"] == 20
     assert config["control"]["steps_per_inference"] == config["control"]["action_horizon"]
     assert config["frs"]["steering_protection_interval_s"] is None
-    assert "history_stride" not in config["frs"]
+    assert config["frs"]["history_stride"] == 1
     assert config["frs"]["tactile_window_divisor"] == 4
     assert config["frs"]["reverse_solver"] == "slerpflow"
     assert config["frs"]["decode_solver"] == "fireflow"
@@ -1304,14 +1305,13 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
     assert "gate_temperature" not in config["frs"]
 
 
-def test_frs_config_rejects_unused_history_stride() -> None:
+def test_frs_config_defaults_history_stride_to_one() -> None:
     config = {
         "frs": {
             "enabled": True,
             "checkpoint": "unused",
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
-            "history_stride": 3,
             "tactile_window_divisor": 1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
@@ -1322,8 +1322,54 @@ def test_frs_config_rejects_unused_history_stride() -> None:
         "control": {"steps_per_inference": 2, "action_horizon": 2},
     }
 
-    with pytest.raises(ValueError, match="history_stride is unused"):
+    frs_runtime_module.validate_frs_config_section(config)
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_frs_config_rejects_nonpositive_history_stride(value: int) -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": value,
+            "tactile_window_divisor": 1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="history_stride"):
         frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_steer_action_samples_unpadded_history_with_stride(per_action_runtime) -> None:
+    per_action_runtime.config.tactile_window_divisor = 2
+    per_action_runtime.config.history_stride = 2
+    start_per_action_chunk(per_action_runtime)
+
+    lengths = []
+    for index, value in enumerate((1.0, 2.0, 3.0, 4.0)):
+        result = per_action_runtime.steer_action(
+            4,
+            10 + index,
+            tactile_observation(value),
+            index,
+        )
+        lengths.append(result.tactile_sequence_length)
+
+    assert lengths == [1, 1, 2, 2]
+    np.testing.assert_array_equal(
+        per_action_runtime.decode_tactiles[-1],
+        np.stack(
+            [np.full((2, 3), value, dtype=np.float32) for value in (2.0, 4.0)]
+        )[None, ...],
+    )
 
 
 def test_frs_server_config_advertises_explicit_v1_fields() -> None:
@@ -1444,6 +1490,7 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
 
     assert parsed.steering_protection_interval_s == 0.25
     assert parsed.tactile_window_divisor == 1
+    assert parsed.history_stride == 1
     assert not hasattr(parsed, "gate_tau")
     assert not hasattr(parsed, "gate_temperature")
 

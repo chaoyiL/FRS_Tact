@@ -6,7 +6,7 @@ from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
-from tactile_encoder.utils.image_dataset import parse_image_to_unit
+from train_encoder.utils.image_dataset import parse_image_to_unit
 
 from train_smolvla.preprocessing import JaxSmolVLAPreprocessor
 

@@ -898,17 +898,31 @@ def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
     return Path(cache_root).expanduser().joinpath(*parts)
 
 
+def prepare_tactile_embeddings_from_config(
+    config: Mapping[str, Any],
+    *,
+    overwrite: bool = False,
+) -> Path | None:
+    """Build or resume the tactile embedding cache used by FRS / verify_gt_fm."""
+
+    tactile = config.get("tactile_embedding_cache") or {}
+    if not isinstance(tactile, Mapping):
+        raise ValueError("config.tactile_embedding_cache must be a mapping")
+    if not tactile.get("root") or not bool(tactile.get("enabled", True)):
+        return None
+    from train_vtsmolvla.precompute import precompute_from_config
+
+    print("prepare tactile embedding cache", flush=True)
+    return precompute_from_config(
+        config,
+        overwrite=overwrite,
+        require_use_tactile_encoder=False,
+    )
+
+
 def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
+    prepare_tactile_embeddings_from_config(config)
     checkpoint = Path(str(config["checkpoint"])).expanduser()
-    merge_config = config.get("checkpoint_merge") or {}
-    if not isinstance(merge_config, Mapping):
-        raise ValueError("config.checkpoint_merge must be a mapping")
-    merge_output = Path(str(merge_config.get("output", checkpoint))).expanduser()
-    if checkpoint.resolve() != merge_output.resolve():
-        raise ValueError(
-            "checkpoint_merge.output must equal checkpoint: "
-            f"{merge_output.resolve()} != {checkpoint.resolve()}"
-        )
     if not checkpoint.is_dir():
         raise FileNotFoundError(
             f"merged checkpoint does not exist: {checkpoint}. Run tools/merge_smolvla_peft_to_jax.py first."

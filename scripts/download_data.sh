@@ -15,15 +15,15 @@ fi
 HF_NAMESPACE="KaiyueChen"
 # Hub 下载、LeRobot 缓存和 v3.0 转换结果统一使用同一个命名空间。
 LEROBOT_NAMESPACE="${LEROBOT_NAMESPACE:-${HF_NAMESPACE}}"
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-/workspace}"
-# 让脚本内的 Hub、Transformers 和 LeRobot 下载统一使用 workspace 缓存。
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-${HOME}}"
+# 让脚本内的 Hub、Transformers 和 LeRobot 下载统一使用家目录缓存。
 export HF_HOME="${FRS_HF_HOME:-${WORKSPACE_ROOT}/huggingface}"
 export HF_HUB_CACHE="${HF_HOME}/hub"
 export HF_DATASETS_CACHE="${HF_HOME}/datasets_arrow"
 export HF_LEROBOT_HOME="${HF_HOME}/lerobot"
 export TMPDIR="${FRS_TMPDIR:-${WORKSPACE_ROOT}/tmp}"
 mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
-# 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
+# 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在家目录。
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
 if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
     HF_DATASET_CACHE_DIR="$1"

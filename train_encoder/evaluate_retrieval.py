@@ -11,21 +11,21 @@ import jax.numpy as jnp
 import numpy as np
 
 from utils.cache import atomic_write_json
-from tactile_encoder.utils.checkpoint import load_checkpoint
-from tactile_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
-from tactile_encoder.utils.clip_backend import ClipBackend
-from tactile_encoder.utils.data import DataKeys
-from tactile_encoder.utils.data import batches
-from tactile_encoder.utils.data import build_future_records
-from tactile_encoder.utils.data import future_records_digest
-from tactile_encoder.utils.data import resolve_data_keys
-from tactile_encoder.utils.image_dataset import create_image_dataset
-from tactile_encoder.utils.masking import resolve_eval_rgb_mask
-from tactile_encoder.utils.metrics import pooled_retrieval_metrics_by_side
-from tactile_encoder.utils.metrics import retrieval_metrics_by_side
-from tactile_encoder.utils.model import TactileClipConfig
-from tactile_encoder.utils.model import forward_embeddings
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
+from train_encoder.utils.checkpoint import load_checkpoint
+from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
+from train_encoder.utils.clip_backend import ClipBackend
+from train_encoder.utils.data import DataKeys
+from train_encoder.utils.data import batches
+from train_encoder.utils.data import build_future_records
+from train_encoder.utils.data import future_records_digest
+from train_encoder.utils.data import resolve_data_keys
+from train_encoder.utils.image_dataset import create_image_dataset
+from train_encoder.utils.masking import resolve_eval_rgb_mask
+from train_encoder.utils.metrics import pooled_retrieval_metrics_by_side
+from train_encoder.utils.metrics import retrieval_metrics_by_side
+from train_encoder.utils.model import TactileClipConfig
+from train_encoder.utils.model import forward_embeddings
+from train_encoder.utils.model import tactile_clip_config_from_dict
 
 
 def _tree_to_jax(batch: dict[str, np.ndarray]) -> dict[str, jax.Array]:

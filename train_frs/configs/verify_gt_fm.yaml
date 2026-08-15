@@ -1,0 +1,54 @@
+# 在已有 action cache 上验证；触觉 embedding cache 缺失时会按本配置自动生成。
+# 无 GRU、无历史窗、纯 GT Flow Matching。一次跑完 tactile 与 zero-token 对照。
+#   uv run --no-sync python -m train_frs.verify_gt_fm \
+#     --config train_frs/configs/verify_gt_fm.yaml
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /home/typhon/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+action_cache:
+  root: ~/FRS_Tact/cache/pick_tube_05/action_cache
+
+tactile_embedding_cache:
+  enabled: true
+  root: ~/FRS_Tact/cache/pick_tube_05/tactile_embeddings
+
+model:
+  tactile_encoder_path: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+  # 验证对照关掉 state，避免 zero-token 仍能靠 state 降 MSE。
+  state_conditioning: false
+
+verify_training:
+  output: outputs/verify_gt_fm
+  use_gru: false
+  tactile_window: 1
+  loss: fm_gt
+  decode_steps: 10
+  decode_solver: fireflow
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 1
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+  batch_size: 128
+  epochs: 50
+  seed: 42

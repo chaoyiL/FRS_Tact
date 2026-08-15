@@ -1406,7 +1406,7 @@ class DataProcessorPipeline[TInput, TOutput](HubMixin):
         - Constructs exact command user needs to run
         - Uses the migration script: migrate_policy_normalization.py
         - Includes the model path automatically
-        - Example: "python src/lerobot/processor/migrate_policy_normalization.py --pretrained-path /models/old_model"
+        - Example: "python lerobot/processor/migrate_policy_normalization.py --pretrained-path /models/old_model"
 
         **Error Structure**:
         - **Always raises**: ProcessorMigrationError (never returns)
@@ -1429,7 +1429,7 @@ class DataProcessorPipeline[TInput, TOutput](HubMixin):
             ProcessorMigrationError: Always raised (this method never returns normally)
         """
         migration_command = (
-            f"python src/lerobot/processor/migrate_policy_normalization.py --pretrained-path {model_path}"
+            f"python lerobot/processor/migrate_policy_normalization.py --pretrained-path {model_path}"
         )
 
         raise ProcessorMigrationError(model_path, migration_command, original_error)
