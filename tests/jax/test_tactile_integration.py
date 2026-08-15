@@ -569,7 +569,7 @@ def _write_protocol_run_config(path: Path, *, frs_enabled: bool) -> Path:
             "checkpoint": "unused-frs",
             "tactile_encoder_checkpoint": "unused-tactile",
             "tactile_keys": ["tactile"],
-            "history_stride": 1,
+            "tactile_window_divisor": 1,
             "reverse_steps": 2,
             "reverse_solver": "euler",
             "decode_steps": 2,
@@ -634,10 +634,13 @@ def _run_protocol_fixture(
             self.policy = policy
             self.config = SimpleNamespace(
                 checkpoint="unused-frs",
-                history_stride=1,
+                tactile_window_divisor=1,
                 steering_protection_interval_s=None,
             )
             self.model = SimpleNamespace(config=SimpleNamespace(tactile_window=3))
+
+        def resolved_tactile_window(self) -> int:
+            return int(self.policy.config.chunk_size) // int(self.config.tactile_window_divisor)
             self.last_diagnostics = None
             events.append(("frs_init",))
 

@@ -1030,8 +1030,8 @@ def run(
             print(
                 "[client] FRS enabled: "
                 f"checkpoint={frs_runtime.config.checkpoint} "
-                f"window={frs_runtime.model.config.tactile_window} "
-                f"stride={frs_runtime.config.history_stride}"
+                f"window={frs_runtime.resolved_tactile_window()} "
+                f"divisor={frs_runtime.config.tactile_window_divisor}"
             )
             
         for warmup_index in range(warmup_runs):

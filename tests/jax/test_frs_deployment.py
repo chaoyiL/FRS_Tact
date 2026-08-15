@@ -510,6 +510,7 @@ def per_action_runtime(monkeypatch: pytest.MonkeyPatch):
     runtime.policy = PerActionSource()
     runtime.config = SimpleNamespace(
         tactile_keys=("left", "right"),
+        tactile_window_divisor=1,
         decode_steps=3,
         decode_solver="euler",
         max_normalized_action_abs=8.0,
@@ -1156,9 +1157,96 @@ def test_warmup_compiles_every_true_tactile_length_and_preserves_inactive_state(
         (1, 4, 2, 3),
     ]
     assert len(blocked) == 4
-    assert "exceeds checkpoint tactile window" in caplog.text
+    assert "warming 4 concrete lengths" in caplog.text
     assert _live_state_identities(per_action_runtime) == before
     assert per_action_runtime.encode_calls == 0
+
+
+def test_steer_action_keeps_only_the_resolved_tactile_window(per_action_runtime) -> None:
+    per_action_runtime.config.tactile_window_divisor = 2
+    start_per_action_chunk(per_action_runtime)
+
+    lengths = []
+    for index, value in enumerate((1.0, 2.0, 3.0, 4.0)):
+        result = per_action_runtime.steer_action(
+            4,
+            10 + index,
+            tactile_observation(value),
+            index,
+        )
+        lengths.append(result.tactile_sequence_length)
+
+    assert lengths == [1, 2, 2, 2]
+    assert per_action_runtime.decode_input_shapes == [
+        (1, 1, 2, 3),
+        (1, 2, 2, 3),
+        (1, 2, 2, 3),
+        (1, 2, 2, 3),
+    ]
+    np.testing.assert_array_equal(
+        per_action_runtime.decode_tactiles[-1],
+        np.stack(
+            [np.full((2, 3), value, dtype=np.float32) for value in (3.0, 4.0)]
+        )[None, ...],
+    )
+
+
+def test_warmup_compiles_only_the_resolved_tactile_window(
+    per_action_runtime,
+    monkeypatch,
+) -> None:
+    per_action_runtime.config.tactile_window_divisor = 2
+    blocked = []
+    monkeypatch.setattr(frs_runtime_module.jax, "block_until_ready", lambda value: blocked.append(value))
+
+    per_action_runtime.warmup_all_tactile_lengths()
+
+    assert per_action_runtime.decode_input_shapes == [
+        (1, 1, 2, 3),
+        (1, 2, 2, 3),
+    ]
+    assert len(blocked) == 2
+
+
+def test_frs_config_requires_tactile_window_divisor() -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="tactile_window_divisor"):
+        frs_runtime_module.validate_frs_config_section(config)
+
+
+def test_frs_config_rejects_window_divisor_that_does_not_divide_horizon() -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "tactile_window_divisor": 3,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 20, "action_horizon": 20},
+    }
+
+    with pytest.raises(ValueError, match="divisible"):
+        frs_runtime_module.validate_frs_config_section(config)
 
 
 def test_warmup_restores_active_state_even_when_decode_fails(
@@ -1194,7 +1282,7 @@ def test_deploy_frs_config_uses_project_local_downloads() -> None:
     config = remote_client.load_config(FRS_CONFIG)
     root = ROOT / "checkpoints"
     assert Path(config["checkpoint"]) == root / "model/pick_tube_01_jax"
-    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0814_01_state_best_rank"
+    assert Path(config["frs"]["checkpoint"]) == root / "frs/frs_0815_03_all_encoders/best"
     assert Path(config["frs"]["tactile_encoder_checkpoint"]) == (
         root / "encoder/encoder_ckpt_0809"
     )
@@ -1208,11 +1296,34 @@ def test_deploy_frs_config_preserves_training_time_scale() -> None:
     assert config["control"]["steps_per_inference"] == 20
     assert config["control"]["steps_per_inference"] == config["control"]["action_horizon"]
     assert config["frs"]["steering_protection_interval_s"] is None
-    assert config["frs"]["history_stride"] == 3
+    assert "history_stride" not in config["frs"]
+    assert config["frs"]["tactile_window_divisor"] == 4
     assert config["frs"]["reverse_solver"] == "slerpflow"
     assert config["frs"]["decode_solver"] == "fireflow"
     assert "gate_tau" not in config["frs"]
     assert "gate_temperature" not in config["frs"]
+
+
+def test_frs_config_rejects_unused_history_stride() -> None:
+    config = {
+        "frs": {
+            "enabled": True,
+            "checkpoint": "unused",
+            "tactile_encoder_checkpoint": "unused",
+            "tactile_keys": ["left"],
+            "history_stride": 3,
+            "tactile_window_divisor": 1,
+            "reverse_steps": 1,
+            "reverse_solver": "euler",
+            "decode_steps": 1,
+            "decode_solver": "euler",
+        },
+        "observation": {"data_type": "vitac"},
+        "control": {"steps_per_inference": 2, "action_horizon": 2},
+    }
+
+    with pytest.raises(ValueError, match="history_stride is unused"):
+        frs_runtime_module.validate_frs_config_section(config)
 
 
 def test_frs_server_config_advertises_explicit_v1_fields() -> None:
@@ -1298,7 +1409,7 @@ def test_frs_config_accepts_null_or_nonnegative_finite_protection_interval(
             "checkpoint": "unused",
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
-            "history_stride": 1,
+            "tactile_window_divisor": 1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1321,7 +1432,7 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
         "checkpoint": str(frs_checkpoint),
         "tactile_encoder_checkpoint": str(encoder_checkpoint),
         "tactile_keys": ["left"],
-        "history_stride": 1,
+        "tactile_window_divisor": 1,
         "reverse_steps": 1,
         "reverse_solver": "euler",
         "decode_steps": 1,
@@ -1332,6 +1443,7 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
     parsed = frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
 
     assert parsed.steering_protection_interval_s == 0.25
+    assert parsed.tactile_window_divisor == 1
     assert not hasattr(parsed, "gate_tau")
     assert not hasattr(parsed, "gate_temperature")
 
@@ -1351,7 +1463,7 @@ def test_frs_config_rejects_invalid_protection_interval(value: object) -> None:
             "checkpoint": "unused",
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
-            "history_stride": 1,
+            "tactile_window_divisor": 1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1373,7 +1485,7 @@ def test_frs_config_requires_full_horizon_steps_per_inference() -> None:
             "checkpoint": "unused",
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
-            "history_stride": 1,
+            "tactile_window_divisor": 1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1394,7 +1506,7 @@ def test_frs_config_rejects_deprecated_gate_values() -> None:
             "checkpoint": "unused",
             "tactile_encoder_checkpoint": "unused",
             "tactile_keys": ["left"],
-            "history_stride": 1,
+            "tactile_window_divisor": 1,
             "reverse_steps": 1,
             "reverse_solver": "euler",
             "decode_steps": 1,
@@ -1710,7 +1822,6 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
     runtime = object.__new__(FRSRuntime)
     runtime.config = SimpleNamespace(
         tactile_keys=("left", "right", "left_1", "right_1"),
-        history_stride=3,
         decode_steps=10,
         decode_solver="euler",
         reverse_steps=20,

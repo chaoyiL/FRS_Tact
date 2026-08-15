@@ -27,7 +27,7 @@ rename_map:
 frs:
   enabled: true
   steering_protection_interval_s: null
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0814_01_state_best_rank
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_0815_03_all_encoders/best
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:
@@ -36,8 +36,9 @@ frs:
     - observation.images.tactile_left_1
     - observation.images.tactile_right_1
 
-  # 必须与训练 checkpoint metadata 一致。
-  history_stride: 3
+  # GRU 历史窗口 = action_horizon / n，n 必须整除。4 → 20/4=5。
+  # 部署按连续帧取窗口，不再使用训练时的 history_stride。
+  tactile_window_divisor: 4
   reverse_steps: 20
   reverse_solver: slerpflow
   decode_steps: 10

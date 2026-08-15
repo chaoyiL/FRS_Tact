@@ -22,7 +22,7 @@ from tactile_encoder.utils.checkpoint import load_tactile_encoder
 from tactile_encoder.utils.model import tactile_clip_config_from_dict
 from tactile_encoder.utils.resnet import encode_resnet18
 from train_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
-from train_frs.utils.data import tactile_change_from_tokens
+from train_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
 from train_frs.utils.model import decode_actions
 from train_vtsmolvla.preprocessing import prepare_tactile_batch
 from utils.integration import REVERSE_INTEGRATION_VERSION
@@ -69,7 +69,7 @@ class FRSConfig:
     checkpoint: Path
     tactile_encoder_checkpoint: Path
     tactile_keys: tuple[str, ...]
-    history_stride: int
+    tactile_window_divisor: int
     reverse_steps: int
     reverse_solver: str
     decode_steps: int
@@ -112,6 +112,11 @@ def _reject_deprecated_gate_config(raw: Mapping[str, Any]) -> None:
     deprecated = {"gate_tau", "gate_temperature"}.intersection(raw)
     if deprecated:
         raise ValueError(f"Deprecated FRS gate config values: {sorted(deprecated)}")
+    if "history_stride" in raw:
+        raise ValueError(
+            "frs.history_stride is unused; deployment uses consecutive tactile frames. "
+            "Remove it from the config."
+        )
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -120,7 +125,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         "checkpoint",
         "tactile_encoder_checkpoint",
         "tactile_keys",
-        "history_stride",
+        "tactile_window_divisor",
         "reverse_steps",
         "reverse_solver",
         "decode_steps",
@@ -140,7 +145,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     if len(set(tactile_keys)) != len(tactile_keys):
         raise ValueError("frs.tactile_keys must not contain duplicates")
 
-    history_stride = int(raw["history_stride"])
+    tactile_window_divisor = int(raw["tactile_window_divisor"])
     reverse_steps = int(raw["reverse_steps"])
     decode_steps = int(raw["decode_steps"])
     max_action_abs = float(raw.get("max_normalized_action_abs", 8.0))
@@ -148,8 +153,10 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     steering_protection_interval_s = _steering_protection_interval(
         raw.get("steering_protection_interval_s")
     )
-    if min(history_stride, reverse_steps, decode_steps) <= 0:
-        raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
+    if min(tactile_window_divisor, reverse_steps, decode_steps) <= 0:
+        raise ValueError(
+            "frs tactile_window_divisor/reverse_steps/decode_steps must be positive"
+        )
     if max_action_abs <= 0 or max_delta_rms <= 0:
         raise ValueError("FRS normalized-action safety limits must be positive")
     reverse_solver = str(raw["reverse_solver"])
@@ -167,7 +174,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
             name="tactile encoder checkpoint",
         ),
         tactile_keys=tactile_keys,
-        history_stride=history_stride,
+        tactile_window_divisor=tactile_window_divisor,
         reverse_steps=reverse_steps,
         reverse_solver=reverse_solver,
         decode_steps=decode_steps,
@@ -194,7 +201,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         "checkpoint",
         "tactile_encoder_checkpoint",
         "tactile_keys",
-        "history_stride",
+        "tactile_window_divisor",
         "reverse_steps",
         "reverse_solver",
         "decode_steps",
@@ -209,13 +216,15 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         raise ValueError("frs.tactile_keys must not contain duplicates")
     if (
         min(
-            int(raw["history_stride"]),
+            int(raw["tactile_window_divisor"]),
             int(raw["reverse_steps"]),
             int(raw["decode_steps"]),
         )
         <= 0
     ):
-        raise ValueError("frs history_stride/reverse_steps/decode_steps must be positive")
+        raise ValueError(
+            "frs tactile_window_divisor/reverse_steps/decode_steps must be positive"
+        )
     if str(raw["reverse_solver"]) not in {"euler", "fireflow", "slerpflow"}:
         raise ValueError("frs.reverse_solver must be euler, fireflow, or slerpflow")
     if str(raw["decode_solver"]) not in {"euler", "fireflow"}:
@@ -231,6 +240,11 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     ):
         raise ValueError(
             "FRS deployment requires steps_per_inference to equal action_horizon"
+        )
+    if control.get("action_horizon") is not None:
+        resolve_tactile_window(
+            action_horizon=int(control["action_horizon"]),
+            window_divisor=int(raw["tactile_window_divisor"]),
         )
 
 
@@ -368,7 +382,7 @@ class FRSSteeringPolicy:
         decoder = self.model.config
         self.history = TactileHistory(
             window=int(decoder.tactile_window),
-            stride=self.config.history_stride,
+            stride=1,
             token_shape=(len(self.config.tactile_keys), self.embedding_dim),
         )
         self.baseline: np.ndarray | None = None
@@ -423,11 +437,6 @@ class FRSSteeringPolicy:
                 "FRS checkpoint mismatch for decoder_input_version: "
                 f"{decoder_input_version!r} != 2"
             )
-        _require_equal(
-            int(extra.get("history_stride", 0)),
-            self.config.history_stride,
-            "history_stride",
-        )
         _require_equal(
             int(extra.get("tactile_window", 0)),
             decoder.tactile_window,
@@ -510,6 +519,12 @@ class FRSSteeringPolicy:
     def _uses_state(self) -> bool:
         return bool(
             getattr(getattr(self.model, "config", None), "state_conditioning", False)
+        )
+
+    def resolved_tactile_window(self) -> int:
+        return resolve_tactile_window(
+            action_horizon=int(self.policy.config.chunk_size),
+            window_divisor=int(self.config.tactile_window_divisor),
         )
 
     def _normalized_state(self, observation: Mapping[str, Any]) -> jax.Array | None:
@@ -764,7 +779,7 @@ class FRSSteeringPolicy:
                 "FRS action_index must be strictly increasing for unique requests: "
                 f"{action_index} <= {self._last_action_index}"
             )
-        if len(self._tactile_sequence) >= horizon:
+        if len(self._request_results) >= horizon:
             raise ValueError(f"FRS tactile sequence exceeds action horizon {horizon}")
         tactile_hash = self._tactile_payload_hash(observation)
         assert self._episode_baseline is not None
@@ -781,7 +796,10 @@ class FRSSteeringPolicy:
             )
         if not np.isfinite(current).all():
             raise ValueError("tactile encoder produced NaN or Inf")
+        window = self.resolved_tactile_window()
         tactile_sequence = (*self._tactile_sequence, current)
+        if len(tactile_sequence) > window:
+            tactile_sequence = tactile_sequence[-window:]
         tactile = jnp.expand_dims(jnp.asarray(np.stack(tactile_sequence)), axis=0)
         change = tactile_change_from_tokens(
             current[None, ...],
@@ -838,7 +856,7 @@ class FRSSteeringPolicy:
             decode_started_at=decode_started_at,
             decode_finished_at=decode_finished_at,
         )
-        self._tactile_sequence.append(current)
+        self._tactile_sequence = list(tactile_sequence)
         self._request_results[request_id] = (chunk_id, action_index, tactile_hash, result)
         self._last_action_index = action_index
         self.last_diagnostics = diagnostics
@@ -888,13 +906,18 @@ class FRSSteeringPolicy:
         snapshot = self._snapshot_live_state()
         try:
             horizon = int(self.policy.config.chunk_size)
-            tactile_window = int(self.model.config.tactile_window)
-            if horizon > tactile_window:
+            checkpoint_window = int(self.model.config.tactile_window)
+            window = self.resolved_tactile_window()
+            if window != checkpoint_window:
                 logging.getLogger(__name__).warning(
-                    "FRS action horizon %d exceeds checkpoint tactile window %d; "
-                    "warming all concrete lengths",
+                    "FRS runtime tactile window %d (horizon %d / divisor %d) "
+                    "differs from checkpoint tactile window %d; "
+                    "warming %d concrete lengths",
+                    window,
                     horizon,
-                    tactile_window,
+                    int(self.config.tactile_window_divisor),
+                    checkpoint_window,
+                    window,
                 )
             baseline = np.asarray(self._episode_baseline, dtype=np.float32)
             if self._x_base_device is not None:
@@ -910,7 +933,7 @@ class FRSSteeringPolicy:
                 )
             else:
                 synthetic_x_base = jnp.asarray(self._x_base, dtype=jnp.float32)
-            for length in range(1, horizon + 1):
+            for length in range(1, window + 1):
                 tactile = jnp.expand_dims(
                     jnp.asarray(np.stack([baseline] * length)),
                     axis=0,
