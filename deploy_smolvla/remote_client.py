@@ -825,13 +825,47 @@ def _build_action_trace(
     policy: Policy,
     frs_runtime: FRSRuntime | None,
     *,
+    direct_decoder: DirectDecoderRuntime | None = None,
     inference_wall_start_s: float,
     inference_wall_end_s: float,
 ) -> dict[str, Any] | None:
-    """Build a diagnostic-only v1 trace for a completed FRS inference."""
+    """Build a diagnostic-only v1 trace for a completed inference."""
 
-    if frs_runtime is None:
+    if frs_runtime is not None and direct_decoder is not None:
+        raise ValueError("action trace cannot use FRS and direct decoder together")
+    if frs_runtime is None and direct_decoder is None:
         return None
+    if direct_decoder is not None:
+        vla_normalized = direct_decoder.last_vla_normalized
+        direct_normalized = direct_decoder.last_direct_normalized
+        if vla_normalized is None or direct_normalized is None:
+            return None
+
+        vla_chunk = _trace_action_chunk(vla_normalized)
+        direct_chunk = _trace_action_chunk(direct_normalized)
+        vla_action = _trace_action_chunk(
+            policy.preprocessor.unnormalize_actions(vla_normalized)
+        )
+        direct_action = _trace_action_chunk(
+            policy.preprocessor.unnormalize_actions(direct_normalized)
+        )
+        return {
+            "version": 1,
+            "prediction_source": "direct_decode",
+            "vla_normalized": vla_chunk,
+            "frs_normalized": direct_chunk,
+            "vla_action": vla_action,
+            "frs_action": direct_action,
+            "inference_started_at": float(inference_wall_start_s),
+            "inference_finished_at": float(inference_wall_end_s),
+            "frs_diagnostics": {
+                "delta_rms": float(
+                    np.sqrt(np.mean(np.square(direct_chunk - vla_chunk)))
+                ),
+                "max_normalized_action_abs": float(np.max(np.abs(direct_chunk))),
+            },
+        }
+
     vla_normalized = frs_runtime.last_vla_normalized
     frs_normalized = frs_runtime.last_frs_normalized
     diagnostics = frs_runtime.last_diagnostics
@@ -862,6 +896,7 @@ def _build_action_trace_or_none(
     policy: Policy,
     frs_runtime: FRSRuntime | None,
     *,
+    direct_decoder: DirectDecoderRuntime | None = None,
     inference_wall_start_s: float,
     inference_wall_end_s: float,
 ) -> dict[str, Any] | None:
@@ -871,6 +906,7 @@ def _build_action_trace_or_none(
         return _build_action_trace(
             policy,
             frs_runtime,
+            direct_decoder=direct_decoder,
             inference_wall_start_s=inference_wall_start_s,
             inference_wall_end_s=inference_wall_end_s,
         )
@@ -1176,6 +1212,7 @@ def run(
             trace = _build_action_trace_or_none(
                 policy,
                 frs_runtime,
+                direct_decoder=direct_decoder,
                 inference_wall_start_s=inference_started_at,
                 inference_wall_end_s=time.time(),
             )

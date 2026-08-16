@@ -2005,6 +2005,69 @@ def test_action_trace_failure_is_omitted_without_raising() -> None:
     )
 
 
+def test_action_trace_contains_complete_direct_decoder_chunks_and_diagnostics() -> None:
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(actions):
+            return np.asarray(actions) * 10.0
+
+    policy = SimpleNamespace(preprocessor=Preprocessor())
+    base = np.asarray([[[1.0], [2.0]]], dtype=np.float32)
+    direct = np.asarray([[[3.0], [4.0]]], dtype=np.float32)
+    direct_runtime = SimpleNamespace(
+        last_vla_normalized=base,
+        last_direct_normalized=direct,
+    )
+
+    trace = remote_client._build_action_trace(
+        policy,
+        None,
+        direct_decoder=direct_runtime,
+        inference_wall_start_s=100.25,
+        inference_wall_end_s=100.75,
+    )
+
+    assert trace["version"] == 1
+    assert trace["prediction_source"] == "direct_decode"
+    np.testing.assert_array_equal(trace["vla_normalized"], base[0])
+    np.testing.assert_array_equal(trace["frs_normalized"], direct[0])
+    np.testing.assert_array_equal(trace["vla_action"], base[0] * 10.0)
+    np.testing.assert_array_equal(trace["frs_action"], direct[0] * 10.0)
+    assert trace["frs_diagnostics"] == {
+        "delta_rms": float(np.sqrt(np.mean(np.square(direct - base)))),
+        "max_normalized_action_abs": float(np.max(np.abs(direct))),
+    }
+
+
+@pytest.mark.parametrize(
+    "direct_runtime",
+    [
+        SimpleNamespace(last_vla_normalized=np.ones((1, 2, 1), dtype=np.float32)),
+        SimpleNamespace(
+            last_vla_normalized=np.ones((1,), dtype=np.float32),
+            last_direct_normalized=np.ones((1, 2, 1), dtype=np.float32),
+        ),
+    ],
+)
+def test_direct_action_trace_missing_or_malformed_snapshots_are_omitted(
+    direct_runtime: SimpleNamespace,
+) -> None:
+    policy = SimpleNamespace(
+        preprocessor=SimpleNamespace(unnormalize_actions=lambda actions: actions)
+    )
+
+    assert (
+        remote_client._build_action_trace_or_none(
+            policy,
+            None,
+            direct_decoder=direct_runtime,
+            inference_wall_start_s=100.25,
+            inference_wall_end_s=100.75,
+        )
+        is None
+    )
+
+
 def test_bridge_send_action_keeps_legacy_payload_without_trace_and_adds_keyword_trace() -> None:
     bridge = object.__new__(RobotBridgeClient)
     messages: list[dict[str, object]] = []

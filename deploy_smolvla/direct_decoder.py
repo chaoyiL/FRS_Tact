@@ -217,6 +217,8 @@ class DirectDecoderRuntime:
         self.fixed_noise_jax = jax.device_put(
             jnp.asarray(fixed_noise, dtype=jnp.float32)
         )
+        self.last_vla_normalized: np.ndarray | None = None
+        self.last_direct_normalized: np.ndarray | None = None
 
     @classmethod
     def from_bundle(
@@ -282,7 +284,8 @@ class DirectDecoderRuntime:
         )
 
     def reset(self) -> None:
-        return None
+        self.last_vla_normalized = None
+        self.last_direct_normalized = None
 
     @torch.inference_mode()
     def refine(
@@ -307,4 +310,7 @@ class DirectDecoderRuntime:
         fine = self.decoder(coarse, tactile)
         if fine.shape != (1, 20, 20) or not torch.isfinite(fine).all():
             raise ValueError("decoder output must be finite and shaped [1,20,20]")
-        return fine.detach().cpu().numpy().astype(np.float32, copy=False)
+        direct = fine.detach().cpu().numpy().astype(np.float32, copy=False)
+        self.last_vla_normalized = np.array(coarse_array, copy=True)
+        self.last_direct_normalized = np.array(direct, copy=True)
+        return direct

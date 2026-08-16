@@ -8,6 +8,7 @@ import torch
 import yaml
 
 from deploy_smolvla import remote_client
+from deploy_smolvla import direct_decoder as direct_decoder_module
 from deploy_smolvla.direct_decoder import (
     DIRECT_TACTILE_KEYS,
     DirectDecoderRuntime,
@@ -189,6 +190,42 @@ def test_fixed_noise_matches_training_contract() -> None:
     assert noise.shape == (1, 20, 32)
     assert np.isfinite(noise).all()
     np.testing.assert_array_equal(noise[:, :, 20:], 0.0)
+
+
+def test_runtime_refine_records_copied_snapshots_and_reset_clears_them(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = object.__new__(DirectDecoderRuntime)
+    runtime.device = torch.device("cpu")
+    runtime.tactile_keys = DIRECT_TACTILE_KEYS
+    runtime.encoder = lambda images: torch.ones((4, 512), dtype=torch.float32)
+    runtime.decoder = lambda coarse, tactile: coarse + 2.0
+    runtime.last_vla_normalized = None
+    runtime.last_direct_normalized = None
+    monkeypatch.setattr(
+        direct_decoder_module,
+        "_preprocess_image",
+        lambda image: np.zeros((3, 224, 224), dtype=np.float32),
+    )
+
+    coarse = np.ones((1, 20, 20), dtype=np.float32)
+    observation = {
+        key: np.zeros((1, 1, 3), dtype=np.uint8) for key in DIRECT_TACTILE_KEYS
+    }
+
+    direct = runtime.refine(coarse, observation)
+
+    np.testing.assert_array_equal(runtime.last_vla_normalized, coarse)
+    np.testing.assert_array_equal(runtime.last_direct_normalized, direct)
+    coarse[0, 0, 0] = -1.0
+    direct[0, 0, 0] = -2.0
+    assert runtime.last_vla_normalized[0, 0, 0] == 1.0
+    assert runtime.last_direct_normalized[0, 0, 0] == 3.0
+
+    runtime.reset()
+
+    assert runtime.last_vla_normalized is None
+    assert runtime.last_direct_normalized is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="deployment uses cuda:0")
