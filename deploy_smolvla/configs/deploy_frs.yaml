@@ -27,7 +27,13 @@ rename_map:
 frs:
   enabled: true
   steering_protection_interval_s: null
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_lambda_05/best
+  # null = 关闭；0 = 历史预测均匀平均；数值越大越偏重最新预测。
+  temporal_ensemble_coeff: 0.1
+  # 第 10/20 维夹爪宽度低于 threshold 时减去 gain；设为 null 可关闭。
+  gripper_gain:
+    threshold: 0.1
+    gain: 0.05
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_no_repair
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:
@@ -39,7 +45,7 @@ frs:
   # GRU 历史窗口 = action_horizon / n，n 必须整除。4 → 20/4=5。
   tactile_window_divisor: 4
   # 从当前帧往回抽帧；1 = 连续帧，3 = 每隔 2 帧取一次。
-  history_stride: 1
+  history_stride: 3
   reverse_steps: 20
   reverse_solver: slerpflow
   decode_steps: 10
@@ -73,7 +79,7 @@ observation:
 
 control:
   # 训练数据是 30 Hz；FRS v1 逐 action 重定向，完整协商 horizon 不截断执行。
-  control_frequency: 10.0
+  control_frequency: 20.0
   controller_frequency: 80.0
   action_horizon: 20
   steps_per_inference: 20

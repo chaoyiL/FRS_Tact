@@ -624,6 +624,61 @@ def test_steer_action_result_has_the_exact_frozen_contract(per_action_runtime) -
         result.request_id = 11
 
 
+def test_steer_action_temporal_ensemble_weights_newer_predictions_more(
+    per_action_runtime,
+) -> None:
+    per_action_runtime.config.temporal_ensemble_coeff = float(np.log(2.0))
+    start_per_action_chunk(per_action_runtime)
+    first_chunk = np.zeros((1, 4, 2), dtype=np.float32)
+    first_chunk[0, 1] = (1.0, 2.0)
+    per_action_runtime.decode_result = first_chunk
+
+    per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+    second_chunk = np.zeros((1, 4, 2), dtype=np.float32)
+    second_chunk[0, 1] = (4.0, 5.0)
+    per_action_runtime.decode_result = second_chunk
+    result = per_action_runtime.steer_action(4, 11, tactile_observation(2.0), 1)
+
+    np.testing.assert_allclose(result.selected_normalized, (3.0, 4.0), rtol=1e-6)
+    np.testing.assert_allclose(result.selected_action, (30.0, 40.0), rtol=1e-6)
+    np.testing.assert_array_equal(result.decoded_normalized, second_chunk)
+
+
+def test_steer_action_temporal_ensemble_is_stable_for_large_finite_coeff(
+    per_action_runtime,
+) -> None:
+    per_action_runtime.config.temporal_ensemble_coeff = 1e100
+    start_per_action_chunk(per_action_runtime)
+    per_action_runtime.decode_result = np.ones((1, 4, 2), dtype=np.float32)
+    per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+    newest_chunk = np.full((1, 4, 2), 2.0, dtype=np.float32)
+    per_action_runtime.decode_result = newest_chunk
+
+    result = per_action_runtime.steer_action(4, 11, tactile_observation(2.0), 1)
+
+    np.testing.assert_array_equal(result.selected_normalized, newest_chunk[0, 1])
+
+
+def test_steer_action_applies_gain_to_robot_space_grippers_below_threshold(
+    per_action_runtime,
+) -> None:
+    per_action_runtime.policy.config.action_dim = 20
+    per_action_runtime.config.gripper_gain = (0.1, 0.05)
+    normalized = np.zeros((1, 4, 20), dtype=np.float32)
+    per_action_runtime._activate_chunk(4, normalized, normalized)
+    decoded = normalized.copy()
+    decoded[0, 0, 8:11] = (0.008, 0.008, 0.010)
+    decoded[0, 0, 18:20] = (0.018, 0.015)
+    per_action_runtime.decode_result = decoded
+
+    result = per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+
+    expected = decoded[0, 0] * 10.0
+    expected[[9, 19]] = (0.03, 0.15)
+    np.testing.assert_array_equal(result.selected_normalized, decoded[0, 0])
+    np.testing.assert_allclose(result.selected_action, expected, atol=1e-7)
+
+
 def test_steer_result_arrays_cannot_be_mutated_or_corrupt_cached_replay(
     per_action_runtime,
 ) -> None:
@@ -1497,6 +1552,109 @@ def test_parse_frs_config_stores_validated_protection_interval(tmp_path: Path) -
     raw["gate_tau"] = 0.4
     with pytest.raises(ValueError, match="Deprecated"):
         frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
+
+
+def test_parse_frs_config_defaults_and_stores_temporal_ensemble_coeff(
+    tmp_path: Path,
+) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "tactile_window_divisor": 1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+    }
+
+    disabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+    raw["temporal_ensemble_coeff"] = 0.1
+    enabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+
+    assert disabled.temporal_ensemble_coeff is None
+    assert enabled.temporal_ensemble_coeff == pytest.approx(0.1)
+
+
+def test_parse_frs_config_defaults_and_stores_gripper_gain(
+    tmp_path: Path,
+) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "tactile_window_divisor": 1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+    }
+
+    disabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+    raw["gripper_gain"] = {
+        "threshold": 0.1,
+        "gain": 0.05,
+    }
+    enabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+
+    assert disabled.gripper_gain is None
+    assert enabled.gripper_gain == pytest.approx((0.1, 0.05))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, -0.1, float("nan"), float("inf"), float("-inf"), "0.1"],
+)
+def test_frs_config_rejects_invalid_temporal_ensemble_coeff(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "tactile_window_divisor": 1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+        "temporal_ensemble_coeff": value,
+    }
+
+    with pytest.raises(ValueError, match="temporal_ensemble_coeff"):
+        frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
+    with pytest.raises(ValueError, match="temporal_ensemble_coeff"):
+        frs_runtime_module.validate_frs_config_section(
+            {
+                "frs": {**raw, "checkpoint": "unused", "tactile_encoder_checkpoint": "unused"},
+                "observation": {"data_type": "vitac"},
+                "control": {"steps_per_inference": 2, "action_horizon": 2},
+            }
+        )
 
 
 @pytest.mark.parametrize(
