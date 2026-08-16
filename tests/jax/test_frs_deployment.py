@@ -2047,6 +2047,10 @@ def test_action_trace_contains_complete_direct_decoder_chunks_and_diagnostics() 
             last_vla_normalized=np.ones((1,), dtype=np.float32),
             last_direct_normalized=np.ones((1, 2, 1), dtype=np.float32),
         ),
+        SimpleNamespace(
+            last_vla_normalized=np.ones((1, 2, 1), dtype=np.float32),
+            last_direct_normalized=np.ones((1, 1, 1), dtype=np.float32),
+        ),
     ],
 )
 def test_direct_action_trace_missing_or_malformed_snapshots_are_omitted(

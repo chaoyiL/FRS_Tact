@@ -840,6 +840,10 @@ def _build_action_trace(
         direct_normalized = direct_decoder.last_direct_normalized
         if vla_normalized is None or direct_normalized is None:
             return None
+        if np.asarray(vla_normalized).shape != np.asarray(direct_normalized).shape:
+            raise ValueError(
+                "direct trace base and refined normalized snapshots must have matching shapes"
+            )
 
         vla_chunk = _trace_action_chunk(vla_normalized)
         direct_chunk = _trace_action_chunk(direct_normalized)
