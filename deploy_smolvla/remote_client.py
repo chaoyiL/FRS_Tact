@@ -703,7 +703,7 @@ def _build_trace_or_none(builder: Any, *args: Any) -> dict[str, Any] | None:
     try:
         return builder(*args)
     except Exception as exc:
-        LOGGER.warning("Omitting steering trace after serialization failure: %s", exc)
+        LOGGER.warning("Omitting FRS trace after serialization failure: %s", exc)
         return None
 
 
