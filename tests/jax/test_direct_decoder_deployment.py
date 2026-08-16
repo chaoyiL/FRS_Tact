@@ -1,9 +1,13 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+import jax.numpy as jnp
 import numpy as np
 import pytest
 import torch
+import yaml
 
+from deploy_smolvla import remote_client
 from deploy_smolvla.direct_decoder import (
     DIRECT_TACTILE_KEYS,
     DirectDecoderRuntime,
@@ -12,6 +16,82 @@ from deploy_smolvla.direct_decoder import (
 
 ROOT = Path(__file__).resolve().parents[2]
 ABLATION = ROOT / "checkpoints" / "ablation"
+
+
+def test_direct_backend_requires_vitac_horizon_and_bundle(tmp_path: Path) -> None:
+    config = yaml.safe_load(
+        (ROOT / "deploy_smolvla/configs/deploy_smolvla_jax.yaml").read_text()
+    )
+    config["backend"] = "direct_tactile_decoder"
+    config["direct_decoder"] = {"bundle": str(ABLATION), "device": "cpu"}
+    config["observation"]["data_type"] = "vision"
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump(config))
+    with pytest.raises(ValueError, match="requires observation.data_type='vitac'"):
+        remote_client.load_config(path)
+
+
+def test_predict_chunk_refines_normalized_actions_before_unnormalizing() -> None:
+    coarse = jnp.ones((1, 2, 1), dtype=jnp.float32)
+    refined = np.full((1, 2, 1), 4.0, dtype=np.float32)
+    unnormalized: list[np.ndarray] = []
+    refined_inputs: list[tuple[np.ndarray, object]] = []
+    predict_kwargs: dict[str, object] = {}
+
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(actions: np.ndarray) -> np.ndarray:
+            unnormalized.append(np.asarray(actions))
+            return np.asarray(actions) * 10.0
+
+    class Policy:
+        config = SimpleNamespace(chunk_size=2, action_dim=1)
+        preprocessor = Preprocessor()
+
+        @staticmethod
+        def predict_action_chunk(observation, task, **kwargs):
+            del observation, task
+            predict_kwargs.update(kwargs)
+            return coarse
+
+    observation = {"tactile": np.zeros((1,), dtype=np.float32)}
+    runtime = SimpleNamespace(
+        fixed_noise_jax=jnp.zeros((1, 2, 1), dtype=jnp.float32),
+        refine=lambda normalized, received_observation: (
+            refined_inputs.append((np.asarray(normalized), received_observation)) or refined
+        ),
+    )
+
+    action, normalized = remote_client._predict_chunk(
+        Policy(),
+        observation,
+        "task",
+        seed=7,
+        jit=False,
+        num_steps=3,
+        previous_chunk=np.zeros((1, 1), dtype=np.float32),
+        inference_delay=1,
+        execution_horizon=2,
+        direct_decoder=runtime,
+    )
+
+    assert predict_kwargs == {
+        "seed": 7,
+        "noise": runtime.fixed_noise_jax,
+        "jit": False,
+        "normalized": True,
+        "num_steps": 3,
+        "previous_chunk": None,
+        "inference_delay": None,
+        "execution_horizon": None,
+    }
+    assert len(refined_inputs) == 1
+    np.testing.assert_array_equal(refined_inputs[0][0], np.asarray(coarse))
+    assert refined_inputs[0][1] is observation
+    assert len(unnormalized) == 1
+    np.testing.assert_array_equal(unnormalized[0], refined)
+    np.testing.assert_array_equal(action, np.full((2, 1), 40.0, dtype=np.float32))
+    np.testing.assert_array_equal(normalized, np.full((2, 1), 4.0, dtype=np.float32))
 
 
 def test_released_decoder_state_loads_strictly() -> None:

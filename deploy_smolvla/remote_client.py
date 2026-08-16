@@ -29,6 +29,7 @@ from train_vtsmolvla.validation import (
 )
 
 from .bridge_client import RobotBridgeClient
+from .direct_decoder import DIRECT_TACTILE_KEYS, DirectDecoderRuntime
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import (
     FRSChunkReady,
@@ -39,6 +40,7 @@ from .frs_runtime import (
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
+DIRECT_DECODER_BACKEND = "direct_tactile_decoder"
 Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
 LOGGER = logging.getLogger(__name__)
 
@@ -158,6 +160,20 @@ def _required(mapping: Mapping[str, Any], key: str, where: str) -> Any:
     return mapping[key]
 
 
+def _direct_decoder_config(config: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    backend = str(config.get("backend", "jax_smolvla"))
+    if backend == "jax_smolvla":
+        return None
+    if backend != DIRECT_DECODER_BACKEND:
+        raise ValueError(f"Unsupported backend: {backend}")
+    section = config.get("direct_decoder")
+    if not isinstance(section, Mapping):
+        raise ValueError("Missing YAML section: direct_decoder")
+    _required(section, "bundle", "direct_decoder")
+    _required(section, "device", "direct_decoder")
+    return section
+
+
 def load_config(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"config not found: {path}")
@@ -216,6 +232,24 @@ def load_config(path: Path) -> dict[str, Any]:
     rename_map = config.get("rename_map", {}) or {}
     if not isinstance(rename_map, dict):
         raise ValueError("rename_map must be a mapping of string to string")
+    direct_decoder = _direct_decoder_config(config)
+    if direct_decoder is not None:
+        if observation["data_type"] != "vitac":
+            raise ValueError(
+                "direct_tactile_decoder requires observation.data_type='vitac'"
+            )
+        if int(control["action_horizon"]) != 20:
+            raise ValueError("direct_tactile_decoder requires control.action_horizon=20")
+        if control.get("inference_delay") is not None:
+            raise ValueError("direct_tactile_decoder requires control.inference_delay=null")
+        if control.get("execution_horizon") is not None:
+            raise ValueError("direct_tactile_decoder requires control.execution_horizon=null")
+        frs_config = config.get("frs")
+        frs_enabled = isinstance(frs_config, Mapping) and bool(
+            frs_config.get("enabled", True)
+        )
+        if frs_enabled:
+            raise ValueError("direct_tactile_decoder does not support enabled FRS")
     validate_frs_config_section(config)
     return config
 
@@ -499,27 +533,39 @@ def _predict_chunk(
     previous_chunk: np.ndarray | None,
     inference_delay: int | None,
     execution_horizon: int | None,
+    direct_decoder: DirectDecoderRuntime | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return ``(robot_action, model_space_action)`` each shaped ``[horizon, action_dim]``."""
 
+    noise = direct_decoder.fixed_noise_jax if direct_decoder is not None else None
     actions_norm = policy.predict_action_chunk(
         observation,
         task,
         seed=seed,
+        noise=noise,
         jit=jit,
         normalized=True,
         num_steps=num_steps,
-        previous_chunk=None if previous_chunk is None else np.asarray(previous_chunk),
-        inference_delay=inference_delay,
-        execution_horizon=execution_horizon,
+        previous_chunk=(
+            None
+            if direct_decoder is not None or previous_chunk is None
+            else np.asarray(previous_chunk)
+        ),
+        inference_delay=None if direct_decoder is not None else inference_delay,
+        execution_horizon=None if direct_decoder is not None else execution_horizon,
     )
 
     jax.block_until_ready(actions_norm)
 
-    actions = policy.preprocessor.unnormalize_actions(actions_norm)
+    final_norm = (
+        np.asarray(actions_norm, dtype=np.float32)
+        if direct_decoder is None
+        else direct_decoder.refine(np.asarray(actions_norm, dtype=np.float32), observation)
+    )
+    actions = policy.preprocessor.unnormalize_actions(final_norm)
     expected_shape = (1, policy.config.chunk_size, policy.config.action_dim)
     action = np.asarray(actions)
-    action_norm = np.asarray(actions_norm)
+    action_norm = np.asarray(final_norm)
 
     if action.shape != expected_shape:
         raise ValueError(f"Expected JAX SmolVLA action shaped {expected_shape}, got {action.shape}")
@@ -912,6 +958,14 @@ def run(
     )
     print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
+    direct_decoder_config = _direct_decoder_config(config)
+    if direct_decoder_config is not None:
+        direct_decoder = DirectDecoderRuntime.from_bundle(
+            Path(str(direct_decoder_config["bundle"])),
+            device=str(direct_decoder_config["device"]),
+        )
+    else:
+        direct_decoder = None
     use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
     frs_config = config.get("frs")
     frs_enabled = isinstance(frs_config, Mapping) and bool(frs_config.get("enabled", True))
@@ -927,7 +981,9 @@ def run(
         frs_runtime = None
     _validate_observation_mode(
         str(observation_config["data_type"]),
-        use_tactile_encoder=use_tactile or frs_runtime is not None,
+        use_tactile_encoder=(
+            use_tactile or frs_runtime is not None or direct_decoder is not None
+        ),
     )
 
     configured_horizon = int(control["action_horizon"])
@@ -946,6 +1002,9 @@ def run(
     robot_tactile_keys = _robot_tactile_keys(policy, rename_map)
     if frs_runtime is not None:
         robot_tactile_keys = frs_runtime.tactile_keys
+        robot_image_keys = tuple(dict.fromkeys((*robot_image_keys, *robot_tactile_keys)))
+    elif direct_decoder is not None:
+        robot_tactile_keys = DIRECT_TACTILE_KEYS
         robot_image_keys = tuple(dict.fromkeys((*robot_image_keys, *robot_tactile_keys)))
     state_dim = int(policy.config.state_dim)
     empty_cameras = int(policy.config.empty_cameras)
@@ -1034,7 +1093,9 @@ def run(
                 f"divisor={frs_runtime.config.tactile_window_divisor} "
                 f"stride={frs_runtime.config.history_stride}"
             )
-            
+        if direct_decoder is not None:
+            direct_decoder.reset()
+
         for warmup_index in range(warmup_runs):
             start = time.perf_counter()
             _predict_chunk(
@@ -1047,6 +1108,7 @@ def run(
                 previous_chunk=None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
+                direct_decoder=direct_decoder,
             )
             warmup_ms = (time.perf_counter() - start) * 1000.0
             print(f"[client] Warmup {warmup_index + 1}/{warmup_runs}: {warmup_ms:.1f}ms")
@@ -1094,12 +1156,13 @@ def run(
                 policy,
                 frame,
                 task,
-                seed=seed + iteration,
+                seed=seed if direct_decoder is not None else seed + iteration,
                 jit=jit,
                 num_steps=num_steps,
                 previous_chunk=previous_chunk if rtc_on else None,
                 inference_delay=inference_delay if rtc_on else None,
                 execution_horizon=execution_horizon if rtc_on else None,
+                direct_decoder=direct_decoder,
             )
 
             inference_ms = (time.perf_counter() - start) * 1000.0
