@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from hashlib import sha256
+from numbers import Integral
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import cv2
@@ -19,6 +23,239 @@ DIRECT_TACTILE_KEYS = (
     "observation.images.tactile_left_1",
     "observation.images.tactile_right_1",
 )
+
+
+def _immutable_array(value: Any) -> np.ndarray:
+    """Return an ndarray backed by immutable bytes, detached from its input."""
+    array = np.ascontiguousarray(np.asarray(value))
+    return np.frombuffer(array.tobytes(), dtype=array.dtype).reshape(array.shape)
+
+
+def _require_finite_shape(value: Any, shape: tuple[int, ...], name: str) -> np.ndarray:
+    array = np.asarray(value)
+    if array.shape != shape:
+        raise ValueError(f"{name} must be shaped {shape}, got {array.shape}")
+    try:
+        finite = np.isfinite(array).all()
+    except TypeError as error:
+        raise ValueError(f"{name} must contain numeric finite values") from error
+    if not finite:
+        raise ValueError(f"{name} must be finite")
+    return array
+
+
+@dataclass(frozen=True)
+class DirectChunkReady:
+    chunk_id: int
+    action_vla_normalized: np.ndarray
+    action_vla: np.ndarray
+    prediction_started_at: float
+    prediction_finished_at: float
+
+
+@dataclass(frozen=True)
+class DirectSteerDiagnostics:
+    delta_rms: float
+    max_normalized_action_abs: float
+
+
+@dataclass(frozen=True)
+class DirectSteerResult:
+    chunk_id: int
+    request_id: int
+    action_index: int
+    action_vla_normalized: np.ndarray
+    decoded_normalized: np.ndarray
+    selected_normalized: np.ndarray
+    selected_action: np.ndarray
+    diagnostics: DirectSteerDiagnostics
+    decode_started_at: float
+    decode_finished_at: float
+
+
+@dataclass(frozen=True)
+class _CachedDirectRequest:
+    chunk_id: int
+    action_index: int
+    tactile_hash: bytes
+    result: DirectSteerResult
+
+
+class DirectDecoderSteeringRuntime:
+    """Coordinates one visual coarse chunk with tactile refinement per action."""
+
+    def __init__(self, *, policy: Any, decoder: "DirectDecoderRuntime") -> None:
+        self.policy = policy
+        self.decoder = decoder
+        self.tactile_keys = tuple(decoder.tactile_keys)
+        self._active_chunk_id: int | None = None
+        self._action_vla_normalized: np.ndarray | None = None
+        self._last_action_index: int | None = None
+        self._request_cache: dict[int, _CachedDirectRequest] = {}
+
+    def reset(self) -> None:
+        self._active_chunk_id = None
+        self._action_vla_normalized = None
+        self._last_action_index = None
+        self._request_cache.clear()
+
+    def begin_chunk(
+        self,
+        chunk_id: int,
+        initial_observation: Mapping[str, Any],
+        task: str,
+        *,
+        seed: int,
+        jit: bool,
+        num_steps: int,
+    ) -> DirectChunkReady:
+        if self._active_chunk_id is not None:
+            raise ValueError("a direct decoder chunk is already active")
+
+        prediction_started_at = perf_counter()
+        coarse = self.policy.predict_action_chunk(
+            initial_observation,
+            task,
+            seed=seed,
+            noise=self.decoder.fixed_noise_jax,
+            jit=jit,
+            normalized=True,
+            num_steps=num_steps,
+            previous_chunk=None,
+            inference_delay=None,
+            execution_horizon=None,
+        )
+        coarse = jax.block_until_ready(coarse)
+        prediction_finished_at = perf_counter()
+        shape = (1, self.policy.config.chunk_size, self.policy.config.action_dim)
+        action_vla_normalized = _immutable_array(
+            _require_finite_shape(coarse, shape, "coarse normalized action")
+        )
+        action_vla = _immutable_array(
+            _require_finite_shape(
+                self.policy.preprocessor.unnormalize_actions(
+                    np.array(action_vla_normalized, copy=True)
+                ),
+                shape,
+                "coarse robot action",
+            )
+        )
+        ready = DirectChunkReady(
+            chunk_id=chunk_id,
+            action_vla_normalized=action_vla_normalized,
+            action_vla=action_vla,
+            prediction_started_at=prediction_started_at,
+            prediction_finished_at=prediction_finished_at,
+        )
+        self._active_chunk_id = chunk_id
+        self._action_vla_normalized = action_vla_normalized
+        self._last_action_index = None
+        self._request_cache.clear()
+        return ready
+
+    def steer_action(
+        self,
+        chunk_id: int,
+        request_id: int,
+        observation: Mapping[str, Any],
+        action_index: int,
+    ) -> DirectSteerResult:
+        if self._active_chunk_id is None:
+            raise ValueError("no direct decoder chunk is active")
+        if chunk_id != self._active_chunk_id:
+            raise ValueError("direct decoder chunk ID does not match the active chunk")
+        if isinstance(action_index, (bool, np.bool_)) or not isinstance(
+            action_index, Integral
+        ):
+            raise ValueError("action index must be an integer")
+        action_index = int(action_index)
+        assert self._action_vla_normalized is not None
+        chunk_size = self._action_vla_normalized.shape[1]
+        if not 0 <= action_index < chunk_size:
+            raise ValueError("action index is outside the active chunk")
+
+        tactile_hash = self._tactile_payload_hash(observation)
+        cached = self._request_cache.get(request_id)
+        if cached is not None:
+            if (
+                cached.chunk_id == chunk_id
+                and cached.action_index == action_index
+                and cached.tactile_hash == tactile_hash
+            ):
+                return cached.result
+            raise ValueError("conflicting duplicate direct decoder request")
+        if (
+            self._last_action_index is not None
+            and action_index <= self._last_action_index
+        ):
+            raise ValueError("action indices must be strictly increasing")
+
+        decode_started_at = perf_counter()
+        decoded = self.decoder.refine(
+            np.array(self._action_vla_normalized, copy=True), observation
+        )
+        decoded_normalized = _immutable_array(
+            _require_finite_shape(
+                decoded,
+                self._action_vla_normalized.shape,
+                "decoded normalized action",
+            )
+        )
+        selected_normalized = _immutable_array(decoded_normalized[0, action_index])
+        selected_action = _immutable_array(
+            _require_finite_shape(
+                self.policy.preprocessor.unnormalize_actions(
+                    np.array(selected_normalized, copy=True)
+                ),
+                (self.policy.config.action_dim,),
+                "selected robot action",
+            )
+        )
+        decode_finished_at = perf_counter()
+        delta = decoded_normalized - self._action_vla_normalized
+        result = DirectSteerResult(
+            chunk_id=chunk_id,
+            request_id=request_id,
+            action_index=action_index,
+            action_vla_normalized=self._action_vla_normalized,
+            decoded_normalized=decoded_normalized,
+            selected_normalized=selected_normalized,
+            selected_action=selected_action,
+            diagnostics=DirectSteerDiagnostics(
+                delta_rms=float(np.sqrt(np.mean(np.square(delta, dtype=np.float64)))),
+                max_normalized_action_abs=float(np.max(np.abs(decoded_normalized))),
+            ),
+            decode_started_at=decode_started_at,
+            decode_finished_at=decode_finished_at,
+        )
+        self._request_cache[request_id] = _CachedDirectRequest(
+            chunk_id=chunk_id,
+            action_index=action_index,
+            tactile_hash=tactile_hash,
+            result=result,
+        )
+        self._last_action_index = action_index
+        return result
+
+    def end_chunk(self, chunk_id: int) -> None:
+        if self._active_chunk_id is None:
+            raise ValueError("no direct decoder chunk is active")
+        if chunk_id != self._active_chunk_id:
+            raise ValueError("direct decoder chunk ID does not match the active chunk")
+        self.reset()
+
+    def _tactile_payload_hash(self, observation: Mapping[str, Any]) -> bytes:
+        missing = [key for key in self.tactile_keys if key not in observation]
+        if missing:
+            raise ValueError(f"observation is missing tactile keys: {missing}")
+        digest = sha256()
+        for key in self.tactile_keys:
+            array = np.ascontiguousarray(np.asarray(observation[key]))
+            for value in (key.encode(), array.dtype.str.encode(), repr(array.shape).encode()):
+                digest.update(len(value).to_bytes(8, "big"))
+                digest.update(value)
+            digest.update(array.tobytes())
+        return digest.digest()
 
 
 class SamePadConv2d(nn.Conv2d):
