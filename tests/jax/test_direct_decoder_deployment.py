@@ -18,6 +18,71 @@ ROOT = Path(__file__).resolve().parents[2]
 ABLATION = ROOT / "checkpoints" / "ablation"
 
 
+def _direct_backend_config() -> dict[str, object]:
+    config = yaml.safe_load(
+        (ROOT / "deploy_smolvla/configs/deploy_smolvla_jax.yaml").read_text()
+    )
+    config["backend"] = "direct_tactile_decoder"
+    config["direct_decoder"] = {"bundle": str(ABLATION), "device": "cpu"}
+    config["observation"]["data_type"] = "vitac"
+    return config
+
+
+def _direct_policy(*, use_tactile_encoder: bool, rtc_enabled: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            use_tactile_encoder=use_tactile_encoder,
+            rtc_config=(
+                SimpleNamespace(enabled=True, execution_horizon=20)
+                if rtc_enabled
+                else None
+            ),
+            chunk_size=20,
+            action_dim=20,
+            image_keys=("observation.images.camera0",),
+            state_dim=14,
+            empty_cameras=0,
+        ),
+        reset=lambda: None,
+    )
+
+
+def test_run_rejects_direct_backend_with_checkpoint_rtc(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _direct_backend_config()
+    monkeypatch.setattr(remote_client, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        remote_client,
+        "_load_validated_policy",
+        lambda *args, **kwargs: _direct_policy(
+            use_tactile_encoder=False, rtc_enabled=True
+        ),
+    )
+
+    with pytest.raises(ValueError, match="does not support checkpoint RTC"):
+        remote_client.run(tmp_path / "deploy.yaml")
+
+
+def test_run_rejects_direct_backend_with_tactile_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _direct_backend_config()
+    monkeypatch.setattr(remote_client, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        remote_client,
+        "_load_validated_policy",
+        lambda *args, **kwargs: _direct_policy(
+            use_tactile_encoder=True, rtc_enabled=False
+        ),
+    )
+
+    with pytest.raises(ValueError, match="requires a visual-only JaxSmolVLAPolicy"):
+        remote_client.run(tmp_path / "deploy.yaml")
+
+
 def test_direct_backend_requires_vitac_horizon_and_bundle(tmp_path: Path) -> None:
     config = yaml.safe_load(
         (ROOT / "deploy_smolvla/configs/deploy_smolvla_jax.yaml").read_text()

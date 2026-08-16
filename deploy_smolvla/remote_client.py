@@ -959,14 +959,11 @@ def run(
     print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
     direct_decoder_config = _direct_decoder_config(config)
-    if direct_decoder_config is not None:
-        direct_decoder = DirectDecoderRuntime.from_bundle(
-            Path(str(direct_decoder_config["bundle"])),
-            device=str(direct_decoder_config["device"]),
-        )
-    else:
-        direct_decoder = None
     use_tactile = bool(getattr(policy.config, "use_tactile_encoder", False))
+    if direct_decoder_config is not None and use_tactile:
+        raise ValueError(
+            "direct_tactile_decoder requires a visual-only JaxSmolVLAPolicy checkpoint"
+        )
     frs_config = config.get("frs")
     frs_enabled = isinstance(frs_config, Mapping) and bool(frs_config.get("enabled", True))
     if frs_enabled:
@@ -982,7 +979,7 @@ def run(
     _validate_observation_mode(
         str(observation_config["data_type"]),
         use_tactile_encoder=(
-            use_tactile or frs_runtime is not None or direct_decoder is not None
+            use_tactile or frs_runtime is not None or direct_decoder_config is not None
         ),
     )
 
@@ -1003,7 +1000,7 @@ def run(
     if frs_runtime is not None:
         robot_tactile_keys = frs_runtime.tactile_keys
         robot_image_keys = tuple(dict.fromkeys((*robot_image_keys, *robot_tactile_keys)))
-    elif direct_decoder is not None:
+    elif direct_decoder_config is not None:
         robot_tactile_keys = DIRECT_TACTILE_KEYS
         robot_image_keys = tuple(dict.fromkeys((*robot_image_keys, *robot_tactile_keys)))
     state_dim = int(policy.config.state_dim)
@@ -1016,6 +1013,8 @@ def run(
 
     steps_per_inference = configured_steps
     rtc_on = _rtc_enabled(policy)
+    if direct_decoder_config is not None and rtc_on:
+        raise ValueError("direct_tactile_decoder does not support checkpoint RTC")
     if frs_runtime is not None and rtc_on:
         raise ValueError("FRS deployment does not support RTC action stitching")
     configured_inference_delay = control.get("inference_delay")
@@ -1037,6 +1036,14 @@ def run(
             f"[client] RTC enabled: inference_delay={inference_delay} "
             f"execution_horizon={execution_horizon}"
         )
+
+    if direct_decoder_config is not None:
+        direct_decoder = DirectDecoderRuntime.from_bundle(
+            Path(str(direct_decoder_config["bundle"])),
+            device=str(direct_decoder_config["device"]),
+        )
+    else:
+        direct_decoder = None
 
     server_config = _build_server_config(
         observation_config,
