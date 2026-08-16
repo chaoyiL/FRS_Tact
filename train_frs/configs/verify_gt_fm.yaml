@@ -1,5 +1,7 @@
 # 在已有 action cache 上验证；触觉 embedding cache 缺失时会按本配置自动生成。
-# 无 GRU、无历史窗、纯 GT Flow Matching。一次跑完 tactile 与 zero-token 对照。
+# 无 GRU、无历史窗。一次跑完四组对照：
+#   tactile / zero_tactile_tokens：纯 GT Flow Matching
+#   vla_direct / vla_tactile_direct：直接回归，不用流匹配
 #   uv run --no-sync python -m train_frs.verify_gt_fm \
 #     --config train_frs/configs/verify_gt_fm.yaml
 

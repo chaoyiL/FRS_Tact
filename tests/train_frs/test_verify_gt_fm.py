@@ -8,12 +8,14 @@ from pathlib import Path
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from flax import nnx
 from flax import traverse_util
 
 from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
 from train_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 from train_frs.verify_gt_fm import (
+    RUN_NAMES,
     format_run_line,
     plot_relative_reduction,
     relative_reduction,
@@ -54,6 +56,7 @@ def test_default_decoder_keeps_gru_and_nonzero_tokens() -> None:
     )
     assert config.use_gru is True
     assert config.zero_tactile_tokens is False
+    assert config.use_flow_matching is True
     model = TactileConditionedFlowDecoder(config, rngs=nnx.Rngs(0))
     tactile = jax.random.normal(jax.random.key(1), (2, 3, 2, 6))
     tokens = model.encode_tactile_tokens(tactile)
@@ -105,6 +108,50 @@ def test_zero_tactile_tokens_velocity_ignores_embeddings() -> None:
     np.testing.assert_allclose(np.asarray(velocity_a), np.asarray(velocity_b), rtol=1e-5, atol=1e-6)
 
 
+def test_direct_action_head_ignores_time_and_predicts_action() -> None:
+    model = TactileConditionedFlowDecoder(
+        _no_gru_config(use_flow_matching=False),
+        rngs=nnx.Rngs(13),
+    )
+    vla = jax.random.normal(jax.random.key(14), (2, 4, 3))
+    tactile = jax.random.normal(jax.random.key(15), (2, 1, 4, 6))
+    t_a = jnp.asarray([0.1, 0.2], dtype=jnp.float32)
+    t_b = jnp.asarray([0.8, 0.9], dtype=jnp.float32)
+    pred_a = model(vla, t_a, tactile)
+    pred_b = model(vla, t_b, tactile)
+    assert pred_a.shape == vla.shape
+    np.testing.assert_allclose(np.asarray(pred_a), np.asarray(pred_b), rtol=1e-5, atol=1e-6)
+    assert not hasattr(model, "time_mlp")
+
+
+def test_vla_direct_ignores_tactile_embeddings() -> None:
+    model = TactileConditionedFlowDecoder(
+        _no_gru_config(use_flow_matching=False, zero_tactile_tokens=True),
+        rngs=nnx.Rngs(16),
+    )
+    vla = jax.random.normal(jax.random.key(17), (2, 4, 3))
+    t = jnp.zeros((2,), dtype=jnp.float32)
+    tactile_a = jax.random.normal(jax.random.key(18), (2, 1, 4, 6))
+    tactile_b = jax.random.normal(jax.random.key(19), (2, 1, 4, 6))
+    pred_a = model(vla, t, tactile_a)
+    pred_b = model(vla, t, tactile_b)
+    np.testing.assert_allclose(np.asarray(pred_a), np.asarray(pred_b), rtol=1e-5, atol=1e-6)
+
+
+def test_vla_tactile_direct_uses_tactile_embeddings() -> None:
+    model = TactileConditionedFlowDecoder(
+        _no_gru_config(use_flow_matching=False, zero_tactile_tokens=False),
+        rngs=nnx.Rngs(20),
+    )
+    vla = jax.random.normal(jax.random.key(21), (2, 4, 3))
+    t = jnp.zeros((2,), dtype=jnp.float32)
+    tactile_a = jax.random.normal(jax.random.key(22), (2, 1, 4, 6))
+    tactile_b = tactile_a + 1.0
+    pred_a = model(vla, t, tactile_a)
+    pred_b = model(vla, t, tactile_b)
+    assert float(jnp.max(jnp.abs(pred_a - pred_b))) > 1e-6
+
+
 def test_relative_reduction_is_vla_minus_frs_over_vla() -> None:
     assert relative_reduction(0.25, 1.0) == 0.75
     assert relative_reduction(1.0, 1.0) == 0.0
@@ -114,10 +161,22 @@ def test_relative_reduction_is_vla_minus_frs_over_vla() -> None:
 def test_summarize_comparison_reports_reduction_gap() -> None:
     tactile = {"mse_frs_gt": 0.25, "mse_vla_gt": 1.0, "relative_reduction": 0.75}
     zero = {"mse_frs_gt": 0.9, "mse_vla_gt": 1.0, "relative_reduction": 0.1}
-    summary = summarize_comparison(tactile, zero)
+    vla_direct = {"mse_frs_gt": 0.8, "mse_vla_gt": 1.0, "relative_reduction": 0.2}
+    vla_tactile = {"mse_frs_gt": 0.4, "mse_vla_gt": 1.0, "relative_reduction": 0.6}
+    summary = summarize_comparison(
+        {
+            "tactile": tactile,
+            "zero_tactile_tokens": zero,
+            "vla_direct": vla_direct,
+            "vla_tactile_direct": vla_tactile,
+        }
+    )
     assert summary["reduction_gap"] == 0.65
+    assert summary["reduction_gap_direct"] == pytest.approx(0.4)
     assert summary["tactile"]["mse_frs_gt"] == 0.25
+    assert summary["vla_tactile_direct"]["relative_reduction"] == 0.6
     assert "23.40%" in format_run_line("tactile", {"mse_frs_gt": 0.766, "mse_vla_gt": 1.0, "relative_reduction": 0.234})
+    assert RUN_NAMES == ("tactile", "zero_tactile_tokens", "vla_direct", "vla_tactile_direct")
 
 
 def test_legacy_decoder_config_defaults_keep_gru() -> None:
@@ -170,16 +229,19 @@ def test_plot_relative_reduction_writes_png(tmp_path: Path) -> None:
 
 
 def test_write_relative_reduction_plots_adds_combined_curve(tmp_path: Path) -> None:
-    tactile = tmp_path / "tactile"
-    zero = tmp_path / "zero_tactile_tokens"
-    tactile.mkdir()
-    zero.mkdir()
     header = "epoch,train_loss,val_mse_frs_gt,val_mse_vla_gt,val_relative_reduction\n"
-    (tactile / "history.csv").write_text(header + "1,0.4,0.8,1.0,0.2\n", encoding="utf-8")
-    (zero / "history.csv").write_text(header + "1,0.5,1.1,1.0,-0.1\n", encoding="utf-8")
-    written = write_relative_reduction_plots(zero, "zero_tactile_tokens")
-    assert tactile / "relative_reduction.png" not in written
-    assert zero / "relative_reduction.png" in written
+    for name, row in (
+        ("tactile", "1,0.4,0.8,1.0,0.2\n"),
+        ("zero_tactile_tokens", "1,0.5,1.1,1.0,-0.1\n"),
+        ("vla_direct", "1,0.6,0.9,1.0,0.1\n"),
+        ("vla_tactile_direct", "1,0.3,0.5,1.0,0.5\n"),
+    ):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / "history.csv").write_text(header + row, encoding="utf-8")
+    written = write_relative_reduction_plots(tmp_path / "zero_tactile_tokens", "zero_tactile_tokens")
+    assert tmp_path / "tactile" / "relative_reduction.png" not in written
+    assert tmp_path / "zero_tactile_tokens" / "relative_reduction.png" in written
     assert tmp_path / "relative_reduction.png" in written
     assert all(path.is_file() for path in written)
 
@@ -195,6 +257,8 @@ def test_verify_gt_fm_module_help() -> None:
     assert completed.returncode == 0, completed.stderr
     assert "--config" in completed.stdout
     assert "--run" in completed.stdout
+    assert "vla_direct" in completed.stdout
+    assert "vla_tactile_direct" in completed.stdout
 
 
 def test_prepare_tactile_embeddings_skips_when_disabled() -> None:

@@ -50,6 +50,7 @@ class DecoderConfig:
     tactile_encode_microbatch_size: int = 8
     use_gru: bool = True
     zero_tactile_tokens: bool = False
+    use_flow_matching: bool = True
 
     def __post_init__(self) -> None:
         if (
@@ -227,7 +228,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
                 nnx.BatchStat,
             )
         self.action_in = nnx.Linear(config.action_dim, config.model_dim, rngs=rngs)
-        self.time_mlp = TimeMLP(config.model_dim, rngs=rngs)
+        if config.use_flow_matching:
+            self.time_mlp = TimeMLP(config.model_dim, rngs=rngs)
         if config.use_gru:
             self.tactile_gru = SharedTactileGRU(
                 config.resnet_embedding_dim,
@@ -418,7 +420,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
             raise ValueError(f"Expected x_t with shape [B, T, A], got {x_t.shape}.")
         x = self.action_in(x_t)
         x = x + sequence_position_embedding(x.shape[1], self.config.model_dim)[None, :, :]
-        x = x + self.time_mlp(t)[:, None, :]
+        if self.config.use_flow_matching:
+            x = x + self.time_mlp(t)[:, None, :]
         for block in self.blocks:
             x = block(x, tactile_condition)
         return self.action_out(self.out_norm(x))

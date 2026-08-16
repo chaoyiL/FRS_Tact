@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Train no-GRU GT Flow Matching FRS and a zero-token control on existing caches."""
+"""Verify no-GRU FRS: GT Flow Matching vs direct VLA-action regression."""
 
 from __future__ import annotations
 
@@ -17,8 +17,19 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-RunName = Literal["tactile", "zero_tactile_tokens"]
-RUN_NAMES: tuple[RunName, ...] = ("tactile", "zero_tactile_tokens")
+RunName = Literal["tactile", "zero_tactile_tokens", "vla_direct", "vla_tactile_direct"]
+RUN_NAMES: tuple[RunName, ...] = (
+    "tactile",
+    "zero_tactile_tokens",
+    "vla_direct",
+    "vla_tactile_direct",
+)
+RUN_SPECS: dict[RunName, dict[str, bool]] = {
+    "tactile": {"use_flow_matching": True, "zero_tactile_tokens": False},
+    "zero_tactile_tokens": {"use_flow_matching": True, "zero_tactile_tokens": True},
+    "vla_direct": {"use_flow_matching": False, "zero_tactile_tokens": True},
+    "vla_tactile_direct": {"use_flow_matching": False, "zero_tactile_tokens": False},
+}
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "verify_gt_fm.yaml"
 HISTORY_FIELDS = (
     "epoch",
@@ -86,7 +97,7 @@ def plot_relative_reduction(
     axis.axhline(0.0, color="0.5", linewidth=1.0, linestyle="--")
     axis.set_xlabel("epoch")
     axis.set_ylabel("val relative reduction (%)")
-    axis.set_title("verify_gt_fm: (MSE_VLA - MSE_FRS) / MSE_VLA")
+    axis.set_title("verify_gt_fm: (MSE_VLA - MSE_pred) / MSE_VLA")
     if len(series) > 1:
         axis.legend()
     axis.grid(True, alpha=0.3)
@@ -113,18 +124,21 @@ def relative_reduction(mse_frs_gt: float, mse_vla_gt: float) -> float:
     return (baseline - float(mse_frs_gt)) / baseline
 
 
-def summarize_comparison(
-    tactile: Mapping[str, float],
-    zero_tactile_tokens: Mapping[str, float],
-) -> dict[str, Any]:
-    """Combine the two runs and the reduction gap."""
+def summarize_comparison(run_metrics: Mapping[str, Mapping[str, float]]) -> dict[str, Any]:
+    """Combine run metrics and tactile-vs-control reduction gaps."""
 
-    return {
-        "tactile": dict(tactile),
-        "zero_tactile_tokens": dict(zero_tactile_tokens),
-        "reduction_gap": float(tactile["relative_reduction"])
-        - float(zero_tactile_tokens["relative_reduction"]),
-    }
+    summary: dict[str, Any] = {name: dict(metrics) for name, metrics in run_metrics.items()}
+    if "tactile" in run_metrics and "zero_tactile_tokens" in run_metrics:
+        gap = float(run_metrics["tactile"]["relative_reduction"]) - float(
+            run_metrics["zero_tactile_tokens"]["relative_reduction"]
+        )
+        summary["reduction_gap"] = gap
+        summary["reduction_gap_fm"] = gap
+    if "vla_tactile_direct" in run_metrics and "vla_direct" in run_metrics:
+        summary["reduction_gap_direct"] = float(
+            run_metrics["vla_tactile_direct"]["relative_reduction"]
+        ) - float(run_metrics["vla_direct"]["relative_reduction"])
+    return summary
 
 
 def format_run_line(name: str, metrics: Mapping[str, float]) -> str:
@@ -172,6 +186,7 @@ def evaluate_verify_split(
     batch_size: int,
     num_steps: int,
     solver: str,
+    use_flow_matching: bool,
 ) -> dict[str, float]:
     import jax
     import jax.numpy as jnp
@@ -189,15 +204,20 @@ def evaluate_verify_split(
         _state_np,
         tactile_input,
     ) in conditioner.batches(split, batch_size=batch_size, shuffle=False, seed=0):
-        decoded = decode_actions(
-            model,
-            jnp.asarray(x_base_np),
-            jnp.asarray(tactile_input),
-            num_steps=num_steps,
-            solver=solver,  # type: ignore[arg-type]
-        )
-        gt_action = jnp.asarray(gt_action_np)
         predicted = jnp.asarray(predicted_np)
+        tactile = jnp.asarray(tactile_input)
+        if use_flow_matching:
+            decoded = decode_actions(
+                model,
+                jnp.asarray(x_base_np),
+                tactile,
+                num_steps=num_steps,
+                solver=solver,  # type: ignore[arg-type]
+            )
+        else:
+            dummy_t = jnp.zeros((predicted.shape[0],), dtype=jnp.float32)
+            decoded = model(predicted, dummy_t, tactile)
+        gt_action = jnp.asarray(gt_action_np)
         mse_frs_parts.append(
             np.asarray(jax.device_get(jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))))
         )
@@ -228,6 +248,22 @@ def _fm_train_step(model, optimizer, x_base, gt_action, tactile_seq, key):
         return jnp.mean(
             flow_matching_loss_per_sample(candidate, x_base, gt_action, t, tactile_seq)
         )
+
+    loss, gradients = nnx.value_and_grad(loss_fn)(model)
+    optimizer.update(model, gradients)
+    return loss
+
+
+def _direct_train_step(model, optimizer, vla_action, gt_action, tactile_seq, key):
+    import jax.numpy as jnp
+    from flax import nnx
+
+    del key
+    dummy_t = jnp.zeros((vla_action.shape[0],), dtype=jnp.float32)
+
+    def loss_fn(candidate):
+        predicted = candidate(vla_action, dummy_t, tactile_seq)
+        return jnp.mean(jnp.square(predicted - gt_action))
 
     loss, gradients = nnx.value_and_grad(loss_fn)(model)
     optimizer.update(model, gradients)
@@ -276,6 +312,7 @@ def train_one_run(
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    spec = RUN_SPECS[run_name]
     action_horizon = int(pairs.manifest["action_horizon"])
     decoder_config = DecoderConfig(
         action_dim=int(pairs.manifest["action_dim"]),
@@ -292,7 +329,8 @@ def train_one_run(
         state_conditioning=False,
         tactile_encoder_trainable=False,
         use_gru=False,
-        zero_tactile_tokens=(run_name == "zero_tactile_tokens"),
+        zero_tactile_tokens=spec["zero_tactile_tokens"],
+        use_flow_matching=spec["use_flow_matching"],
     )
     model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
     train_samples = len(pairs.indices("train"))
@@ -313,14 +351,15 @@ def train_one_run(
         min_learning_rate_ratio=min_lr_ratio,
         cosine_decay=cosine_decay,
     )
-    train_step = nnx.jit(_fm_train_step)
+    train_step = nnx.jit(_fm_train_step if spec["use_flow_matching"] else _direct_train_step)
     history_path = output_dir / "history.csv"
     best_metrics: dict[str, float] | None = None
     print(
         f"run={run_name} samples_train={train_samples} "
         f"samples_val={len(pairs.indices('val'))} "
         f"zero_tactile_tokens={decoder_config.zero_tactile_tokens} "
-        f"use_gru={decoder_config.use_gru}",
+        f"use_gru={decoder_config.use_gru} "
+        f"use_flow_matching={decoder_config.use_flow_matching}",
         flush=True,
     )
     with history_path.open("w", encoding="utf-8", newline="") as file:
@@ -333,17 +372,18 @@ def train_one_run(
             for batch_number, (
                 _indices,
                 x_base_np,
-                _predicted_np,
+                predicted_np,
                 gt_action_np,
                 _state_np,
                 tactile_input,
             ) in enumerate(
                 conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
             ):
+                action_input = x_base_np if spec["use_flow_matching"] else predicted_np
                 loss = train_step(
                     model,
                     optimizer,
-                    jnp.asarray(x_base_np),
+                    jnp.asarray(action_input),
                     jnp.asarray(gt_action_np),
                     jnp.asarray(tactile_input),
                     jax.random.fold_in(jax.random.key(seed), epoch * 1_000_000 + batch_number),
@@ -365,6 +405,7 @@ def train_one_run(
                 batch_size=batch_size,
                 num_steps=decode_steps,
                 solver=decode_solver,
+                use_flow_matching=spec["use_flow_matching"],
             )
             row = {
                 "epoch": epoch,
@@ -386,12 +427,19 @@ def train_one_run(
                 "train_loss": train_loss,
                 **{f"val_{key}": value for key, value in val_metrics.items()},
             }
+            run_metadata = {
+                **dict(extra_metadata),
+                "run_name": run_name,
+                "loss": "fm_gt" if spec["use_flow_matching"] else "direct_mse",
+                "use_flow_matching": spec["use_flow_matching"],
+                "zero_tactile_tokens": spec["zero_tactile_tokens"],
+            }
             save_checkpoint(
                 output_dir / "last",
                 model,
                 epoch=epoch,
                 metrics=checkpoint_metrics,
-                extra_metadata=dict(extra_metadata),
+                extra_metadata=run_metadata,
             )
             if best_metrics is None or val_metrics["mse_frs_gt"] < best_metrics["mse_frs_gt"]:
                 best_metrics = dict(val_metrics)
@@ -400,7 +448,7 @@ def train_one_run(
                     model,
                     epoch=epoch,
                     metrics=checkpoint_metrics,
-                    extra_metadata=dict(extra_metadata),
+                    extra_metadata=run_metadata,
                 )
     assert best_metrics is not None
     return best_metrics
@@ -500,15 +548,17 @@ def verify_from_config(config: Mapping[str, Any], *, runs: Sequence[RunName] = R
     finally:
         conditioner.close()
 
-    if set(run_metrics) == set(RUN_NAMES):
-        summary = summarize_comparison(run_metrics["tactile"], run_metrics["zero_tactile_tokens"])
-    else:
-        summary = {name: metrics for name, metrics in run_metrics.items()}
+    summary = summarize_comparison(run_metrics)
     atomic_write_json(output_root / "metrics.json", summary)
     for name, metrics in run_metrics.items():
         print(format_run_line(name, metrics), flush=True)
     if "reduction_gap" in summary:
-        print(f"reduction_gap={100.0 * float(summary['reduction_gap']):.2f}%", flush=True)
+        print(f"reduction_gap_fm={100.0 * float(summary['reduction_gap']):.2f}%", flush=True)
+    if "reduction_gap_direct" in summary:
+        print(
+            f"reduction_gap_direct={100.0 * float(summary['reduction_gap_direct']):.2f}%",
+            flush=True,
+        )
     print(f"metrics={output_root / 'metrics.json'}", flush=True)
     return summary
 
@@ -516,8 +566,9 @@ def verify_from_config(config: Mapping[str, Any], *, runs: Sequence[RunName] = R
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Train a no-GRU, current-frame tactile FRS with GT Flow Matching, "
-            "then a zero-token control, and report MSE reduction vs VLA."
+            "Train no-GRU current-frame FRS controls: GT Flow Matching "
+            "(tactile / zero tokens) and direct VLA-action regression "
+            "(VLA only / VLA+tactile). Report MSE reduction vs VLA."
         )
     )
     parser.add_argument("--config", type=pathlib.Path, default=DEFAULT_CONFIG)
@@ -526,7 +577,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=RUN_NAMES,
         action="append",
         dest="runs",
-        help="Train only this run. Repeat to select both. Default: both runs.",
+        help="Train only this run. Repeat to select a subset. Default: all four runs.",
     )
     return parser
 
