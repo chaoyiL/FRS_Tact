@@ -7,8 +7,8 @@ import pytest
 import torch
 import yaml
 
-from deploy_smolvla import remote_client
 from deploy_smolvla import direct_decoder as direct_decoder_module
+from deploy_smolvla import remote_client
 from deploy_smolvla.direct_decoder import (
     DIRECT_TACTILE_KEYS,
     DirectDecoderRuntime,
