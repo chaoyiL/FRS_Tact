@@ -192,7 +192,7 @@ class PolicySpy:
                 selected if self.selected_action is None else self.selected_action
             ),
             tactile_sequence_length=1,
-            diagnostics=FRSDiagnostics(0.1, 0.2, 0.3, 0.4),
+            diagnostics=FRSDiagnostics(0.1, 0.2, 0.3),
             encode_started_at=3.0,
             encode_finished_at=4.0,
             decode_started_at=5.0,

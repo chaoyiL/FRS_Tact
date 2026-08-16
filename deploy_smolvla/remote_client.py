@@ -638,18 +638,73 @@ def _build_frs_steer_trace(
     }
 
 
+def _build_direct_chunk_trace(ready: Any) -> dict[str, Any]:
+    return {
+        "version": 2,
+        "kind": "frs_chunk",
+        "chunk_id": int(ready.chunk_id),
+        "action_vla_normalized": _immutable_trace_array(
+            ready.action_vla_normalized
+        ),
+        "action_vla": _immutable_trace_array(ready.action_vla),
+        "x_base": _immutable_trace_array(ready.action_vla_normalized),
+        "prediction_started_at": float(ready.prediction_started_at),
+        "prediction_finished_at": float(ready.prediction_finished_at),
+    }
+
+
+def _build_direct_steer_trace(
+    result: Any,
+    request: FRSSteerRequest,
+) -> dict[str, Any]:
+    if (result.chunk_id, result.request_id, result.action_index) != (
+        request.chunk_id,
+        request.request_id,
+        request.action_index,
+    ):
+        raise ValueError("direct decoder steer trace result does not match its request")
+    diagnostics = result.diagnostics
+    return {
+        "version": 2,
+        "kind": "frs_steer",
+        "chunk_id": int(result.chunk_id),
+        "request_id": int(result.request_id),
+        "action_index": int(result.action_index),
+        "target_timestamp": request.target_timestamp,
+        "protection_applied": request.protection_applied,
+        "decoded_normalized": _immutable_trace_array(result.decoded_normalized),
+        "selected_normalized": _immutable_trace_array(result.selected_normalized),
+        "selected_action": _immutable_trace_array(result.selected_action),
+        "tactile_sequence_length": 1,
+        "encode_started_at": float(result.decode_started_at),
+        "encode_finished_at": float(result.decode_started_at),
+        "decode_started_at": float(result.decode_started_at),
+        "decode_finished_at": float(result.decode_finished_at),
+        "frs_diagnostics": {
+            "tactile_change": 0.0,
+            "delta_rms": float(diagnostics.delta_rms),
+            "max_normalized_action_abs": float(
+                diagnostics.max_normalized_action_abs
+            ),
+        },
+    }
+
+
 def _build_trace_or_none(builder: Any, *args: Any) -> dict[str, Any] | None:
     try:
         return builder(*args)
     except Exception as exc:
-        LOGGER.warning("Omitting FRS trace after serialization failure: %s", exc)
+        LOGGER.warning("Omitting steering trace after serialization failure: %s", exc)
         return None
 
 
-def _run_frs_protocol(
+def _run_per_action_protocol(
     bridge: RobotBridgeClient,
-    steering_policy: FRSRuntime,
+    steering_policy: Any,
     *,
+    backend_label: str,
+    build_chunk_trace: Any,
+    build_steer_trace: Any,
     task: str,
     state_dim: int,
     image_keys: Sequence[str],
@@ -662,9 +717,9 @@ def _run_frs_protocol(
     max_chunks: int,
     observation_saver: ObservationSaver,
 ) -> None:
-    """Run the strictly ordered, server-directed FRS steering protocol."""
+    """Run a strictly ordered, server-directed per-action steering protocol."""
 
-    print("[client] Running FRS steering protocol.")
+    print(f"[client] Running {backend_label} steering protocol.")
 
     completed_chunks = 0
     previous_chunk_id: int | None = None
@@ -673,12 +728,12 @@ def _run_frs_protocol(
         chunk_start = bridge.receive_frs_message(observation_timeout_s)
         if not isinstance(chunk_start, FRSChunkStart):
             raise RuntimeError(
-                "expected FRS chunk start, received "
+                f"expected {backend_label} chunk start, received "
                 f"{type(chunk_start).__name__}"
             )
         if previous_chunk_id is not None and chunk_start.chunk_id <= previous_chunk_id:
             raise RuntimeError(
-                "FRS chunk ids must be strictly increasing: "
+                f"{backend_label} chunk ids must be strictly increasing: "
                 f"{chunk_start.chunk_id} <= {previous_chunk_id}"
             )
         observation_saver.submit(
@@ -705,15 +760,15 @@ def _run_frs_protocol(
         )
         if ready.chunk_id != chunk_start.chunk_id:
             raise RuntimeError(
-                "FRS chunk ready id does not match chunk start: "
+                f"{backend_label} chunk ready id does not match chunk start: "
                 f"{ready.chunk_id} != {chunk_start.chunk_id}"
             )
-        print("[client] FRS chunk is ready.")
+        print(f"[client] {backend_label} chunk is ready.")
 
         bridge.send_frs_chunk_ready(
             chunk_start.obs_seq,
             chunk_start.chunk_id,
-            _build_trace_or_none(_build_frs_chunk_trace, ready),
+            _build_trace_or_none(build_chunk_trace, ready),
         )
 
         while True:
@@ -724,7 +779,7 @@ def _run_frs_protocol(
             if isinstance(message, FRSChunkEnd):
                 if message.chunk_id != chunk_start.chunk_id:
                     raise RuntimeError(
-                        "FRS chunk end chunk id does not match active chunk: "
+                        f"{backend_label} chunk end chunk id does not match active chunk: "
                         f"{message.chunk_id} != {chunk_start.chunk_id}"
                     )
                 print("[client] Chunk end.")
@@ -736,12 +791,12 @@ def _run_frs_protocol(
 
             if not isinstance(message, FRSSteerRequest):
                 raise RuntimeError(
-                    "expected FRS steer request or chunk end, received "
+                    f"expected {backend_label} steer request or chunk end, received "
                     f"{type(message).__name__}"
                 )
             if message.chunk_id != chunk_start.chunk_id:
                 raise RuntimeError(
-                    "FRS steer request chunk id does not match active chunk: "
+                    f"{backend_label} steer request chunk id does not match active chunk: "
                     f"{message.chunk_id} != {chunk_start.chunk_id}"
                 )
 
@@ -770,7 +825,7 @@ def _run_frs_protocol(
             result_ids = (result.chunk_id, result.request_id, result.action_index)
             if result_ids != request_ids:
                 raise RuntimeError(
-                    "FRS steer result does not match its request: "
+                    f"{backend_label} steer result does not match its request: "
                     f"{result_ids} != {request_ids}"
                 )
             selected_action = np.asarray(result.selected_action)
@@ -778,7 +833,7 @@ def _run_frs_protocol(
             expected_shape = (int(steering_policy.policy.config.action_dim),)
             if selected_action.shape != expected_shape:
                 raise RuntimeError(
-                    "FRS selected action must have shape "
+                    f"{backend_label} selected action must have shape "
                     f"{expected_shape}, got {selected_action.shape}"
                 )
             
@@ -788,7 +843,7 @@ def _run_frs_protocol(
                 message.request_id,
                 message.action_index,
                 selected_action,
-                trace=_build_trace_or_none(_build_frs_steer_trace, result, message),
+                trace=_build_trace_or_none(build_steer_trace, result, message),
             )
             time_end = time.time()
             print("[client] Steering action finished in ", time_end - time_start, " seconds")
@@ -800,7 +855,7 @@ def _run_frs_protocol(
 
             if not isinstance(acknowledgement, FRSSteerAck):
                 raise RuntimeError(
-                    "expected FRS steer acknowledgement, received "
+                    f"expected {backend_label} steer acknowledgement, received "
                     f"{type(acknowledgement).__name__}"
                 )
             acknowledgement_ids = (
@@ -810,15 +865,91 @@ def _run_frs_protocol(
             )
             if acknowledgement_ids != request_ids:
                 raise RuntimeError(
-                    "FRS steer acknowledgement does not match its request: "
+                    f"{backend_label} steer acknowledgement does not match its request: "
                     f"{acknowledgement_ids} != {request_ids}"
                 )
             if acknowledgement.status == "rejected":
                 raise RuntimeError(
-                    "FRS steer action was rejected for "
+                    f"{backend_label} steer action was rejected for "
                     f"chunk={message.chunk_id} request={message.request_id} "
                     f"action_index={message.action_index}"
                 )
+
+
+def _run_frs_protocol(
+    bridge: RobotBridgeClient,
+    steering_policy: FRSRuntime,
+    *,
+    task: str,
+    state_dim: int,
+    image_keys: Sequence[str],
+    empty_cameras: int,
+    observation_timeout_s: float,
+    action_ack_timeout_s: float,
+    seed: int,
+    jit: bool,
+    num_steps: int | None,
+    max_chunks: int,
+    observation_saver: ObservationSaver,
+) -> None:
+    """Run the server-directed protocol with FRS trace serialization."""
+
+    _run_per_action_protocol(
+        bridge,
+        steering_policy,
+        backend_label="FRS",
+        build_chunk_trace=_build_frs_chunk_trace,
+        build_steer_trace=_build_frs_steer_trace,
+        task=task,
+        state_dim=state_dim,
+        image_keys=image_keys,
+        empty_cameras=empty_cameras,
+        observation_timeout_s=observation_timeout_s,
+        action_ack_timeout_s=action_ack_timeout_s,
+        seed=seed,
+        jit=jit,
+        num_steps=num_steps,
+        max_chunks=max_chunks,
+        observation_saver=observation_saver,
+    )
+
+
+def _run_direct_decoder_protocol(
+    bridge: RobotBridgeClient,
+    steering_policy: Any,
+    *,
+    task: str,
+    state_dim: int,
+    image_keys: Sequence[str],
+    empty_cameras: int,
+    observation_timeout_s: float,
+    action_ack_timeout_s: float,
+    seed: int,
+    jit: bool,
+    num_steps: int | None,
+    max_chunks: int,
+    observation_saver: ObservationSaver,
+) -> None:
+    """Run the server-directed protocol with direct-decoder trace adapters."""
+
+    _run_per_action_protocol(
+        bridge,
+        steering_policy,
+        backend_label="direct decoder",
+        build_chunk_trace=_build_direct_chunk_trace,
+        build_steer_trace=_build_direct_steer_trace,
+        task=task,
+        state_dim=state_dim,
+        image_keys=image_keys,
+        empty_cameras=empty_cameras,
+        observation_timeout_s=observation_timeout_s,
+        action_ack_timeout_s=action_ack_timeout_s,
+        seed=seed,
+        jit=jit,
+        num_steps=num_steps,
+        max_chunks=max_chunks,
+        observation_saver=observation_saver,
+    )
 
 
 def _build_action_trace(

@@ -1,5 +1,7 @@
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
@@ -11,9 +13,18 @@ from deploy_smolvla import direct_decoder as direct_decoder_module
 from deploy_smolvla import remote_client
 from deploy_smolvla.direct_decoder import (
     DIRECT_TACTILE_KEYS,
-    DirectDecoderSteeringRuntime,
+    DirectChunkReady,
     DirectDecoderRuntime,
+    DirectDecoderSteeringRuntime,
+    DirectSteerDiagnostics,
+    DirectSteerResult,
     DirectTactileActionDecoder,
+)
+from deploy_smolvla.frs_protocol import (
+    FRSChunkEnd,
+    FRSChunkStart,
+    FRSSteerAck,
+    FRSSteerRequest,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -204,6 +215,337 @@ def test_direct_steering_uses_immutable_snapshot_copies() -> None:
     )
     with pytest.raises(ValueError):
         result.selected_action[0] = 0.0
+
+
+def _protocol_observation(value: int) -> dict[str, np.ndarray]:
+    return {
+        "observation.state": np.full((3,), value, dtype=np.float32),
+        "camera": np.full((2, 2, 3), value, dtype=np.uint8),
+        "tactile": np.full((2, 2, 3), value, dtype=np.uint8),
+    }
+
+
+class _ProtocolBridge:
+    def __init__(self, inbound: list[object], events: list[tuple[Any, ...]]) -> None:
+        self.inbound = deque(inbound)
+        self.events = events
+        self.sent: list[tuple[Any, ...]] = []
+
+    def receive_frs_message(self, timeout: float) -> object:
+        del timeout
+        message = self.inbound.popleft()
+        self.events.append(("receive", type(message).__name__))
+        return message
+
+    def send_frs_chunk_ready(
+        self,
+        obs_seq: int,
+        chunk_id: int,
+        prediction_trace: dict[str, Any] | None = None,
+    ) -> None:
+        sent = ("ready", obs_seq, chunk_id, prediction_trace)
+        self.events.append(sent)
+        self.sent.append(sent)
+
+    def send_frs_steer_action(
+        self,
+        chunk_id: int,
+        request_id: int,
+        action_index: int,
+        action: np.ndarray,
+        *,
+        trace: dict[str, Any] | None = None,
+    ) -> None:
+        sent = (
+            "action",
+            chunk_id,
+            request_id,
+            action_index,
+            np.array(action, copy=True),
+            trace,
+        )
+        self.events.append(sent)
+        self.sent.append(sent)
+
+
+class _DirectProtocolRuntime:
+    tactile_keys = ("tactile",)
+
+    def __init__(self, events: list[tuple[Any, ...]]) -> None:
+        self.events = events
+        self.policy = SimpleNamespace(
+            config=SimpleNamespace(action_dim=2, chunk_size=3)
+        )
+        self.coarse = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        self.request_observations: list[int] = []
+        self.results: list[DirectSteerResult] = []
+        self.mismatch_result = False
+
+    def begin_chunk(
+        self,
+        chunk_id: int,
+        initial_observation: dict[str, Any],
+        task: str,
+        *,
+        seed: int,
+        jit: bool,
+        num_steps: int | None,
+    ) -> DirectChunkReady:
+        del initial_observation, task, seed, jit, num_steps
+        self.events.append(("begin", chunk_id))
+        return DirectChunkReady(
+            chunk_id=chunk_id,
+            action_vla_normalized=self.coarse,
+            action_vla=self.coarse + 100.0,
+            prediction_started_at=1.0,
+            prediction_finished_at=2.0,
+        )
+
+    def steer_action(
+        self,
+        chunk_id: int,
+        request_id: int,
+        observation: dict[str, Any],
+        action_index: int,
+    ) -> DirectSteerResult:
+        value = int(observation["tactile"][0, 0, 0])
+        self.request_observations.append(value)
+        self.events.append(("steer", chunk_id, request_id, action_index))
+        decoded = self.coarse + value
+        selected_normalized = decoded[0, action_index]
+        result = DirectSteerResult(
+            chunk_id=chunk_id,
+            request_id=request_id + int(self.mismatch_result),
+            action_index=action_index,
+            action_vla_normalized=self.coarse,
+            decoded_normalized=decoded,
+            selected_normalized=selected_normalized,
+            selected_action=selected_normalized + 1000.0,
+            diagnostics=DirectSteerDiagnostics(
+                delta_rms=float(value),
+                max_normalized_action_abs=float(np.max(np.abs(decoded))),
+            ),
+            decode_started_at=3.0 + request_id,
+            decode_finished_at=4.0 + request_id,
+        )
+        self.results.append(result)
+        return result
+
+    def end_chunk(self, chunk_id: int) -> None:
+        self.events.append(("end", chunk_id))
+
+
+class _ProtocolSaver:
+    def submit(self, iteration: int, obs_seq: int, observation: object) -> None:
+        del iteration, obs_seq, observation
+
+
+def _protocol_start(chunk_id: int = 1) -> FRSChunkStart:
+    return FRSChunkStart(
+        obs_seq=9,
+        chunk_id=chunk_id,
+        observation=_protocol_observation(1),
+        observation_timestamp=100.0,
+        control_dt=0.05,
+        action_horizon=3,
+        execution_mode="block",
+        action_timestamps=None,
+        nominal_chunk_end=None,
+    )
+
+
+def _protocol_request(request_id: int, action_index: int) -> FRSSteerRequest:
+    return FRSSteerRequest(
+        chunk_id=1,
+        request_id=request_id,
+        action_index=action_index,
+        target_timestamp=123.5 + action_index,
+        protection_applied=bool(action_index),
+        observation=_protocol_observation(request_id),
+    )
+
+
+def _protocol_ack(
+    request_id: int,
+    action_index: int,
+    *,
+    chunk_id: int = 1,
+) -> FRSSteerAck:
+    return FRSSteerAck(
+        chunk_id=chunk_id,
+        request_id=request_id,
+        action_index=action_index,
+        status="scheduled",
+        scheduled_timestamp=124.0,
+    )
+
+
+def _protocol_end() -> FRSChunkEnd:
+    return FRSChunkEnd(
+        chunk_id=1,
+        reason="exhausted",
+        scheduled_count=2,
+        stale_count=0,
+    )
+
+
+def _run_direct_protocol(
+    bridge: _ProtocolBridge,
+    runtime: _DirectProtocolRuntime,
+) -> None:
+    remote_client._run_direct_decoder_protocol(
+        bridge,
+        runtime,
+        task="pick",
+        state_dim=3,
+        image_keys=("camera", "tactile"),
+        empty_cameras=0,
+        observation_timeout_s=10.0,
+        action_ack_timeout_s=2.0,
+        seed=7,
+        jit=True,
+        num_steps=4,
+        max_chunks=1,
+        observation_saver=_ProtocolSaver(),
+    )
+
+
+def test_direct_protocol_orders_requests_and_sends_selected_rows() -> None:
+    events: list[tuple[Any, ...]] = []
+    bridge = _ProtocolBridge(
+        [
+            _protocol_start(),
+            _protocol_request(4, 0),
+            _protocol_ack(4, 0),
+            _protocol_request(5, 1),
+            _protocol_ack(5, 1),
+            _protocol_end(),
+        ],
+        events,
+    )
+    runtime = _DirectProtocolRuntime(events)
+
+    _run_direct_protocol(bridge, runtime)
+
+    assert [event[0] for event in events] == [
+        "receive",
+        "begin",
+        "ready",
+        "receive",
+        "steer",
+        "action",
+        "receive",
+        "receive",
+        "steer",
+        "action",
+        "receive",
+        "receive",
+        "end",
+    ]
+    actions = [message for message in bridge.sent if message[0] == "action"]
+    np.testing.assert_array_equal(actions[0][4], runtime.results[0].selected_action)
+    np.testing.assert_array_equal(actions[1][4], runtime.results[1].selected_action)
+    np.testing.assert_array_equal(
+        runtime.results[0].selected_normalized,
+        runtime.results[0].decoded_normalized[0, 0],
+    )
+    np.testing.assert_array_equal(
+        runtime.results[1].selected_normalized,
+        runtime.results[1].decoded_normalized[0, 1],
+    )
+    assert runtime.request_observations == [4, 5]
+
+    chunk_trace = bridge.sent[0][3]
+    assert chunk_trace is not None
+    assert set(chunk_trace) == {
+        "version",
+        "kind",
+        "chunk_id",
+        "action_vla_normalized",
+        "action_vla",
+        "x_base",
+        "prediction_started_at",
+        "prediction_finished_at",
+    }
+    assert chunk_trace["version"] == 2
+    assert chunk_trace["kind"] == "frs_chunk"
+    np.testing.assert_array_equal(
+        chunk_trace["action_vla_normalized"], runtime.coarse
+    )
+    np.testing.assert_array_equal(chunk_trace["action_vla"], runtime.coarse + 100.0)
+    np.testing.assert_array_equal(chunk_trace["x_base"], runtime.coarse)
+    assert not chunk_trace["x_base"].flags.writeable
+
+    steer_trace = actions[0][5]
+    assert steer_trace is not None
+    assert set(steer_trace) == {
+        "version",
+        "kind",
+        "chunk_id",
+        "request_id",
+        "action_index",
+        "target_timestamp",
+        "protection_applied",
+        "decoded_normalized",
+        "selected_normalized",
+        "selected_action",
+        "tactile_sequence_length",
+        "encode_started_at",
+        "encode_finished_at",
+        "decode_started_at",
+        "decode_finished_at",
+        "frs_diagnostics",
+    }
+    assert steer_trace["kind"] == "frs_steer"
+    assert (
+        steer_trace["chunk_id"],
+        steer_trace["request_id"],
+        steer_trace["action_index"],
+    ) == (1, 4, 0)
+    np.testing.assert_array_equal(
+        steer_trace["decoded_normalized"], runtime.results[0].decoded_normalized
+    )
+    np.testing.assert_array_equal(
+        steer_trace["selected_normalized"], runtime.results[0].selected_normalized
+    )
+    np.testing.assert_array_equal(
+        steer_trace["selected_action"], runtime.results[0].selected_action
+    )
+    assert steer_trace["tactile_sequence_length"] == 1
+    assert steer_trace["encode_started_at"] == runtime.results[0].decode_started_at
+    assert steer_trace["encode_finished_at"] == runtime.results[0].decode_started_at
+    assert steer_trace["decode_started_at"] == runtime.results[0].decode_started_at
+    assert steer_trace["decode_finished_at"] == runtime.results[0].decode_finished_at
+    assert steer_trace["frs_diagnostics"] == {
+        "tactile_change": 0.0,
+        "delta_rms": runtime.results[0].diagnostics.delta_rms,
+        "max_normalized_action_abs": (
+            runtime.results[0].diagnostics.max_normalized_action_abs
+        ),
+    }
+
+
+def test_direct_protocol_checks_ack_identity() -> None:
+    events: list[tuple[Any, ...]] = []
+    bridge = _ProtocolBridge(
+        [_protocol_start(), _protocol_request(4, 0), _protocol_ack(5, 0)],
+        events,
+    )
+
+    with pytest.raises(RuntimeError, match="acknowledgement.*does not match"):
+        _run_direct_protocol(bridge, _DirectProtocolRuntime(events))
+
+
+def test_direct_protocol_rejects_mismatched_result_before_sending() -> None:
+    events: list[tuple[Any, ...]] = []
+    bridge = _ProtocolBridge([_protocol_start(), _protocol_request(4, 0)], events)
+    runtime = _DirectProtocolRuntime(events)
+    runtime.mismatch_result = True
+
+    with pytest.raises(RuntimeError, match="steer result does not match"):
+        _run_direct_protocol(bridge, runtime)
+
+    assert [message for message in bridge.sent if message[0] == "action"] == []
 
 
 def _direct_backend_config() -> dict[str, object]:
