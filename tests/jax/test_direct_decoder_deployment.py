@@ -37,11 +37,13 @@ class _SteeringPreprocessor:
 
 
 class _SteeringPolicy:
-    def __init__(self) -> None:
-        self.config = SimpleNamespace(chunk_size=3, action_dim=2)
+    def __init__(self, *, chunk_size: int = 20, action_dim: int = 20) -> None:
+        self.config = SimpleNamespace(chunk_size=chunk_size, action_dim=action_dim)
         self.preprocessor = _SteeringPreprocessor()
         self.predict_calls: list[SimpleNamespace] = []
-        self.coarse = np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+        self.coarse = np.arange(
+            chunk_size * action_dim, dtype=np.float32
+        ).reshape(1, chunk_size, action_dim)
 
     def predict_action_chunk(self, observation, task, **kwargs):
         self.predict_calls.append(
@@ -56,7 +58,7 @@ class _SteeringPolicy:
 
 class _SteeringDecoder:
     tactile_keys = DIRECT_TACTILE_KEYS
-    fixed_noise_jax = jnp.zeros((1, 3, 2), dtype=jnp.float32)
+    fixed_noise_jax = jnp.zeros((1, 20, 32), dtype=jnp.float32)
 
     def __init__(self) -> None:
         self.refine_calls: list[SimpleNamespace] = []
@@ -72,7 +74,7 @@ class _SteeringDecoder:
             )
         )
         self.returned = (
-            np.arange(6, dtype=np.float32).reshape(1, 3, 2)
+            np.arange(400, dtype=np.float32).reshape(1, 20, 20)
             + self.refine_calls[-1].observation_value
         )
         return self.returned
@@ -115,6 +117,18 @@ def test_direct_steering_runs_vla_once_and_refines_current_observation_per_actio
     assert np.isfinite(first.selected_action).all()
 
 
+def test_direct_steering_rejects_incompatible_policy_and_fixed_noise_contracts() -> None:
+    decoder = _SteeringDecoder()
+    with pytest.raises(ValueError, match="chunk_size=20 and action_dim=20"):
+        DirectDecoderSteeringRuntime(
+            policy=_SteeringPolicy(chunk_size=3, action_dim=2), decoder=decoder
+        )
+
+    decoder.fixed_noise_jax = jnp.zeros((1, 20, 31), dtype=jnp.float32)
+    with pytest.raises(ValueError, match="fixed noise must be shaped \\[1,20,32\\]"):
+        DirectDecoderSteeringRuntime(policy=_SteeringPolicy(), decoder=decoder)
+
+
 def test_direct_steering_rejects_invalid_chunk_lifecycle_and_indices() -> None:
     steering, _, _ = _steering_runtime()
 
@@ -126,7 +140,7 @@ def test_direct_steering_rejects_invalid_chunk_lifecycle_and_indices() -> None:
         steering.begin_chunk(4, _steering_observation(10), "pick", seed=7, jit=False, num_steps=4)
     with pytest.raises(ValueError):
         steering.steer_action(4, 10, _steering_observation(10), 0)
-    for index in (True, 1.5, -1, 3):
+    for index in (True, 1.5, -1, 20):
         with pytest.raises(ValueError):
             steering.steer_action(3, 10, _steering_observation(10), index)
 
@@ -180,8 +194,14 @@ def test_direct_steering_uses_immutable_snapshot_copies() -> None:
     assert decoder.returned is not None
     decoder.returned[:] = -300.0
 
-    np.testing.assert_array_equal(ready.action_vla_normalized, np.arange(6, dtype=np.float32).reshape(1, 3, 2))
-    np.testing.assert_array_equal(result.decoded_normalized, np.arange(6, dtype=np.float32).reshape(1, 3, 2) + 20)
+    np.testing.assert_array_equal(
+        ready.action_vla_normalized,
+        np.arange(400, dtype=np.float32).reshape(1, 20, 20),
+    )
+    np.testing.assert_array_equal(
+        result.decoded_normalized,
+        np.arange(400, dtype=np.float32).reshape(1, 20, 20) + 20,
+    )
     with pytest.raises(ValueError):
         result.selected_action[0] = 0.0
 

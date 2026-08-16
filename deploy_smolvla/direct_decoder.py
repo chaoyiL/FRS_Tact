@@ -23,6 +23,9 @@ DIRECT_TACTILE_KEYS = (
     "observation.images.tactile_left_1",
     "observation.images.tactile_right_1",
 )
+DIRECT_CHUNK_SIZE = 20
+DIRECT_ACTION_DIM = 20
+DIRECT_FIXED_NOISE_SHAPE = (1, DIRECT_CHUNK_SIZE, 32)
 
 
 def _immutable_array(value: Any) -> np.ndarray:
@@ -85,6 +88,13 @@ class DirectDecoderSteeringRuntime:
     """Coordinates one visual coarse chunk with tactile refinement per action."""
 
     def __init__(self, *, policy: Any, decoder: "DirectDecoderRuntime") -> None:
+        if (
+            policy.config.chunk_size != DIRECT_CHUNK_SIZE
+            or policy.config.action_dim != DIRECT_ACTION_DIM
+        ):
+            raise ValueError("direct steering requires chunk_size=20 and action_dim=20")
+        if tuple(decoder.fixed_noise_jax.shape) != DIRECT_FIXED_NOISE_SHAPE:
+            raise ValueError("direct steering fixed noise must be shaped [1,20,32]")
         self.policy = policy
         self.decoder = decoder
         self.tactile_keys = tuple(decoder.tactile_keys)
@@ -127,7 +137,7 @@ class DirectDecoderSteeringRuntime:
         )
         coarse = jax.block_until_ready(coarse)
         prediction_finished_at = perf_counter()
-        shape = (1, self.policy.config.chunk_size, self.policy.config.action_dim)
+        shape = (1, DIRECT_CHUNK_SIZE, DIRECT_ACTION_DIM)
         action_vla_normalized = _immutable_array(
             _require_finite_shape(coarse, shape, "coarse normalized action")
         )
@@ -170,8 +180,7 @@ class DirectDecoderSteeringRuntime:
             raise ValueError("action index must be an integer")
         action_index = int(action_index)
         assert self._action_vla_normalized is not None
-        chunk_size = self._action_vla_normalized.shape[1]
-        if not 0 <= action_index < chunk_size:
+        if not 0 <= action_index < DIRECT_CHUNK_SIZE:
             raise ValueError("action index is outside the active chunk")
 
         tactile_hash = self._tactile_payload_hash(observation)
@@ -207,7 +216,7 @@ class DirectDecoderSteeringRuntime:
                 self.policy.preprocessor.unnormalize_actions(
                     np.array(selected_normalized, copy=True)
                 ),
-                (self.policy.config.action_dim,),
+                (DIRECT_ACTION_DIM,),
                 "selected robot action",
             )
         )
