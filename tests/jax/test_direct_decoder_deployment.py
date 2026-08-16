@@ -565,7 +565,11 @@ def test_direct_decoder_config_and_launcher() -> None:
     assert config["backend"] == "direct_tactile_decoder"
     assert config["observation"]["data_type"] == "vitac"
     assert config["control"]["action_horizon"] == 20
-    assert config["control"]["steps_per_inference"] == 10
+    assert config["control"]["steps_per_inference"] == 20
+    assert (
+        config["control"]["steps_per_inference"]
+        == config["control"]["action_horizon"]
+    )
     launcher = launcher_path.read_text()
     assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in launcher
     assert "start_remote_client.sh" in launcher
@@ -637,6 +641,165 @@ def test_direct_backend_requires_vitac_horizon_and_bundle(tmp_path: Path) -> Non
     path.write_text(yaml.safe_dump(config))
     with pytest.raises(ValueError, match="requires observation.data_type='vitac'"):
         remote_client.load_config(path)
+
+
+def test_direct_backend_config_rejects_partial_chunks(tmp_path: Path) -> None:
+    config = _direct_backend_config()
+    config["control"]["steps_per_inference"] = 19
+    path = tmp_path / "deploy.yaml"
+    path.write_text(yaml.safe_dump(config))
+
+    with pytest.raises(
+        ValueError,
+        match="steps_per_inference to equal action_horizon",
+    ):
+        remote_client.load_config(path)
+
+
+def test_direct_run_advertises_server_config_and_routes_per_action_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    config = _direct_backend_config()
+    config["control"]["steps_per_inference"] = 20
+    config["runtime"].update(auto_start=True, warmup_runs=1, max_iterations=2)
+    config["logging"]["save_observations"] = False
+    config["connection"]["require_token"] = False
+    events: list[tuple[Any, ...]] = []
+    server_config: dict[str, Any] = {}
+    routed: dict[str, Any] = {}
+    frame = {
+        "observation.state": np.zeros((14,), dtype=np.float32),
+        "camera": np.zeros((2, 2, 3), dtype=np.uint8),
+        **{
+            key: np.zeros((2, 2, 3), dtype=np.uint8)
+            for key in DIRECT_TACTILE_KEYS
+        },
+    }
+
+    class Preprocessor:
+        @staticmethod
+        def unnormalize_actions(actions: np.ndarray) -> np.ndarray:
+            return np.asarray(actions)
+
+    class Policy:
+        config = SimpleNamespace(
+            state_dim=14,
+            action_dim=20,
+            chunk_size=20,
+            image_keys=("camera",),
+            tactile_keys=(),
+            use_tactile_encoder=False,
+            empty_cameras=0,
+            rtc_config=None,
+            adapt_to_pi_aloha=False,
+        )
+        preprocessor = Preprocessor()
+
+        @staticmethod
+        def reset() -> None:
+            events.append(("policy_reset",))
+
+        @staticmethod
+        def predict_action_chunk(*args: Any, **kwargs: Any) -> jnp.ndarray:
+            del args, kwargs
+            events.append(("predict",))
+            return jnp.zeros((1, 20, 20), dtype=jnp.float32)
+
+    class Decoder:
+        fixed_noise_jax = jnp.zeros((1, 20, 32), dtype=jnp.float32)
+        tactile_keys = DIRECT_TACTILE_KEYS
+
+        @staticmethod
+        def reset() -> None:
+            events.append(("decoder_reset",))
+
+        @staticmethod
+        def refine(coarse: np.ndarray, observation: object) -> np.ndarray:
+            del observation
+            events.append(("refine",))
+            return np.asarray(coarse)
+
+    decoder = Decoder()
+
+    class Steering:
+        def __init__(self, *, policy: Policy, decoder: Decoder) -> None:
+            self.policy = policy
+            self.decoder = decoder
+            self.tactile_keys = tuple(decoder.tactile_keys)
+            events.append(("steering_init",))
+
+        @staticmethod
+        def reset() -> None:
+            events.append(("steering_reset",))
+
+    class Bridge:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            events.append(("bridge",))
+
+        @staticmethod
+        def send_config(value: dict[str, Any]) -> None:
+            server_config.update(value)
+            events.append(("config",))
+
+        @staticmethod
+        def receive_observation(timeout: float) -> tuple[int, dict[str, Any]]:
+            del timeout
+            events.append(("receive_observation",))
+            return 7, frame
+
+        @staticmethod
+        def send_state(state: str) -> None:
+            events.append((state,))
+
+        @staticmethod
+        def send_action(*args: Any, **kwargs: Any) -> None:
+            del args, kwargs
+            pytest.fail("direct execution entered the legacy send_action loop")
+
+        @staticmethod
+        def close() -> None:
+            events.append(("close",))
+
+    def run_direct(bridge: Bridge, steering: Steering, **kwargs: Any) -> None:
+        routed.update(bridge=bridge, steering=steering, **kwargs)
+        events.append(("direct_protocol",))
+
+    monkeypatch.setattr(remote_client, "load_config", lambda path: config)
+    monkeypatch.setattr(
+        remote_client, "_load_validated_policy", lambda *args, **kwargs: Policy()
+    )
+    monkeypatch.setattr(
+        remote_client.DirectDecoderRuntime,
+        "from_bundle",
+        lambda *args, **kwargs: decoder,
+    )
+    monkeypatch.setattr(remote_client, "DirectDecoderSteeringRuntime", Steering, raising=False)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", Bridge)
+    monkeypatch.setattr(remote_client, "_run_direct_decoder_protocol", run_direct)
+
+    remote_client.run(tmp_path / "deploy.yaml")
+
+    assert server_config == {
+        "data_type": "vitac",
+        "language_prompt": config["observation"]["language_prompt"],
+        "control_frequency": 20.0,
+        "controller_frequency": 80.0,
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+        "steps_per_inference": 20,
+        "action_horizon": 20,
+        "execution_protocol": "frs_steering_v1",
+        "steering_protection_interval_s": None,
+        "frs_tactile_keys": list(DIRECT_TACTILE_KEYS),
+    }
+    assert routed["max_chunks"] == 2
+    assert isinstance(routed["steering"], Steering)
+    names = [event[0] for event in events]
+    assert names.index("predict") < names.index("steering_reset")
+    assert names.index("steering_reset") < names.index("start")
+    assert names.index("start") < names.index("direct_protocol")
 
 
 def test_predict_chunk_refines_normalized_actions_before_unnormalizing() -> None:

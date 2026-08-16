@@ -29,7 +29,11 @@ from train_vtsmolvla.validation import (
 )
 
 from .bridge_client import RobotBridgeClient
-from .direct_decoder import DIRECT_TACTILE_KEYS, DirectDecoderRuntime
+from .direct_decoder import (
+    DIRECT_TACTILE_KEYS,
+    DirectDecoderRuntime,
+    DirectDecoderSteeringRuntime,
+)
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import (
     FRSChunkReady,
@@ -240,6 +244,11 @@ def load_config(path: Path) -> dict[str, Any]:
             )
         if int(control["action_horizon"]) != 20:
             raise ValueError("direct_tactile_decoder requires control.action_horizon=20")
+        if int(control["steps_per_inference"]) != int(control["action_horizon"]):
+            raise ValueError(
+                "direct_tactile_decoder per-action execution requires "
+                "steps_per_inference to equal action_horizon"
+            )
         if control.get("inference_delay") is not None:
             raise ValueError("direct_tactile_decoder requires control.inference_delay=null")
         if control.get("execution_horizon") is not None:
@@ -1073,6 +1082,7 @@ def _build_server_config(
     control: Mapping[str, Any],
     *,
     frs_policy: FRSRuntime | None,
+    direct_steering: DirectDecoderSteeringRuntime | None = None,
 ) -> dict[str, Any]:
     server_config = {
         "data_type": observation_config["data_type"],
@@ -1084,13 +1094,16 @@ def _build_server_config(
         "steps_per_inference": int(control["steps_per_inference"]),
         "action_horizon": int(control["action_horizon"]),
     }
-    if frs_policy is not None:
+    steering_policy = frs_policy if frs_policy is not None else direct_steering
+    if steering_policy is not None:
         server_config.update(
             execution_protocol="frs_steering_v1",
             steering_protection_interval_s=(
                 frs_policy.config.steering_protection_interval_s
+                if frs_policy is not None
+                else None
             ),
-            frs_tactile_keys=list(frs_policy.tactile_keys),
+            frs_tactile_keys=list(steering_policy.tactile_keys),
         )
     return server_config
 
@@ -1213,13 +1226,19 @@ def run(
             Path(str(direct_decoder_config["bundle"])),
             device=str(direct_decoder_config["device"]),
         )
+        direct_steering = DirectDecoderSteeringRuntime(
+            policy=policy,
+            decoder=direct_decoder,
+        )
     else:
         direct_decoder = None
+        direct_steering = None
 
     server_config = _build_server_config(
         observation_config,
         control,
         frs_policy=frs_runtime,
+        direct_steering=direct_steering,
     )
     bridge = RobotBridgeClient(
         address=str(connection["address"]),
@@ -1291,6 +1310,8 @@ def run(
             warmup_ms = (time.perf_counter() - start) * 1000.0
             print(f"[client] Warmup {warmup_index + 1}/{warmup_runs}: {warmup_ms:.1f}ms")
         print(f"[client] Warmup observation sequence: {warmup_obs_seq}")
+        if direct_steering is not None:
+            direct_steering.reset()
 
         if not bool(runtime.get("auto_start", False)):
             input("[client] Ready. Press Enter to send START to the robot server... ")
@@ -1300,6 +1321,24 @@ def run(
             _run_frs_protocol(
                 bridge,
                 frs_runtime,
+                task=task,
+                state_dim=state_dim,
+                image_keys=robot_image_keys,
+                empty_cameras=empty_cameras,
+                observation_timeout_s=observation_timeout_s,
+                action_ack_timeout_s=action_ack_timeout_s,
+                seed=seed,
+                jit=jit,
+                num_steps=num_steps,
+                max_chunks=max_iterations,
+                observation_saver=observation_saver,
+            )
+            return
+
+        if direct_steering is not None:
+            _run_direct_decoder_protocol(
+                bridge,
+                direct_steering,
                 task=task,
                 state_dim=state_dim,
                 image_keys=robot_image_keys,

@@ -38,7 +38,8 @@ control:
   control_frequency: 20.0
   controller_frequency: 80.0
   action_horizon: 20
-  steps_per_inference: 10
+  # Negotiate the complete indexed chunk; each request still executes one action.
+  steps_per_inference: 20
   inference_delay: null
   execution_horizon: null
 
