@@ -28,6 +28,19 @@ def _direct_backend_config() -> dict[str, object]:
     return config
 
 
+def test_direct_decoder_config_and_launcher() -> None:
+    config_path = ROOT / "deploy_smolvla/configs/deploy_direct_decoder.yaml"
+    launcher_path = ROOT / "deploy_smolvla/scripts/start_direct_decoder.sh"
+    config = remote_client.load_config(config_path)
+    assert config["backend"] == "direct_tactile_decoder"
+    assert config["observation"]["data_type"] == "vitac"
+    assert config["control"]["action_horizon"] == 20
+    assert config["control"]["steps_per_inference"] == 10
+    launcher = launcher_path.read_text()
+    assert "XLA_PYTHON_CLIENT_PREALLOCATE=false" in launcher
+    assert "start_remote_client.sh" in launcher
+
+
 def _direct_policy(*, use_tactile_encoder: bool, rtc_enabled: bool) -> SimpleNamespace:
     return SimpleNamespace(
         config=SimpleNamespace(
