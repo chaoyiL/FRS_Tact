@@ -108,6 +108,7 @@ class DirectDecoderSteeringRuntime:
         self._action_vla_normalized = None
         self._last_action_index = None
         self._request_cache.clear()
+        self.decoder.reset()
 
     def begin_chunk(
         self,

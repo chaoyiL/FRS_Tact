@@ -74,6 +74,9 @@ class _SteeringDecoder:
     def __init__(self) -> None:
         self.refine_calls: list[SimpleNamespace] = []
         self.returned: np.ndarray | None = None
+        self.reset_calls = 0
+        self.last_vla_normalized: np.ndarray | None = None
+        self.last_direct_normalized: np.ndarray | None = None
 
     def refine(self, coarse_normalized: np.ndarray, observation) -> np.ndarray:
         self.refine_calls.append(
@@ -88,7 +91,14 @@ class _SteeringDecoder:
             np.arange(400, dtype=np.float32).reshape(1, 20, 20)
             + self.refine_calls[-1].observation_value
         )
+        self.last_vla_normalized = np.array(coarse_normalized, copy=True)
+        self.last_direct_normalized = np.array(self.returned, copy=True)
         return self.returned
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        self.last_vla_normalized = None
+        self.last_direct_normalized = None
 
 
 def _steering_runtime() -> tuple[
@@ -190,6 +200,32 @@ def test_direct_steering_end_chunk_and_reset_clear_chunk_local_state() -> None:
     steering.reset()
     steering.begin_chunk(5, _steering_observation(50), "place", seed=9, jit=True, num_steps=6)
 
+    assert len(policy.predict_calls) == 3
+
+
+def test_direct_steering_reset_and_end_chunk_reset_decoder_snapshots() -> None:
+    steering, policy, decoder = _steering_runtime()
+
+    steering.begin_chunk(3, _steering_observation(10), "pick", seed=7, jit=False, num_steps=4)
+    steering.steer_action(3, 11, _steering_observation(20), 0)
+    assert decoder.last_vla_normalized is not None
+    assert decoder.last_direct_normalized is not None
+
+    steering.end_chunk(3)
+
+    assert decoder.reset_calls == 1
+    assert decoder.last_vla_normalized is None
+    assert decoder.last_direct_normalized is None
+
+    steering.begin_chunk(4, _steering_observation(30), "place", seed=8, jit=True, num_steps=5)
+    steering.steer_action(4, 12, _steering_observation(40), 0)
+    steering.reset()
+
+    assert decoder.reset_calls == 2
+    assert decoder.last_vla_normalized is None
+    assert decoder.last_direct_normalized is None
+
+    steering.begin_chunk(5, _steering_observation(50), "place", seed=9, jit=True, num_steps=6)
     assert len(policy.predict_calls) == 3
 
 
@@ -546,6 +582,37 @@ def test_direct_protocol_rejects_mismatched_result_before_sending() -> None:
         _run_direct_protocol(bridge, runtime)
 
     assert [message for message in bridge.sent if message[0] == "action"] == []
+
+
+def test_direct_protocol_trace_builder_exception_is_fail_open(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[Any, ...]] = []
+    bridge = _ProtocolBridge(
+        [
+            _protocol_start(),
+            _protocol_request(4, 0),
+            _protocol_ack(4, 0),
+            _protocol_end(),
+        ],
+        events,
+    )
+    runtime = _DirectProtocolRuntime(events)
+
+    def fail_builder(*args: Any) -> dict[str, Any]:
+        del args
+        raise RuntimeError("direct trace serialization failed")
+
+    monkeypatch.setattr(remote_client, "_build_direct_steer_trace", fail_builder)
+
+    _run_direct_protocol(bridge, runtime)
+
+    actions = [message for message in bridge.sent if message[0] == "action"]
+    assert len(actions) == 1
+    np.testing.assert_array_equal(actions[0][4], runtime.results[0].selected_action)
+    assert actions[0][5] is None
+    assert "Omitting direct decoder steering trace after serialization failure: direct trace serialization failed" in caplog.text
 
 
 def _direct_backend_config() -> dict[str, object]:

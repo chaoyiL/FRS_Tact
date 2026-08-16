@@ -699,11 +699,17 @@ def _build_direct_steer_trace(
     }
 
 
-def _build_trace_or_none(builder: Any, *args: Any) -> dict[str, Any] | None:
+def _build_trace_or_none(
+    builder: Any,
+    *args: Any,
+    trace_label: str = "FRS",
+) -> dict[str, Any] | None:
     try:
         return builder(*args)
     except Exception as exc:
-        LOGGER.warning("Omitting FRS trace after serialization failure: %s", exc)
+        LOGGER.warning(
+            "Omitting %s trace after serialization failure: %s", trace_label, exc
+        )
         return None
 
 
@@ -712,6 +718,7 @@ def _run_per_action_protocol(
     steering_policy: Any,
     *,
     backend_label: str,
+    trace_label: str,
     build_chunk_trace: Any,
     build_steer_trace: Any,
     task: str,
@@ -777,7 +784,7 @@ def _run_per_action_protocol(
         bridge.send_frs_chunk_ready(
             chunk_start.obs_seq,
             chunk_start.chunk_id,
-            _build_trace_or_none(build_chunk_trace, ready),
+            _build_trace_or_none(build_chunk_trace, ready, trace_label=trace_label),
         )
 
         while True:
@@ -852,7 +859,12 @@ def _run_per_action_protocol(
                 message.request_id,
                 message.action_index,
                 selected_action,
-                trace=_build_trace_or_none(build_steer_trace, result, message),
+                trace=_build_trace_or_none(
+                    build_steer_trace,
+                    result,
+                    message,
+                    trace_label=trace_label,
+                ),
             )
             time_end = time.time()
             print("[client] Steering action finished in ", time_end - time_start, " seconds")
@@ -907,6 +919,7 @@ def _run_frs_protocol(
         bridge,
         steering_policy,
         backend_label="FRS",
+        trace_label="FRS",
         build_chunk_trace=_build_frs_chunk_trace,
         build_steer_trace=_build_frs_steer_trace,
         task=task,
@@ -945,6 +958,7 @@ def _run_direct_decoder_protocol(
         bridge,
         steering_policy,
         backend_label="direct decoder",
+        trace_label="direct decoder steering",
         build_chunk_trace=_build_direct_chunk_trace,
         build_steer_trace=_build_direct_steer_trace,
         task=task,
