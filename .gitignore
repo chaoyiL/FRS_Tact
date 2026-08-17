@@ -110,3 +110,13 @@ tensorboard/
 /datasets/
 *.parquet
 *.arrow
+
+# Local credentials
+/token.txt
+
+# Debug artifacts
+/debug_outputs/
+
+# Exported training/model bundles
+/training/
+/smolvla_training/
