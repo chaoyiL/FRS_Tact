@@ -4,7 +4,7 @@ import argparse
 import pathlib
 from collections.abc import Sequence
 
-from tactile_flow_steering.utils.history_plot import plot_training_history
+from train_pi05_frs.utils.history_plot import plot_training_history
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,7 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--history-path",
         type=pathlib.Path,
         required=True,
-        help="Path to history.csv produced by tactile_flow_steering.train.",
+        help="Path to history.csv produced by train_pi05_frs.train.",
     )
     parser.add_argument(
         "--output",

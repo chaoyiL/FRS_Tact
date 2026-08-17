@@ -248,7 +248,7 @@ main() {
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
     echo "一键启动 pi0.5 FRS："
-    echo "  bash ${PROJECT_ROOT}/scripts/start_frs_pi05_train.sh ${PROJECT_ROOT}/configs/train_frs_pick_tube_pi05.yaml"
+    echo "  bash ${PROJECT_ROOT}/scripts/start_frs_pi05_train.sh ${PROJECT_ROOT}/configs/train_pi05_frs.yaml"
 }
 
 main "$@"

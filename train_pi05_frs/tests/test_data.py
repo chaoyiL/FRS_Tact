@@ -8,16 +8,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_flow_steering.utils.data import NUM_TACTILE_STREAMS
-from tactile_flow_steering.utils.data import TACTILE_KEYS
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.data import gate_weights_from_change
-from tactile_flow_steering.utils.data import resolve_dataset_repo_id
-from tactile_flow_steering.utils.data import resolve_tactile_window
-from tactile_flow_steering.utils.data import resnet_embedding_dim_from_encoder
-from tactile_flow_steering.utils.data import tactile_change_from_tokens
-from tactile_flow_steering.utils.window_io import load_tactile_windows
-from tactile_flow_steering.utils.window_io import window_frame_indices
+from train_pi05_frs.utils.data import NUM_TACTILE_STREAMS
+from train_pi05_frs.utils.data import TACTILE_KEYS
+from train_pi05_frs.utils.data import TactileConditionedBatches
+from train_pi05_frs.utils.data import gate_weights_from_change
+from train_pi05_frs.utils.data import resolve_dataset_repo_id
+from train_pi05_frs.utils.data import resolve_tactile_window
+from train_pi05_frs.utils.data import resnet_embedding_dim_from_encoder
+from train_pi05_frs.utils.data import tactile_change_from_tokens
+from train_pi05_frs.utils.window_io import load_tactile_windows
+from train_pi05_frs.utils.window_io import window_frame_indices
 
 
 class FakePairs:
@@ -32,6 +32,7 @@ class FakePairs:
             "x_base": np.zeros((3, 2, 3), dtype=np.float32),
             "target": np.zeros((3, 2, 3), dtype=np.float32),
             "gt_action": np.ones((3, 2, 3), dtype=np.float32),
+            "state": np.ones((3, 5), dtype=np.float32),
             "split": np.asarray([0, 0, 1], dtype=np.int8),
         }
 
@@ -45,6 +46,7 @@ class FakePairs:
                 self.arrays["x_base"][batch],
                 self.arrays["target"][batch],
                 self.arrays["gt_action"][batch],
+                self.arrays["state"][batch],
             )
 
 
@@ -174,11 +176,12 @@ class DataHelpersTest(unittest.TestCase):
         self.assertTrue(bool(jnp.allclose(grads, 0.0)))
 
         batch = next(conditioner.batches("train", batch_size=2, shuffle=False, seed=0))
-        indices, x_base, predicted, gt_action, tactile_seq = batch
+        indices, x_base, predicted, gt_action, state, tactile_seq = batch
         self.assertEqual(list(indices), [0, 1])
         self.assertEqual(x_base.shape, (2, 2, 3))
         self.assertEqual(predicted.shape, (2, 2, 3))
         self.assertEqual(gt_action.shape, (2, 2, 3))
+        self.assertEqual(state.shape, (2, 5))
         self.assertEqual(tactile_seq.shape, (2, 3, 4, 4))
 
         weights = conditioner.gate_weights_for_cache_indices(

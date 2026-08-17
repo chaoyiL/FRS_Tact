@@ -6,7 +6,7 @@
 - `src/lerobot/policies/pi05_jax/`：openpi 的 pi0.5 JAX 代码（模型 + 完整训练栈），逐文件对应关系见
   该目录的 [README.md](src/lerobot/policies/pi05_jax/README.md)。
 - `prepare_pi05.py` / `tools/prepare_frs_pi05_cache.py`：用 pi0.5 生成 FRS action cache。
-- `configs/train_frs_pick_tube_pi05.yaml`：四个 pick_tube 数据集的 pi0.5 FRS 配置。
+- `configs/train_pi05_frs.yaml`：与 FRS_Tact 对齐的 `pick_tube_05` pi0.5 FRS 配置。
 - `scripts/start_frs_pi05_train.sh`：FRS（触觉 Flow Steering）一键训练入口。
 
 另外有一条独立的**微调 pi0.5 本身**的链路（不是 FRS，用的是 openpi 原版的 `TrainConfig` + tyro，
@@ -59,7 +59,7 @@ bash scripts/setup_env.sh
 bash scripts/download_data.sh
 ```
 
-确认 `configs/train_frs_pick_tube_pi05.yaml` 里的路径存在，尤其是：
+确认 `configs/train_pi05_frs.yaml` 里的路径存在，尤其是：
 
 - `datasets[*].root`：默认指向 `/workspace/lerobot_v30/KaiyueChen/pick_tube_0X`
 - `model.tactile_encoder_path`：默认指向 `/workspace/checkpoints/encoder_ckpt_0809`
@@ -70,7 +70,7 @@ bash scripts/download_data.sh
 启动完整 pi0.5 管线：
 
 ```bash
-bash scripts/start_frs_pi05_train.sh configs/train_frs_pick_tube_pi05.yaml
+bash scripts/start_frs_pi05_train.sh configs/train_pi05_frs.yaml
 ```
 
 默认会在 tmux 后台运行，session 名是 `frs_pick_tube_pi05`：
@@ -82,7 +82,7 @@ tmux attach -t frs_pick_tube_pi05
 如果希望前台运行：
 
 ```bash
-FRS_FOREGROUND=1 bash scripts/start_frs_pi05_train.sh configs/train_frs_pick_tube_pi05.yaml
+FRS_FOREGROUND=1 bash scripts/start_frs_pi05_train.sh configs/train_pi05_frs.yaml
 ```
 
 ## 管线步骤
@@ -95,33 +95,30 @@ FRS_FOREGROUND=1 bash scripts/start_frs_pi05_train.sh configs/train_frs_pick_tub
 
    ```bash
    uv run --no-sync python tools/precompute_tactile_embeddings.py \
-     --config configs/train_frs_pick_tube_pi05.yaml
+     --config configs/train_pi05_frs.yaml
    ```
 
 4. 生成 pi0.5 action cache：
 
    ```bash
    uv run --no-sync python tools/prepare_frs_pi05_cache.py \
-     --config configs/train_frs_pick_tube_pi05.yaml
+     --config configs/train_pi05_frs.yaml
    ```
 
 5. 训练 tactile FRS：
 
    ```bash
    uv run --no-sync python tools/train_frs.py \
-     --config configs/train_frs_pick_tube_pi05.yaml
+     --config configs/train_pi05_frs.yaml
    ```
 
 pi0.5 没有 PEFT adapter merge 这一步，checkpoint 直接通过 Orbax/JAX 加载。
 
 ## pick_tube 配置要点
 
-当前配置使用四个数据集：
+当前配置与 FRS_Tact 一样只使用一个数据集，不做多数据集均衡：
 
-- `KaiyueChen/pick_tube_01`
-- `KaiyueChen/pick_tube_02`
-- `KaiyueChen/pick_tube_03`
-- `KaiyueChen/pick_tube_04`
+- `KaiyueChen/pick_tube_05`
 
 pi0.5 固定使用三个图像槽位：`base_0_rgb`、`left_wrist_0_rgb`、`right_wrist_0_rgb`。pick_tube 只有两路腕部相机，
 所以配置里把：
@@ -163,7 +160,7 @@ norm_stats:
 - `modalities_eval/pi05_utils.py`：LeRobot sample 到 pi0.5 `Observation` 的适配层。
 - `utils/pi05_source_model.py`：pi0.5 sampling + reverse integration。
 - `utils/cache.py`：action cache 的 manifest、memmap 和 sample record 逻辑。
-- `tactile_flow_steering/`：FRS 模型、数据读取、训练与评估。
+- `train_pi05_frs/`：FRS 模型、数据读取、训练与评估。
 - `tactile_encoder/`：触觉 encoder 训练与推理工具。
 
 ## 当前状态和必须验证的事
@@ -214,19 +211,19 @@ bash scripts/setup_env.sh
 bash scripts/download_data.sh
 
 # 完整 pi0.5 FRS 管线
-bash scripts/start_frs_pi05_train.sh configs/train_frs_pick_tube_pi05.yaml
+bash scripts/start_frs_pi05_train.sh configs/train_pi05_frs.yaml
 
 # 分步运行
-uv run --no-sync python tools/precompute_tactile_embeddings.py --config configs/train_frs_pick_tube_pi05.yaml
-uv run --no-sync python tools/prepare_frs_pi05_cache.py --config configs/train_frs_pick_tube_pi05.yaml
-uv run --no-sync python tools/train_frs.py --config configs/train_frs_pick_tube_pi05.yaml
+uv run --no-sync python tools/precompute_tactile_embeddings.py --config configs/train_pi05_frs.yaml
+uv run --no-sync python tools/prepare_frs_pi05_cache.py --config configs/train_pi05_frs.yaml
+uv run --no-sync python tools/train_frs.py --config configs/train_pi05_frs.yaml
 
-# 评估训练出的 FRS checkpoint（示例：pick_tube_01，对其他数据集换 --cache-dir/--dataset-root）
-uv run --no-sync python tactile_flow_steering/evaluate.py \
-  --cache-dir /workspace/frs_pick_tube_pi05/action_cache/KaiyueChen/pick_tube_01 \
+# 评估训练出的 FRS checkpoint（pick_tube_05）
+uv run --no-sync python train_pi05_frs/evaluate.py \
+  --cache-dir /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3/KaiyueChen/pick_tube_05 \
   --tactile-encoder-dir /workspace/checkpoints/encoder_ckpt_0809 \
-  --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_01/best \
-  --output-dir /workspace/frs_pick_tube_pi05/run_gated_01/eval_pick_tube_01 \
-  --dataset-repo-id KaiyueChen/pick_tube_01 \
-  --dataset-root /workspace/lerobot_v30/KaiyueChen/pick_tube_01
+  --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/best \
+  --output-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/eval_pick_tube_05 \
+  --dataset-repo-id KaiyueChen/pick_tube_05 \
+  --dataset-root /workspace/lerobot_v30/KaiyueChen/pick_tube_05
 ```

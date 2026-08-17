@@ -10,11 +10,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.metrics import EvaluationResult
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
+from train_pi05_frs.utils.data import TactileConditionedBatches
+from train_pi05_frs.utils.metrics import EvaluationResult
+from train_pi05_frs.utils.model import FlowSolver
+from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
+from train_pi05_frs.utils.model import decode_actions
 from utils.cache import CachedPairs
 
 
@@ -209,9 +209,17 @@ def _decode_with_tactile(
     x_base = jnp.asarray(pairs.arrays["x_base"][cache_indices])
     gt_action = np.asarray(pairs.arrays["gt_action"][cache_indices], dtype=np.float32)
     predicted_action = np.asarray(pairs.arrays["target"][cache_indices], dtype=np.float32)
+    state = jnp.asarray(pairs.arrays["state"][cache_indices])
     tactile_seq = conditioner.encode_cache_indices(cache_indices)
     decoded = np.asarray(
-        decode_actions(model, x_base, tactile_seq, num_steps=num_steps, solver=solver),
+        decode_actions(
+            model,
+            x_base,
+            tactile_seq,
+            num_steps=num_steps,
+            solver=solver,
+            state=state,
+        ),
         dtype=np.float32,
     )
     return gt_action, predicted_action, decoded
@@ -396,5 +404,5 @@ def _plot_episode_action_strips(
 
 
 # Re-export for train.py callers.
-from tactile_flow_steering.utils.history_plot import plot_training_history as plot_training_history
+from train_pi05_frs.utils.history_plot import plot_training_history as plot_training_history
 

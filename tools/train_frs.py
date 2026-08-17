@@ -17,9 +17,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from tactile_flow_steering.train import train_decoder
+from train_pi05_frs.train import train_decoder
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_pi05_frs.yaml"
 
 
 def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -86,6 +86,24 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_lambda=float(training.get("gate_lambda", 1.0)),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
+        aux_decode_solver=str(training.get("aux_decode_solver", "fireflow")),  # type: ignore[arg-type]
+        low_gate_safety_weight=float(training.get("low_gate_safety_weight", 0.0)),
+        low_gate_safety_margin=float(training.get("low_gate_safety_margin", 0.03)),
+        rank_weight=float(training.get("rank_weight", 0.0)),
+        rank_margin=float(training.get("rank_margin", 0.0)),
+        repair_weight=float(training.get("repair_weight", 0.0)),
+        repair_margin=float(training.get("repair_margin", 0.0)),
+        low_gate_threshold=float(training.get("rank_low_gate_threshold", 0.3)),
+        high_gate_threshold=float(training.get("rank_high_gate_threshold", 0.7)),
+        state_conditioning=bool(model.get("state_conditioning", False)),
+        state_dropout_rate=float(model.get("state_dropout_rate", 0.0)),
+        best_max_low_gate_unsafe_frac=float(
+            training.get("best_max_low_gate_unsafe_frac", 0.1)
+        ),
+        best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
+        best_min_high_gate_rank_satisfied_frac=float(
+            training.get("best_min_high_gate_rank_satisfied_frac", 0.8)
+        ),
         model_dim=_positive_int(training, "model_dim", 256),
         depth=_positive_int(training, "depth", 6),
         num_heads=_positive_int(training, "num_heads", 4),

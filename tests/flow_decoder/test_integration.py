@@ -6,6 +6,7 @@ import jax.numpy as jnp
 
 from utils.integration import euler_integrate_velocity
 from utils.integration import fireflow_integrate_velocity
+from utils.integration import slerpflow_integrate_velocity
 
 
 class EulerIntegrationTest(unittest.TestCase):
@@ -58,6 +59,50 @@ class FireFlowIntegrationTest(unittest.TestCase):
             fireflow_integrate_velocity(
                 lambda value, time: value,
                 jnp.zeros((1, 1, 1)),
+                num_steps=0,
+            )
+
+
+class SlerpFlowIntegrationTest(unittest.TestCase):
+    def test_shape_and_finiteness_are_preserved(self):
+        x = jnp.arange(1, 25, dtype=jnp.float32).reshape(2, 3, 4) / 24.0
+
+        def velocity(value, time):
+            return 0.1 * value + time[:, None, None]
+
+        for num_steps in (1, 4, 10):
+            with self.subTest(num_steps=num_steps):
+                result = slerpflow_integrate_velocity(velocity, x, num_steps=num_steps)
+                self.assertEqual(result.shape, x.shape)
+                self.assertTrue(bool(jnp.all(jnp.isfinite(result))))
+
+    def test_nfe_equals_num_steps_plus_one(self):
+        x = jnp.ones((2, 3, 4), dtype=jnp.float32)
+        for num_steps in (1, 5, 10):
+            with self.subTest(num_steps=num_steps):
+                _, nfe = slerpflow_integrate_velocity(
+                    lambda value, time: jnp.ones_like(value),
+                    x,
+                    num_steps=num_steps,
+                    return_nfe=True,
+                )
+                self.assertEqual(int(nfe), num_steps + 1)
+
+    def test_constant_radial_velocity_integrates_forward(self):
+        x = jnp.ones((2, 3, 4), dtype=jnp.float32)
+        direction = x / jnp.linalg.norm(x, axis=(1, 2), keepdims=True)
+        result = slerpflow_integrate_velocity(
+            lambda value, time: direction,
+            x,
+            num_steps=10,
+        )
+        self.assertTrue(jnp.allclose(result, x + direction, atol=1e-5))
+
+    def test_invalid_step_count(self):
+        with self.assertRaises(ValueError):
+            slerpflow_integrate_velocity(
+                lambda value, time: value,
+                jnp.ones((1, 1, 1)),
                 num_steps=0,
             )
 

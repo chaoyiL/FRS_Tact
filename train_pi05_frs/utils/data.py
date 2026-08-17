@@ -17,8 +17,8 @@ from tactile_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_
 from tactile_encoder.utils.image_dataset import create_image_dataset
 from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 from tactile_encoder.utils.prefetch import prefetch_iterator
-from tactile_flow_steering.utils.mp_batches import MpTactileWindowLoader
-from tactile_flow_steering.utils.window_io import (
+from train_pi05_frs.utils.mp_batches import MpTactileWindowLoader
+from train_pi05_frs.utils.window_io import (
     NUM_TACTILE_STREAMS,
     TACTILE_KEYS,
     _frame_streams_from_images,
@@ -130,7 +130,9 @@ def gate_weights_from_change(
 
 
 class TactileConditionedBatches:
-    """Yields (indices, x_base, predicted, gt_action, tactile_seq) with frozen ResNet features.
+    """Yields (indices, x_base, predicted, gt_action, state, tactile_seq).
+
+    Tactile ResNet features are frozen; normalized current state comes from cache v3.
 
     ``tactile_seq`` has shape ``[B, T, 4, D]`` (oldest→newest; 4 sensor streams).
     """
@@ -395,7 +397,7 @@ class TactileConditionedBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
         yield from self.pairs.batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
 
     def batches(
@@ -405,7 +407,7 @@ class TactileConditionedBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
         pair_batches = list(
             self._iter_pair_batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
         )
@@ -418,35 +420,35 @@ class TactileConditionedBatches:
             ]
 
             def _produce() -> Iterator[
-                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
             ]:
                 for pair_batch, images in zip(
                     pair_batches,
                     self._mp_loader.iter_image_batches(sample_batches),
                     strict=True,
                 ):
-                    indices, x_base, predicted, gt_action = pair_batch
-                    yield indices, x_base, predicted, gt_action, images
+                    indices, x_base, predicted, gt_action, state = pair_batch
+                    yield indices, x_base, predicted, gt_action, state, images
 
             image_iter = prefetch_iterator(_produce(), buffer_size=self.pipeline_prefetch)
-            for indices, x_base, predicted, gt_action, images in image_iter:
+            for indices, x_base, predicted, gt_action, state, images in image_iter:
                 tactile_seq = self._encode_window_images(images)
-                yield indices, x_base, predicted, gt_action, tactile_seq
+                yield indices, x_base, predicted, gt_action, state, tactile_seq
             return
 
         def _produce_local() -> Iterator[
-            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
         ]:
-            for indices, x_base, predicted, gt_action in pair_batches:
+            for indices, x_base, predicted, gt_action, state in pair_batches:
                 images = self.load_window_images(indices)
-                yield indices, x_base, predicted, gt_action, images
+                yield indices, x_base, predicted, gt_action, state, images
 
-        for indices, x_base, predicted, gt_action, images in prefetch_iterator(
+        for indices, x_base, predicted, gt_action, state, images in prefetch_iterator(
             _produce_local(),
             buffer_size=self.pipeline_prefetch,
         ):
             tactile_seq = self._encode_window_images(images)
-            yield indices, x_base, predicted, gt_action, tactile_seq
+            yield indices, x_base, predicted, gt_action, state, tactile_seq
 
 
 class CachedTactileEmbeddingBatches:
@@ -629,8 +631,8 @@ class CachedTactileEmbeddingBatches:
         batch_size: int,
         shuffle: bool,
         seed: int,
-    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
-        for indices, x_base, predicted, gt_action in self.pairs.batches(
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
+        for indices, x_base, predicted, gt_action, state in self.pairs.batches(
             split, batch_size=batch_size, shuffle=shuffle, seed=seed
         ):
-            yield indices, x_base, predicted, gt_action, self.encode_cache_indices(indices)
+            yield indices, x_base, predicted, gt_action, state, self.encode_cache_indices(indices)

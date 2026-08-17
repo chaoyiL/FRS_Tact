@@ -1,6 +1,6 @@
 # FRS base model 切换：SmolVLA → pi0.5（JAX，vendored from openpi）
 
-分支：`pi05-frs-jax`（从 `eric` 切出）。目标：FRS（`tactile_flow_steering`）不再使用 SmolVLA，
+分支：`pi05-frs-jax`（从 `eric` 切出）。目标：FRS（`train_pi05_frs`）不再使用 SmolVLA，
 全部按 pi0.5（Physical Intelligence 的 openpi，JAX 原生实现）的要求来——包括主环境的
 jax/flax/transformers/orbax 版本，不用兼顾 SmolVLA 还能不能跑。这个文件记录已确认的架构决策、
 关键发现和还没做完的事，避免跨 session 丢上下文。
@@ -326,7 +326,7 @@ pi0.5 部署/训练。核对了一下发现两件事：
 | 1. 触觉 embedding | `tools/precompute_tactile_embeddings.py` | 现有工具直接可用，**已验证**不用改 |
 | 2. action_cache | `tools/prepare_frs_pi05_cache.py` | 本次新增 |
 | 3. FRS 训练 | `tools/train_frs.py` | 现有工具直接可用，**已验证**不用改 |
-| 4. FRS 评估 | `tactile_flow_steering/evaluate.py` | 现有工具直接可用（完全不依赖 base 模型） |
+| 4. FRS 评估 | `train_pi05_frs/evaluate.py` | 现有工具直接可用（完全不依赖 base 模型） |
 
 第 1、3 步能直接复用是核对过的：它们读的每个配置键 pi0.5 配置里都有；原来位于
 `smolvla_jax` 的通用数据源解析和触觉 cache 已抽到 `lerobot/datasets/`，所以 pi0.5

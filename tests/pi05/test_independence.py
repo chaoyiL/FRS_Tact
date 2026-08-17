@@ -54,7 +54,7 @@ def test_pi05_runtime_path_imports_no_other_policy() -> None:
     """The shared (base-model-agnostic) stages must not reach into a policy package at all."""
     runtime_sources = (
         ROOT / "tools" / "precompute_tactile_embeddings.py",
-        ROOT / "tactile_flow_steering" / "utils" / "data.py",
+        ROOT / "train_pi05_frs" / "utils" / "data.py",
         ROOT / "tools" / "train_frs.py",
         ROOT / "src" / "lerobot" / "datasets" / "sample_utils.py",
         ROOT / "src" / "lerobot" / "datasets" / "tactile_cache.py",

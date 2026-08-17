@@ -7,11 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
-from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
+from train_pi05_frs.utils.data import TactileConditionedBatches
+from train_pi05_frs.utils.model import FlowSolver
+from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
+from train_pi05_frs.utils.model import decode_actions
+from train_pi05_frs.utils.model import flow_matching_loss_per_sample
 
 EvalTarget = Literal["gt", "predicted"]
 
@@ -54,6 +54,10 @@ class EvaluationResult:
     mse_pred_low_w: float | None = None
     n_high_w: int | None = None
     n_low_w: int | None = None
+    low_gate_unsafe_frac: float | None = None
+    high_gate_gain: float | None = None
+    high_gate_rank_satisfied_frac: float | None = None
+    high_gate_repair_satisfied_frac: float | None = None
 
 
 def _per_sample_errors(prediction: jax.Array, reference: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -110,8 +114,13 @@ def evaluate_split(
     target: EvalTarget = "gt",
     gate_tau: float | None = None,
     gate_temperature: float | None = None,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+    low_gate_safety_margin: float = 0.03,
+    rank_margin: float = 0.0,
+    repair_margin: float = 0.0,
 ) -> EvaluationResult:
-    from tactile_flow_steering.utils.data import gate_weights_from_change
+    from train_pi05_frs.utils.data import gate_weights_from_change
 
     if target not in ("gt", "predicted"):
         raise ValueError(f"target must be 'gt' or 'predicted', got {target!r}.")
@@ -123,6 +132,7 @@ def evaluate_split(
     mae_gt_parts: list[np.ndarray] = []
     mse_pred_parts: list[np.ndarray] = []
     mae_pred_parts: list[np.ndarray] = []
+    pi05_gt_mse_parts: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
@@ -132,20 +142,26 @@ def evaluate_split(
         and bool(conditioner.episode_baselines)
     )
 
-    for indices, x_base_np, predicted_np, gt_action_np, tactile_seq in conditioner.batches(
+    for indices, x_base_np, predicted_np, gt_action_np, state_np, tactile_seq in conditioner.batches(
         split, batch_size=batch_size, shuffle=False, seed=0
     ):
         x_base = jnp.asarray(x_base_np)
         gt_action = jnp.asarray(gt_action_np)
         predicted_action = jnp.asarray(predicted_np)
+        state = jnp.asarray(state_np)
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
-        flow_gt = flow_matching_loss_per_sample(model, x_base, gt_action, t, tactile_seq)
-        flow_pred = flow_matching_loss_per_sample(model, x_base, predicted_action, t, tactile_seq)
+        flow_gt = flow_matching_loss_per_sample(
+            model, x_base, gt_action, t, tactile_seq, state=state
+        )
+        flow_pred = flow_matching_loss_per_sample(
+            model, x_base, predicted_action, t, tactile_seq, state=state
+        )
         prediction = decode_actions(
-            model, x_base, tactile_seq, num_steps=num_steps, solver=solver
+            model, x_base, tactile_seq, num_steps=num_steps, solver=solver, state=state
         )
         mse_gt, mae_gt = _per_sample_errors(prediction, gt_action)
         mse_pred, mae_pred = _per_sample_errors(prediction, predicted_action)
+        pi05_gt_mse, _ = _per_sample_errors(predicted_action, gt_action)
 
         cache_indices.append(indices)
         flow_gt_parts.append(np.asarray(jax.device_get(flow_gt)))
@@ -154,6 +170,7 @@ def evaluate_split(
         mae_gt_parts.append(np.asarray(jax.device_get(mae_gt)))
         mse_pred_parts.append(np.asarray(jax.device_get(mse_pred)))
         mae_pred_parts.append(np.asarray(jax.device_get(mae_pred)))
+        pi05_gt_mse_parts.append(np.asarray(jax.device_get(pi05_gt_mse)))
         if keep_predictions:
             predictions.append(np.asarray(jax.device_get(prediction), dtype=np.float32))
         if track_tactile:
@@ -175,6 +192,7 @@ def evaluate_split(
     all_mae_gt = np.concatenate(mae_gt_parts)
     all_mse_pred = np.concatenate(mse_pred_parts)
     all_mae_pred = np.concatenate(mae_pred_parts)
+    all_pi05_gt_mse = np.concatenate(pi05_gt_mse_parts)
     if target == "gt":
         primary_flow, primary_mse, primary_mae = all_flow_gt, all_mse_gt, all_mae_gt
     else:
@@ -189,6 +207,20 @@ def evaluate_split(
         gate_w_mean = float(np.mean(all_gate))
         gate_active_frac = float(np.mean(all_gate > 0.5))
         stratified = gate_stratified_decode_metrics(all_mse_gt, all_mse_pred, all_gate)
+        low = all_gate <= float(low_gate_threshold)
+        high = all_gate >= float(high_gate_threshold)
+        low_gate_unsafe_frac = _mean_or_nan(
+            (np.minimum(all_mse_gt, all_mse_pred)[low] > low_gate_safety_margin).astype(
+                np.float32
+            )
+        )
+        high_gate_gain = _mean_or_nan(all_pi05_gt_mse[high] - all_mse_gt[high])
+        high_gate_rank_satisfied_frac = _mean_or_nan(
+            (all_mse_gt[high] + rank_margin <= all_mse_pred[high]).astype(np.float32)
+        )
+        high_gate_repair_satisfied_frac = _mean_or_nan(
+            (all_mse_gt[high] + repair_margin <= all_pi05_gt_mse[high]).astype(np.float32)
+        )
     else:
         tactile_change = None
         tactile_sim = None
@@ -202,6 +234,10 @@ def evaluate_split(
             "n_high_w": None,
             "n_low_w": None,
         }
+        low_gate_unsafe_frac = None
+        high_gate_gain = None
+        high_gate_rank_satisfied_frac = None
+        high_gate_repair_satisfied_frac = None
 
     return EvaluationResult(
         target=target,
@@ -237,4 +273,8 @@ def evaluate_split(
         mse_pred_low_w=stratified["mse_pred_low_w"],  # type: ignore[arg-type]
         n_high_w=stratified["n_high_w"],  # type: ignore[arg-type]
         n_low_w=stratified["n_low_w"],  # type: ignore[arg-type]
+        low_gate_unsafe_frac=low_gate_unsafe_frac,
+        high_gate_gain=high_gate_gain,
+        high_gate_rank_satisfied_frac=high_gate_rank_satisfied_frac,
+        high_gate_repair_satisfied_frac=high_gate_repair_satisfied_frac,
     )

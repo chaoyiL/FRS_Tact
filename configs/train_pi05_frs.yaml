@@ -1,0 +1,139 @@
+# 一键跑完整管线（推荐，会在 tmux 后台跑，并在开前跑校验 checkpoint/encoder/数据集都就位）：
+#   bash scripts/start_frs_pi05_train.sh configs/train_pi05_frs.yaml
+
+# 手动分步：
+#   1) uv run --no-sync python tools/precompute_tactile_embeddings.py \
+#        --config configs/train_pi05_frs.yaml
+#   2) uv run --no-sync python tools/prepare_frs_pi05_cache.py \
+#        --config configs/train_pi05_frs.yaml
+#   3) uv run --no-sync python tools/train_frs.py \
+#        --config configs/train_pi05_frs.yaml
+
+checkpoint: gs://openpi-assets/checkpoints/pi05_base
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+# prepare action cache: Slerpflow 
+action_cache:
+  root: /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: slerpflow
+  batch_size: 64
+  load_workers: 4
+  flush_every: 8
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+# 每帧保存四路 frozen ResNet embedding [4, 512]；FRS 训练不再解码触觉视频。
+tactile_embedding_cache:
+  enabled: true
+  root: /workspace/tactile_embeddings
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+# ResNet 从该 checkpoint 初始化，随后作为 FRS 参数参与训练并写入 FRS checkpoint。
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_0809
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+  state_conditioning: true
+  state_dropout_rate: 0.1
+
+  # ---- pi0.5 action-cache 配置 ----
+  # pick_tube 只有两路腕部相机；base_0_rgb 未映射时自动补黑图并设 mask=False。
+  # rename_map 后：camera1=原 camera0（左腕），camera2=原 camera1（右腕）。
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
+  # pi0.5 checkpoint 使用 32 维动作；pick_tube 的 20 维动作归一化后补零。
+  action_dim: 32
+  action_horizon: 50
+  # 必须匹配 checkpoint：base/全量微调用普通 variant，LoRA 用 *_lora。
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
+
+# 当前借用 pi05_base 的 trossen 统计量（14 维）；pick_tube 多出的 6 维不做归一化。
+# 使用微调 checkpoint 时，应改为其 assets 目录和 asset_id: pick_tube。
+# 微调、action cache 和部署必须使用同一份 norm stats。
+norm_stats:
+  dir: gs://openpi-assets/checkpoints/pi05_base/assets
+  asset_id: trossen
+  use_quantile_norm: true
+
+frs_training:
+  # 启用 state token 后参数树不同，需使用新的输出目录冷启动。
+  output: /workspace/frs_pick_tube_pi05/run_gated_v7_state_01
+  # tactile_window = action_horizon // divisor = 50 // 5 = 10；stride=3 时约覆盖 0.9 秒。
+  tactile_window_divisor: 5
+  history_stride: 3
+
+  # Gate 根据触觉变化在 GT steering 与 pi0.5 原动作之间切换。
+  loss_mode: gated
+  gate_tau: 0.4
+  gate_temperature: 0.1
+  gate_lambda: 0.25
+  # 高 Gate 动作解码约束。
+  aux_decode_weight: 4.0
+  aux_decode_steps: 10
+  aux_decode_solver: fireflow
+
+  # gated-v7：低 Gate 保持端点安全，高 Gate 强制向 GT 修复。
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  rank_low_gate_threshold: 0.3
+  rank_high_gate_threshold: 0.7
+  rank_weight: 2.0
+  rank_margin: 0.0
+  repair_weight: 2.0
+  repair_margin: 0.0
+
+  # best checkpoint：先满足安全/修复约束，再比较验证 MSE。
+  best_max_low_gate_unsafe_frac: 0.1
+  best_min_high_gate_gain: 0.0
+  best_min_high_gate_rank_satisfied_frac: 0.8
+
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+
+  batch_size: 128
+  epochs: 100
+  validation_steps: 10
+  eval_every: 5
+  seed: 42
+  write_plots: true
+  resume: false
+  resume_from: null

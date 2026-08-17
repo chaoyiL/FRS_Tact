@@ -2,7 +2,7 @@
 """Prepare one pi0.5 FRS action cache per dataset from a YAML config.
 
 pi0.5 analogue of tools/prepare_frs_caches.py -- same config file
-(configs/train_frs_pick_tube_pi05.yaml), same output cache format (utils/cache.py), just backed
+(configs/train_pi05_frs.yaml), same output cache format (utils/cache.py), just backed
 by prepare_pi05.prepare_cache() instead of prepare.prepare_cache().
 
 The environment, official checkpoint restore, and real LeRobot sample loading are verified on
@@ -28,7 +28,7 @@ if str(ROOT) not in sys.path:
 from prepare_pi05 import prepare_cache
 from lerobot.policies.pi05_jax import Pi0Config, load_pi0
 
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube_pi05.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_pi05_frs.yaml"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -64,7 +64,7 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
         raise ValueError(
             "config.model.camera_map is required: map pi0.5 image keys "
             "(base_0_rgb/left_wrist_0_rgb/right_wrist_0_rgb) to dataset observation keys. "
-            "See configs/train_frs_pick_tube_pi05.yaml and pi05_frs_plan.md."
+            "See configs/train_pi05_frs.yaml and pi05_frs_plan.md."
         )
     norm_stats_config = config.get("norm_stats") or {}
     if not norm_stats_config.get("dir") or not norm_stats_config.get("asset_id"):

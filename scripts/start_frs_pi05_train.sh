@@ -14,7 +14,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONFIG_PATH="${1:-${PROJECT_ROOT}/configs/train_frs_pick_tube_pi05.yaml}"
+CONFIG_PATH="${1:-${PROJECT_ROOT}/configs/train_pi05_frs.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube_pi05}"
 

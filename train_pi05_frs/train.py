@@ -43,6 +43,20 @@ def train_decoder(
     gate_lambda: float,
     aux_decode_weight: float,
     aux_decode_steps: int,
+    aux_decode_solver: str,
+    low_gate_safety_weight: float,
+    low_gate_safety_margin: float,
+    rank_weight: float,
+    rank_margin: float,
+    repair_weight: float,
+    repair_margin: float,
+    low_gate_threshold: float,
+    high_gate_threshold: float,
+    state_conditioning: bool,
+    state_dropout_rate: float,
+    best_max_low_gate_unsafe_frac: float,
+    best_min_high_gate_gain: float,
+    best_min_high_gate_rank_satisfied_frac: float,
     model_dim: int,
     depth: int,
     num_heads: int,
@@ -83,22 +97,22 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
-    from tactile_flow_steering.utils.checkpoint import (
+    from train_pi05_frs.utils.checkpoint import (
         CHECKPOINT_NAME,
         load_checkpoint,
         load_optimizer_state,
         restore_optimizer_state,
         save_checkpoint,
     )
-    from tactile_flow_steering.utils.data import (
+    from train_pi05_frs.utils.data import (
         CachedTactileEmbeddingBatches,
         TactileConditionedBatches,
         gate_weights_from_change,
         resolve_tactile_window,
     )
-    from tactile_flow_steering.utils.history_plot import plot_training_history
-    from tactile_flow_steering.utils.metrics import evaluate_split
-    from tactile_flow_steering.utils.model import (
+    from train_pi05_frs.utils.history_plot import plot_training_history
+    from train_pi05_frs.utils.metrics import evaluate_split
+    from train_pi05_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
         TactileConditionedFlowDecoder,
@@ -110,6 +124,13 @@ def train_decoder(
 
     history_fields = [
         "epoch",
+        "train_loss_total",
+        "train_loss_gt_fm",
+        "train_loss_vla_fm",
+        "train_loss_low_safety",
+        "train_loss_decode",
+        "train_loss_rank",
+        "train_loss_repair",
         "train_flow_loss",
         "val_flow_loss",
         "val_mse",
@@ -130,6 +151,10 @@ def train_decoder(
         "val_mse_pred_low_w",
         "val_n_high_w",
         "val_n_low_w",
+        "val_low_gate_unsafe_frac",
+        "val_high_gate_gain",
+        "val_high_gate_rank_satisfied_frac",
+        "val_high_gate_repair_satisfied_frac",
     ]
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
@@ -147,12 +172,24 @@ def train_decoder(
     if loss_mode not in ("gt", "predicted", "gated"):
         raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
+    if not 0.0 <= gate_tau <= 1.0:
+        raise ValueError(f"gate_tau must be in [0, 1], got {gate_tau}.")
     if gate_temperature <= 0:
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
     if gate_lambda < 0:
         raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
+    if aux_decode_solver not in ("euler", "fireflow"):
+        raise ValueError(f"aux_decode_solver must be 'euler' or 'fireflow', got {aux_decode_solver!r}.")
+    if not 0.0 <= state_dropout_rate < 1.0:
+        raise ValueError(f"state_dropout_rate must be in [0, 1), got {state_dropout_rate}.")
+    if not 0.0 <= low_gate_threshold < high_gate_threshold <= 1.0:
+        raise ValueError("Gate thresholds must satisfy 0 <= low < high <= 1.")
+    if not 0.0 <= best_max_low_gate_unsafe_frac <= 1.0:
+        raise ValueError("best_max_low_gate_unsafe_frac must be in [0, 1].")
+    if not 0.0 <= best_min_high_gate_rank_satisfied_frac <= 1.0:
+        raise ValueError("best_min_high_gate_rank_satisfied_frac must be in [0, 1].")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
     start_epoch = 1
@@ -248,16 +285,18 @@ def train_decoder(
         depth=depth,
         num_heads=num_heads,
         mlp_ratio=mlp_ratio,
+        state_conditioning=state_conditioning,
+        state_dim=int(pairs.manifest["state_dim"]) if state_conditioning else 0,
     )
     if resume_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
     else:
         ckpt_config = DecoderConfig(**resume_metadata["decoder_config"])
         if dataclasses_asdict_mismatch := _config_diff(ckpt_config, decoder_config):
-            print(
-                "warning: CLI decoder config differs from resume checkpoint; "
-                f"keeping checkpoint weights. diffs={dataclasses_asdict_mismatch}",
-                flush=True,
+            raise ValueError(
+                "Resume checkpoint decoder config does not match the requested model: "
+                f"{dataclasses_asdict_mismatch}. Start a new output directory for the "
+                "state-conditioned decoder."
             )
         # ``model`` already loaded above.
     train_samples = len(pairs.indices("train"))
@@ -297,7 +336,8 @@ def train_decoder(
         f"tactile_window={tactile_window} "
         f"(action_horizon={action_horizon} / divisor={tactile_window_divisor}) "
         f"gru_hidden_dim={DEFAULT_GRU_HIDDEN_DIM} resnet_dim={conditioner.resnet_embedding_dim} "
-        f"(frozen ResNet + trainable shared GRU)"
+        f"state_conditioning={state_conditioning} state_dim={decoder_config.state_dim} "
+        f"state_dropout={state_dropout_rate:g} (frozen ResNet + trainable shared GRU)"
     )
     if use_cached_embeddings:
         print(
@@ -314,6 +354,20 @@ def train_decoder(
         )
     if aux_decode_weight < 0:
         raise ValueError(f"aux_decode_weight must be >= 0, got {aux_decode_weight}.")
+    for name, value in (
+        ("low_gate_safety_weight", low_gate_safety_weight),
+        ("rank_weight", rank_weight),
+        ("repair_weight", repair_weight),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value}.")
+    for name, value in (
+        ("low_gate_safety_margin", low_gate_safety_margin),
+        ("rank_margin", rank_margin),
+        ("repair_margin", repair_margin),
+    ):
+        if value < 0:
+            raise ValueError(f"{name} must be non-negative, got {value}.")
     if aux_decode_steps <= 0:
         raise ValueError(f"aux_decode_steps must be positive, got {aux_decode_steps}.")
     if loss_mode == "gt":
@@ -329,9 +383,12 @@ def train_decoder(
         )
     else:
         print(
-            f"loss_mode=gated L=w*(FM(gt)+aux*MSE(decode,gt))+lambda*(1-w)*FM(pred) "
+            "loss_mode=gated gated-v7 six-term objective "
             f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g} "
             f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
+            f"decode_solver={aux_decode_solver} low_safety={low_gate_safety_weight:g} "
+            f"rank={rank_weight:g} repair={repair_weight:g} "
+            f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
             f"(primary eval=gt; also log vs predicted)"
         )
     if cosine_decay:
@@ -345,12 +402,30 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
-    best_mse = float("inf")
+    def _best_key(metrics: Mapping[str, Any]) -> tuple[float, float]:
+        low_unsafe = float(metrics.get("val_low_gate_unsafe_frac", float("nan")))
+        high_gain = float(metrics.get("val_high_gate_gain", float("nan")))
+        high_rank = float(metrics.get("val_high_gate_rank_satisfied_frac", float("nan")))
+        val_mse = float(metrics.get("val_mse", float("inf")))
+        if loss_mode != "gated":
+            return (0.0, val_mse)
+        if not np.isfinite(low_unsafe) or not np.isfinite(high_gain) or not np.isfinite(high_rank):
+            return (float("inf"), val_mse)
+        violation = (
+            max(0.0, low_unsafe - best_max_low_gate_unsafe_frac)
+            / max(best_max_low_gate_unsafe_frac, 1e-8)
+            + max(0.0, best_min_high_gate_gain - high_gain)
+            + max(0.0, best_min_high_gate_rank_satisfied_frac - high_rank)
+            / max(best_min_high_gate_rank_satisfied_frac, 1e-8)
+        )
+        return (violation, val_mse)
+
+    best_key = (float("inf"), float("inf"))
     best_path = output_dir / "best" / CHECKPOINT_NAME
     if best_path.exists():
         with best_path.open(encoding="utf-8") as file:
             best_meta = json.load(file)
-        best_mse = float(best_meta.get("metrics", {}).get("val_mse", best_mse))
+        best_key = _best_key(best_meta.get("metrics", {}))
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0
     history_mode = "a" if resume_dir is not None and history_exists else "w"
@@ -375,8 +450,21 @@ def train_decoder(
             for epoch in range(start_epoch, epochs + 1):
                 losses: list[float] = []
                 weights: list[int] = []
-                for batch_number, (indices, x_base_np, predicted_np, gt_action_np, tactile_seq) in enumerate(
-                    conditioner.batches("train", batch_size=batch_size, shuffle=True, seed=seed + epoch)
+                component_values: dict[str, list[float]] = {
+                    name: []
+                    for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+                }
+                for batch_number, (
+                    indices,
+                    x_base_np,
+                    predicted_np,
+                    gt_action_np,
+                    state_np,
+                    tactile_seq,
+                ) in enumerate(
+                    conditioner.batches(
+                        "train", batch_size=batch_size, shuffle=True, seed=seed + epoch
+                    )
                 ):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
                     batch_n = len(x_base_np)
@@ -390,7 +478,7 @@ def train_decoder(
                     else:
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
-                    loss = train_step(
+                    loss, batch_components = train_step(
                         model,
                         optimizer,
                         jnp.asarray(x_base_np),
@@ -399,21 +487,38 @@ def train_decoder(
                         tactile_seq,
                         jnp.asarray(gate_w),
                         step_key,
+                        state=jnp.asarray(state_np),
+                        state_dropout_rate=state_dropout_rate,
                         loss_mode=loss_mode,
                         gate_lambda=gate_lambda,
                         aux_decode_weight=aux_decode_weight,
                         aux_decode_steps=aux_decode_steps,
+                        aux_decode_solver=aux_decode_solver,
+                        low_gate_safety_weight=low_gate_safety_weight,
+                        low_gate_safety_margin=low_gate_safety_margin,
+                        rank_weight=rank_weight,
+                        rank_margin=rank_margin,
+                        repair_weight=repair_weight,
+                        repair_margin=repair_margin,
+                        low_gate_threshold=low_gate_threshold,
+                        high_gate_threshold=high_gate_threshold,
                     )
                     losses.append(float(jax.device_get(loss)))
+                    for name, value in batch_components.items():
+                        component_values[name].append(float(jax.device_get(value)))
                     weights.append(batch_n)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
                         extra = f" gate_w={batch_gate_w:.4f}" if loss_mode == "gated" else ""
                         print(
                             f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
-                            f"flow_loss={losses[-1]:.6f}{extra}",
+                            f"loss={losses[-1]:.6f}{extra}",
                             flush=True,
                         )
                 train_loss = float(np.average(losses, weights=weights))
+                train_components = {
+                    name: float(np.average(values, weights=weights))
+                    for name, values in component_values.items()
+                }
                 run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
@@ -430,6 +535,22 @@ def train_decoder(
                     "gate_lambda": gate_lambda,
                     "aux_decode_weight": aux_decode_weight,
                     "aux_decode_steps": aux_decode_steps,
+                    "aux_decode_solver": aux_decode_solver,
+                    "low_gate_safety_weight": low_gate_safety_weight,
+                    "low_gate_safety_margin": low_gate_safety_margin,
+                    "rank_weight": rank_weight,
+                    "rank_margin": rank_margin,
+                    "repair_weight": repair_weight,
+                    "repair_margin": repair_margin,
+                    "low_gate_threshold": low_gate_threshold,
+                    "high_gate_threshold": high_gate_threshold,
+                    "state_conditioning": state_conditioning,
+                    "state_dropout_rate": state_dropout_rate,
+                    "best_max_low_gate_unsafe_frac": best_max_low_gate_unsafe_frac,
+                    "best_min_high_gate_gain": best_min_high_gate_gain,
+                    "best_min_high_gate_rank_satisfied_frac": (
+                        best_min_high_gate_rank_satisfied_frac
+                    ),
                     "eval_every": eval_every,
                 }
                 if run_eval:
@@ -440,11 +561,22 @@ def train_decoder(
                         batch_size=batch_size,
                         num_steps=validation_steps,
                         keep_predictions=False,
+                        solver=aux_decode_solver,
                         target=eval_target,
                         gate_tau=gate_tau if loss_mode == "gated" else None,
                         gate_temperature=gate_temperature if loss_mode == "gated" else None,
+                        low_gate_threshold=low_gate_threshold,
+                        high_gate_threshold=high_gate_threshold,
+                        low_gate_safety_margin=low_gate_safety_margin,
+                        rank_margin=rank_margin,
+                        repair_margin=repair_margin,
                     )
                     metrics: dict[str, float | str | int] = {
+                        "train_loss_total": train_loss,
+                        **{
+                            f"train_loss_{name}": value
+                            for name, value in train_components.items()
+                        },
                         "train_flow_loss": train_loss,
                         "val_flow_loss": validation.flow_loss,
                         "val_mse": validation.mse,
@@ -469,6 +601,16 @@ def train_decoder(
                                 "val_mse_pred_low_w": float(validation.mse_pred_low_w),
                                 "val_n_high_w": int(validation.n_high_w),
                                 "val_n_low_w": int(validation.n_low_w),
+                                "val_low_gate_unsafe_frac": float(
+                                    validation.low_gate_unsafe_frac
+                                ),
+                                "val_high_gate_gain": float(validation.high_gate_gain),
+                                "val_high_gate_rank_satisfied_frac": float(
+                                    validation.high_gate_rank_satisfied_frac
+                                ),
+                                "val_high_gate_repair_satisfied_frac": float(
+                                    validation.high_gate_repair_satisfied_frac
+                                ),
                             }
                         )
                     writer.writerow(_blank_history_row(epoch, **metrics))
@@ -482,8 +624,9 @@ def train_decoder(
                         extra_metadata=checkpoint_extra,
                         optimizer=optimizer,
                     )
-                    if validation.mse < best_mse:
-                        best_mse = validation.mse
+                    candidate_key = _best_key(metrics)
+                    if candidate_key < best_key:
+                        best_key = candidate_key
                         save_checkpoint(
                             output_dir / "best",
                             model,
@@ -500,6 +643,9 @@ def train_decoder(
                             f" mse_pred(w>0.5)={validation.mse_pred_high_w:.4f}"
                             f" mse_pred(w<=0.5)={validation.mse_pred_low_w:.4f}"
                             f" n_high={validation.n_high_w} n_low={validation.n_low_w}"
+                            f" low_unsafe={validation.low_gate_unsafe_frac:.4f}"
+                            f" high_gain={validation.high_gate_gain:.4f}"
+                            f" high_rank_ok={validation.high_gate_rank_satisfied_frac:.4f}"
                         )
                     print(
                         f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
@@ -510,7 +656,14 @@ def train_decoder(
                         flush=True,
                     )
                 else:
-                    metrics = {"train_flow_loss": train_loss}
+                    metrics = {
+                        "train_loss_total": train_loss,
+                        **{
+                            f"train_loss_{name}": value
+                            for name, value in train_components.items()
+                        },
+                        "train_flow_loss": train_loss,
+                    }
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
@@ -527,7 +680,7 @@ def train_decoder(
                         flush=True,
                     )
 
-        print(f"best_val_mse={best_mse:.8f}")
+        print(f"best_selection_key={best_key}")
         print(f"checkpoints={output_dir}")
         _refresh_training_plot(announce=True)
     finally:
@@ -588,15 +741,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "gt: FM(gt)+aux*MSE(decode,gt) (primary eval vs GT). "
             "predicted: FM vs VLA predicted_actions only (no aux; sanity check). "
-            "gated: w*(FM(gt)+aux*MSE(decode,gt))+lambda*(1-w)*FM(pred). "
+            "gated: FRS_Tact three-region six-term Gate objective. "
             "All modes always log both val_mse_gt and val_mse_pred."
         ),
     )
     parser.add_argument(
         "--gate-tau",
         type=float,
-        default=0.5,
-        help="Soft-gate midpoint tau for w=sigmoid((s-tau)/T). Default 0.5.",
+        default=0.4,
+        help="Soft-gate midpoint tau for w=sigmoid((s-tau)/T). Default 0.4.",
     )
     parser.add_argument(
         "--gate-temperature",
@@ -607,16 +760,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gate-lambda",
         type=float,
-        default=1.0,
-        help="Weight on (1-w)*L_stop in gated mode. Default 1.0.",
+        default=0.25,
+        help="Weight on the low-Gate VLA flow-matching term. Default 0.25.",
     )
     parser.add_argument(
         "--aux-decode-weight",
         type=float,
-        default=1.0,
+        default=4.0,
         help=(
             "Weight on MSE(decode(x_base), gt) added inside every GT loss term "
-            "(gt mode and gated L*). Set 0 to disable. Default 1.0."
+            "(gt mode and gated high-Gate decode). Set 0 to disable. Default 4.0."
         ),
     )
     parser.add_argument(
@@ -624,9 +777,25 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help=(
-            "Euler steps used for aux decode MSE during training "
+            "Integration steps used for aux decode MSE during training "
             "(default: same as --validation-steps)."
         ),
+    )
+    parser.add_argument("--aux-decode-solver", choices=("euler", "fireflow"), default="fireflow")
+    parser.add_argument("--low-gate-safety-weight", type=float, default=0.5)
+    parser.add_argument("--low-gate-safety-margin", type=float, default=0.03)
+    parser.add_argument("--rank-weight", type=float, default=2.0)
+    parser.add_argument("--rank-margin", type=float, default=0.0)
+    parser.add_argument("--repair-weight", type=float, default=2.0)
+    parser.add_argument("--repair-margin", type=float, default=0.0)
+    parser.add_argument("--low-gate-threshold", type=float, default=0.3)
+    parser.add_argument("--high-gate-threshold", type=float, default=0.7)
+    parser.add_argument("--state-conditioning", action="store_true")
+    parser.add_argument("--state-dropout-rate", type=float, default=0.1)
+    parser.add_argument("--best-max-low-gate-unsafe-frac", type=float, default=0.1)
+    parser.add_argument("--best-min-high-gate-gain", type=float, default=0.0)
+    parser.add_argument(
+        "--best-min-high-gate-rank-satisfied-frac", type=float, default=0.8
     )
 
     parser.add_argument("--model-dim", type=int, default=256)
@@ -719,6 +888,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         aux_decode_weight=args.aux_decode_weight,
         aux_decode_steps=(
             args.validation_steps if args.aux_decode_steps is None else args.aux_decode_steps
+        ),
+        aux_decode_solver=args.aux_decode_solver,
+        low_gate_safety_weight=args.low_gate_safety_weight,
+        low_gate_safety_margin=args.low_gate_safety_margin,
+        rank_weight=args.rank_weight,
+        rank_margin=args.rank_margin,
+        repair_weight=args.repair_weight,
+        repair_margin=args.repair_margin,
+        low_gate_threshold=args.low_gate_threshold,
+        high_gate_threshold=args.high_gate_threshold,
+        state_conditioning=args.state_conditioning,
+        state_dropout_rate=args.state_dropout_rate,
+        best_max_low_gate_unsafe_frac=args.best_max_low_gate_unsafe_frac,
+        best_min_high_gate_gain=args.best_min_high_gate_gain,
+        best_min_high_gate_rank_satisfied_frac=(
+            args.best_min_high_gate_rank_satisfied_frac
         ),
         model_dim=args.model_dim,
         depth=args.depth,

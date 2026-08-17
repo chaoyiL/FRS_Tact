@@ -68,6 +68,9 @@ dependencies = [
     "draccus==0.10.0", # TODO: Relax version constraint
     "huggingface-hub>=0.34.0,<1.0.0",
     "requests>=2.32.0,<3.0.0",
+    "PyYAML>=6.0.0,<7.0.0",
+    "msgpack>=1.0.0,<2.0.0",
+    "websockets>=13.0,<16.0",
     # Serialization & checkpointing
     "safetensors>=0.4.3,<1.0.0",
     # Lightweight utilities
@@ -145,7 +148,10 @@ torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["lerobot*", "tactile_encoder*", "utils*"]
+include = ["lerobot*", "tactile_encoder*", "train_pi05_frs*", "utils*", "deploy_pi05_frs*"]
+
+[tool.setuptools.package-data]
+deploy_pi05_frs = ["configs/*.yaml"]
 
 [tool.ruff]
 target-version = "py312"

@@ -263,8 +263,11 @@ def prepare_cache(
         raise ValueError(
             "model_sample_steps, reverse_steps, batch_size, and load_workers must all be positive."
         )
-    if reverse_solver not in ("euler", "fireflow"):
-        raise ValueError(f"reverse_solver must be 'euler' or 'fireflow', got {reverse_solver!r}.")
+    if reverse_solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            "reverse_solver must be 'euler', 'fireflow', or 'slerpflow', "
+            f"got {reverse_solver!r}."
+        )
     if flush_every <= 0:
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
     if drop_tail_action_chunks < 0:
@@ -330,6 +333,8 @@ def prepare_cache(
     digest = records_digest(records)
     manifest_path = cache_dir / MANIFEST_NAME
     action_dim = model.action_dim
+    # Store the dataset's real normalized state width, not the zero padding added for pi0.5.
+    state_dim = int(np.asarray(model.state_stats.mean).shape[-1])
     drop_frames = int(drop_tail_action_chunks) * action_horizon
     if drop_frames > 0:
         print(
@@ -352,7 +357,13 @@ def prepare_cache(
         print(f"resuming cache at sample {completed}/{len(records)}")
     else:
         cache_dir.mkdir(parents=True, exist_ok=True)
-        arrays = create_cache_arrays(cache_dir, records, action_horizon=action_horizon, action_dim=action_dim)
+        arrays = create_cache_arrays(
+            cache_dir,
+            records,
+            action_horizon=action_horizon,
+            action_dim=action_dim,
+            state_dim=state_dim,
+        )
         completed = 0
         manifest = {
             "version": CACHE_VERSION,
@@ -365,6 +376,7 @@ def prepare_cache(
             "val_episodes": list(val_episodes),
             "action_horizon": action_horizon,
             "action_dim": action_dim,
+            "state_dim": state_dim,
             "configuration": configuration,
             "records_sha256": digest,
         }
@@ -414,15 +426,18 @@ def prepare_cache(
         valid = pending["valid"]
         predicted_actions, x_base = jax.device_get(pending["predicted"]), jax.device_get(pending["x_base"])
         gt_actions = pending["gt_action"]
+        states = pending["state"]
         noise = pending["noise"]
         predicted_actions = np.asarray(predicted_actions[:valid], dtype=np.float32)
         x_base = np.asarray(x_base[:valid], dtype=np.float32)
         gt_actions = np.asarray(gt_actions[:valid], dtype=np.float32)
+        states = np.asarray(jax.device_get(states[:valid]), dtype=np.float32)
         noise = np.asarray(jax.device_get(noise[:valid]), dtype=np.float32)
 
         arrays["target"][start:stop] = predicted_actions
         arrays["x_base"][start:stop] = x_base
         arrays["gt_action"][start:stop] = gt_actions
+        arrays["state"][start:stop] = states
         arrays["inversion_mse"][start:stop] = inversion_mse(x_base, noise)
         manifest["completed_samples"] = stop
         batches_since_flush += 1
@@ -477,6 +492,7 @@ def prepare_cache(
             "predicted": predicted_actions,
             "x_base": x_base,
             "gt_action": gt_action_batch,
+            "state": observation_batch.state[..., :state_dim],
             "noise": noise,
         }
         if batch_number == 0:
@@ -529,7 +545,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--action-horizon", type=int, default=50)
     parser.add_argument("--model-sample-steps", type=int, default=10)
     parser.add_argument("--reverse-steps", type=int, default=50)
-    parser.add_argument("--reverse-solver", choices=("euler", "fireflow"), default="fireflow")
+    parser.add_argument(
+        "--reverse-solver",
+        choices=("euler", "fireflow", "slerpflow"),
+        default="fireflow",
+    )
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--load-workers", type=int, default=4)
     parser.add_argument("--flush-every", type=int, default=8)

@@ -63,6 +63,7 @@ class EpisodeSplitTest(unittest.TestCase):
             reopened["x_base"][1] = 9.0
             flush_arrays(reopened)
             self.assertTrue(np.all(np.load(cache_dir / "x_base.npy")[1] == 9.0))
+            del arrays, reopened
 
     def test_finalize_partial_cache_truncates_and_resplits(self):
         records = [
@@ -91,6 +92,7 @@ class EpisodeSplitTest(unittest.TestCase):
                 },
             )
 
+            del arrays
             manifest = finalize_partial_cache(cache_dir, resplit=True)
             reopened = open_cache_arrays(cache_dir)
 
@@ -101,6 +103,7 @@ class EpisodeSplitTest(unittest.TestCase):
             self.assertEqual(manifest["train_sample_count"] + manifest["val_sample_count"], 3)
             self.assertEqual(set(manifest["train_episodes"]) & set(manifest["val_episodes"]), set())
             self.assertAlmostEqual(manifest["mean_source_inversion_mse"], 2.0)
+            del reopened
 
     def test_trim_episode_tail_drops_k_action_horizons(self):
         indices = list(range(120))
@@ -148,6 +151,7 @@ class EpisodeSplitTest(unittest.TestCase):
                     "val_episodes": [1],
                     "action_horizon": 2,
                     "action_dim": 2,
+                    "state_dim": 1,
                     "configuration": {},
                     "records_sha256": "unused",
                     "mean_source_inversion_mse": 0.25,
@@ -168,6 +172,7 @@ class EpisodeSplitTest(unittest.TestCase):
 
             with self.assertRaises(FileExistsError):
                 write_cache_subset(source, output, [0, 1, 3])
+            del arrays, kept
 
 
 if __name__ == "__main__":

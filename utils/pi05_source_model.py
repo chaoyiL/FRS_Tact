@@ -5,7 +5,7 @@ action_cache) through the same flow-matching velocity field.
 Kept separate from utils/source_model.py (SmolVLA) rather than branching that file, because
 importing it would pull in `modalities_eval.utils`/`lerobot.policies.smolvla_jax` -- exactly the
 coupling pi0.5's own code avoids (see src/lerobot/policies/pi05_jax/README.md). The two share
-only the base-model-agnostic pieces: `utils/integration.py`'s euler/fireflow solvers and
+only the base-model-agnostic pieces: `utils/integration.py`'s reverse ODE solvers and
 `utils/flow_matching.py`'s deterministic_noise/inversion_mse.
 
 UNTESTED, like the rest of pi05_jax (see its README.md): the caching/jit pattern below follows
@@ -23,7 +23,13 @@ import jax.numpy as jnp
 
 from lerobot.policies.pi05_jax import Observation, Pi0, frs as _frs
 from lerobot.policies.pi05_jax.frs import Pi0PrefixCache
-from utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
+from utils.integration import (
+    euler_integrate_velocity,
+    fireflow_integrate_velocity,
+    slerpflow_integrate_velocity,
+)
+
+ReverseSolver = Literal["euler", "fireflow", "slerpflow"]
 
 # Keyed by `_cache_key`; values are jitted functions taking `state` as their first argument.
 # Deliberately hold no reference to any `Pi0` (nor to its weights) -- see `_cache_key`.
@@ -90,11 +96,16 @@ def _jitted_sample(model: Pi0, *, num_steps: int):
     return jitted
 
 
-def _jitted_reverse(model: Pi0, *, num_steps: int, solver: Literal["euler", "fireflow"]):
+def _jitted_reverse(model: Pi0, *, num_steps: int, solver: ReverseSolver):
     cache_key = _cache_key(model, num_steps, solver)
     jitted = _REVERSE_CACHE.get(cache_key)
     if jitted is None:
-        integrate = euler_integrate_velocity if solver == "euler" else fireflow_integrate_velocity
+        if solver == "euler":
+            integrate = euler_integrate_velocity
+        elif solver == "fireflow":
+            integrate = fireflow_integrate_velocity
+        else:
+            integrate = slerpflow_integrate_velocity
         graphdef, _ = nnx.split(model)
 
         @jax.jit
@@ -123,14 +134,16 @@ def sample_and_reverse(
     *,
     sample_steps: int,
     reverse_steps: int,
-    solver: Literal["euler", "fireflow"] = "fireflow",
+    solver: ReverseSolver = "fireflow",
 ) -> tuple[jax.Array, jax.Array]:
     """One shared prefix encode, then sample t:1->0 and reverse t:0->1. Mirrors
     utils/source_model.py:sample_and_reverse for SmolVLA."""
     if sample_steps <= 0 or reverse_steps <= 0:
         raise ValueError("sample_steps and reverse_steps must be positive.")
-    if solver not in ("euler", "fireflow"):
-        raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
+    if solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
+        )
 
     # Split once and reuse for all three calls -- `nnx.split` walks the whole module graph, so
     # doing it per call would repeat that work three times per batch for no benefit.
@@ -147,11 +160,13 @@ def reverse_integrate_actions(
     actions: jax.Array,
     *,
     num_steps: int,
-    solver: Literal["euler", "fireflow"] = "euler",
+    solver: ReverseSolver = "euler",
 ) -> jax.Array:
     """Integrate model-space actions from data time t=0 to base noise time t=1."""
-    if solver not in ("euler", "fireflow"):
-        raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
+    if solver not in ("euler", "fireflow", "slerpflow"):
+        raise ValueError(
+            f"solver must be 'euler', 'fireflow', or 'slerpflow', got {solver!r}."
+        )
     _, state = nnx.split(model)
     cache = _jitted_prefix(model)(state, observation)
     return _jitted_reverse(model, num_steps=num_steps, solver=solver)(

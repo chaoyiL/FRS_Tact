@@ -7,13 +7,13 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from tactile_flow_steering.utils.checkpoint import load_checkpoint
-from tactile_flow_steering.utils.data import TactileConditionedBatches
-from tactile_flow_steering.utils.data import resolve_tactile_window
-from tactile_flow_steering.utils.metrics import EvalTarget
-from tactile_flow_steering.utils.metrics import evaluate_split
-from tactile_flow_steering.utils.model import FlowSolver
-from tactile_flow_steering.utils.visualize import write_evaluation_plots
+from train_pi05_frs.utils.checkpoint import load_checkpoint
+from train_pi05_frs.utils.data import TactileConditionedBatches
+from train_pi05_frs.utils.data import resolve_tactile_window
+from train_pi05_frs.utils.metrics import EvalTarget
+from train_pi05_frs.utils.metrics import evaluate_split
+from train_pi05_frs.utils.model import FlowSolver
+from train_pi05_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs
 from utils.cache import atomic_write_json
 
@@ -51,6 +51,11 @@ def evaluate_decoder(
     actual_shape = (model.config.action_horizon, model.config.action_dim)
     if actual_shape != expected_shape:
         raise ValueError(f"Checkpoint/cache action shape mismatch: {actual_shape} != {expected_shape}.")
+    if model.config.state_conditioning and model.config.state_dim != int(pairs.manifest["state_dim"]):
+        raise ValueError(
+            "Checkpoint/cache state dimension mismatch: "
+            f"{model.config.state_dim} != {pairs.manifest['state_dim']}."
+        )
 
     extra = checkpoint_metadata.get("extra_metadata") or {}
     if tactile_window_divisor is None:
@@ -78,6 +83,7 @@ def evaluate_decoder(
         dataset_repo_id=dataset_repo_id,
         dataset_root=dataset_root,
         history_stride=history_stride,
+        build_episode_baselines=str(extra.get("loss_mode", "gt")) == "gated",
         num_workers=num_workers,
         prefetch_batches=prefetch_batches,
         load_threads=load_threads,
@@ -100,6 +106,13 @@ def evaluate_decoder(
             solver=solver,
             keep_predictions=save_predictions,
             target=target,
+            gate_tau=extra.get("gate_tau"),
+            gate_temperature=extra.get("gate_temperature"),
+            low_gate_threshold=float(extra.get("low_gate_threshold", 0.3)),
+            high_gate_threshold=float(extra.get("high_gate_threshold", 0.7)),
+            low_gate_safety_margin=float(extra.get("low_gate_safety_margin", 0.03)),
+            rank_margin=float(extra.get("rank_margin", 0.0)),
+            repair_margin=float(extra.get("repair_margin", 0.0)),
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, float | int | str] = {
@@ -124,6 +137,15 @@ def evaluate_decoder(
             "rmse_pred": result.rmse_pred,
             "mae_pred": result.mae_pred,
         }
+        if result.low_gate_unsafe_frac is not None:
+            metrics.update(
+                {
+                    "low_gate_unsafe_frac": result.low_gate_unsafe_frac,
+                    "high_gate_gain": result.high_gate_gain,  # type: ignore[dict-item]
+                    "high_gate_rank_satisfied_frac": result.high_gate_rank_satisfied_frac,  # type: ignore[dict-item]
+                    "high_gate_repair_satisfied_frac": result.high_gate_repair_satisfied_frac,  # type: ignore[dict-item]
+                }
+            )
         atomic_write_json(output_dir / "metrics.json", metrics)
 
         arrays = pairs.arrays

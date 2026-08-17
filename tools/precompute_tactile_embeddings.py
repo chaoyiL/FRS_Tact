@@ -31,7 +31,7 @@ from tactile_encoder.utils.image_dataset import parse_image_to_uint8
 from tactile_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = ROOT / "configs" / "train_frs_pick_tube_pi05.yaml"
+DEFAULT_CONFIG = ROOT / "configs" / "train_pi05_frs.yaml"
 
 
 def _start_cpu_only_workers(loader: DataLoader, num_workers: int):

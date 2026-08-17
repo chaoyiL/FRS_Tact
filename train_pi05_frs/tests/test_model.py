@@ -8,19 +8,19 @@ import jax
 import jax.numpy as jnp
 from flax import nnx
 
-from tactile_flow_steering.utils.checkpoint import load_checkpoint
-from tactile_flow_steering.utils.checkpoint import save_checkpoint
-from tactile_flow_steering.utils.model import DecoderConfig
-from tactile_flow_steering.utils.model import TactileConditionedFlowDecoder
-from tactile_flow_steering.utils.model import decode_actions
-from tactile_flow_steering.utils.model import decode_euler
-from tactile_flow_steering.utils.metrics import gate_stratified_decode_metrics
-from tactile_flow_steering.utils.model import decode_mse_per_sample
-from tactile_flow_steering.utils.model import flow_matching_loss_per_sample
-from tactile_flow_steering.utils.model import gated_flow_matching_loss_per_sample
-from tactile_flow_steering.utils.model import gt_supervised_loss_per_sample
-from tactile_flow_steering.utils.model import make_optimizer
-from tactile_flow_steering.utils.model import train_step
+from train_pi05_frs.utils.checkpoint import load_checkpoint
+from train_pi05_frs.utils.checkpoint import save_checkpoint
+from train_pi05_frs.utils.model import DecoderConfig
+from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
+from train_pi05_frs.utils.model import decode_actions
+from train_pi05_frs.utils.model import decode_euler
+from train_pi05_frs.utils.metrics import gate_stratified_decode_metrics
+from train_pi05_frs.utils.model import decode_mse_per_sample
+from train_pi05_frs.utils.model import flow_matching_loss_per_sample
+from train_pi05_frs.utils.model import gated_flow_matching_loss_per_sample
+from train_pi05_frs.utils.model import gt_supervised_loss_per_sample
+from train_pi05_frs.utils.model import make_optimizer
+from train_pi05_frs.utils.model import train_step
 import numpy as np
 
 
@@ -64,7 +64,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(decoded_fireflow))))
         optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
         gate = jnp.ones((4,), dtype=jnp.float32)
-        step_loss = train_step(
+        step_loss, components = train_step(
             model,
             optimizer,
             x_base,
@@ -79,7 +79,10 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_steps=4,
         )
         self.assertTrue(bool(jnp.isfinite(step_loss)))
-        pred_step_loss = train_step(
+        self.assertEqual(
+            set(components), {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"}
+        )
+        pred_step_loss, _ = train_step(
             model,
             optimizer,
             x_base,
@@ -196,8 +199,31 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_weight=1.0,
             aux_decode_steps=4,
         )
-        expected = 0.5 * loss_star + 2.0 * 0.5 * loss_stop
+        # Mid-Gate mixes FM targets; decode supervision is reserved for high Gate.
+        flow_star = flow_matching_loss_per_sample(model, x_base, gt, t, tactile)
+        expected = 0.5 * flow_star + 2.0 * 0.5 * loss_stop
         self.assertTrue(bool(jnp.allclose(gated_half, expected, atol=1e-5)))
+
+    def test_state_conditioning_adds_one_condition_token(self):
+        model = TactileConditionedFlowDecoder(
+            DecoderConfig(
+                action_dim=3,
+                action_horizon=6,
+                tactile_window=3,
+                gru_hidden_dim=8,
+                resnet_embedding_dim=4,
+                model_dim=16,
+                depth=1,
+                num_heads=4,
+                state_conditioning=True,
+                state_dim=5,
+            ),
+            rngs=nnx.Rngs(0),
+        )
+        tactile = self._tactile_seq(jax.random.key(30), 2)
+        state = jnp.ones((2, 5), dtype=jnp.float32)
+        condition = model.encode_condition(tactile, state)
+        self.assertEqual(condition.shape, (2, 5, 16))
 
     def test_tactile_seq_changes_output(self):
         model = self.make_model()
@@ -231,9 +257,9 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["decoder_config"]["num_tactile_tokens"], 4)
 
     def test_optimizer_state_round_trip(self):
-        from tactile_flow_steering.utils.checkpoint import load_optimizer_state
-        from tactile_flow_steering.utils.checkpoint import restore_optimizer_state
-        from tactile_flow_steering.utils.model import make_optimizer
+        from train_pi05_frs.utils.checkpoint import load_optimizer_state
+        from train_pi05_frs.utils.checkpoint import restore_optimizer_state
+        from train_pi05_frs.utils.model import make_optimizer
 
         model = self.make_model()
         optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0, total_steps=10)
