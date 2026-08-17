@@ -59,7 +59,10 @@ def lifecycle_runtime(
 ):
     runtime = object.__new__(FRSRuntime)
     runtime.policy = lifecycle_source
-    runtime.config = SimpleNamespace(reverse_steps=5, reverse_solver="slerpflow")
+    runtime.config = SimpleNamespace(
+        reverse_steps=5,
+        reverse_solver="slerpflow",
+    )
     runtime.history = TactileHistory(window=2, stride=1, token_shape=(1, 2))
     runtime.baseline = None
     runtime.last_diagnostics = None
@@ -659,11 +662,76 @@ def test_steer_action_temporal_ensemble_is_stable_for_large_finite_coeff(
     np.testing.assert_array_equal(result.selected_normalized, newest_chunk[0, 1])
 
 
-def test_steer_action_applies_gain_to_robot_space_grippers_below_threshold(
+@pytest.mark.parametrize(
+    ("left_xyz_m", "right_xyz_m", "protected_slices"),
+    [
+        ((0.0001, -0.0002, 0.000249), (0.0001, 0.0003, 0.0), (slice(0, 3),)),
+        ((0.0003, 0.0, 0.0), (-0.000249, 0.0001, 0.0), (slice(10, 13),)),
+        (
+            ((-0.0001, 0.0001, 0.0)),
+            ((0.0002, -0.0002, 0.0002)),
+            (slice(0, 3), slice(10, 13)),
+        ),
+    ],
+)
+def test_steer_action_protects_only_inactive_arm_xyz_in_robot_space(
+    per_action_runtime,
+    left_xyz_m: tuple[float, float, float],
+    right_xyz_m: tuple[float, float, float],
+    protected_slices: tuple[slice, ...],
+) -> None:
+    per_action_runtime.policy.config.action_dim = 20
+    per_action_runtime.config.inactive_arm_xyz_threshold_m = 0.00025
+    normalized_vla = np.zeros((1, 4, 20), dtype=np.float32)
+    normalized_vla[0, 0, 0:3] = np.asarray(left_xyz_m) / 10.0
+    normalized_vla[0, 0, 10:13] = np.asarray(right_xyz_m) / 10.0
+    per_action_runtime._activate_chunk(4, normalized_vla, normalized_vla)
+    decoded = np.arange(80, dtype=np.float32).reshape(1, 4, 20) / 20.0
+    per_action_runtime.decode_result = decoded
+
+    result = per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
+
+    expected_normalized = decoded[0, 0].copy()
+    for protected_slice in protected_slices:
+        expected_normalized[protected_slice] = normalized_vla[0, 0, protected_slice]
+    np.testing.assert_array_equal(result.decoded_normalized, decoded)
+    np.testing.assert_array_equal(result.selected_normalized, expected_normalized)
+    np.testing.assert_array_equal(result.selected_action, expected_normalized * 10.0)
+    np.testing.assert_array_equal(result.selected_normalized[3:10], decoded[0, 0, 3:10])
+    np.testing.assert_array_equal(result.selected_normalized[13:20], decoded[0, 0, 13:20])
+
+
+def test_inactive_arm_xyz_protection_uses_strict_float32_threshold() -> None:
+    threshold = np.float32(0.00025)
+    immediately_below = np.nextafter(threshold, np.float32(-np.inf))
+    selected = np.arange(20, dtype=np.float32)
+    vla_normalized = np.zeros(20, dtype=np.float32)
+    vla_action = np.full(20, 1.0, dtype=np.float32)
+    vla_action[0:3] = (immediately_below, 0.0, 0.0)
+
+    protected = frs_runtime_module._protect_inactive_arm_xyz(
+        selected,
+        vla_normalized,
+        vla_action,
+        float(threshold),
+    )
+    np.testing.assert_array_equal(protected[0:3], vla_normalized[0:3])
+
+    vla_action[0] = threshold
+    unprotected = frs_runtime_module._protect_inactive_arm_xyz(
+        selected,
+        vla_normalized,
+        vla_action,
+        float(threshold),
+    )
+    np.testing.assert_array_equal(unprotected, selected)
+
+
+def test_steer_action_multiplies_robot_space_grippers_below_threshold(
     per_action_runtime,
 ) -> None:
     per_action_runtime.policy.config.action_dim = 20
-    per_action_runtime.config.gripper_gain = (0.1, 0.05)
+    per_action_runtime.config.gripper_gain = (0.1, 1.5, 2.0)
     normalized = np.zeros((1, 4, 20), dtype=np.float32)
     per_action_runtime._activate_chunk(4, normalized, normalized)
     decoded = normalized.copy()
@@ -674,7 +742,7 @@ def test_steer_action_applies_gain_to_robot_space_grippers_below_threshold(
     result = per_action_runtime.steer_action(4, 10, tactile_observation(1.0), 0)
 
     expected = decoded[0, 0] * 10.0
-    expected[[9, 19]] = (0.03, 0.15)
+    expected[[9, 19]] = (0.12, 0.30)
     np.testing.assert_array_equal(result.selected_normalized, decoded[0, 0])
     np.testing.assert_allclose(result.selected_action, expected, atol=1e-7)
 
@@ -1586,6 +1654,74 @@ def test_parse_frs_config_defaults_and_stores_temporal_ensemble_coeff(
     assert enabled.temporal_ensemble_coeff == pytest.approx(0.1)
 
 
+def test_parse_frs_config_defaults_and_stores_inactive_arm_xyz_threshold(
+    tmp_path: Path,
+) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "tactile_window_divisor": 1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+    }
+
+    disabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+    raw["inactive_arm_xyz_threshold_m"] = 0.00025
+    enabled = frs_runtime_module.parse_frs_config(
+        raw,
+        config_path=tmp_path / "deploy.yaml",
+    )
+
+    assert disabled.inactive_arm_xyz_threshold_m is None
+    assert enabled.inactive_arm_xyz_threshold_m == pytest.approx(0.00025)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, False, 0, -0.1, float("nan"), float("inf"), float("-inf"), "0.1"],
+)
+def test_frs_config_rejects_invalid_inactive_arm_xyz_threshold(
+    tmp_path: Path,
+    value: object,
+) -> None:
+    frs_checkpoint = tmp_path / "frs"
+    encoder_checkpoint = tmp_path / "encoder"
+    frs_checkpoint.mkdir()
+    encoder_checkpoint.mkdir()
+    raw = {
+        "checkpoint": str(frs_checkpoint),
+        "tactile_encoder_checkpoint": str(encoder_checkpoint),
+        "tactile_keys": ["left"],
+        "tactile_window_divisor": 1,
+        "reverse_steps": 1,
+        "reverse_solver": "euler",
+        "decode_steps": 1,
+        "decode_solver": "euler",
+        "inactive_arm_xyz_threshold_m": value,
+    }
+
+    with pytest.raises(ValueError, match="inactive_arm_xyz_threshold_m"):
+        frs_runtime_module.parse_frs_config(raw, config_path=tmp_path / "deploy.yaml")
+    with pytest.raises(ValueError, match="inactive_arm_xyz_threshold_m"):
+        frs_runtime_module.validate_frs_config_section(
+            {
+                "frs": {**raw, "checkpoint": "unused", "tactile_encoder_checkpoint": "unused"},
+                "observation": {"data_type": "vitac"},
+                "control": {"steps_per_inference": 2, "action_horizon": 2},
+            }
+        )
+
+
 def test_parse_frs_config_defaults_and_stores_gripper_gain(
     tmp_path: Path,
 ) -> None:
@@ -1610,7 +1746,8 @@ def test_parse_frs_config_defaults_and_stores_gripper_gain(
     )
     raw["gripper_gain"] = {
         "threshold": 0.1,
-        "gain": 0.05,
+        "multiplier": 1.5,
+        "above_multiplier": 2.0,
     }
     enabled = frs_runtime_module.parse_frs_config(
         raw,
@@ -1618,7 +1755,7 @@ def test_parse_frs_config_defaults_and_stores_gripper_gain(
     )
 
     assert disabled.gripper_gain is None
-    assert enabled.gripper_gain == pytest.approx((0.1, 0.05))
+    assert enabled.gripper_gain == pytest.approx((0.1, 1.5, 2.0))
 
 
 @pytest.mark.parametrize(
@@ -2144,6 +2281,14 @@ def test_frs_contract_allows_deployment_solver_to_differ_from_validation_solver(
     runtime, policy = _contract_runtime()
     runtime.config.decode_solver = "fireflow"
     runtime.metadata["extra_metadata"]["validation_solver"] = "euler"
+
+    runtime._validate_contract(policy, source_sample_steps=10)
+
+
+def test_frs_contract_allows_decode_steps_to_differ_from_validation_steps() -> None:
+    runtime, policy = _contract_runtime()
+    runtime.config.decode_steps = 5
+    runtime.metadata["extra_metadata"]["validation_steps"] = 10
 
     runtime._validate_contract(policy, source_sample_steps=10)
 

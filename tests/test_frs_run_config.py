@@ -6,7 +6,14 @@ import pytest
 import yaml
 
 from train_frs.train_frs import resolve_decode_solver
+from train_frs.train_frs import resolve_optional_loss_weight
 from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
+from train_frs.utils.loss_ablation import (
+    DEFAULT_ABLATION_REPAIR_WEIGHT,
+    LOSS_ABLATION_SWITCHES,
+    build_loss_ablation_runs,
+    write_loss_ablation_configs,
+)
 
 
 def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -> None:
@@ -49,6 +56,53 @@ def test_resolve_decode_solver_accepts_fireflow() -> None:
     assert resolve_decode_solver(None) == "euler"
     with pytest.raises(ValueError, match="decode solver"):
         resolve_decode_solver("slerpflow")
+
+
+def test_resolve_optional_loss_weight_is_the_on_off_switch() -> None:
+    assert resolve_optional_loss_weight(True, 4.0) == 4.0
+    assert resolve_optional_loss_weight(False, 4.0) == 0.0
+    assert resolve_optional_loss_weight(None, 0.5) == 0.5
+    with pytest.raises(ValueError, match="must be >= 0"):
+        resolve_optional_loss_weight(True, -0.1)
+
+
+def test_train_frs_yaml_exposes_optional_loss_switches() -> None:
+    config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
+    training = yaml.safe_load(config_path.read_text(encoding="utf-8"))["frs_training"]
+    assert training["aux_decode"] is True
+    assert training["low_gate_safety"] is True
+    assert training["rank"] is True
+    assert training["repair"] is True
+    assert training["aux_decode_weight"] == 4.0
+    assert training["low_gate_safety_weight"] == 0.5
+    assert training["rank_weight"] == 2.0
+    assert training["repair_weight"] == 0.0
+
+
+def test_loss_ablation_closes_one_switch_and_keeps_the_other_three(tmp_path: Path) -> None:
+    config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
+    base = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    output_root = tmp_path / "checkpoints" / "frs"
+
+    runs = build_loss_ablation_runs(base, output_root=output_root)
+
+    assert [name for name, _config in runs] == [f"no_{name}" for name in LOSS_ABLATION_SWITCHES]
+    for disabled, (_name, config) in zip(LOSS_ABLATION_SWITCHES, runs, strict=True):
+        training = config["frs_training"]
+        for switch in LOSS_ABLATION_SWITCHES:
+            assert training[switch] is (switch != disabled)
+        assert training["output"] == str((output_root / f"no_{disabled}").resolve())
+        if training["repair"]:
+            assert training["repair_weight"] == DEFAULT_ABLATION_REPAIR_WEIGHT
+        else:
+            assert training["repair_weight"] == 0.0
+
+    written = write_loss_ablation_configs(base, output_root=output_root)
+    assert [name for name, _path in written] == [name for name, _config in runs]
+    for name, path in written:
+        assert path.is_file()
+        dumped = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert dumped["frs_training"]["output"].endswith(f"/{name}")
 
 
 def test_save_run_config_writes_effective_yaml(tmp_path: Path) -> None:

@@ -33,6 +33,20 @@ def resolve_decode_solver(value: Any, *, default: DecodeSolver = "euler") -> Dec
     return solver  # type: ignore[return-value]
 
 
+def resolve_optional_loss_weight(enabled: Any, weight: float) -> float:
+    """Return ``weight`` when the term is on, otherwise 0.
+
+    ``enabled is None`` keeps current configs that only set the weight.
+    """
+
+    resolved = float(weight)
+    if resolved < 0:
+        raise ValueError(f"loss weight must be >= 0, got {resolved}.")
+    if enabled is None or bool(enabled):
+        return resolved
+    return 0.0
+
+
 def update_early_stop_state(
     *,
     improved: bool,
@@ -1674,6 +1688,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--aux-decode",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable aux decode MSE. --no-aux-decode turns it off even if the weight is nonzero.",
+    )
+    parser.add_argument(
         "--aux-decode-steps",
         type=int,
         default=None,
@@ -1692,10 +1712,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Weight of the low-gate nearest-endpoint safety hinge.",
     )
     parser.add_argument(
+        "--low-gate-safety",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable the low-gate safety hinge. "
+            "--no-low-gate-safety turns it off even if the weight is nonzero."
+        ),
+    )
+    parser.add_argument(
         "--low-gate-safety-margin",
         type=float,
         default=0.03,
         help="Allowed low-gate MSE to the nearer of GT/VLA before the hinge activates.",
+    )
+    parser.add_argument(
+        "--rank",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the high-gate rank loss. --no-rank turns it off even if the weight is nonzero.",
     )
     parser.add_argument(
         "--rank-weight",
@@ -1708,6 +1743,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Required MSE separation between the preferred and other endpoint.",
+    )
+    parser.add_argument(
+        "--repair",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable the high-gate repair loss. --no-repair turns it off even if the weight is nonzero.",
     )
     parser.add_argument(
         "--repair-weight",
@@ -1877,14 +1918,22 @@ def train_from_cli_args(argv: Sequence[str] | None = None) -> None:
         gate_tau=args.gate_tau,
         gate_temperature=args.gate_temperature,
         gate_lambda=args.gate_lambda,
-        aux_decode_weight=args.aux_decode_weight,
+        aux_decode_weight=resolve_optional_loss_weight(
+            getattr(args, "aux_decode", None), args.aux_decode_weight
+        ),
         aux_decode_steps=(args.validation_steps if args.aux_decode_steps is None else args.aux_decode_steps),
         aux_decode_solver=args.aux_decode_solver,
-        low_gate_safety_weight=args.low_gate_safety_weight,
+        low_gate_safety_weight=resolve_optional_loss_weight(
+            getattr(args, "low_gate_safety", None), args.low_gate_safety_weight
+        ),
         low_gate_safety_margin=args.low_gate_safety_margin,
-        rank_weight=args.rank_weight,
+        rank_weight=resolve_optional_loss_weight(
+            getattr(args, "rank", None), args.rank_weight
+        ),
         rank_margin=args.rank_margin,
-        repair_weight=args.repair_weight,
+        repair_weight=resolve_optional_loss_weight(
+            getattr(args, "repair", None), args.repair_weight
+        ),
         repair_margin=args.repair_margin,
         rank_low_gate_threshold=args.rank_low_gate_threshold,
         rank_high_gate_threshold=args.rank_high_gate_threshold,
@@ -2055,14 +2104,26 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_tau=float(training.get("gate_tau", 0.5)),
         gate_temperature=float(training.get("gate_temperature", 0.1)),
         gate_lambda=float(training.get("gate_lambda", 1.0)),
-        aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
+        aux_decode_weight=resolve_optional_loss_weight(
+            training.get("aux_decode"),
+            float(training.get("aux_decode_weight", 1.0)),
+        ),
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
         aux_decode_solver=resolve_decode_solver(training.get("aux_decode_solver", "euler")),
-        low_gate_safety_weight=float(training.get("low_gate_safety_weight", 0.0)),
+        low_gate_safety_weight=resolve_optional_loss_weight(
+            training.get("low_gate_safety"),
+            float(training.get("low_gate_safety_weight", 0.0)),
+        ),
         low_gate_safety_margin=float(training.get("low_gate_safety_margin", 0.03)),
-        rank_weight=float(training.get("rank_weight", 0.0)),
+        rank_weight=resolve_optional_loss_weight(
+            training.get("rank"),
+            float(training.get("rank_weight", 0.0)),
+        ),
         rank_margin=float(training.get("rank_margin", 0.0)),
-        repair_weight=float(training.get("repair_weight", 0.0)),
+        repair_weight=resolve_optional_loss_weight(
+            training.get("repair"),
+            float(training.get("repair_weight", 0.0)),
+        ),
         repair_margin=float(training.get("repair_margin", 0.0)),
         rank_low_gate_threshold=float(training.get("rank_low_gate_threshold", 0.3)),
         rank_high_gate_threshold=float(training.get("rank_high_gate_threshold", 0.7)),

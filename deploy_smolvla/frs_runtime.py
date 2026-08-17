@@ -77,7 +77,8 @@ class FRSConfig:
     decode_solver: str
     steering_protection_interval_s: float | None
     temporal_ensemble_coeff: float | None
-    gripper_gain: tuple[float, float] | None
+    inactive_arm_xyz_threshold_m: float | None
+    gripper_gain: tuple[float, float, float] | None
     verify_source_checkpoint_fingerprint: bool
     max_normalized_action_abs: float
     max_normalized_delta_rms: float
@@ -126,12 +127,55 @@ def _temporal_ensemble_coefficient(value: Any) -> float | None:
     return coefficient
 
 
-def _gripper_gain_config(value: Any) -> tuple[float, float] | None:
+def _inactive_arm_xyz_threshold(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(
+            "frs.inactive_arm_xyz_threshold_m must be null or a finite positive number"
+        )
+    threshold = float(value)
+    if not math.isfinite(threshold) or threshold <= 0:
+        raise ValueError(
+            "frs.inactive_arm_xyz_threshold_m must be null or a finite positive number"
+        )
+    return threshold
+
+
+def _protect_inactive_arm_xyz(
+    selected_normalized: Any,
+    vla_normalized: Any,
+    vla_action: Any,
+    threshold_m: float,
+) -> np.ndarray:
+    selected = np.asarray(selected_normalized)
+    vla_normalized_array = np.asarray(vla_normalized)
+    vla_action_array = np.asarray(vla_action)
+    expected = (20,)
+    if (
+        selected.shape != expected
+        or vla_normalized_array.shape != expected
+        or vla_action_array.shape != expected
+    ):
+        raise ValueError(
+            "FRS inactive-arm XYZ protection requires a 20-dimensional action"
+        )
+
+    protected = np.array(selected, copy=True)
+    action_threshold = np.asarray(threshold_m, dtype=vla_action_array.dtype)
+    for start in (0, 10):
+        xyz_slice = slice(start, start + 3)
+        if np.max(np.abs(vla_action_array[xyz_slice])) < action_threshold:
+            protected[xyz_slice] = vla_normalized_array[xyz_slice]
+    return protected
+
+
+def _gripper_gain_config(value: Any) -> tuple[float, float, float] | None:
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError("frs.gripper_gain must be null or a mapping")
-    names = ("threshold", "gain")
+    names = ("threshold", "multiplier", "above_multiplier")
     missing = [name for name in names if name not in value]
     if missing:
         raise ValueError(f"Missing frs.gripper_gain config values: {missing}")
@@ -144,10 +188,12 @@ def _gripper_gain_config(value: Any) -> tuple[float, float] | None:
         if not math.isfinite(number):
             raise ValueError(f"frs.gripper_gain.{name} must be a finite number")
         parsed.append(number)
-    threshold, gain = parsed
-    if gain < 0:
-        raise ValueError("frs.gripper_gain.gain must be non-negative")
-    return threshold, gain
+    threshold, multiplier, above_multiplier = parsed
+    if multiplier <= 0:
+        raise ValueError("frs.gripper_gain.multiplier must be positive")
+    if above_multiplier <= 0:
+        raise ValueError("frs.gripper_gain.above_multiplier must be positive")
+    return threshold, multiplier, above_multiplier
 
 
 def _positive_history_stride(raw: Mapping[str, Any]) -> int:
@@ -220,6 +266,9 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     temporal_ensemble_coeff = _temporal_ensemble_coefficient(
         raw.get("temporal_ensemble_coeff")
     )
+    inactive_arm_xyz_threshold_m = _inactive_arm_xyz_threshold(
+        raw.get("inactive_arm_xyz_threshold_m")
+    )
     gripper_gain = _gripper_gain_config(raw.get("gripper_gain"))
     if min(tactile_window_divisor, history_stride, reverse_steps, decode_steps) <= 0:
         raise ValueError(
@@ -250,6 +299,7 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         decode_solver=decode_solver,
         steering_protection_interval_s=steering_protection_interval_s,
         temporal_ensemble_coeff=temporal_ensemble_coeff,
+        inactive_arm_xyz_threshold_m=inactive_arm_xyz_threshold_m,
         gripper_gain=gripper_gain,
         verify_source_checkpoint_fingerprint=bool(raw.get("verify_source_checkpoint_fingerprint", True)),
         max_normalized_action_abs=max_action_abs,
@@ -303,6 +353,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         raise ValueError("frs.decode_solver must be euler or fireflow")
     _steering_protection_interval(raw.get("steering_protection_interval_s"))
     _temporal_ensemble_coefficient(raw.get("temporal_ensemble_coeff"))
+    _inactive_arm_xyz_threshold(raw.get("inactive_arm_xyz_threshold_m"))
     _gripper_gain_config(raw.get("gripper_gain"))
     if config.get("observation", {}).get("data_type") != "vitac":
         raise ValueError("FRS deployment requires observation.data_type='vitac'")
@@ -488,6 +539,13 @@ class FRSSteeringPolicy:
     def _validate_contract(self, policy: Any, *, source_sample_steps: int) -> None:
         decoder = self.model.config
         _require_equal(decoder.action_dim, int(policy.config.action_dim), "action_dim")
+        if (
+            getattr(self.config, "inactive_arm_xyz_threshold_m", None) is not None
+            and int(policy.config.action_dim) != 20
+        ):
+            raise ValueError(
+                "FRS inactive-arm XYZ protection requires a 20-dimensional action"
+            )
         _require_equal(decoder.action_horizon, int(policy.config.chunk_size), "action_horizon")
         _require_equal(
             decoder.num_tactile_tokens,
@@ -521,11 +579,8 @@ class FRSSteeringPolicy:
             bool(getattr(decoder, "state_conditioning", False)),
             "state_conditioning",
         )
-        _require_equal(
-            int(extra.get("validation_steps", 0)),
-            self.config.decode_steps,
-            "decode_steps",
-        )
+        # ``validation_steps`` records the training-time evaluation setup.
+        # Runtime decoding may intentionally use a different step count.
         # ``validation_solver`` records how the training run selected/evaluated
         # this checkpoint. It is provenance, not a runtime decoder constraint.
 
@@ -858,6 +913,7 @@ class FRSSteeringPolicy:
         tactile_hash = self._tactile_payload_hash(observation)
         assert self._episode_baseline is not None
         assert self._action_vla_normalized is not None
+        assert self._action_vla is not None
         assert self._x_base is not None
         assert self._x_base_device is not None
 
@@ -915,6 +971,18 @@ class FRSSteeringPolicy:
             ages = np.arange(len(candidates) - 1, -1, -1)
             weights = np.power(math.exp(-float(ensemble_coeff)), ages)
             selected = np.average(np.stack(candidates), axis=0, weights=weights)
+        inactive_threshold = getattr(
+            self.config,
+            "inactive_arm_xyz_threshold_m",
+            None,
+        )
+        if inactive_threshold is not None:
+            selected = _protect_inactive_arm_xyz(
+                selected,
+                self._action_vla_normalized[0, action_index],
+                self._action_vla[0, action_index],
+                inactive_threshold,
+            )
         selected_normalized = self._immutable_public_array(selected)
         robot_selected = np.asarray(
             self.policy.preprocessor.unnormalize_actions(selected_normalized),
@@ -932,14 +1000,18 @@ class FRSSteeringPolicy:
         if gripper_gain is not None:
             if robot_selected.shape != (20,):
                 raise ValueError("FRS gripper gain requires a 20-dimensional action")
-            threshold, gain = gripper_gain
+            threshold, multiplier, above_multiplier = gripper_gain
             robot_selected = robot_selected.copy()
             gripper_indices = np.asarray((9, 19))
             gripper_widths = robot_selected[gripper_indices]
             robot_selected[gripper_indices] = np.where(
                 gripper_widths < threshold,
-                gripper_widths - gain,
-                gripper_widths,
+                gripper_widths * multiplier,
+                np.where(
+                    gripper_widths > threshold,
+                    gripper_widths * above_multiplier,
+                    gripper_widths,
+                ),
             )
         selected_action = self._immutable_public_array(robot_selected)
 

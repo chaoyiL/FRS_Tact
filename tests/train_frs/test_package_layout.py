@@ -159,3 +159,14 @@ def test_launcher_uses_new_module_paths() -> None:
     assert "python -m train_frs.prepare_frs_caches" in launcher
     assert "python -m train_frs.train_frs" in launcher
     assert "tools/merge_smolvla_peft_to_jax.py" in launcher
+
+
+def test_loss_ablation_launcher_trains_four_leave_one_out_runs() -> None:
+    launcher_path = ROOT / "train_frs" / "scripts" / "start_frs_loss_ablation.sh"
+    launcher = launcher_path.read_text()
+    assert launcher_path.stat().st_mode & stat.S_IXUSR
+    assert "python -m train_frs.utils.loss_ablation" in launcher
+    assert "python -m train_frs.train_frs" in launcher
+    assert "checkpoints/frs" in launcher
+    for name in ("no_aux_decode", "no_low_gate_safety", "no_rank", "no_repair"):
+        assert name in launcher
