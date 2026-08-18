@@ -24,7 +24,7 @@ from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerReque
 from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
 from .policy import Pi05DeploymentConfig, Pi05RemotePolicy
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05_frs.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05.yaml"
 LOGGER = logging.getLogger(__name__)
 
 

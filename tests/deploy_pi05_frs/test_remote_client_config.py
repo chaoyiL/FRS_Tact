@@ -58,3 +58,14 @@ def test_compat_load_config_delegates_to_frs_profile_loader(monkeypatch, tmp_pat
 
     assert remote_client.load_config(config_path) == expected
     assert calls == [(config_path, "frs")]
+
+
+def test_default_config_uses_shared_frs_profile(monkeypatch) -> None:
+    remote_client = _import_remote_client(monkeypatch)
+
+    expected_path = ROOT / "deploy_pi05_frs/configs/deploy_pi05.yaml"
+
+    assert remote_client.DEFAULT_CONFIG == expected_path
+    assert remote_client.DEFAULT_CONFIG.is_file()
+    config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
+    assert config["observation"]["data_type"] == "vitac"
