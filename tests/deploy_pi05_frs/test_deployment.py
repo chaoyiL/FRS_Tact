@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import types
 
@@ -150,6 +151,21 @@ def test_frs_server_config_requires_runtime(tmp_path):
 
     with pytest.raises(ValueError, match="frs_runtime"):
         make_server_config(loaded, mode="frs")
+
+
+def test_default_frs_profile_builds_frs_server_config():
+    path = Path("deploy_pi05_frs/configs/deploy_pi05.yaml")
+    config = load_deployment_config(path, "frs")
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(steering_protection_interval_s=None),
+        tactile_keys=("t0", "t1", "t2", "t3"),
+    )
+
+    server = make_server_config(config, mode="frs", frs_runtime=runtime)
+
+    assert server["data_type"] == "vitac"
+    assert server["execution_protocol"] == "frs_steering_v1"
+    assert server["frs_tactile_keys"] == ["t0", "t1", "t2", "t3"]
 
 
 def test_rejects_horizon_drift_before_model_load(tmp_path):

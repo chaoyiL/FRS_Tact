@@ -7,6 +7,8 @@ import sys
 import types
 from pathlib import Path
 
+from deploy_pi05_frs import deployment
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -69,3 +71,15 @@ def test_default_config_uses_shared_frs_profile(monkeypatch) -> None:
     assert remote_client.DEFAULT_CONFIG.is_file()
     config = remote_client.load_config(remote_client.DEFAULT_CONFIG)
     assert config["observation"]["data_type"] == "vitac"
+
+
+def test_remote_client_uses_shared_deployment_helpers(monkeypatch) -> None:
+    remote_client = _import_remote_client(monkeypatch)
+
+    assert remote_client.ObservationSaver is deployment.ObservationSaver
+    assert remote_client.make_policy_config is deployment.make_policy_config
+    assert remote_client.resolve_token is deployment.resolve_token
+    assert remote_client.optional_bool is deployment.optional_bool
+    assert remote_client.prepare_observation is deployment.prepare_observation
+    assert remote_client.make_server_config is deployment.make_server_config
+    assert remote_client.section is deployment.section

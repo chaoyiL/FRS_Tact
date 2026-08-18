@@ -3,197 +3,37 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
-import os
-import queue
-import threading
 import time
-from collections.abc import Mapping, Sequence
-from datetime import datetime
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import cv2
 import jax
 import numpy as np
 
 from .bridge_client import RobotBridgeClient
-from .deployment import load_deployment_config
+from .deployment import (
+    ObservationSaver,
+    load_deployment_config,
+    make_policy_config,
+    make_server_config,
+    optional_bool,
+    prepare_observation,
+    resolve_token,
+    section,
+)
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
-from .policy import Pi05DeploymentConfig, Pi05RemotePolicy
+from .policy import Pi05RemotePolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05.yaml"
 LOGGER = logging.getLogger(__name__)
 
 
-class ObservationSaver:
-    """Save robot observations on a background thread."""
-
-    def __init__(self, config: Mapping[str, Any], image_keys: Sequence[str]) -> None:
-        self.enabled = bool(config.get("save_observations", False))
-        self.save_every = int(config.get("save_every", 1))
-        queue_size = int(config.get("queue_size", 32))
-        if self.save_every < 1 or queue_size < 1:
-            raise ValueError("logging.save_every and logging.queue_size must be positive")
-        self.image_keys = tuple(image_keys)
-        self.output_dir: Path | None = None
-        if self.enabled:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            root = Path(str(config.get("output_dir", "outputs/pi05_frs_observations")))
-            self.output_dir = root.expanduser().resolve() / timestamp
-            self.output_dir.mkdir(parents=True, exist_ok=False)
-            print(f"[client] Saving observations to {self.output_dir}")
-        self._queue: queue.Queue[tuple[int, int, dict[str, Any]]] = queue.Queue(queue_size)
-        self._thread: threading.Thread | None = None
-        self._running = False
-        self._dropped = 0
-
-    def start(self) -> None:
-        if not self.enabled:
-            return
-        self._running = True
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def submit(self, iteration: int, obs_seq: int, observation: Mapping[str, Any]) -> None:
-        if not self.enabled or iteration % self.save_every:
-            return
-        payload = {
-            key: np.asarray(observation[key]).copy()
-            for key in (*self.image_keys, "observation.state")
-            if key in observation
-        }
-        try:
-            self._queue.put_nowait((iteration, obs_seq, payload))
-        except queue.Full:
-            self._dropped += 1
-
-    def _worker(self) -> None:
-        while self._running or not self._queue.empty():
-            try:
-                item = self._queue.get(timeout=0.2)
-            except queue.Empty:
-                continue
-            try:
-                self._save(*item)
-            except Exception as error:  # Observation logging must not stop the robot loop.
-                LOGGER.warning("Could not save observation: %s", error)
-            finally:
-                self._queue.task_done()
-
-    def _save(self, iteration: int, obs_seq: int, observation: Mapping[str, Any]) -> None:
-        assert self.output_dir is not None
-        step_dir = self.output_dir / f"step_{iteration:06d}"
-        step_dir.mkdir()
-        for key in self.image_keys:
-            if key not in observation:
-                continue
-            image = np.asarray(observation[key])
-            if image.dtype != np.uint8:
-                if np.issubdtype(image.dtype, np.floating) and float(image.max()) <= 1.0:
-                    image = image * 255.0
-                image = np.clip(image, 0, 255).astype(np.uint8)
-            name = key.replace("/", "_").replace(".", "_")
-            cv2.imwrite(str(step_dir / f"{name}.jpg"), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
-        np.save(step_dir / "observation_state.npy", observation["observation.state"])
-        (step_dir / "metadata.json").write_text(
-            json.dumps({"iteration": iteration, "obs_seq": obs_seq}), encoding="utf-8"
-        )
-
-    def close(self) -> None:
-        if not self.enabled:
-            return
-        self._running = False
-        if self._thread is not None:
-            self._thread.join(timeout=10.0)
-        print(f"[client] Observation saver stopped; dropped={self._dropped}")
-
-
-def _section(config: Mapping[str, Any], name: str) -> dict[str, Any]:
-    value = config.get(name)
-    if not isinstance(value, dict):
-        raise ValueError(f"Missing YAML section: {name}")
-    return value
-
-
-def _required(mapping: Mapping[str, Any], key: str, where: str) -> Any:
-    if key not in mapping:
-        raise ValueError(f"Missing config value {where}.{key}")
-    return mapping[key]
-
-
 def load_config(path: Path) -> dict[str, Any]:
     """Load the FRS profile from the shared deployment configuration."""
     return load_deployment_config(path, "frs")
-
-
-def _resolve_local(value: str, config_path: Path) -> str:
-    if "://" in value:
-        return value
-    path = Path(value).expanduser()
-    if path.is_absolute():
-        return str(path)
-    candidate = (config_path.parent / path).resolve()
-    return str(candidate) if candidate.exists() else value
-
-
-def _policy_config(config: Mapping[str, Any], config_path: Path) -> Pi05DeploymentConfig:
-    model = _section(config, "model")
-    stats = _section(config, "norm_stats")
-    camera_map = model["camera_map"]
-    if not isinstance(camera_map, dict):
-        raise ValueError("model.camera_map must be a mapping")
-    empty = model.get("empty_cameras", []) or []
-    if not isinstance(empty, list):
-        raise ValueError("model.empty_cameras must be a list")
-    return Pi05DeploymentConfig(
-        checkpoint=_resolve_local(str(config["checkpoint"]), config_path),
-        assets_dir=_resolve_local(str(stats["dir"]), config_path),
-        asset_id=str(stats["asset_id"]),
-        camera_map={str(key): str(value) for key, value in camera_map.items()},
-        empty_cameras=tuple(str(value) for value in empty),
-        state_dim=int(model["state_dim"]),
-        robot_action_dim=int(model["robot_action_dim"]),
-        action_dim=int(model["action_dim"]),
-        action_horizon=int(model["action_horizon"]),
-        paligemma_variant=str(model.get("paligemma_variant", "gemma_2b_lora")),
-        action_expert_variant=str(model.get("action_expert_variant", "gemma_300m_lora")),
-        use_quantile_norm=bool(stats["use_quantile_norm"]),
-    )
-
-
-def _resolve_token(connection: Mapping[str, Any]) -> str | None:
-    env_name = str(connection.get("token_env", "")).strip()
-    env_token = os.environ.get(env_name) if env_name else None
-    config_token = str(connection.get("token") or "").strip() or None
-    token = env_token or config_token
-    if bool(connection.get("require_token", False)) and not token:
-        raise ValueError(f"authentication token is missing; set env {env_name} or connection.token")
-    return token
-
-
-def _optional_bool(value: Any) -> bool | None:
-    return None if value is None else bool(value)
-
-
-def _prepare_observation(
-    observation: Mapping[str, Any], *, state_dim: int, image_keys: Sequence[str]
-) -> dict[str, Any]:
-    missing = [key for key in (*image_keys, "observation.state") if key not in observation]
-    if missing:
-        raise ValueError(f"robot observation is missing keys: {missing}")
-    state = np.asarray(observation["observation.state"], dtype=np.float32)
-    if state.shape != (state_dim,) or not np.isfinite(state).all():
-        raise ValueError(f"robot state must be finite with shape ({state_dim},), got {state.shape}")
-    prepared: dict[str, Any] = {"observation.state": state.copy()}
-    for key in image_keys:
-        image = np.asarray(observation[key])
-        if image.ndim != 3 or image.shape[-1] != 3:
-            raise ValueError(f"{key} must be HWC RGB, got {image.shape}")
-        prepared[key] = image.copy()
-    return prepared
 
 
 def _immutable(value: Any) -> np.ndarray:
@@ -274,7 +114,7 @@ def _run_frs(
         if previous_chunk_id is not None and start.chunk_id <= previous_chunk_id:
             raise RuntimeError("FRS chunk ids must be strictly increasing")
         saver.submit(completed + 1, start.obs_seq, start.observation)
-        observation = _prepare_observation(
+        observation = prepare_observation(
             start.observation, state_dim=frs.policy.config.state_dim, image_keys=image_keys
         )
         ready = frs.begin_chunk(
@@ -295,7 +135,7 @@ def _run_frs(
                 raise RuntimeError(f"expected FRSSteerRequest, got {type(message).__name__}")
             if message.chunk_id != start.chunk_id:
                 raise RuntimeError("FRSSteerRequest does not match the active chunk")
-            frame = _prepare_observation(
+            frame = prepare_observation(
                 message.observation,
                 state_dim=frs.policy.config.state_dim,
                 image_keys=image_keys,
@@ -325,11 +165,10 @@ def _run_frs(
 def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     config_path = config_path.expanduser().resolve()
     config = load_config(config_path)
-    policy_config = _policy_config(config, config_path)
-    connection = _section(config, "connection")
-    observation_config = _section(config, "observation")
-    control = _section(config, "control")
-    runtime = _section(config, "runtime")
+    policy_config = make_policy_config(config, config_path)
+    connection = section(config, "connection")
+    observation_config = section(config, "observation")
+    runtime = section(config, "runtime")
     seed = int(config.get("seed", 0))
     sample_steps = int(config.get("num_steps", 10))
     if sample_steps <= 0:
@@ -339,7 +178,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     policy = Pi05RemotePolicy(policy_config)
     print(f"[client] JAX backend: {jax.default_backend()}")
     frs = FRSRuntime(
-        _section(config, "frs"),
+        section(config, "frs"),
         config_path=config_path,
         policy=policy,
         source_sample_steps=sample_steps,
@@ -352,24 +191,12 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         f"RGB={list(policy.robot_image_keys)}, empty={list(policy_config.empty_cameras)}, "
         f"tactile={list(frs.tactile_keys)}"
     )
-    server_config = {
-        "data_type": observation_config["data_type"],
-        "language_prompt": observation_config["language_prompt"],
-        "control_frequency": float(control["control_frequency"]),
-        "controller_frequency": float(control["controller_frequency"]),
-        "single_arm_mode": bool(observation_config["single_arm_mode"]),
-        "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
-        "steps_per_inference": int(control["steps_per_inference"]),
-        "action_horizon": int(control["action_horizon"]),
-        "execution_protocol": "frs_steering_v1",
-        "steering_protection_interval_s": frs.config.steering_protection_interval_s,
-        "frs_tactile_keys": list(frs.tactile_keys),
-    }
+    server_config = make_server_config(config, mode="frs", frs_runtime=frs)
     bridge = RobotBridgeClient(
         address=str(connection["address"]),
         port=int(connection["port"]),
-        token=_resolve_token(connection),
-        add_port=_optional_bool(connection.get("add_port")),
+        token=resolve_token(connection),
+        add_port=optional_bool(connection.get("add_port")),
         retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
         ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
         ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
@@ -391,7 +218,9 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     try:
         print("[client] Waiting for robot warmup observation")
         obs_seq, raw = bridge.receive_observation(timeout=timeout)
-        warmup = _prepare_observation(raw, state_dim=policy_config.state_dim, image_keys=image_keys)
+        warmup = prepare_observation(
+            raw, state_dim=policy_config.state_dim, image_keys=image_keys
+        )
         frs.reset_episode(warmup)
         for index in range(warmup_runs):
             started = time.perf_counter()
