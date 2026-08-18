@@ -13,6 +13,7 @@ import numpy as np
 from .bridge_client import RobotBridgeClient
 from .deployment import (
     ObservationSaver,
+    cleanup_deployment_resources,
     load_deployment_config,
     make_policy_config,
     make_server_config,
@@ -20,6 +21,8 @@ from .deployment import (
     prepare_observation,
     resolve_token,
     section,
+    start_observation_saver,
+    submit_observation,
 )
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05.yaml"
@@ -64,7 +67,7 @@ def run_legacy_loop(
     seed: int,
     sample_steps: int,
     max_iterations: int,
-    saver: ObservationSaver,
+    saver: ObservationSaver | None,
 ) -> None:
     """Process legacy chunks serially: observation, full action, then its ACK."""
     completed = 0
@@ -75,7 +78,7 @@ def run_legacy_loop(
             state_dim=policy.config.state_dim,
             image_keys=image_keys,
         )
-        saver.submit(completed + 1, obs_seq, raw_observation)
+        submit_observation(saver, completed + 1, obs_seq, raw_observation, logger=LOGGER)
         action = predict_robot_action_chunk(
             policy, observation, task, seed=seed, num_steps=sample_steps
         )
@@ -107,20 +110,25 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     policy = _make_policy(policy_config)
     image_keys = tuple(policy.robot_image_keys)
     server_config = make_server_config(config, mode="pi05")
-    saver = ObservationSaver(config.get("logging", {}) or {}, image_keys)
     bridge: RobotBridgeClient | None = None
+    saver: ObservationSaver | None = None
     try:
         bridge = RobotBridgeClient(
             address=str(connection["address"]),
             port=int(connection["port"]),
             token=resolve_token(connection),
-            add_port=optional_bool(connection.get("add_port")),
+            add_port=optional_bool(connection.get("add_port"), "connection.add_port"),
             retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
             ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
             ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
         )
         bridge.send_config(server_config)
-        saver.start()
+        saver = start_observation_saver(
+            config.get("logging", {}) or {},
+            image_keys,
+            saver_factory=ObservationSaver,
+            logger=LOGGER,
+        )
         timeout = float(connection.get("observation_timeout_s", 30.0))
         ack_timeout = float(connection["action_ack_timeout_s"])
         task = str(observation_config["language_prompt"])
@@ -142,7 +150,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
                 num_steps=sample_steps,
             )
         print(f"[client] Warmup observation sequence: {obs_seq}")
-        if not bool(runtime.get("auto_start", False)):
+        if runtime.get("auto_start", False) is False:
             input("[client] Ready. Press Enter to send START to the robot server... ")
         bridge.send_state("start")
         run_legacy_loop(
@@ -160,14 +168,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     except KeyboardInterrupt:
         print("[client] Interrupted")
     finally:
-        saver.close()
-        if bridge is not None:
-            try:
-                bridge.send_state("stop")
-            except Exception as error:
-                LOGGER.warning("Could not send STOP: %s", error)
-            finally:
-                bridge.close()
+        cleanup_deployment_resources(bridge, saver, logger=LOGGER)
         print("[client] Stopped")
 
 

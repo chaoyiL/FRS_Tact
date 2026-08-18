@@ -7,35 +7,19 @@ import numpy as np
 import pytest
 import yaml
 
-import deploy_pi05_frs.deployment as deployment
 from deploy_pi05_frs.deployment import (
     load_deployment_config,
     make_policy_config,
     make_server_config,
+    optional_bool,
     prepare_observation,
 )
 
 
 @pytest.fixture(autouse=True)
-def _isolate_frs_validation(monkeypatch):
-    """Keep config tests runnable without importing the JAX/FRS runtime on Python 3.11."""
+def _isolate_policy_import(monkeypatch):
+    """Keep policy-config tests independent from the optional model stack."""
 
-    def validate(config):
-        required = {
-            "checkpoint",
-            "tactile_encoder_checkpoint",
-            "tactile_keys",
-            "tactile_window_divisor",
-            "reverse_steps",
-            "reverse_solver",
-            "decode_steps",
-            "decode_solver",
-        }
-        missing = sorted(required - set(config["frs"]))
-        if missing:
-            raise ValueError(f"missing FRS config values: {missing}")
-
-    monkeypatch.setattr(deployment, "_validate_frs_config_section", validate)
     policy_module = types.ModuleType("deploy_pi05_frs.policy")
 
     class FakePi05DeploymentConfig:
@@ -221,6 +205,48 @@ def test_rejects_non_integral_or_boolean_control_values(tmp_path, section_name, 
     config[section_name][key] = value
 
     with pytest.raises(ValueError, match=f"{section_name}.{key} must be an integer"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
+@pytest.mark.parametrize(
+    ("section_name", "key", "value"),
+    [
+        ("runtime", "auto_start", "false"),
+        ("runtime", "auto_start", 1),
+        ("norm_stats", "use_quantile_norm", "true"),
+        ("norm_stats", "use_quantile_norm", 1),
+        ("observation", "single_arm_mode", "false"),
+        ("observation", "no_state_obs_mode", 0),
+        ("connection", "add_port", "false"),
+        ("connection", "add_port", 1),
+        ("connection", "require_token", "true"),
+        ("logging", "save_observations", "false"),
+    ],
+)
+def test_rejects_pseudo_boolean_config_values(
+    tmp_path, section_name, key, value
+):
+    config = _config()
+    config[section_name][key] = value
+
+    with pytest.raises(ValueError, match=rf"{section_name}\.{key} must be a boolean"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
+def test_optional_add_port_preserves_none(tmp_path):
+    config = _config()
+    config["connection"]["add_port"] = None
+
+    loaded = load_deployment_config(_write(tmp_path, config), "pi05")
+
+    assert optional_bool(loaded["connection"]["add_port"]) is None
+
+
+def test_rejects_boolean_frequency(tmp_path):
+    config = _config()
+    config["control"]["control_frequency"] = True
+
+    with pytest.raises(ValueError, match=r"control\.control_frequency must be a number"):
         load_deployment_config(_write(tmp_path, config), "pi05")
 
 

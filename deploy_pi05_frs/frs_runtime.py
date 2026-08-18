@@ -24,6 +24,7 @@ from train_pi05_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoi
 from train_pi05_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
 from train_pi05_frs.utils.model import DECODER_INPUT_VERSION, decode_actions
 
+from .frs_config import validate_frs_config_section
 from .policy import Pi05RemotePolicy
 
 
@@ -182,36 +183,6 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         verify_source_checkpoint_fingerprint=bool(raw.get("verify_source_checkpoint_fingerprint", False)),
         max_normalized_action_abs=max_abs,
         max_normalized_delta_rms=max_delta,
-    )
-
-
-def validate_frs_config_section(config: Mapping[str, Any]) -> None:
-    raw = config.get("frs")
-    if not isinstance(raw, Mapping):
-        raise ValueError("frs must be a mapping")
-    if raw.get("enabled", True) is False:
-        raise ValueError("deploy_pi05_frs requires frs.enabled=true")
-    required = (
-        "checkpoint",
-        "tactile_encoder_checkpoint",
-        "tactile_keys",
-        "tactile_window_divisor",
-        "reverse_steps",
-        "reverse_solver",
-        "decode_steps",
-        "decode_solver",
-    )
-    missing = [key for key in required if key not in raw]
-    if missing:
-        raise ValueError(f"missing FRS config values: {missing}")
-    if config.get("observation", {}).get("data_type") != "vitac":
-        raise ValueError("FRS deployment requires observation.data_type='vitac'")
-    control = config.get("control", {})
-    if int(control.get("steps_per_inference", 0)) != int(control.get("action_horizon", -1)):
-        raise ValueError("FRS deployment requires steps_per_inference == action_horizon")
-    resolve_tactile_window(
-        action_horizon=int(control["action_horizon"]),
-        window_divisor=int(raw["tactile_window_divisor"]),
     )
 
 

@@ -137,9 +137,16 @@ class RobotBridgeClient:
         self.ping_timeout_s = ping_timeout_s
         self._packer = _Packer()
         self._websocket = self._connect()
-        hello = self._receive(timeout=10.0)
-        if hello.get("type") != "hello" or hello.get("protocol") != "robot-bridge-v1":
-            raise RuntimeError(f"Unexpected robot bridge greeting: {hello}")
+        try:
+            hello = self._receive(timeout=10.0)
+            if hello.get("type") != "hello" or hello.get("protocol") != "robot-bridge-v1":
+                raise RuntimeError(f"Unexpected robot bridge greeting: {hello}")
+        except BaseException:
+            try:
+                self._websocket.close()
+            except Exception:
+                pass
+            raise
 
     def _connect(self) -> ClientConnection:
         headers = None if not self.token else {"Authorization": f"Bearer {self.token}"}

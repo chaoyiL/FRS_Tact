@@ -46,16 +46,18 @@ SmolVLA 相关的代码、配置、部署客户端和分析脚本都已从这个
 `VB3_TOKEN_FILE`（默认 `/home/typhon/vb3_robot_server/token_list.txt`）；不要把 token
 写进配置、日志或版本库。
 
-必须先启动 robot server，再在另一终端启动**一个**客户端模式。server launcher 会前台运行：
+`bimanual_smolvla.sh --dry-run` 只实现 legacy `obs` / `action` / `action_ack`
+链路，因此只能验证普通 pi0.5；它不支持 `frs_steering_v1`，不能用于验证 FRS 客户端。
+普通 pi0.5 的无硬件 smoke test 使用两个终端，server launcher 会前台运行：
 
-Terminal A（每次启动或重启 vb3 server）：
+Terminal A（legacy-only dry-run server）：
 
 ```bash
 cd /home/typhon/vb3_robot_server
 bash scripts/bimanual_smolvla.sh --dry-run
 ```
 
-Terminal B（只选其中一个模式）：
+Terminal B（普通 pi0.5 client）：
 
 ```bash
 cd /home/typhon/FRS_Tact-pi05-frs-jax
@@ -66,20 +68,21 @@ bash deploy_pi05_frs/scripts/start_pi05.sh --check
 bash deploy_pi05_frs/scripts/start_pi05.sh --max-iterations 2
 ```
 
+`--check` 只显示 mode、配置、token 来源、Python 和 entrypoint，不会加载模型或连接机器人；
+普通模式的 `--max-iterations 2` 按 action chunk 限制轮次。
+
+FRS 没有由上述 launcher 提供的无硬件 server dry-run。运行 FRS 时，只能使用已经确认支持
+`frs_steering_v1` 的真实 `vb3_robot_server` 流程；本仓库不提供或猜测额外的 server flag。
+可先安全检查客户端配置，再在 server 已就绪的另一个终端启动有限轮次 FRS client：
+
 ```bash
-# 或 pi0.5 + FRS（不要与普通模式同时运行）
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --check
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --max-iterations 2
 ```
 
-若要测试另一种模式，先停止 Terminal A 中的 server，再重新启动 server，然后在 Terminal B
-只运行另一种模式的命令。
-
-`--check` 只显示 mode、配置、token 来源、Python 和 entrypoint，不会加载模型或连接机器人；
-`--max-iterations 2` 是有限轮次 smoke test（普通模式按 action chunk，FRS 按 FRS chunk）。
-真机前先确认 server dry-run、共享模型资产路径和有限轮次的 server action trace。任何真机运行
-都必须有人全程看护，并保证急停可立即使用；断线或观测/action 异常后应停止并重新启动客户端，
-本部署不做自动重连。
+FRS 和其他任何真机运行都必须由受训人员全程监护，并保证急停可立即使用；发送 START 前要确认
+server 已协商 `frs_steering_v1`。断线或观测/action 异常后应停止并重新启动客户端，本部署不做
+自动重连。
 
 ## 为什么不直接安装 openpi
 

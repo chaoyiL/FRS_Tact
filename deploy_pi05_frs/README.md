@@ -27,20 +27,21 @@ parsing, token resolution, Python selection, and Python module launch to
 for either mode; the FRS wrapper also accepts the legacy
 `PI05_FRS_DEPLOY_CONFIG` as a lower-priority compatibility override.
 
-## Startup order and smoke checks
+## Plain pi0.5 legacy dry-run
 
-Start the robot server before one client mode. The server launcher stays in the
-foreground, so use two terminals and do not start both client modes against
-the same server instance.
+`bimanual_smolvla.sh --dry-run` implements only the legacy
+`obs`/`action`/`action_ack` exchange. It can validate the plain pi0.5 client,
+but it does not implement `frs_steering_v1` and cannot validate the FRS client.
+Use two terminals for the plain, hardware-free smoke test.
 
-Terminal A (each time you start or restart `vb3_robot_server`):
+Terminal A (legacy-only dry-run server):
 
 ```bash
 cd /home/typhon/vb3_robot_server
 bash scripts/bimanual_smolvla.sh --dry-run
 ```
 
-Terminal B (choose exactly one mode):
+Terminal B (plain pi0.5 client):
 
 ```bash
 cd /home/typhon/FRS_Tact-pi05-frs-jax
@@ -51,27 +52,31 @@ bash deploy_pi05_frs/scripts/start_pi05.sh --check
 bash deploy_pi05_frs/scripts/start_pi05.sh --max-iterations 2
 ```
 
+`VB_ROBOT_TOKEN` is preferred and must not be committed or printed. If it is
+unset, the common launcher reads `VB3_TOKEN_FILE` (default:
+`/home/typhon/vb3_robot_server/token_list.txt`). `--check` prints only token
+provenance, never the token itself. In this dry-run flow, `--max-iterations 2`
+limits plain mode by action chunk.
+
+## FRS real-server flow
+
+The launcher above provides no hardware-free FRS server dry-run. Run the FRS
+client only against a real `vb3_robot_server` flow already verified to support
+`frs_steering_v1`; this repository does not prescribe or invent an additional
+server flag. You may inspect the client configuration without connecting, then
+start a bounded FRS run after that server is ready:
+
 ```bash
-# Or pi0.5 + FRS; do not run this concurrently with plain pi0.5.
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --check
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --max-iterations 2
 ```
 
-To test the other mode, first stop the server in Terminal A, restart it there,
-then run only the other mode's commands in Terminal B.
-
-`VB_ROBOT_TOKEN` is preferred and must not be committed or printed. If it is
-unset, the common launcher reads `VB3_TOKEN_FILE` (default:
-`/home/typhon/vb3_robot_server/token_list.txt`). `--check` prints only token
-provenance, never the token itself. `--max-iterations 2` is a bounded smoke
-run: it limits plain mode by action chunk and FRS mode by FRS chunk.
-
 ## Hardware safety
 
-Do not treat a successful `--check` as a robot validation. Before moving to
-real hardware, verify the server dry run, use the bounded client run, confirm
-the configured checkpoint and norm-stats paths, and inspect the server's
-action trace. A trained operator must supervise every hardware run with a
-working emergency stop immediately available. Stop and restart the client
-after any disconnect or unexpected observation/action error; this deployment
-does not automatically reconnect.
+Do not treat a successful `--check` or the plain legacy dry-run as FRS robot
+validation. Before START, confirm that the real server negotiated
+`frs_steering_v1`, confirm the configured checkpoint and norm-stats paths, and
+use a bounded client run. A trained operator must supervise every hardware run
+with a working emergency stop immediately available. Stop and restart the
+client after any disconnect or unexpected observation/action error; this
+deployment does not automatically reconnect.

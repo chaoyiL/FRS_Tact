@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 import yaml
 
+from .frs_config import validate_frs_config_section
+
 if TYPE_CHECKING:
     from .policy import Pi05DeploymentConfig
 
@@ -60,9 +62,7 @@ def _mode_data_type(mode: str) -> str:
 
 
 def _validate_frs_config_section(config: Mapping[str, Any]) -> None:
-    """Import the FRS-only validator only when an FRS profile is selected."""
-    from .frs_runtime import validate_frs_config_section
-
+    """Compatibility hook around the dependency-light FRS validator."""
     validate_frs_config_section(config)
 
 
@@ -73,6 +73,8 @@ def _as_int(value: Any, name: str) -> int:
 
 
 def _as_float(value: Any, name: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a number")
     try:
         parsed = float(value)
     except (TypeError, ValueError) as error:
@@ -80,6 +82,12 @@ def _as_float(value: Any, name: str) -> float:
     if not np.isfinite(parsed):
         raise ValueError(f"{name} must be finite")
     return parsed
+
+
+def _as_bool(value: Any, name: str) -> bool:
+    if type(value) is not bool:
+        raise ValueError(f"{name} must be a boolean")
+    return value
 
 
 def validate_common_config(config: Mapping[str, Any]) -> None:
@@ -90,6 +98,9 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     observation = section(config, "observation")
     control = section(config, "control")
     runtime = section(config, "runtime")
+    logging_config = config.get("logging", {}) or {}
+    if not isinstance(logging_config, Mapping):
+        raise ValueError("Missing YAML section: logging")
     required(config, "checkpoint", "root")
 
     for key in (
@@ -110,8 +121,22 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     for key in ("control_frequency", "controller_frequency", "action_horizon", "steps_per_inference"):
         required(control, key, "control")
 
-    if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
+    _as_bool(norm_stats["use_quantile_norm"], "norm_stats.use_quantile_norm")
+    single_arm_mode = _as_bool(
+        observation["single_arm_mode"], "observation.single_arm_mode"
+    )
+    no_state_obs_mode = _as_bool(
+        observation["no_state_obs_mode"], "observation.no_state_obs_mode"
+    )
+    if single_arm_mode or no_state_obs_mode:
         raise ValueError("pi0.5 pick_tube requires bimanual state observations")
+    _as_bool(runtime.get("auto_start", False), "runtime.auto_start")
+    if "add_port" in connection and connection["add_port"] is not None:
+        _as_bool(connection["add_port"], "connection.add_port")
+    if "require_token" in connection:
+        _as_bool(connection["require_token"], "connection.require_token")
+    if "save_observations" in logging_config:
+        _as_bool(logging_config["save_observations"], "logging.save_observations")
 
     for key, expected in _MODEL_CONTRACT.items():
         if _as_int(model[key], f"model.{key}") != expected:
@@ -134,8 +159,25 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
         raise ValueError("control frequencies must be positive")
     if _as_int(runtime.get("warmup_runs", 1), "runtime.warmup_runs") < 1:
         raise ValueError("runtime.warmup_runs must be at least 1")
+    if _as_int(runtime.get("max_iterations", 0), "runtime.max_iterations") < 0:
+        raise ValueError("runtime.max_iterations must be non-negative")
     if _as_float(connection["action_ack_timeout_s"], "connection.action_ack_timeout_s") <= 0:
         raise ValueError("connection.action_ack_timeout_s must be positive")
+    _as_int(connection["port"], "connection.port")
+    for key, default in (
+        ("retry_interval_s", 1.0),
+        ("ping_interval_s", 20.0),
+        ("ping_timeout_s", 20.0),
+        ("observation_timeout_s", 30.0),
+    ):
+        _as_float(connection.get(key, default), f"connection.{key}")
+    _as_int(config.get("seed", 0), "root.seed")
+    if _as_int(config.get("num_steps", 10), "root.num_steps") <= 0:
+        raise ValueError("root.num_steps must be positive")
+    if _as_int(logging_config.get("save_every", 1), "logging.save_every") < 1:
+        raise ValueError("logging.save_every must be positive")
+    if _as_int(logging_config.get("queue_size", 32), "logging.queue_size") < 1:
+        raise ValueError("logging.queue_size must be positive")
 
 
 def load_deployment_config(path: Path, mode: DeploymentMode) -> dict[str, Any]:
@@ -201,7 +243,7 @@ def make_policy_config(config: Mapping[str, Any], config_path: Path) -> Pi05Depl
         action_horizon=_as_int(model["action_horizon"], "model.action_horizon"),
         paligemma_variant=str(model.get("paligemma_variant", "gemma_2b_lora")),
         action_expert_variant=str(model.get("action_expert_variant", "gemma_300m_lora")),
-        use_quantile_norm=bool(stats["use_quantile_norm"]),
+        use_quantile_norm=_as_bool(stats["use_quantile_norm"], "norm_stats.use_quantile_norm"),
     )
 
 
@@ -211,14 +253,14 @@ def resolve_token(connection: Mapping[str, Any]) -> str | None:
     env_token = os.environ.get(env_name) if env_name else None
     config_token = str(connection.get("token") or "").strip() or None
     token = env_token or config_token
-    if bool(connection.get("require_token", False)) and not token:
+    if _as_bool(connection.get("require_token", False), "connection.require_token") and not token:
         raise ValueError(f"authentication token is missing; set env {env_name} or connection.token")
     return token
 
 
-def optional_bool(value: Any) -> bool | None:
+def optional_bool(value: Any, name: str = "value") -> bool | None:
     """Preserve an omitted optional boolean while normalizing present values."""
-    return None if value is None else bool(value)
+    return None if value is None else _as_bool(value, name)
 
 
 def prepare_observation(
@@ -252,12 +294,22 @@ def make_server_config(
     result = {
         "data_type": observation["data_type"],
         "language_prompt": observation["language_prompt"],
-        "control_frequency": float(control["control_frequency"]),
-        "controller_frequency": float(control["controller_frequency"]),
-        "single_arm_mode": bool(observation["single_arm_mode"]),
-        "no_state_obs_mode": bool(observation["no_state_obs_mode"]),
-        "steps_per_inference": int(control["steps_per_inference"]),
-        "action_horizon": int(control["action_horizon"]),
+        "control_frequency": _as_float(
+            control["control_frequency"], "control.control_frequency"
+        ),
+        "controller_frequency": _as_float(
+            control["controller_frequency"], "control.controller_frequency"
+        ),
+        "single_arm_mode": _as_bool(
+            observation["single_arm_mode"], "observation.single_arm_mode"
+        ),
+        "no_state_obs_mode": _as_bool(
+            observation["no_state_obs_mode"], "observation.no_state_obs_mode"
+        ),
+        "steps_per_inference": _as_int(
+            control["steps_per_inference"], "control.steps_per_inference"
+        ),
+        "action_horizon": _as_int(control["action_horizon"], "control.action_horizon"),
     }
     if mode == "frs":
         if frs_runtime is None:
@@ -274,9 +326,11 @@ class ObservationSaver:
     """Save robot observations on a bounded background queue."""
 
     def __init__(self, config: Mapping[str, Any], image_keys: Sequence[str]) -> None:
-        self.enabled = bool(config.get("save_observations", False))
-        self.save_every = int(config.get("save_every", 1))
-        queue_size = int(config.get("queue_size", 32))
+        self.enabled = _as_bool(
+            config.get("save_observations", False), "logging.save_observations"
+        )
+        self.save_every = _as_int(config.get("save_every", 1), "logging.save_every")
+        queue_size = _as_int(config.get("queue_size", 32), "logging.queue_size")
         if self.save_every < 1 or queue_size < 1:
             raise ValueError("logging.save_every and logging.queue_size must be positive")
         self.image_keys = tuple(image_keys)
@@ -353,3 +407,67 @@ class ObservationSaver:
         if self._thread is not None:
             self._thread.join(timeout=10.0)
         print(f"[client] Observation saver stopped; dropped={self._dropped}")
+
+
+def start_observation_saver(
+    config: Mapping[str, Any],
+    image_keys: Sequence[str],
+    *,
+    saver_factory: Any = ObservationSaver,
+    logger: logging.Logger = LOGGER,
+) -> ObservationSaver | None:
+    """Construct and start optional observation logging without blocking control."""
+    saver: ObservationSaver | None = None
+    try:
+        saver = saver_factory(config, image_keys)
+        saver.start()
+        return saver
+    except Exception as error:
+        logger.warning("Could not start observation saver: %s", error)
+        if saver is not None:
+            try:
+                saver.close()
+            except Exception as close_error:
+                logger.warning("Could not close failed observation saver: %s", close_error)
+        return None
+
+
+def submit_observation(
+    saver: ObservationSaver | None,
+    iteration: int,
+    obs_seq: int,
+    observation: Mapping[str, Any],
+    *,
+    logger: logging.Logger = LOGGER,
+) -> None:
+    """Submit one observation without allowing logging failures into control."""
+    if saver is None:
+        return
+    try:
+        saver.submit(iteration, obs_seq, observation)
+    except Exception as error:
+        logger.warning("Could not queue observation for saving: %s", error)
+
+
+def cleanup_deployment_resources(
+    bridge: Any | None,
+    saver: ObservationSaver | None,
+    *,
+    logger: logging.Logger = LOGGER,
+) -> None:
+    """Best-effort STOP, saver drain, and socket close in safety order."""
+    if bridge is not None:
+        try:
+            bridge.send_state("stop")
+        except Exception as error:
+            logger.warning("Could not send STOP: %s", error)
+    if saver is not None:
+        try:
+            saver.close()
+        except Exception as error:
+            logger.warning("Could not close observation saver: %s", error)
+    if bridge is not None:
+        try:
+            bridge.close()
+        except Exception as error:
+            logger.warning("Could not close robot bridge: %s", error)

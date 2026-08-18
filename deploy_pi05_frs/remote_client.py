@@ -15,6 +15,7 @@ import numpy as np
 from .bridge_client import RobotBridgeClient
 from .deployment import (
     ObservationSaver,
+    cleanup_deployment_resources,
     load_deployment_config,
     make_policy_config,
     make_server_config,
@@ -22,6 +23,8 @@ from .deployment import (
     prepare_observation,
     resolve_token,
     section,
+    start_observation_saver,
+    submit_observation,
 )
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
@@ -99,7 +102,7 @@ def _run_frs(
     seed: int,
     sample_steps: int,
     max_chunks: int,
-    saver: ObservationSaver,
+    saver: ObservationSaver | None,
 ) -> None:
     completed = 0
     previous_chunk_id: int | None = None
@@ -113,7 +116,13 @@ def _run_frs(
             raise RuntimeError("server and pi0.5 action horizons do not match")
         if previous_chunk_id is not None and start.chunk_id <= previous_chunk_id:
             raise RuntimeError("FRS chunk ids must be strictly increasing")
-        saver.submit(completed + 1, start.obs_seq, start.observation)
+        submit_observation(
+            saver,
+            completed + 1,
+            start.obs_seq,
+            start.observation,
+            logger=LOGGER,
+        )
         observation = prepare_observation(
             start.observation, state_dim=frs.policy.config.state_dim, image_keys=image_keys
         )
@@ -165,7 +174,6 @@ def _run_frs(
 def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     config_path = config_path.expanduser().resolve()
     config = load_config(config_path)
-    policy_config = make_policy_config(config, config_path)
     connection = section(config, "connection")
     observation_config = section(config, "observation")
     runtime = section(config, "runtime")
@@ -173,7 +181,19 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     sample_steps = int(config.get("num_steps", 10))
     if sample_steps <= 0:
         raise ValueError("num_steps must be positive")
+    max_chunks = (
+        int(runtime.get("max_iterations", 0))
+        if max_iterations_override is None
+        else int(max_iterations_override)
+    )
+    if max_chunks < 0:
+        raise ValueError("max_iterations must be non-negative")
+    timeout = float(connection.get("observation_timeout_s", 30.0))
+    ack_timeout = float(connection["action_ack_timeout_s"])
+    task = str(observation_config["language_prompt"])
+    warmup_runs = int(runtime.get("warmup_runs", 1))
 
+    policy_config = make_policy_config(config, config_path)
     print(f"[client] Loading pi0.5 checkpoint: {policy_config.checkpoint}")
     policy = Pi05RemotePolicy(policy_config)
     print(f"[client] JAX backend: {jax.default_backend()}")
@@ -192,30 +212,25 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         f"tactile={list(frs.tactile_keys)}"
     )
     server_config = make_server_config(config, mode="frs", frs_runtime=frs)
-    bridge = RobotBridgeClient(
-        address=str(connection["address"]),
-        port=int(connection["port"]),
-        token=resolve_token(connection),
-        add_port=optional_bool(connection.get("add_port")),
-        retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
-        ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
-        ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
-    )
-    bridge.send_config(server_config)
-    saver = ObservationSaver(config.get("logging", {}) or {}, image_keys)
-    saver.start()
-    timeout = float(connection.get("observation_timeout_s", 30.0))
-    ack_timeout = float(connection["action_ack_timeout_s"])
-    task = str(observation_config["language_prompt"])
-    warmup_runs = int(runtime.get("warmup_runs", 1))
-    max_chunks = (
-        int(runtime.get("max_iterations", 0))
-        if max_iterations_override is None
-        else int(max_iterations_override)
-    )
-    if max_chunks < 0:
-        raise ValueError("max_iterations must be non-negative")
+    bridge: RobotBridgeClient | None = None
+    saver: ObservationSaver | None = None
     try:
+        bridge = RobotBridgeClient(
+            address=str(connection["address"]),
+            port=int(connection["port"]),
+            token=resolve_token(connection),
+            add_port=optional_bool(connection.get("add_port"), "connection.add_port"),
+            retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
+            ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
+            ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
+        )
+        bridge.send_config(server_config)
+        saver = start_observation_saver(
+            config.get("logging", {}) or {},
+            image_keys,
+            saver_factory=ObservationSaver,
+            logger=LOGGER,
+        )
         print("[client] Waiting for robot warmup observation")
         obs_seq, raw = bridge.receive_observation(timeout=timeout)
         warmup = prepare_observation(
@@ -229,7 +244,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
                 f"[client] Warmup {index + 1}/{warmup_runs}: {(time.perf_counter() - started) * 1000:.1f}ms"
             )
         print(f"[client] Warmup observation sequence: {obs_seq}")
-        if not bool(runtime.get("auto_start", False)):
+        if runtime.get("auto_start", False) is False:
             input("[client] Ready. Press Enter to send START to the robot server... ")
         bridge.send_state("start")
         _run_frs(
@@ -247,13 +262,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     except KeyboardInterrupt:
         print("[client] Interrupted")
     finally:
-        saver.close()
-        try:
-            bridge.send_state("stop")
-        except Exception as error:
-            LOGGER.warning("Could not send STOP: %s", error)
-        finally:
-            bridge.close()
+        cleanup_deployment_resources(bridge, saver, logger=LOGGER)
         print("[client] Stopped")
 
 

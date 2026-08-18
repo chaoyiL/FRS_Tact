@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 from deploy_pi05_frs import pi05_client
 
@@ -51,6 +52,9 @@ class FakeBridge:
         fail_ack: bool = False,
         events: list[tuple[object, ...]] | None = None,
         interrupt_on_receive: int | None = None,
+        fail_config: bool = False,
+        fail_stop: bool = False,
+        fail_close: bool = False,
     ) -> None:
         self.observations = list(observations)
         self.fail_ack = fail_ack
@@ -58,6 +62,9 @@ class FakeBridge:
         self.sent_configs: list[dict[str, object]] = []
         self.interrupt_on_receive = interrupt_on_receive
         self.receive_calls = 0
+        self.fail_config = fail_config
+        self.fail_stop = fail_stop
+        self.fail_close = fail_close
 
     def receive_observation(self, timeout=None):
         self.receive_calls += 1
@@ -78,28 +85,52 @@ class FakeBridge:
     def send_config(self, config):
         self.sent_configs.append(config)
         self.events.append(("config",))
+        if self.fail_config:
+            raise RuntimeError("config failed")
 
     def send_state(self, state):
         self.events.append(("state", state))
+        if state == "stop" and self.fail_stop:
+            raise RuntimeError("stop failed")
 
     def close(self):
         self.events.append(("close",))
+        if self.fail_close:
+            raise RuntimeError("close failed")
 
 
 class FakeSaver:
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        events: list[tuple[object, ...]] | None = None,
+        fail_start: bool = False,
+        fail_close: bool = False,
+        **kwargs,
+    ) -> None:
         self.submissions: list[tuple[int, int]] = []
         self.started = False
         self.closed = False
+        self.events = events
+        self.fail_start = fail_start
+        self.fail_close = fail_close
 
     def start(self) -> None:
         self.started = True
+        if self.events is not None:
+            self.events.append(("saver_start",))
+        if self.fail_start:
+            raise RuntimeError("saver start failed")
 
     def submit(self, iteration, obs_seq, observation) -> None:
         self.submissions.append((iteration, obs_seq))
 
     def close(self) -> None:
         self.closed = True
+        if self.events is not None:
+            self.events.append(("saver_close",))
+        if self.fail_close:
+            raise RuntimeError("saver close failed")
 
 
 def test_predict_robot_action_chunk_returns_full_float32_robot_chunk():
@@ -294,3 +325,102 @@ def test_run_attempts_stop_and_close_when_inference_or_ack_raises(monkeypatch, t
 
     assert bridge.events[-2:] == [("state", "stop"), ("close",)]
     assert saver.closed
+
+
+@pytest.mark.parametrize("auto_start", ["false", 1])
+def test_run_rejects_invalid_auto_start_before_sending_start(
+    monkeypatch, tmp_path, auto_start
+):
+    config = yaml.safe_load(pi05_client.DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    config["runtime"]["auto_start"] = auto_start
+    config["runtime"]["warmup_runs"] = 1
+    config["runtime"]["max_iterations"] = 1
+    config["logging"]["save_observations"] = False
+    config["connection"]["require_token"] = False
+    config_path = tmp_path / "deploy.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    bridge = FakeBridge(observations=[(1, _observation()), (2, _observation())])
+    policy = FakePolicy()
+    monkeypatch.setattr(pi05_client, "make_policy_config", lambda config, path: policy.config)
+    monkeypatch.setattr(pi05_client, "_make_policy", lambda policy_config: policy)
+    monkeypatch.setattr(pi05_client, "RobotBridgeClient", lambda **kwargs: bridge)
+
+    with pytest.raises(ValueError, match=r"runtime\.auto_start must be a boolean"):
+        pi05_client.run(config_path)
+
+    assert ("state", "start") not in bridge.events
+
+
+def test_run_stops_before_saver_drain_then_closes_bridge(monkeypatch, tmp_path):
+    events: list[tuple[object, ...]] = []
+    bridge = FakeBridge(
+        observations=[(1, _observation()), (2, _observation())], events=events
+    )
+    saver = FakeSaver(events=events)
+    _patch_run_dependencies(monkeypatch, bridge, FakePolicy(events=events), saver)
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert events.index(("state", "stop")) < events.index(("saver_close",))
+    assert events.index(("saver_close",)) < events.index(("close",))
+
+
+@pytest.mark.parametrize("failure", ["stop", "saver_close"])
+def test_run_cleanup_failures_do_not_block_later_cleanup(
+    monkeypatch, tmp_path, failure
+):
+    events: list[tuple[object, ...]] = []
+    bridge = FakeBridge(
+        observations=[(1, _observation()), (2, _observation())],
+        events=events,
+        fail_stop=failure == "stop",
+    )
+    saver = FakeSaver(events=events, fail_close=failure == "saver_close")
+    _patch_run_dependencies(monkeypatch, bridge, FakePolicy(), saver)
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert ("state", "stop") in events
+    assert ("saver_close",) in events
+    assert events[-1] == ("close",)
+
+
+def test_run_treats_saver_constructor_failure_as_best_effort(monkeypatch, tmp_path):
+    bridge = FakeBridge(observations=[(1, _observation()), (2, _observation())])
+    policy = FakePolicy()
+    _patch_run_dependencies(monkeypatch, bridge, policy, FakeSaver())
+
+    def fail_saver(*args, **kwargs):
+        raise OSError("output mkdir failed")
+
+    monkeypatch.setattr(pi05_client, "ObservationSaver", fail_saver)
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert [event[0] for event in bridge.events].count("send_action") == 1
+    assert bridge.events[-2:] == [("state", "stop"), ("close",)]
+
+
+def test_run_treats_saver_start_failure_as_best_effort(monkeypatch, tmp_path):
+    events: list[tuple[object, ...]] = []
+    bridge = FakeBridge(
+        observations=[(1, _observation()), (2, _observation())], events=events
+    )
+    saver = FakeSaver(events=events, fail_start=True)
+    _patch_run_dependencies(monkeypatch, bridge, FakePolicy(), saver)
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert [event[0] for event in events].count("send_action") == 1
+    assert events[-1] == ("close",)
+
+
+def test_run_send_config_failure_still_stops_and_closes(monkeypatch, tmp_path):
+    bridge = FakeBridge(observations=[], fail_config=True)
+    saver = FakeSaver()
+    _patch_run_dependencies(monkeypatch, bridge, FakePolicy(), saver)
+
+    with pytest.raises(RuntimeError, match="config failed"):
+        pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert bridge.events[-2:] == [("state", "stop"), ("close",)]
