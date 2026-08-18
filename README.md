@@ -46,19 +46,34 @@ SmolVLA 相关的代码、配置、部署客户端和分析脚本都已从这个
 `VB3_TOKEN_FILE`（默认 `/home/typhon/vb3_robot_server/token_list.txt`）；不要把 token
 写进配置、日志或版本库。
 
-必须先启动/检查 robot server，再启动一个客户端模式：
+必须先启动 robot server，再在另一终端启动**一个**客户端模式。server launcher 会前台运行：
+
+Terminal A（每次启动或重启 vb3 server）：
 
 ```bash
 cd /home/typhon/vb3_robot_server
 bash scripts/bimanual_smolvla.sh --dry-run
+```
 
+Terminal B（只选其中一个模式）：
+
+```bash
 cd /home/typhon/FRS_Tact-pi05-frs-jax
 export VB_ROBOT_TOKEN='...'
+
+# 普通 pi0.5
 bash deploy_pi05_frs/scripts/start_pi05.sh --check
 bash deploy_pi05_frs/scripts/start_pi05.sh --max-iterations 2
+```
+
+```bash
+# 或 pi0.5 + FRS（不要与普通模式同时运行）
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --check
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --max-iterations 2
 ```
+
+若要测试另一种模式，先停止 Terminal A 中的 server，再重新启动 server，然后在 Terminal B
+只运行另一种模式的命令。
 
 `--check` 只显示 mode、配置、token 来源、Python 和 entrypoint，不会加载模型或连接机器人；
 `--max-iterations 2` 是有限轮次 smoke test（普通模式按 action chunk，FRS 按 FRS chunk）。

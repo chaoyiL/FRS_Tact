@@ -29,22 +29,36 @@ for either mode; the FRS wrapper also accepts the legacy
 
 ## Startup order and smoke checks
 
-Make the robot server available before starting either client. First run its
-dry run, then confirm both client launchers resolve the expected mode,
-configuration, and entry point without loading a model or connecting to the
-robot:
+Start the robot server before one client mode. The server launcher stays in the
+foreground, so use two terminals and do not start both client modes against
+the same server instance.
+
+Terminal A (each time you start or restart `vb3_robot_server`):
 
 ```bash
 cd /home/typhon/vb3_robot_server
 bash scripts/bimanual_smolvla.sh --dry-run
+```
 
+Terminal B (choose exactly one mode):
+
+```bash
 cd /home/typhon/FRS_Tact-pi05-frs-jax
 export VB_ROBOT_TOKEN='...'
+
+# Plain pi0.5
 bash deploy_pi05_frs/scripts/start_pi05.sh --check
 bash deploy_pi05_frs/scripts/start_pi05.sh --max-iterations 2
+```
+
+```bash
+# Or pi0.5 + FRS; do not run this concurrently with plain pi0.5.
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --check
 bash deploy_pi05_frs/scripts/start_pi05_frs.sh --max-iterations 2
 ```
+
+To test the other mode, first stop the server in Terminal A, restart it there,
+then run only the other mode's commands in Terminal B.
 
 `VB_ROBOT_TOKEN` is preferred and must not be committed or printed. If it is
 unset, the common launcher reads `VB3_TOKEN_FILE` (default:
