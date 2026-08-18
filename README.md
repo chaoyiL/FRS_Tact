@@ -27,6 +27,45 @@ SmolVLA 相关的代码、配置、部署客户端和分析脚本都已从这个
 这个分支只维护 pi0.5 一条线。`lerobot/policies/__init__.py` 现在不再 re-export 任何 policy，
 `import lerobot.policies.pi05_jax` 不会连带拉起别的模型栈。
 
+## VB3 真机部署
+
+本仓库提供普通 pi0.5 与 pi0.5 + FRS 两种 `vb3_robot_server` 客户端；不修改
+`vb3_robot_server` 本身。两者共用
+`deploy_pi05_frs/configs/deploy_pi05.yaml`，因此必须配置同一训练运行的
+`checkpoint` 和 `norm_stats`。
+
+- `start_pi05.sh` 选择普通 `pi05` profile：请求 `vision`，忽略触觉图像，并用
+  legacy action chunk 协议等待 server ACK。
+- `start_pi05_frs.sh` 选择 `frs` profile：请求 `vitac`，仅由下游 FRS steering
+  使用触觉观测，并使用 `frs_steering_v1`。
+
+两个脚本只是固定模式和共享配置默认值的 wrapper；
+`start_remote_client.sh` 才负责共同的参数解析、token、Python 选择和 Python module
+启动。两种模式都可用 `PI05_DEPLOY_CONFIG` 覆盖 YAML；FRS 还兼容较低优先级的
+`PI05_FRS_DEPLOY_CONFIG`。认证 token 优先从 `VB_ROBOT_TOKEN` 读取，未设置时才读取
+`VB3_TOKEN_FILE`（默认 `/home/typhon/vb3_robot_server/token_list.txt`）；不要把 token
+写进配置、日志或版本库。
+
+必须先启动/检查 robot server，再启动一个客户端模式：
+
+```bash
+cd /home/typhon/vb3_robot_server
+bash scripts/bimanual_smolvla.sh --dry-run
+
+cd /home/typhon/FRS_Tact-pi05-frs-jax
+export VB_ROBOT_TOKEN='...'
+bash deploy_pi05_frs/scripts/start_pi05.sh --check
+bash deploy_pi05_frs/scripts/start_pi05.sh --max-iterations 2
+bash deploy_pi05_frs/scripts/start_pi05_frs.sh --check
+bash deploy_pi05_frs/scripts/start_pi05_frs.sh --max-iterations 2
+```
+
+`--check` 只显示 mode、配置、token 来源、Python 和 entrypoint，不会加载模型或连接机器人；
+`--max-iterations 2` 是有限轮次 smoke test（普通模式按 action chunk，FRS 按 FRS chunk）。
+真机前先确认 server dry-run、共享模型资产路径和有限轮次的 server action trace。任何真机运行
+都必须有人全程看护，并保证急停可立即使用；断线或观测/action 异常后应停止并重新启动客户端，
+本部署不做自动重连。
+
 ## 为什么不直接安装 openpi
 
 openpi 会依赖官方 `lerobot` 包，而本仓库本身也提供 `src/lerobot/`。两个包在同一个 Python 环境里会发生
@@ -195,7 +234,6 @@ action_cache:
 
 ## 已知限制
 
-- 没有真机部署代码（原先只有 SmolVLA 版，已随 SmolVLA 一起删除）。
 - 没有 loglike / action-error / t-SNE 这类分析脚本（同上）；要做的话可以基于
   `modalities_eval/pi05_utils.py` 的 `Pi05EvalModel` 重写。
 - 当前 pi0.5 只把 RGB 相机喂给 base model，触觉信息只进入下游 FRS 网络；没有采用“触觉图像直接进 pi0.5 SigLIP”的 VB-VLA fork 路线。
