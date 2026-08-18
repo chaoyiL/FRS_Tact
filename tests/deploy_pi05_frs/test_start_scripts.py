@@ -79,6 +79,34 @@ def test_frs_wrapper_uses_legacy_config_override_as_fallback(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
+    ("script", "requested_mode", "expected_mode"),
+    [
+        (f"{SCRIPTS}/start_pi05.sh", "frs", "pi05"),
+        (f"{SCRIPTS}/start_pi05_frs.sh", "pi05", "frs"),
+    ],
+)
+def test_wrapper_identity_cannot_be_overridden_by_user_arguments(
+    tmp_path: Path, script: str, requested_mode: str, expected_mode: str
+) -> None:
+    forced_config = tmp_path / "forced.yaml"
+    user_config = tmp_path / "user.yaml"
+    forced_config.write_text("profiles: {}\n", encoding="utf-8")
+    user_config.write_text("profiles: {}\n", encoding="utf-8")
+
+    output = _check(
+        script,
+        "--mode",
+        requested_mode,
+        "--config",
+        str(user_config),
+        env=_env(PI05_DEPLOY_CONFIG=str(forced_config)),
+    )
+
+    assert f"mode={expected_mode}" in output
+    assert f"config={forced_config}" in output
+
+
+@pytest.mark.parametrize(
     ("mode", "expected_python"),
     [("pi05", "plain-python"), ("frs", "frs-python")],
 )
@@ -123,6 +151,69 @@ def test_launcher_rejects_missing_max_iterations_value() -> None:
 
     assert result.returncode == 2
     assert "--max-iterations requires a value" in result.stderr
+
+
+@pytest.mark.parametrize("value", ["-1", "not-an-integer"])
+def test_launcher_rejects_non_nonnegative_max_iterations(value: str) -> None:
+    result = subprocess.run(
+        ["bash", str(ROOT / SCRIPTS / "start_remote_client.sh"), "--config", CONFIG, "--max-iterations", value],
+        cwd=ROOT,
+        env=_env(),
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "--max-iterations must be a non-negative integer" in result.stderr
+
+
+def test_launcher_rejects_adjacent_check_without_executing_python(tmp_path: Path) -> None:
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text('#!/usr/bin/env bash\ntouch "${PI05_EXECUTED_FILE}"\n', encoding="utf-8")
+    fake_python.chmod(0o755)
+    executed_file = tmp_path / "executed"
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(ROOT / SCRIPTS / "start_remote_client.sh"),
+            "--config",
+            CONFIG,
+            "--max-iterations",
+            "--check",
+        ],
+        cwd=ROOT,
+        env=_env(PI05_FRS_PYTHON=str(fake_python), PI05_EXECUTED_FILE=str(executed_file)),
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 2
+    assert "--max-iterations must be a non-negative integer" in result.stderr
+    assert not executed_file.exists()
+
+
+def test_launcher_accepts_zero_max_iterations(tmp_path: Path) -> None:
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text('#!/usr/bin/env bash\nprintf "%s\\n" "$@" >"${PI05_ARGS_FILE}"\n', encoding="utf-8")
+    fake_python.chmod(0o755)
+    args_file = tmp_path / "args.txt"
+
+    subprocess.run(
+        [
+            "bash",
+            str(ROOT / SCRIPTS / "start_remote_client.sh"),
+            "--config",
+            CONFIG,
+            "--max-iterations",
+            "0",
+        ],
+        cwd=ROOT,
+        env=_env(PI05_FRS_PYTHON=str(fake_python), PI05_ARGS_FILE=str(args_file)),
+        check=True,
+    )
+
+    assert args_file.read_text(encoding="utf-8").splitlines()[-2:] == ["--max-iterations", "0"]
 
 
 def test_wrapper_forwards_max_iterations_to_selected_module(tmp_path: Path) -> None:

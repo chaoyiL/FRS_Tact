@@ -17,11 +17,11 @@ from typing import Any
 import cv2
 import jax
 import numpy as np
-import yaml
 
 from .bridge_client import RobotBridgeClient
+from .deployment import load_deployment_config
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
-from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult, validate_frs_config_section
+from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
 from .policy import Pi05DeploymentConfig, Pi05RemotePolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05_frs.yaml"
@@ -125,44 +125,8 @@ def _required(mapping: Mapping[str, Any], key: str, where: str) -> Any:
 
 
 def load_config(path: Path) -> dict[str, Any]:
-    if not path.is_file():
-        raise FileNotFoundError(f"config not found: {path}")
-    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(config, dict):
-        raise ValueError("config root must be a mapping")
-    model = _section(config, "model")
-    norm_stats = _section(config, "norm_stats")
-    connection = _section(config, "connection")
-    observation = _section(config, "observation")
-    control = _section(config, "control")
-    runtime = _section(config, "runtime")
-    _section(config, "frs")
-    _required(config, "checkpoint", "root")
-    for key in ("action_dim", "action_horizon", "state_dim", "robot_action_dim", "camera_map"):
-        _required(model, key, "model")
-    for key in ("dir", "asset_id", "use_quantile_norm"):
-        _required(norm_stats, key, "norm_stats")
-    for key in ("address", "port", "action_ack_timeout_s"):
-        _required(connection, key, "connection")
-    for key in ("data_type", "language_prompt", "single_arm_mode", "no_state_obs_mode"):
-        _required(observation, key, "observation")
-    for key in ("control_frequency", "controller_frequency", "action_horizon", "steps_per_inference"):
-        _required(control, key, "control")
-    if observation["data_type"] != "vitac":
-        raise ValueError("pi0.5 FRS deployment requires observation.data_type='vitac'")
-    if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
-        raise ValueError("pi0.5 pick_tube requires bimanual state observations")
-    horizon = int(model["action_horizon"])
-    if int(control["action_horizon"]) != horizon or int(control["steps_per_inference"]) != horizon:
-        raise ValueError("model/control action_horizon and steps_per_inference must all match")
-    if min(float(control["control_frequency"]), float(control["controller_frequency"])) <= 0:
-        raise ValueError("control frequencies must be positive")
-    if int(runtime.get("warmup_runs", 1)) < 1:
-        raise ValueError("runtime.warmup_runs must be at least 1")
-    if float(connection["action_ack_timeout_s"]) <= 0:
-        raise ValueError("connection.action_ack_timeout_s must be positive")
-    validate_frs_config_section(config)
-    return config
+    """Load the FRS profile from the shared deployment configuration."""
+    return load_deployment_config(path, "frs")
 
 
 def _resolve_local(value: str, config_path: Path) -> str:

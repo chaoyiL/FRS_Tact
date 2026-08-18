@@ -39,6 +39,11 @@ while (( $# > 0 )); do
     esac
 done
 
+if [[ -n "${MAX_ITERATIONS}" && ! "${MAX_ITERATIONS}" =~ ^[0-9]+$ ]]; then
+    echo "--max-iterations must be a non-negative integer" >&2
+    exit 2
+fi
+
 case "${MODE}" in
     pi05)
         ENTRYPOINT="deploy_pi05_frs.pi05_client"
