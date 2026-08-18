@@ -10,6 +10,7 @@ import queue
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+from numbers import Integral
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -22,6 +23,17 @@ if TYPE_CHECKING:
 
 DeploymentMode = Literal["pi05", "frs"]
 LOGGER = logging.getLogger(__name__)
+_MODEL_CONTRACT = {
+    "state_dim": 20,
+    "robot_action_dim": 20,
+    "action_dim": 32,
+    "action_horizon": 50,
+}
+_CAMERA_MAP_CONTRACT = {
+    "left_wrist_0_rgb": "observation.images.camera0",
+    "right_wrist_0_rgb": "observation.images.camera1",
+}
+_EMPTY_CAMERAS_CONTRACT = ["base_0_rgb"]
 
 
 def section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -55,10 +67,9 @@ def _validate_frs_config_section(config: Mapping[str, Any]) -> None:
 
 
 def _as_int(value: Any, name: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(f"{name} must be an integer") from error
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer")
+    return int(value)
 
 
 def _as_float(value: Any, name: str) -> float:
@@ -81,7 +92,14 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     runtime = section(config, "runtime")
     required(config, "checkpoint", "root")
 
-    for key in ("action_dim", "action_horizon", "state_dim", "robot_action_dim", "camera_map"):
+    for key in (
+        "action_dim",
+        "action_horizon",
+        "state_dim",
+        "robot_action_dim",
+        "camera_map",
+        "empty_cameras",
+    ):
         required(model, key, "model")
     for key in ("dir", "asset_id", "use_quantile_norm"):
         required(norm_stats, key, "norm_stats")
@@ -95,9 +113,15 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
         raise ValueError("pi0.5 pick_tube requires bimanual state observations")
 
-    horizon = _as_int(model["action_horizon"], "model.action_horizon")
-    if horizon <= 0:
-        raise ValueError("model.action_horizon must be positive")
+    for key, expected in _MODEL_CONTRACT.items():
+        if _as_int(model[key], f"model.{key}") != expected:
+            raise ValueError(f"model.{key} must be {expected} for this pi0.5 deployment")
+    if model["camera_map"] != _CAMERA_MAP_CONTRACT:
+        raise ValueError("model.camera_map must match the pi0.5 deployment camera contract")
+    if model["empty_cameras"] != _EMPTY_CAMERAS_CONTRACT:
+        raise ValueError("model.empty_cameras must be ['base_0_rgb'] for this pi0.5 deployment")
+
+    horizon = _MODEL_CONTRACT["action_horizon"]
     if _as_int(control["action_horizon"], "control.action_horizon") != horizon:
         raise ValueError("model/control action_horizon values must match")
     steps = _as_int(control["steps_per_inference"], "control.steps_per_inference")

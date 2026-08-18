@@ -160,6 +160,54 @@ def test_rejects_horizon_drift_before_model_load(tmp_path):
         load_deployment_config(_write(tmp_path, config), "pi05")
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("state_dim", 19),
+        ("robot_action_dim", 19),
+        ("action_dim", 31),
+        ("action_horizon", 49),
+    ],
+)
+def test_rejects_model_dimension_contract_drift_before_model_load(tmp_path, key, value):
+    config = _config()
+    config["model"][key] = value
+
+    with pytest.raises(ValueError, match=f"model.{key}"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
+def test_rejects_camera_map_contract_drift_before_model_load(tmp_path):
+    config = _config()
+    config["model"]["camera_map"]["left_wrist_0_rgb"] = "observation.images.camera1"
+
+    with pytest.raises(ValueError, match="model.camera_map"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
+def test_rejects_empty_camera_contract_drift_before_model_load(tmp_path):
+    config = _config()
+    config["model"]["empty_cameras"] = []
+
+    with pytest.raises(ValueError, match="model.empty_cameras"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
+@pytest.mark.parametrize(
+    ("section_name", "key", "value"),
+    [
+        ("model", "action_horizon", 50.9),
+        ("control", "steps_per_inference", True),
+    ],
+)
+def test_rejects_non_integral_or_boolean_control_values(tmp_path, section_name, key, value):
+    config = _config()
+    config[section_name][key] = value
+
+    with pytest.raises(ValueError, match=f"{section_name}.{key} must be an integer"):
+        load_deployment_config(_write(tmp_path, config), "pi05")
+
+
 @pytest.mark.parametrize("mode", ["", "pi0", "unknown"])
 def test_rejects_unknown_mode(tmp_path, mode):
     with pytest.raises(ValueError, match="unsupported deployment mode"):
