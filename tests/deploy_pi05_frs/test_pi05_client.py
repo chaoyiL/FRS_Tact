@@ -19,12 +19,22 @@ class FakePolicy:
     config = SimpleNamespace(action_horizon=2, action_dim=3, robot_action_dim=2, state_dim=2)
     robot_image_keys = ("observation.images.camera0",)
 
-    def __init__(self, *, fail_on_prediction: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on_prediction: int | None = None,
+        events: list[tuple[object, ...]] | None = None,
+    ) -> None:
         self.fail_on_prediction = fail_on_prediction
         self.predictions = 0
+        self.events = events
+        self.calls: list[tuple[object, str, int, int]] = []
 
     def predict_action_chunk(self, observation, task, *, seed, num_steps):
         self.predictions += 1
+        self.calls.append((observation, task, seed, num_steps))
+        if self.events is not None:
+            self.events.append(("predict", seed, num_steps))
         if self.predictions == self.fail_on_prediction:
             raise RuntimeError("inference failed")
         return np.arange(6, dtype=np.float32).reshape(1, 2, 3)
@@ -34,13 +44,25 @@ class FakePolicy:
 
 
 class FakeBridge:
-    def __init__(self, *, observations, fail_ack: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        observations,
+        fail_ack: bool = False,
+        events: list[tuple[object, ...]] | None = None,
+        interrupt_on_receive: int | None = None,
+    ) -> None:
         self.observations = list(observations)
         self.fail_ack = fail_ack
-        self.events: list[tuple[object, ...]] = []
+        self.events = [] if events is None else events
         self.sent_configs: list[dict[str, object]] = []
+        self.interrupt_on_receive = interrupt_on_receive
+        self.receive_calls = 0
 
     def receive_observation(self, timeout=None):
+        self.receive_calls += 1
+        if self.receive_calls == self.interrupt_on_receive:
+            raise KeyboardInterrupt
         obs_seq, observation = self.observations.pop(0)
         self.events.append(("receive", obs_seq))
         return obs_seq, observation
@@ -81,13 +103,23 @@ class FakeSaver:
 
 
 def test_predict_robot_action_chunk_returns_full_float32_robot_chunk():
+    policy = FakePolicy()
     action = pi05_client.predict_robot_action_chunk(
-        FakePolicy(), _observation(), "pick", seed=0, num_steps=10
+        policy, _observation(), "pick", seed=123, num_steps=17
     )
 
     assert action.shape == (2, 2)
     assert action.dtype == np.float32
     assert np.isfinite(action).all()
+    assert policy.calls[0][2:] == (123, 17)
+
+
+def test_predict_robot_action_chunk_rejects_wrong_model_output_shape():
+    policy = FakePolicy()
+    policy.predict_action_chunk = lambda *args, **kwargs: np.zeros((2, 2, 3), dtype=np.float32)
+
+    with pytest.raises(ValueError, match="pi0.5 action"):
+        pi05_client.predict_robot_action_chunk(policy, _observation(), "pick", seed=0, num_steps=10)
 
 
 @pytest.mark.parametrize(
@@ -175,6 +207,7 @@ def _patch_run_dependencies(monkeypatch, bridge, policy, saver):
     monkeypatch.setattr(pi05_client, "_make_policy", lambda policy_config: policy)
     monkeypatch.setattr(pi05_client, "RobotBridgeClient", lambda **kwargs: bridge)
     monkeypatch.setattr(pi05_client, "ObservationSaver", lambda *args: saver)
+    return config
 
 
 def test_run_sends_plain_server_config_and_closes_resources(monkeypatch, tmp_path):
@@ -189,6 +222,62 @@ def test_run_sends_plain_server_config_and_closes_resources(monkeypatch, tmp_pat
     assert "execution_protocol" not in bridge.sent_configs[0]
     assert bridge.events[-2:] == [("state", "stop"), ("close",)]
     assert saver.started and saver.closed
+
+
+def test_run_warms_up_without_sending_action_then_confirms_before_start(monkeypatch, tmp_path):
+    events: list[tuple[object, ...]] = []
+    bridge = FakeBridge(observations=[(1, _observation()), (2, _observation())], events=events)
+    policy = FakePolicy(events=events)
+    saver = FakeSaver()
+    config = _patch_run_dependencies(monkeypatch, bridge, policy, saver)
+    config["runtime"] = {"auto_start": False, "warmup_runs": 1, "max_iterations": 1}
+    monkeypatch.setattr("builtins.input", lambda prompt: events.append(("input", prompt)))
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert [event[0] for event in events] == [
+        "config",
+        "receive",
+        "predict",
+        "input",
+        "state",
+        "receive",
+        "predict",
+        "send_action",
+        "ack",
+        "state",
+        "close",
+    ]
+    assert events[4] == ("state", "start")
+    assert events[-2:] == [("state", "stop"), ("close",)]
+
+
+def test_run_keyboard_interrupt_still_attempts_stop_and_close(monkeypatch, tmp_path):
+    bridge = FakeBridge(observations=[(1, _observation())], interrupt_on_receive=2)
+    policy = FakePolicy()
+    saver = FakeSaver()
+    _patch_run_dependencies(monkeypatch, bridge, policy, saver)
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert bridge.events[-2:] == [("state", "stop"), ("close",)]
+    assert saver.closed
+
+
+def test_run_zero_max_iterations_continues_until_interrupted(monkeypatch, tmp_path):
+    bridge = FakeBridge(
+        observations=[(1, _observation()), (2, _observation()), (3, _observation())],
+        interrupt_on_receive=4,
+    )
+    policy = FakePolicy()
+    saver = FakeSaver()
+    config = _patch_run_dependencies(monkeypatch, bridge, policy, saver)
+    config["runtime"] = {"auto_start": True, "warmup_runs": 1, "max_iterations": 0}
+
+    pi05_client.run(tmp_path / "deploy_pi05.yaml")
+
+    assert [event[0] for event in bridge.events].count("send_action") == 2
+    assert bridge.events[-2:] == [("state", "stop"), ("close",)]
 
 
 @pytest.mark.parametrize("failure", ["inference", "ack"])
