@@ -23,7 +23,19 @@ FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使�
 
 ## 首次安装
 
-在部署机上执行：
+推荐从仓库根目录执行统一安装脚本；它会分别同步根项目环境和本目录的 Pi0.5
+环境，两者不会混装。在本机路径下，默认目录分别是
+`/home/typhon/FRS_Tact/.venv` 和 `/home/typhon/FRS_Tact/deploy_pi05/.venv`；
+脚本会拒绝把两者设置成同一路径：
+
+```bash
+cd /home/typhon/FRS_Tact && bash scripts/setup_env.sh
+```
+
+如果通过 `PI05_VENV_DIR` 把 Pi0.5 环境放到其他位置，启动前先执行
+`source /home/typhon/FRS_Tact/.env.frs`，让启动器读取生成的 Python 路径。
+
+也可以只在本目录手动同步 Pi0.5 环境：
 
 ```bash
 cd /home/typhon/FRS_Tact/deploy_pi05 && uv sync --frozen

@@ -15,6 +15,8 @@ else
     DEFAULT_STORAGE_ROOT="${PROJECT_ROOT}/.cache"
 fi
 VENV_DIR="${FRS_VENV_DIR:-${DEFAULT_VENV_DIR}}"
+PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"
+PI05_VENV_DIR="${PI05_VENV_DIR:-${PI05_PROJECT_ROOT}/.venv}"
 UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
 STORAGE_ROOT="${FRS_STORAGE_ROOT:-${DEFAULT_STORAGE_ROOT}}"
 HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
@@ -106,15 +108,34 @@ check_existing_uv_processes() {
     fi
 }
 
+validate_environment_targets() {
+    if [[ "${VENV_DIR}" != /* ]]; then
+        VENV_DIR="${PROJECT_ROOT}/${VENV_DIR}"
+    fi
+    if [[ "${PI05_VENV_DIR}" != /* ]]; then
+        PI05_VENV_DIR="${PROJECT_ROOT}/${PI05_VENV_DIR}"
+    fi
+    VENV_DIR="$(realpath -m -- "${VENV_DIR}")"
+    PI05_VENV_DIR="$(realpath -m -- "${PI05_VENV_DIR}")"
+    if [[ "${VENV_DIR}" == "${PI05_VENV_DIR}" ]]; then
+        fail "根项目和 Pi0.5 必须使用不同的虚拟环境目录：${VENV_DIR}"
+    fi
+}
+
 configure_uv_storage() {
-    mkdir -p "$(dirname -- "${VENV_DIR}")" "${UV_CACHE_DIR_VALUE}"
+    validate_environment_targets
+    mkdir -p \
+        "$(dirname -- "${VENV_DIR}")" \
+        "$(dirname -- "${PI05_VENV_DIR}")" \
+        "${UV_CACHE_DIR_VALUE}"
     export UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
     export UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}"
 
-    local env_device cache_device
+    local env_device pi05_env_device cache_device
     env_device="$(stat -c '%d' "$(dirname -- "${VENV_DIR}")")"
+    pi05_env_device="$(stat -c '%d' "$(dirname -- "${PI05_VENV_DIR}")")"
     cache_device="$(stat -c '%d' "${UV_CACHE_DIR_VALUE}")"
-    if [[ "${env_device}" != "${cache_device}" ]]; then
+    if [[ "${env_device}" != "${cache_device}" || "${pi05_env_device}" != "${cache_device}" ]]; then
         export UV_LINK_MODE="copy"
         warn "uv cache 和虚拟环境不在同一文件系统，使用 UV_LINK_MODE=copy"
     fi
@@ -138,6 +159,8 @@ write_environment_file() {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
         printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "${UV_PROJECT_ENVIRONMENT}"
+        printf 'export PI05_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
+        printf 'export PI05_FRS_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export UV_CACHE_DIR=%q\n' "${UV_CACHE_DIR}"
         printf 'export HF_HOME=%q\n' "${HF_HOME}"
         printf 'export HF_HUB_CACHE=%q\n' "${HF_HUB_CACHE}"
@@ -151,15 +174,27 @@ write_environment_file() {
     chmod 600 "${ENV_FILE}"
 }
 
-sync_environment() {
+sync_environments() {
+    validate_environment_targets
     cd "${PROJECT_ROOT}"
     check_existing_uv_processes
     log "安装 Python ${PYTHON_VERSION}"
     "${UV_BIN}" python install "${PYTHON_VERSION}"
-    log "环境目录：${UV_PROJECT_ENVIRONMENT}"
+    log "根项目环境目录：${VENV_DIR}"
     log "uv cache：${UV_CACHE_DIR}"
-    log "按照 uv.lock 同步依赖；大型 PyTorch/CUDA wheel 第一次需要数分钟"
-    "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}"
+    log "按照根目录 uv.lock 同步 SmolVLA/训练环境"
+    UV_PROJECT_ENVIRONMENT="${VENV_DIR}" \
+        "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}"
+
+    [[ -f "${PI05_PROJECT_ROOT}/pyproject.toml" ]] || \
+        fail "缺少 Pi0.5 部署项目：${PI05_PROJECT_ROOT}/pyproject.toml"
+    [[ -f "${PI05_PROJECT_ROOT}/uv.lock" ]] || \
+        fail "缺少 Pi0.5 部署锁文件：${PI05_PROJECT_ROOT}/uv.lock"
+    log "Pi0.5 部署环境目录：${PI05_VENV_DIR}"
+    log "按照 deploy_pi05/uv.lock 同步独立 Pi0.5 环境"
+    UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}" \
+        "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}" \
+        --project "${PI05_PROJECT_ROOT}"
     write_environment_file
 }
 
@@ -192,6 +227,36 @@ PY
     "${UV_BIN}" run --no-sync wandb --version
 }
 
+verify_pi05_environment() {
+    local pi05_python="${PI05_VENV_DIR}/bin/python"
+    [[ -x "${pi05_python}" ]] || fail "Pi0.5 Python 不可执行：${pi05_python}"
+    log "验证独立 Pi0.5 纯视觉与 FRS 部署依赖（不再执行 sync）"
+    (
+        cd "${PI05_PROJECT_ROOT}"
+        PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="${PI05_PROJECT_ROOT}/src:${PI05_PROJECT_ROOT}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+            "${pi05_python}" - <<'PY'
+import sys
+
+import flax
+import jax
+import orbax.checkpoint
+import transformers
+
+import deploy_pi05.pi05_client
+import deploy_pi05.remote_client
+
+if sys.version_info[:2] != (3, 12):
+    raise RuntimeError(f"Pi0.5 需要 Python 3.12，当前为 {sys.version}")
+print(f"pi05 python={sys.version.split()[0]}")
+print(f"pi05 jax={jax.__version__}")
+print(f"pi05 flax={flax.__version__}")
+print(f"pi05 orbax={orbax.checkpoint.__version__}")
+print(f"pi05 transformers={transformers.__version__}")
+PY
+    )
+}
+
 check_gpu() {
     cd "${PROJECT_ROOT}"
     log "检查 NVIDIA、PyTorch 和 JAX 设备"
@@ -217,6 +282,24 @@ if os.environ.get("FRS_EXPECT_GPU") == "1":
     if not any(device.platform == "gpu" for device in devices):
         raise RuntimeError("nvidia-smi 可用，但 JAX 没有识别到 GPU")
 PY
+    (
+        cd "${PI05_PROJECT_ROOT}"
+        FRS_EXPECT_GPU="${expect_gpu}" \
+        PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="${PI05_PROJECT_ROOT}/src:${PI05_PROJECT_ROOT}:${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+            "${PI05_VENV_DIR}/bin/python" - <<'PY'
+import os
+
+import jax
+
+devices = jax.devices()
+print(f"Pi0.5 JAX devices: {devices}")
+if os.environ.get("FRS_EXPECT_GPU") == "1" and not any(
+    device.platform == "gpu" for device in devices
+):
+    raise RuntimeError("nvidia-smi 可用，但 Pi0.5 JAX 没有识别到 GPU")
+PY
+    )
 }
 
 main() {
@@ -225,13 +308,15 @@ main() {
     persist_uv_path
     configure_uv_storage
     configure_runtime_storage
-    sync_environment
+    sync_environments
     verify_python_environment
+    verify_pi05_environment
     check_gpu
 
     log "环境安装完成"
     echo
-    echo "环境目录：${VENV_DIR}"
+    echo "根项目环境：${VENV_DIR}"
+    echo "Pi0.5 部署环境：${PI05_VENV_DIR}"
     echo "环境变量：${ENV_FILE}"
     echo "Hugging Face 缓存：${HF_HOME}"
     echo "Arrow 数据缓存：${HF_DATASETS_CACHE}"
@@ -246,6 +331,12 @@ main() {
     echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/train.sh"
     echo "一键启动 VT-SmolVLA："
     echo "  bash ${PROJECT_ROOT}/train_vtsmolvla/scripts/train.sh"
+    echo "一键启动纯视觉 Pi0.5："
+    echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05.sh"
+    echo "一键启动 Pi0.5 + FRS："
+    echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05_frs.sh"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
