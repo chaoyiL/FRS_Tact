@@ -21,6 +21,7 @@ from packaging.markers import default_environment
 from packaging.requirements import Requirement
 import yaml
 
+from train_pi05_frs.utils.path_safety import validate_fresh_output_root
 from train_pi05_frs.utils.path_safety import validate_output_roots
 
 
@@ -267,6 +268,17 @@ def _probe_nvidia_gpu() -> list[str]:
         detail = result.stderr.strip() or "no NVIDIA GPU was reported"
         raise RuntimeError(f"GPU preflight failed: {detail}")
     return gpu_lines
+
+
+def _owned_pipeline_log() -> str | None:
+    if os.environ.get("FRS_PIPELINE_STAGE") not in {
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    }:
+        return None
+    return os.environ.get("FRS_PIPELINE_LOG")
 
 
 def production_runtime_requirements(
@@ -1108,10 +1120,6 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         read_only_roots["config.frs_training.resume_from"] = resolve_local_path(
             str(resume_from)
         )
-    elif training.get("resume", False):
-        read_only_roots["config.frs_training implicit resume"] = (
-            output_roots["config.frs_training.output"] / "last"
-        )
     validate_output_roots(output_roots, read_only_roots=read_only_roots)
 
     if not check_paths:
@@ -1173,11 +1181,11 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
             raise FileNotFoundError(f"resume checkpoint does not exist: {last}")
     output_target = output_roots["config.frs_training.output"]
     is_resume = bool(training.get("resume", False) or resume_from not in (None, ""))
-    if not is_resume and output_target.exists():
-        if not output_target.is_dir() or any(output_target.iterdir()):
-            raise FileExistsError(
-                f"fresh training output directory is not empty: {output_target}"
-            )
+    if not is_resume:
+        validate_fresh_output_root(
+            output_target,
+            owned_pipeline_log=_owned_pipeline_log(),
+        )
     for value, field in (
         (action_cache["root"], "action_cache.root"),
         (tactile_cache["root"], "tactile_embedding_cache.root"),

@@ -36,6 +36,7 @@ run_pipeline() {
     mkdir -p -- "${output_dir}"
     timestamp="$(date +%Y%m%d_%H%M%S)"
     pipeline_log="${output_dir}/pipeline_${timestamp}.log"
+    export FRS_PIPELINE_LOG="${pipeline_log}"
     exec > >(tee -a "${pipeline_log}") 2>&1
     log "pipeline log: ${pipeline_log}"
 

@@ -4,7 +4,7 @@
 
 **Goal:** Close the four remaining Important findings without importing JAX/models during `--check`, weakening path boundaries, or changing unrelated training/deployment behavior.
 
-**Architecture:** Keep lightweight validation in `tools/train_frs.py` and centralize shared filesystem/cache invariants in `utils/path_safety.py` and `pi05_cache/cache.py`. Production dependency requirements come from `pyproject.toml`; the selected `jax[cuda12-local]` extra is expanded from installed distribution metadata so the CUDA plugin and its PJRT dependency are checked without importing them. Cache identity is derived from immutable file contents and the exact `SampleRecord` serialization already used by `records_digest`.
+**Architecture:** Keep lightweight validation in `tools/train_frs.py` and centralize shared filesystem/cache invariants in `utils/path_safety.py` and `pi05_cache/cache.py`. Production dependency requirements come from `pyproject.toml`; the lock-matched CUDA plugin and PJRT distributions are explicit platform-marked project dependencies, so the same parser checks them without a second hardcoded list or module imports. Cache identity is derived from immutable file contents and the exact `SampleRecord` serialization already used by `records_digest`.
 
 **Tech Stack:** Python 3.12, `tomllib`, `packaging`, `importlib.metadata`, NumPy memmaps, pytest.
 
@@ -19,7 +19,7 @@
 
 1. Add parametrized RED tests proving that preflight rejects Python 3.11/3.13, discovers the applicable production requirements from `pyproject.toml`, rejects every applicable missing distribution one at a time, rejects every unsatisfied specifier, and includes the JAX CUDA plugin and PJRT requirements. Add a guard that `jax` is absent from `sys.modules` after the check.
 2. Run the focused tests and record the expected failures against `REQUIRED_DISTRIBUTIONS` and the absent Python check.
-3. Replace the hardcoded dependency map with a parser that loads `[project].dependencies`, evaluates PEP 508 markers for the current platform, expands only requested extras through `importlib.metadata.requires`, recursively follows the regular requirements introduced by that extra (plugin to PJRT), and validates installed versions with `Requirement.specifier.contains`. Inject version, metadata-requirements, marker environment, and Python version for CPU-only tests. Require exactly Python 3.12 before dependency/GPU probes.
+3. Replace the hardcoded dependency map with a parser that loads `[project].dependencies`, evaluates PEP 508 markers for the current platform, and validates installed versions with `Requirement.specifier.contains`. Declare the lock-matched CUDA plugin and PJRT as explicit Linux requirements in that same dependency source. Inject version, marker environment, and Python version for CPU-only tests. Require exactly Python 3.12 before dependency/GPU probes.
 4. Run the focused tests GREEN and verify a subprocess `--check` light-import guard still never imports JAX or a model.
 
 ## Task 2: Read/write filesystem isolation and no implicit overwrite

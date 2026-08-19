@@ -14,3 +14,6 @@ read-only review of 2a90d99 clean with Critical=0, Important=0, Minor=0)
 Final hardening round: implementation and full verification complete (Python/metadata dependency
 contract, read/write asset isolation, strict norm vectors, actual cache-record/content identity;
 341 passed + 18 subtests; awaiting post-commit read-only review gate)
+Post-commit review repair: launcher-owned log and transactional implicit resume regressions repaired
+RED→GREEN; fresh standard matrix 336 passed + 18 subtests plus 11 deployment tests; awaiting
+replacement commit review)

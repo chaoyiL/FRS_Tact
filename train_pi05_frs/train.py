@@ -8,6 +8,7 @@ there causes ``CUDA_ERROR_NO_DEVICE`` spam and fails the light-import guard.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
@@ -75,6 +76,7 @@ def _validate_training_path_boundaries(
 ) -> None:
     """Validate direct decoder read/write roots before importing heavy runtimes."""
 
+    from train_pi05_frs.utils.path_safety import validate_fresh_output_root
     from train_pi05_frs.utils.path_safety import validate_output_roots
 
     read_only_roots: dict[str, pathlib.Path] = {
@@ -98,16 +100,21 @@ def _validate_training_path_boundaries(
     resolved_resume = _resolve_resume_dir(
         output_dir=output_dir, resume=resume, resume_from=resume_from
     )
-    if resolved_resume is not None:
+    if resume_from is not None:
         read_only_roots["resume_checkpoint"] = resolved_resume
     validate_output_roots(
         {"frs_training.output": output_dir}, read_only_roots=read_only_roots
     )
-    if resolved_resume is None and output_dir.exists():
-        if not output_dir.is_dir() or any(output_dir.iterdir()):
-            raise FileExistsError(
-                f"fresh training output directory is not empty: {output_dir}"
-            )
+    if resolved_resume is None:
+        pipeline_log = (
+            os.environ.get("FRS_PIPELINE_LOG")
+            if os.environ.get("FRS_PIPELINE_STAGE") == "train-frs"
+            else None
+        )
+        validate_fresh_output_root(
+            output_dir,
+            owned_pipeline_log=pipeline_log,
+        )
 
 
 def train_decoder(

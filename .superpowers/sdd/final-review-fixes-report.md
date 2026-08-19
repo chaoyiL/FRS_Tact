@@ -189,8 +189,11 @@ round closes them without modifying protected deployment/source projects:
 
 ### Hardening verification before review
 
-- Full standalone, project-boundary, and protected-deployment compatibility matrix under the actual
-  `PYTHONSAFEPATH=1` environment: `341 passed, 18 subtests passed in 40.81s`.
+- Exact standard command `python -m pytest -q -p no:cacheprovider train_pi05_frs/tests
+  tests/test_train_pi05_frs_project_boundary.py` under the actual `PYTHONSAFEPATH=1` environment:
+  `330 passed, 18 subtests passed`. The separate protected-deployment command
+  `python -m pytest -q -p no:cacheprovider tests/test_deploy_pi05_deployment_only.py` passed its 11
+  tests, giving 341 tests across the two explicitly listed matrices.
 - `uv lock --check --offline --project train_pi05_frs`: passed, 154 packages resolved.
 - Frozen Python 3.12 sync dry-run: passed, 150 packages checked and no changes required.
 - Both shell entrypoints pass `bash -n`; `setup_env.sh --check` selects only the standalone Python
@@ -198,3 +201,25 @@ round closes them without modifying protected deployment/source projects:
 - All 47 protected-source hashes pass; `git diff --check` passes.
 - The real default launcher truthfully exits with `GPU preflight failed: no NVIDIA GPU was reported`
   before JAX/model import on this host.
+
+### Post-commit launcher/resume review repair
+
+The first review of `4096928` found a real launcher regression: the initial clean-output preflight
+passed, but `run_pipeline` then created its log before stage tools repeated path validation, so the
+new stale-output guard rejected the launcher's own file. RED reproduced the full foreground stage
+sequence with every fake stage invoking the real validator. The launcher now exports the exact
+current log path only inside `run_pipeline`; later named pipeline stages may accept that path only
+when it is the sole output entry. Initial validation and direct/unowned calls still reject a single
+stale log, and an owned log never masks any second entry.
+
+The same review identified that treating implicit `<output>/last` exactly like a foreign
+`resume_from` made the established transactional resume mode unreachable. The implicit mode is now
+the narrow exception: it pins the immutable generation referenced by the output's `last` alias
+before writes, as the checkpoint transaction design requires. An explicit `resume_from` remains a
+foreign read-only asset and still must not overlap any writable root.
+
+- Launcher/resume RED: `2 failed`; GREEN focus: `5 pipeline passed`, `2 direct passed`.
+- Fresh standard standalone + boundary command after the repair: `336 passed, 18 subtests passed
+  in 40.17s`; the separately run protected-deployment command remains `11 passed`, for 347 tests
+  across the two explicitly listed matrices.
+- Launcher shell syntax, offline lock, all 47 source hashes, and diff checks remain clean.

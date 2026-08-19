@@ -14,6 +14,7 @@ import jax.numpy as jnp
 from flax import nnx
 
 from train_pi05_frs.utils.checkpoint import load_checkpoint
+from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
 from train_pi05_frs.utils.model import DecoderConfig
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
@@ -80,6 +81,51 @@ class ConditionedDecoderModelTest(unittest.TestCase):
                     resume=False,
                     resume_from=None,
                 )
+
+    def test_direct_decoder_preserves_transactional_implicit_resume(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "output"
+            (output / "last").mkdir(parents=True)
+            _validate_training_path_boundaries(
+                cache_dir=root / "cache",
+                cache_dirs=None,
+                tactile_encoder_dir=root / "encoder",
+                output_dir=output,
+                dataset_root=root / "dataset",
+                dataset_sources=None,
+                tactile_embedding_cache_root=None,
+                resume=True,
+                resume_from=None,
+            )
+
+    def test_implicit_resume_pins_generation_before_saving_next_generation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "output"
+            last = output / "last"
+            model = self.make_model()
+            save_checkpoint(last, model, epoch=1, metrics={"val_mse": 1.0})
+
+            _validate_training_path_boundaries(
+                cache_dir=root / "cache",
+                cache_dirs=None,
+                tactile_encoder_dir=root / "encoder",
+                output_dir=output,
+                dataset_root=root / "dataset",
+                dataset_sources=None,
+                tactile_embedding_cache_root=None,
+                resume=True,
+                resume_from=None,
+            )
+            pinned = resolve_checkpoint_snapshot(last)
+            _, pinned_metadata = load_checkpoint(pinned)
+            save_checkpoint(last, model, epoch=2, metrics={"val_mse": 0.5})
+            _, next_metadata = load_checkpoint(last)
+
+            self.assertNotEqual(pinned, last.resolve(strict=True))
+            self.assertEqual(pinned_metadata["epoch"], 1)
+            self.assertEqual(next_metadata["epoch"], 2)
 
     def make_model(self, *, tactile_window: int = 3) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(

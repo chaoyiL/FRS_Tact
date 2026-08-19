@@ -124,3 +124,28 @@ def validate_output_roots(
                     f"{read_only_label}={read_only_path}"
                 )
     return resolved
+
+
+def validate_fresh_output_root(
+    output_root: str | Path, *, owned_pipeline_log: str | Path | None = None
+) -> None:
+    """Reject stale fresh-run output while allowing this launcher's sole open log."""
+
+    output = Path(output_root).expanduser().absolute().resolve(strict=False)
+    if not output.exists():
+        return
+    if not output.is_dir():
+        raise FileExistsError(f"fresh training output directory is not empty: {output}")
+    entries = list(output.iterdir())
+    if not entries:
+        return
+    if owned_pipeline_log is not None:
+        log = Path(owned_pipeline_log).expanduser().absolute().resolve(strict=False)
+        if (
+            log.parent == output
+            and log.is_file()
+            and len(entries) == 1
+            and entries[0].resolve(strict=False) == log
+        ):
+            return
+    raise FileExistsError(f"fresh training output directory is not empty: {output}")

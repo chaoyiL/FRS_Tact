@@ -52,8 +52,8 @@ never converted through `Path`.
 - `norm_stats.dir` and `norm_stats.asset_id`: the exact statistics used by cache generation and
   deployment.
 - `frs_training.output`: history, plots, `last`, `best`, and pipeline logs.
-- `frs_training.resume_from`: resume from an explicit checkpoint asset root that does not overlap
-  any writable output/cache root.
+- `frs_training.resume` / `resume_from`: resume transactionally from `<output>/last`, or from an
+  explicit checkpoint asset root that does not overlap any writable output/cache root.
 
 Boolean YAML fields are strict: use unquoted `true` and `false`, not strings or `0`/`1`.
 
@@ -64,11 +64,11 @@ provenance. A complete matching cache is skipped; an incomplete matching cache r
 is rejected instead of overwriting existing data. Use a new cache root for changed inputs, or use
 the precompute tool's explicit `--overwrite` only when replacement is intentional.
 
-To resume decoder training, copy or pin the source checkpoint outside every writable output/cache
-root, set `frs_training.resume_from` to that checkpoint directory, and rerun the same launcher.
-Implicit `frs_training.resume: true` from `<output>/last` is rejected because the read-only resume
-asset would be nested inside the writable output root. Completed cache stages remain skip/resume
-safe and the decoder restores compatible parameters and optimizer state.
+To resume decoder training from the same transactional output, set `frs_training.resume: true` so
+the loader pins the immutable generation currently referenced by `<output>/last` before any write.
+For a checkpoint from another run, copy or pin it outside every writable output/cache root and set
+`frs_training.resume_from` to that directory. Completed cache stages remain skip/resume safe and
+the decoder restores compatible parameters and optimizer state.
 Each save first writes and verifies an immutable generation under
 `<output>/.checkpoint-generations/`, then atomically switches the `last` or `best` symlink. Tools
 may consume those aliases directly. When copying a checkpoint outside its output directory,

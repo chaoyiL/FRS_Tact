@@ -655,6 +655,40 @@ def test_path_preflight_rejects_nonempty_fresh_output(tmp_path: Path) -> None:
         validate_config(config, check_paths=True)
 
 
+def test_path_preflight_owned_pipeline_log_does_not_mask_stale_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    output = Path(config["frs_training"]["output"])
+    output.mkdir(parents=True)
+    pipeline_log = output / "pipeline_current.log"
+    pipeline_log.write_text("current", encoding="utf-8")
+    (output / "stale.txt").write_text("stale", encoding="utf-8")
+    monkeypatch.setenv("FRS_PIPELINE_LOG", str(pipeline_log))
+
+    with pytest.raises(FileExistsError, match="output directory is not empty"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_does_not_trust_pipeline_log_outside_owned_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    output = Path(config["frs_training"]["output"])
+    output.mkdir(parents=True)
+    pipeline_log = output / "pipeline_untrusted.log"
+    pipeline_log.write_text("stale", encoding="utf-8")
+    monkeypatch.setenv("FRS_PIPELINE_LOG", str(pipeline_log))
+    monkeypatch.delenv("FRS_PIPELINE_STAGE", raising=False)
+
+    with pytest.raises(FileExistsError, match="output directory is not empty"):
+        validate_config(config, check_paths=True)
+
+
 @pytest.mark.parametrize(
     ("mutate", "message"),
     [
@@ -1429,6 +1463,10 @@ fi
 if [[ "${stage}" == "validate" ]]; then
     exec "${FRS_REAL_PYTHON:?}" "$@"
 fi
+if [[ "${FRS_REVALIDATE_STAGES:-0}" == "1" ]]; then
+    exec "${FRS_REAL_PYTHON:?}" -m train_pi05_frs.tools.train_frs \
+        --config "${FRS_CONFIG_PATH:?}" --check
+fi
 exit 0
 """,
         encoding="utf-8",
@@ -1448,6 +1486,7 @@ def _run_launcher(
     fake_tmux: bool = False,
     relative_python: bool = False,
     symlink_python: bool = False,
+    revalidate_stages: bool = False,
 ) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, Any]]:
     config_path, config = _write_config(tmp_path)
     event_log = tmp_path / "events.txt"
@@ -1475,6 +1514,8 @@ def _run_launcher(
         "FRS_EVENT_LOG": str(event_log),
         "FRS_FAIL_STAGE": fail_stage or "",
         "FRS_NVIDIA_SMI": str(fake_nvidia_smi),
+        "FRS_REVALIDATE_STAGES": "1" if revalidate_stages else "0",
+        "FRS_CONFIG_PATH": str(config_path),
     }
     if foreground:
         environment["FRS_FOREGROUND"] = "1"
@@ -1532,6 +1573,32 @@ def test_foreground_launcher_runs_exact_pipeline_order(tmp_path: Path) -> None:
         "prepare-pi05-cache",
         "train-frs",
     ]
+
+
+def test_foreground_launcher_allows_only_its_own_log_during_stage_revalidation(
+    tmp_path: Path,
+) -> None:
+    result, events, config = _run_launcher(tmp_path, revalidate_stages=True)
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "validate",
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    ]
+    output = Path(config["frs_training"]["output"])
+    assert len(list(output.glob("pipeline_*.log"))) == 1
+
+
+def test_schema_preserves_transactional_implicit_resume(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["frs_training"]["resume"] = True
+
+    validate_config(config, check_paths=False)
 
 
 @pytest.mark.parametrize(
