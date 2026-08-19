@@ -285,6 +285,13 @@ def checkpoint_selection_key(
     )
 
 
+def checkpoint_selection_sentinel(*, loss_mode: LossMode) -> tuple[float, ...]:
+    """Return an all-infinite initial key with the active mode's tuple shape."""
+
+    key_length = 5 if loss_mode == BIMANUAL_LOSS_MODE else 12
+    return (float("inf"),) * key_length
+
+
 def checkpoint_specialist_keys(
     metrics: Mapping[str, Any],
     *,
@@ -1227,8 +1234,8 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
-    best_key = (float("inf"),) * 12
-    best_feasible_key = (float("inf"),) * 12
+    best_key = checkpoint_selection_sentinel(loss_mode=loss_mode)
+    best_feasible_key = checkpoint_selection_sentinel(loss_mode=loss_mode)
     specialist_best_keys = {
         "best_rank": (float("inf"),) * 6,
         "best_low_preservation": (float("inf"),) * 7,

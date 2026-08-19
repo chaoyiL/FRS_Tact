@@ -20,6 +20,7 @@ from train_smolvla_frs.train_frs import (
     _existing_run_artifacts,
     _validate_resume_cache,
     checkpoint_selection_key,
+    checkpoint_selection_sentinel,
     checkpoint_specialist_keys,
     high_gate_rank_statistics,
     update_early_stop_state,
@@ -252,6 +253,7 @@ def test_bimanual_checkpoint_key_uses_finite_sentinels_for_missing_strata() -> N
 
     assert all(not np.isnan(value) for value in key)
     assert key == (float("inf"),) * len(key)
+    assert not key < checkpoint_selection_sentinel(loss_mode="bimanual_gated")
 
 
 def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
