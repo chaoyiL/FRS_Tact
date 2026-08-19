@@ -149,3 +149,28 @@ def validate_fresh_output_root(
         ):
             return
     raise FileExistsError(f"fresh training output directory is not empty: {output}")
+
+
+def validate_implicit_resume_root(output_root: str | Path) -> Path:
+    """Allow only legacy ``last/`` or an in-output immutable generation target."""
+
+    output = Path(output_root).expanduser().absolute().resolve(strict=False)
+    last = output / "last"
+    target = last.resolve(strict=False)
+    if last.is_symlink():
+        generations_path = output / ".checkpoint-generations"
+        generations = generations_path.resolve(strict=False)
+        valid = (
+            generations == generations_path
+            and generations.parent == output
+            and target.parent == generations
+            and target != generations
+        )
+    else:
+        valid = target == last
+    if not valid:
+        raise ValueError(
+            "implicit resume checkpoint must remain in the same output as legacy "
+            f"last/ or .checkpoint-generations/<generation>: {last} -> {target}"
+        )
+    return target

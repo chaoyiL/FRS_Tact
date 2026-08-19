@@ -22,15 +22,18 @@ is imported.
 
 A shared path-safety API will canonicalize all writable roots and the parent asset roots of every
 read-only input: Pi checkpoint, tactile encoder checkpoint, each dataset, normalization asset,
-and resume checkpoint. It rejects equality and either ancestor direction across every read/write
-pair, including symlink aliases. Existing protected-source and writable/writable overlap checks
-remain in force. `validate_config` and direct `train_decoder` call the same API before JAX work or
-filesystem writes.
+and foreign resume checkpoint. It rejects equality and either ancestor direction across every
+read/write pair, including symlink aliases. Existing protected-source and writable/writable overlap
+checks remain in force. The sole controlled exception is implicit `<output>/last`: a legacy real
+directory must remain exactly there, and a symlink must resolve to a direct child of the same
+output's `.checkpoint-generations/` directory. `validate_config` and direct `train_decoder` call
+the same API before JAX work or filesystem writes.
 
 A non-resume run rejects an already-existing, non-empty training output. An action/tactile cache
 directory that is non-empty but has no recognized manifest is rejected before any memmap can be
-opened with a writable mode. Resume continues to require an explicit valid checkpoint. No implicit
-overwrite behavior is introduced.
+opened with a writable mode. A foreign resume requires an explicit valid non-overlapping
+`resume_from`; transactional implicit resume pins only the controlled same-output `last` target
+described above. No implicit overwrite behavior is introduced.
 
 ## Normalization statistics
 

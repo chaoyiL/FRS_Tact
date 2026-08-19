@@ -22,6 +22,7 @@ from packaging.requirements import Requirement
 import yaml
 
 from train_pi05_frs.utils.path_safety import validate_fresh_output_root
+from train_pi05_frs.utils.path_safety import validate_implicit_resume_root
 from train_pi05_frs.utils.path_safety import validate_output_roots
 
 
@@ -1177,6 +1178,7 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         raise FileNotFoundError(f"resume checkpoint does not exist: {resume_from}")
     if training.get("resume", False) and resume_from in (None, ""):
         last = _output_target(training["output"], "frs_training.output") / "last"
+        validate_implicit_resume_root(output_roots["config.frs_training.output"])
         if not last.is_dir():
             raise FileNotFoundError(f"resume checkpoint does not exist: {last}")
     output_target = output_roots["config.frs_training.output"]

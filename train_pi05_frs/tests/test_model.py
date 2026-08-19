@@ -127,6 +127,28 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(pinned_metadata["epoch"], 1)
             self.assertEqual(next_metadata["epoch"], 2)
 
+    def test_direct_decoder_rejects_implicit_resume_symlink_to_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "output"
+            cache_root = root / "cache"
+            output.mkdir()
+            cache_root.mkdir()
+            (output / "last").symlink_to(cache_root, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "implicit resume.*same output"):
+                _validate_training_path_boundaries(
+                    cache_dir=cache_root,
+                    cache_dirs=None,
+                    tactile_encoder_dir=root / "encoder",
+                    output_dir=output,
+                    dataset_root=root / "dataset",
+                    dataset_sources=None,
+                    tactile_embedding_cache_root=None,
+                    resume=True,
+                    resume_from=None,
+                )
+
     def make_model(self, *, tactile_window: int = 3) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
             DecoderConfig(

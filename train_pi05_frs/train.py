@@ -77,6 +77,7 @@ def _validate_training_path_boundaries(
     """Validate direct decoder read/write roots before importing heavy runtimes."""
 
     from train_pi05_frs.utils.path_safety import validate_fresh_output_root
+    from train_pi05_frs.utils.path_safety import validate_implicit_resume_root
     from train_pi05_frs.utils.path_safety import validate_output_roots
 
     read_only_roots: dict[str, pathlib.Path] = {
@@ -102,6 +103,8 @@ def _validate_training_path_boundaries(
     )
     if resume_from is not None:
         read_only_roots["resume_checkpoint"] = resolved_resume
+    elif resume:
+        validate_implicit_resume_root(output_dir)
     validate_output_roots(
         {"frs_training.output": output_dir}, read_only_roots=read_only_roots
     )

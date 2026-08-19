@@ -219,7 +219,14 @@ before writes, as the checkpoint transaction design requires. An explicit `resum
 foreign read-only asset and still must not overlap any writable root.
 
 - Launcher/resume RED: `2 failed`; GREEN focus: `5 pipeline passed`, `2 direct passed`.
-- Fresh standard standalone + boundary command after the repair: `336 passed, 18 subtests passed
-  in 40.17s`; the separately run protected-deployment command remains `11 passed`, for 347 tests
-  across the two explicitly listed matrices.
+- A follow-up review then tightened the implicit exception itself. `output/last` may be either the
+  real legacy directory or a symlink to a direct child of the real, non-symlinked
+  `output/.checkpoint-generations/` container. Direct links to action/tactile caches and the
+  double-alias case where the generation container points outside output are rejected by config
+  and direct boundaries. RED: `2 failed` for direct cache links, then `1 failed` for the container
+  alias; GREEN implicit-resume focus: `5 pipeline passed`, `3 model passed` including generation
+  A pin followed by generation B publication.
+- Fresh standard standalone + boundary command after all review repairs: `342 passed, 18 subtests
+  passed in 40.23s`; the separately run protected-deployment command remains `11 passed in 2.43s`,
+  for 353 tests across the two explicitly listed matrices.
 - Launcher shell syntax, offline lock, all 47 source hashes, and diff checks remain clean.

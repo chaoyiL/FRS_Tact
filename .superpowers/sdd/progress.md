@@ -15,5 +15,5 @@ Final hardening round: implementation and full verification complete (Python/met
 contract, read/write asset isolation, strict norm vectors, actual cache-record/content identity;
 341 passed + 18 subtests; awaiting post-commit read-only review gate)
 Post-commit review repair: launcher-owned log and transactional implicit resume regressions repaired
-RED→GREEN; fresh standard matrix 336 passed + 18 subtests plus 11 deployment tests; awaiting
-replacement commit review)
+RED→GREEN; implicit resume canonical target/container escape follow-up also repaired; fresh standard
+matrix 342 passed + 18 subtests plus 11 deployment tests; awaiting final replacement commit review)

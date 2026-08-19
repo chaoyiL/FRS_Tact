@@ -1601,6 +1601,74 @@ def test_schema_preserves_transactional_implicit_resume(tmp_path: Path) -> None:
     validate_config(config, check_paths=False)
 
 
+@pytest.mark.parametrize("target_name", ["action_cache", "tactile_cache"])
+def test_schema_rejects_implicit_resume_symlink_to_writable_cache(
+    tmp_path: Path, target_name: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["frs_training"]["resume"] = True
+    output = Path(config["frs_training"]["output"])
+    output.mkdir(parents=True)
+    target = Path(
+        config[
+            "action_cache" if target_name == "action_cache" else "tactile_embedding_cache"
+        ]["root"]
+    )
+    target.mkdir(parents=True)
+    (output / "last").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="implicit resume.*same output"):
+        validate_config(config, check_paths=True)
+
+
+def test_schema_rejects_symlinked_generation_container_escape(
+    tmp_path: Path,
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["frs_training"]["resume"] = True
+    output = Path(config["frs_training"]["output"])
+    output.mkdir(parents=True)
+    cache_root = Path(config["action_cache"]["root"])
+    generation = cache_root / "generation-a"
+    generation.mkdir(parents=True)
+    (output / ".checkpoint-generations").symlink_to(
+        cache_root, target_is_directory=True
+    )
+    (output / "last").symlink_to(
+        Path(".checkpoint-generations") / generation.name,
+        target_is_directory=True,
+    )
+
+    with pytest.raises(ValueError, match="implicit resume.*same output"):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize("layout", ["legacy", "generation"])
+def test_schema_allows_controlled_implicit_resume_layout(
+    tmp_path: Path, layout: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["frs_training"]["resume"] = True
+    output = Path(config["frs_training"]["output"])
+    if layout == "legacy":
+        (output / "last").mkdir(parents=True)
+    else:
+        generation = output / ".checkpoint-generations" / "generation-a"
+        generation.mkdir(parents=True)
+        (output / "last").symlink_to(
+            Path(".checkpoint-generations") / generation.name,
+            target_is_directory=True,
+        )
+
+    validate_config(config, check_paths=True)
+
+
 @pytest.mark.parametrize(
     "failed_stage",
     [
