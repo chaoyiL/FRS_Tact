@@ -1,0 +1,771 @@
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any
+
+import numpy as np
+import pytest
+import yaml
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TRAIN_ROOT = REPO_ROOT / "train_pi05_frs"
+CONFIG_PATH = TRAIN_ROOT / "configs" / "train_pi05_frs.yaml"
+LAUNCHER = TRAIN_ROOT / "scripts" / "start_frs_pi05_train.sh"
+
+
+def _valid_config(tmp_path: Path) -> dict[str, Any]:
+    checkpoint = tmp_path / "checkpoint"
+    (checkpoint / "params").mkdir(parents=True)
+    encoder = tmp_path / "encoder"
+    encoder.mkdir()
+    np.savez(encoder / "params-fake.npz", p00000=np.zeros((1,), dtype=np.float32))
+    (encoder / "checkpoint.json").write_text(
+        json.dumps(
+            {
+                "params_file": "params-fake.npz",
+                "parameter_paths": ["tactile_resnet/example"],
+                "tactile_clip_config": {
+                    "embedding_dim": 512,
+                    "tactile_image_size": 224,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    dataset = tmp_path / "dataset"
+    (dataset / "meta").mkdir(parents=True)
+    (dataset / "meta" / "info.json").write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "features": {
+                    "actions": {"dtype": "float32"},
+                    "observation.images.camera0": {"dtype": "video"},
+                    "observation.images.camera1": {"dtype": "video"},
+                    "observation.images.tactile_left_0": {"dtype": "video"},
+                    "observation.images.tactile_right_0": {"dtype": "video"},
+                    "observation.images.tactile_left_1": {"dtype": "video"},
+                    "observation.images.tactile_right_1": {"dtype": "video"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    norm_stats = tmp_path / "norm-stats" / "robot"
+    norm_stats.mkdir(parents=True)
+    (norm_stats / "norm_stats.json").write_text(
+        json.dumps(
+            {
+                "norm_stats": {
+                    "state": {"mean": [0.0], "std": [1.0], "q01": [-1.0], "q99": [1.0]},
+                    "actions": {
+                        "mean": [0.0],
+                        "std": [1.0],
+                        "q01": [-1.0],
+                        "q99": [1.0],
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "checkpoint": str(checkpoint),
+        "allow_download": False,
+        "datasets": [
+            {
+                "repo_id": "org/demo",
+                "root": str(dataset),
+                "action_key": "actions",
+                "rename_map": {
+                    "observation.images.camera0": "observation.images.camera1",
+                    "observation.images.camera1": "observation.images.camera2",
+                },
+            }
+        ],
+        "action_cache": {
+            "root": str(tmp_path / "action-cache"),
+            "model_sample_steps": 2,
+            "reverse_steps": 3,
+            "reverse_solver": "slerpflow",
+            "batch_size": 2,
+            "load_workers": 1,
+            "flush_every": 1,
+            "inference_seed": 0,
+            "split_seed": 1,
+            "val_fraction": 0.1,
+            "frame_stride": 1,
+            "drop_tail_action_chunks": 0,
+            "max_episodes": None,
+            "max_samples": None,
+        },
+        "tactile_embedding_cache": {
+            "enabled": True,
+            "root": str(tmp_path / "tactile-cache"),
+            "dtype": "float16",
+            "precompute_batch_size": 2,
+            "precompute_num_workers": 0,
+            "precompute_prefetch_factor": 2,
+            "precompute_video_backend": "torchcodec",
+            "precompute_flush_every": 1,
+        },
+        "model": {
+            "use_tactile_encoder": True,
+            "tactile_encoder_path": str(encoder),
+            "freeze_tactile_encoder": True,
+            "tactile_keys": [
+                "observation.images.tactile_left_0",
+                "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1",
+                "observation.images.tactile_right_1",
+            ],
+            "tactile_embedding_dim": 512,
+            "tactile_num_tokens": 4,
+            "tactile_image_size": 224,
+            "state_conditioning": True,
+            "state_dropout_rate": 0.1,
+            "camera_map": {
+                "left_wrist_0_rgb": "observation.images.camera1",
+                "right_wrist_0_rgb": "observation.images.camera2",
+            },
+            "action_dim": 32,
+            "action_horizon": 50,
+            "paligemma_variant": "gemma_2b",
+            "action_expert_variant": "gemma_300m",
+        },
+        "norm_stats": {
+            "dir": str(tmp_path / "norm-stats"),
+            "asset_id": "robot",
+            "use_quantile_norm": True,
+        },
+        "frs_training": {
+            "output": str(tmp_path / "training-output"),
+            "tactile_window_divisor": 5,
+            "history_stride": 3,
+            "loss_mode": "gated",
+            "gate_tau": 0.4,
+            "gate_temperature": 0.1,
+            "gate_lambda": 0.25,
+            "aux_decode_weight": 4.0,
+            "aux_decode_steps": 10,
+            "aux_decode_solver": "fireflow",
+            "low_gate_safety_weight": 0.5,
+            "low_gate_safety_margin": 0.03,
+            "rank_low_gate_threshold": 0.3,
+            "rank_high_gate_threshold": 0.7,
+            "rank_weight": 2.0,
+            "rank_margin": 0.0,
+            "repair_weight": 2.0,
+            "repair_margin": 0.0,
+            "best_max_low_gate_unsafe_frac": 0.1,
+            "best_min_high_gate_gain": 0.0,
+            "best_min_high_gate_rank_satisfied_frac": 0.8,
+            "model_dim": 256,
+            "depth": 6,
+            "num_heads": 4,
+            "mlp_ratio": 4,
+            "learning_rate": 3.0e-4,
+            "weight_decay": 1.0e-4,
+            "grad_clip_norm": 1.0,
+            "warmup_epochs": 2,
+            "lr_reference_dim": 256,
+            "min_lr_ratio": 0.1,
+            "lr_schedule": "cosine",
+            "batch_size": 2,
+            "epochs": 1,
+            "validation_steps": 1,
+            "eval_every": 1,
+            "seed": 42,
+            "write_plots": True,
+            "resume": False,
+            "resume_from": None,
+        },
+    }
+
+
+def _write_config(tmp_path: Path, config: dict[str, Any] | None = None) -> tuple[Path, dict[str, Any]]:
+    value = config or _valid_config(tmp_path)
+    path = tmp_path / "pipeline.yaml"
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    return path, value
+
+
+def test_default_config_and_tools_live_inside_training_project() -> None:
+    from train_pi05_frs.tools import prepare_frs_pi05_cache, train_frs
+
+    assert CONFIG_PATH.is_file()
+    assert prepare_frs_pi05_cache.DEFAULT_CONFIG == CONFIG_PATH
+    assert train_frs.DEFAULT_CONFIG == CONFIG_PATH
+    config = train_frs.load_config(CONFIG_PATH)
+    assert config["checkpoint"] == "gs://openpi-assets/checkpoints/pi05_base"
+    assert config["action_cache"]["reverse_solver"] == "slerpflow"
+    assert config["frs_training"]["loss_mode"] == "gated"
+
+
+def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import load_config
+
+    path = tmp_path / "invalid.yaml"
+    path.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="root.*mapping"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "bad_value"),
+    [
+        (None, "allow_download", "false"),
+        ("tactile_embedding_cache", "enabled", 1),
+        ("model", "use_tactile_encoder", "true"),
+        ("model", "freeze_tactile_encoder", 1),
+        ("model", "state_conditioning", "yes"),
+        ("norm_stats", "use_quantile_norm", 1),
+        ("frs_training", "write_plots", "true"),
+        ("frs_training", "resume", 0),
+    ],
+)
+def test_schema_rejects_non_boolean_boolean_fields(
+    tmp_path: Path, section: str | None, key: str, bad_value: object
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    target = config if section is None else config[section]
+    target[key] = bad_value
+    with pytest.raises(ValueError, match=f"{key}.*boolean"):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda cfg: cfg.update(datasets={"repo_id": "org/demo"}), "datasets.*list"),
+        (lambda cfg: cfg.update(action_cache=[]), "action_cache.*mapping"),
+        (lambda cfg: cfg["datasets"].append("org/not-a-mapping"), "datasets\\[1\\].*mapping"),
+        (lambda cfg: cfg["model"].update(tactile_keys="one-key"), "tactile_keys.*list"),
+        (lambda cfg: cfg["model"].update(camera_map=[]), "camera_map.*mapping"),
+        (lambda cfg: cfg["datasets"][0].update(rename_map=[]), "rename_map.*mapping"),
+    ],
+)
+def test_schema_rejects_wrong_mapping_and_list_types(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    mutate(config)
+    with pytest.raises(ValueError, match=message):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("section", "key", "bad_value"),
+    [
+        ("action_cache", "inference_seed", "0"),
+        ("action_cache", "split_seed", False),
+        ("frs_training", "seed", "42"),
+        ("frs_training", "learning_rate", "3e-4"),
+        ("frs_training", "learning_rate", float("nan")),
+        ("frs_training", "aux_decode_weight", float("inf")),
+    ],
+)
+def test_schema_rejects_non_numeric_numeric_fields(
+    tmp_path: Path, section: str, key: str, bad_value: object
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config[section][key] = bad_value
+    with pytest.raises(ValueError, match=key):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("section", "key"),
+    [
+        ("action_cache", "root"),
+        ("tactile_embedding_cache", "root"),
+        ("frs_training", "output"),
+    ],
+)
+def test_schema_rejects_url_output_paths(tmp_path: Path, section: str, key: str) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config[section][key] = "gs://not-a-local-output"
+    with pytest.raises(ValueError, match="local filesystem path"):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda cfg: cfg["model"].update(
+                camera_map={"not_a_pi05_camera": "observation.images.camera1"}
+            ),
+            "camera_map.*not_a_pi05_camera",
+        ),
+        (
+            lambda cfg: cfg["model"].update(paligemma_variant="unknown"),
+            "paligemma_variant",
+        ),
+        (
+            lambda cfg: cfg["model"].update(tactile_num_tokens=3),
+            "tactile_num_tokens",
+        ),
+        (
+            lambda cfg: cfg["datasets"][0].update(episodes="0,1"),
+            "episodes.*list",
+        ),
+        (
+            lambda cfg: cfg["datasets"][0].update(weight=float("nan")),
+            "weight",
+        ),
+    ],
+)
+def test_schema_rejects_model_contract_drift(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    mutate(config)
+    with pytest.raises(ValueError, match=message):
+        validate_config(config, check_paths=False)
+
+
+def test_schema_rejects_colliding_sanitized_dataset_cache_dirs(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["datasets"] = [
+        {"repo_id": "org/two", "root": config["datasets"][0]["root"]},
+        {"repo_id": "org/../two", "root": config["datasets"][0]["root"]},
+    ]
+
+    with pytest.raises(ValueError, match="same sanitized action-cache directory"):
+        validate_config(config, check_paths=False)
+
+
+def test_path_preflight_rejects_missing_inputs_without_creating_outputs(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["model"]["tactile_encoder_path"] = str(tmp_path / "missing-encoder")
+    output = Path(config["frs_training"]["output"])
+    with pytest.raises(FileNotFoundError, match="tactile encoder"):
+        validate_config(config, check_paths=True)
+    assert not output.exists()
+    assert not Path(config["action_cache"]["root"]).exists()
+    assert not Path(config["tactile_embedding_cache"]["root"]).exists()
+
+
+def test_path_preflight_validates_encoder_and_local_norm_stats_files(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    encoder = Path(config["model"]["tactile_encoder_path"])
+    (encoder / "checkpoint.json").unlink()
+    with pytest.raises(FileNotFoundError, match="encoder checkpoint"):
+        validate_config(config, check_paths=True)
+
+    config = _valid_config(tmp_path / "norm-case")
+    stats_file = (
+        Path(config["norm_stats"]["dir"])
+        / config["norm_stats"]["asset_id"]
+        / "norm_stats.json"
+    )
+    stats_file.unlink()
+    with pytest.raises(FileNotFoundError, match="norm stats"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_resolves_camera_map_values_after_dataset_rename(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["model"]["camera_map"]["left_wrist_0_rgb"] = "observation.images.typo"
+
+    with pytest.raises(ValueError, match="camera_map.*typo"):
+        validate_config(config, check_paths=True)
+
+
+def test_prepare_reuses_one_model_preserves_url_and_sanitizes_each_cache_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools import prepare_frs_pi05_cache as tool
+
+    shared_model = object()
+    load_calls: list[tuple[str, object]] = []
+    prepare_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        tool,
+        "load_pi0",
+        lambda checkpoint, config: load_calls.append((checkpoint, config)) or shared_model,
+    )
+    monkeypatch.setattr(
+        tool,
+        "prepare_cache",
+        lambda **kwargs: prepare_calls.append(kwargs) or Path(str(kwargs["cache_dir"])),
+    )
+    config = _valid_config(tmp_path)
+    config["checkpoint"] = "gs://example/pi05"
+    config["allow_download"] = True
+    source = config["datasets"][0]
+    config["datasets"] = [
+        {**source, "repo_id": "org/one"},
+        {**source, "repo_id": "org/../two"},
+    ]
+
+    outputs = tool.prepare_from_config(config)
+
+    assert [call[0] for call in load_calls] == ["gs://example/pi05"]
+    assert len(prepare_calls) == 2
+    assert all(call["checkpoint_dir"] == "gs://example/pi05" for call in prepare_calls)
+    assert all(call["loaded_model"] is shared_model for call in prepare_calls)
+    cache_root = Path(config["action_cache"]["root"])
+    assert outputs == [cache_root / "org" / "one", cache_root / "org" / "two"]
+
+
+def test_prepare_resolves_local_checkpoint_and_norm_stats_from_repo_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools import prepare_frs_pi05_cache as tool
+
+    config = _valid_config(tmp_path)
+    checkpoint = Path(config["checkpoint"])
+    norm_stats = Path(config["norm_stats"]["dir"])
+    config["checkpoint"] = os.path.relpath(checkpoint, REPO_ROOT)
+    config["norm_stats"]["dir"] = os.path.relpath(norm_stats, REPO_ROOT)
+    load_calls: list[str] = []
+    prepare_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        tool,
+        "load_pi0",
+        lambda value, config: load_calls.append(value) or object(),
+    )
+    monkeypatch.setattr(
+        tool,
+        "prepare_cache",
+        lambda **kwargs: prepare_calls.append(kwargs) or Path(str(kwargs["cache_dir"])),
+    )
+
+    tool.prepare_from_config(config)
+
+    assert load_calls == [str(checkpoint)]
+    assert prepare_calls[0]["checkpoint_dir"] == str(checkpoint)
+    assert prepare_calls[0]["norm_stats_dir"] == str(norm_stats)
+
+
+def test_precompute_resolves_dataset_roots_before_source_parsing(tmp_path: Path) -> None:
+    from train_pi05_frs.tools import precompute_tactile_embeddings as tool
+
+    config = _valid_config(tmp_path)
+    dataset_root = Path(config["datasets"][0]["root"])
+    config["datasets"][0]["root"] = os.path.relpath(dataset_root, REPO_ROOT)
+
+    resolved = tool._resolved_source_config(config)
+
+    assert resolved["datasets"][0]["root"] == str(dataset_root)
+    assert config["datasets"][0]["root"] != str(dataset_root)
+
+
+def test_complete_embedding_cache_must_have_valid_array(tmp_path: Path) -> None:
+    from train_pi05_frs.tools import precompute_tactile_embeddings as tool
+
+    path = tmp_path / "embeddings.npy"
+    with pytest.raises(FileNotFoundError, match="embeddings"):
+        tool._open_existing_embeddings(path, shape=(2, 4, 8), dtype="float16")
+
+    wrong = np.lib.format.open_memmap(
+        path, mode="w+", dtype=np.float32, shape=(2, 4, 7)
+    )
+    wrong.flush()
+    del wrong
+    with pytest.raises(ValueError, match="shape/dtype"):
+        tool._open_existing_embeddings(path, shape=(2, 4, 8), dtype="float16")
+
+
+def test_embedding_cache_rejects_unpaired_metadata_or_array(tmp_path: Path) -> None:
+    from train_pi05_frs.tools import precompute_tactile_embeddings as tool
+
+    metadata = tmp_path / "metadata.json"
+    embeddings = tmp_path / "embeddings.npy"
+    embeddings.write_bytes(b"partial")
+    with pytest.raises(ValueError, match="inconsistent tactile cache files"):
+        tool._validate_cache_file_pair(metadata, embeddings, overwrite=False)
+
+    embeddings.unlink()
+    metadata.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="inconsistent tactile cache files"):
+        tool._validate_cache_file_pair(metadata, embeddings, overwrite=False)
+
+
+@pytest.mark.parametrize(
+    ("status", "completed", "total"),
+    [("incomplete", 10, 10), ("complete", 9, 10), ("unknown", 1, 10)],
+)
+def test_embedding_cache_rejects_inconsistent_progress(
+    status: str, completed: int, total: int
+) -> None:
+    from train_pi05_frs.tools import precompute_tactile_embeddings as tool
+
+    with pytest.raises(ValueError, match="cache progress"):
+        tool._validate_cache_progress(status=status, completed=completed, total=total)
+
+
+def test_train_forwards_multi_dataset_caches_and_strict_booleans(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools import train_frs
+
+    config = _valid_config(tmp_path)
+    dataset_root = Path(config["datasets"][0]["root"])
+    config["datasets"][0]["root"] = os.path.relpath(dataset_root, REPO_ROOT)
+    config["datasets"].append({**config["datasets"][0], "repo_id": "other/demo"})
+    for repo_id in ("org/demo", "other/demo"):
+        cache_dir = Path(config["action_cache"]["root"]).joinpath(*repo_id.split("/"))
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(train_frs, "train_decoder", lambda **kwargs: calls.append(kwargs))
+
+    train_frs.train_from_config(config)
+
+    assert len(calls) == 1
+    assert calls[0]["cache_dirs"] == [
+        Path(config["action_cache"]["root"]) / "org" / "demo",
+        Path(config["action_cache"]["root"]) / "other" / "demo",
+    ]
+    assert calls[0]["state_conditioning"] is True
+    assert calls[0]["write_plots"] is True
+    assert calls[0]["resume"] is False
+    assert [source["root"] for source in calls[0]["dataset_sources"]] == [
+        str(dataset_root),
+        str(dataset_root),
+    ]
+
+
+def _fake_python(tmp_path: Path) -> Path:
+    wrapper = tmp_path / "fake-python"
+    wrapper.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FRS_EXPECT_PYTHON_INVOCATION:-}" && "$0" != "${FRS_EXPECT_PYTHON_INVOCATION}" ]]; then
+    exit 42
+fi
+stage="${FRS_PIPELINE_STAGE:?}"
+printf '%s\\n' "${stage}" >> "${FRS_EVENT_LOG:?}"
+if [[ "${FRS_FAIL_STAGE:-}" == "${stage}" ]]; then
+    exit 41
+fi
+if [[ "${stage}" == "validate" ]]; then
+    exec "${FRS_REAL_PYTHON:?}" "$@"
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+    return wrapper
+
+
+def _run_launcher(
+    tmp_path: Path,
+    *,
+    check: bool = False,
+    fail_stage: str | None = None,
+    block_jax: bool = False,
+    relative_config: bool = False,
+    foreground: bool = True,
+    fake_tmux: bool = False,
+    relative_python: bool = False,
+    symlink_python: bool = False,
+) -> tuple[subprocess.CompletedProcess[str], list[str], dict[str, Any]]:
+    config_path, config = _write_config(tmp_path)
+    event_log = tmp_path / "events.txt"
+    fake_python = _fake_python(tmp_path)
+    selected_python = fake_python
+    if symlink_python:
+        selected_python = tmp_path / "venv" / "bin" / "python"
+        selected_python.parent.mkdir(parents=True)
+        selected_python.symlink_to(fake_python)
+    environment = {
+        **os.environ,
+        "TRAIN_PI05_FRS_PYTHON": (
+            os.path.relpath(selected_python, REPO_ROOT)
+            if relative_python
+            else str(selected_python)
+        ),
+        "FRS_EXPECT_PYTHON_INVOCATION": str(selected_python) if symlink_python else "",
+        "FRS_REAL_PYTHON": sys.executable,
+        "FRS_EVENT_LOG": str(event_log),
+        "FRS_FAIL_STAGE": fail_stage or "",
+    }
+    if foreground:
+        environment["FRS_FOREGROUND"] = "1"
+    else:
+        environment.pop("FRS_FOREGROUND", None)
+    if fake_tmux:
+        fake_bin = tmp_path / "fake-bin"
+        fake_bin.mkdir()
+        tmux = fake_bin / "tmux"
+        tmux.write_text(
+            """#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "${FRS_TMUX_LOG:?}"
+if [[ "${1:-}" == "has-session" ]]; then
+    exit 1
+fi
+inner="${!#}"
+bash -c "${inner}"
+""",
+            encoding="utf-8",
+        )
+        tmux.chmod(0o755)
+        environment["FRS_TMUX_LOG"] = str(tmp_path / "tmux.txt")
+        environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    if block_jax:
+        blocker = tmp_path / "block-jax"
+        blocker.mkdir()
+        (blocker / "jax.py").write_text(
+            "raise AssertionError('JAX imported during --check')\n", encoding="utf-8"
+        )
+        environment["PYTHONPATH"] = f"{blocker}:{environment.get('PYTHONPATH', '')}"
+    command = ["bash", str(LAUNCHER)]
+    if check:
+        command.append("--check")
+    command.append(os.path.relpath(config_path, REPO_ROOT) if relative_config else str(config_path))
+    result = subprocess.run(
+        command,
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    events = event_log.read_text(encoding="utf-8").splitlines() if event_log.exists() else []
+    return result, events, config
+
+
+def test_foreground_launcher_runs_exact_pipeline_order(tmp_path: Path) -> None:
+    result, events, _ = _run_launcher(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "validate",
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    ]
+
+
+@pytest.mark.parametrize(
+    "failed_stage",
+    [
+        "validate",
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    ],
+)
+def test_launcher_stops_after_each_failed_stage(tmp_path: Path, failed_stage: str) -> None:
+    expected = [
+        "validate",
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    ]
+    result, events, _ = _run_launcher(tmp_path, fail_stage=failed_stage)
+
+    assert result.returncode != 0
+    assert events == expected[: expected.index(failed_stage) + 1]
+
+
+def test_check_is_dependency_light_and_creates_no_pipeline_artifacts(tmp_path: Path) -> None:
+    result, events, config = _run_launcher(tmp_path, check=True, block_jax=True)
+
+    assert result.returncode == 0, result.stderr
+    assert events == ["validate"]
+    assert not Path(config["frs_training"]["output"]).exists()
+    assert not Path(config["action_cache"]["root"]).exists()
+    assert not Path(config["tactile_embedding_cache"]["root"]).exists()
+
+
+def test_launcher_resolves_config_before_changing_directory(tmp_path: Path) -> None:
+    result, events, _ = _run_launcher(tmp_path, check=True, relative_config=True)
+
+    assert result.returncode == 0, result.stderr
+    assert events == ["validate"]
+
+
+def test_launcher_preserves_virtualenv_python_symlink(tmp_path: Path) -> None:
+    result, events, _ = _run_launcher(tmp_path, check=True, symlink_python=True)
+
+    assert result.returncode == 0, result.stderr
+    assert events == ["validate"]
+
+
+def test_tmux_is_opt_in_after_preflight_and_before_output_creation(tmp_path: Path) -> None:
+    result, events, config = _run_launcher(
+        tmp_path, foreground=False, fake_tmux=True, relative_python=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert events == [
+        "validate",
+        "checkpoint-smoke",
+        "precompute-tactile",
+        "prepare-pi05-cache",
+        "train-frs",
+    ]
+    tmux_calls = (tmp_path / "tmux.txt").read_text(encoding="utf-8").splitlines()
+    assert tmux_calls[0].startswith("has-session -t ")
+    assert tmux_calls[1].startswith("new-session -d -s ")
+    output = Path(config["frs_training"]["output"])
+    assert len(list(output.glob("pipeline_*.log"))) == 1
+
+
+def test_check_exits_before_tmux_even_when_tmux_is_available(tmp_path: Path) -> None:
+    result, events, _ = _run_launcher(
+        tmp_path, check=True, foreground=False, fake_tmux=True
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert events == ["validate"]
+    assert not (tmp_path / "tmux.txt").exists()
+
+
+def test_launcher_uses_private_src_and_training_interpreter_without_uv() -> None:
+    script = LAUNCHER.read_text(encoding="utf-8")
+
+    assert 'TRAIN_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"' in script
+    assert 'export PYTHONPATH="${TRAIN_ROOT}/src:${REPO_ROOT}' in script
+    assert 'cd "${TRAIN_ROOT}"' in script
+    assert "uv run" not in script
+
+
+def test_readme_documents_training_boundary_and_operational_handoff() -> None:
+    readme = (TRAIN_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for phrase in (
+        "train_pi05_frs/.venv",
+        "setup_env.sh",
+        "start_frs_pi05_train.sh",
+        "evaluate",
+        "resume",
+        "tmux",
+        "deploy_pi05",
+        "train_encoder",
+        "modality",
+    ):
+        assert phrase in readme
+    assert "/home/typhon/FRS_Tact-pi05-frs-jax" not in readme
