@@ -32,8 +32,6 @@ ededb0bb10423180b2eef5f97f867aac7b3979d49ce69121916d4e2e0e085295  train_pi05_frs
 d53792b446936f08527b598a89a65fc2ca5c002d9bb14e63015206dae5830023  train_pi05_frs/src/lerobot/datasets/pyav_utils.py
 # src/lerobot/datasets/sample_utils.py -> train_pi05_frs/src/lerobot/datasets/sample_utils.py
 f769e5c0d2fd4cce22321d32adc55a27fb4d9bdbae9e44359c27f7b315a64bc4  train_pi05_frs/src/lerobot/datasets/sample_utils.py
-# src/lerobot/datasets/tactile_cache.py -> train_pi05_frs/src/lerobot/datasets/tactile_cache.py
-f408dcb8f7d18c2a8c7905ed75110ff225130f4d08d06c0c64cd133d0d9d1785  train_pi05_frs/src/lerobot/datasets/tactile_cache.py
 # src/lerobot/datasets/utils.py -> train_pi05_frs/src/lerobot/datasets/utils.py
 488b713e643acaaa8c76cca8830ca71cb20584b4ceb3657a9396f81a20b3f83e  train_pi05_frs/src/lerobot/datasets/utils.py
 # src/lerobot/datasets/video_utils.py -> train_pi05_frs/src/lerobot/datasets/video_utils.py

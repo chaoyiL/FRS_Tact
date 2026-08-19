@@ -38,13 +38,37 @@ def atomic_write_json(path: Path, value: Mapping[str, Any]) -> None:
 @lru_cache(maxsize=8)
 def tactile_encoder_fingerprint(checkpoint_dir: str | Path) -> str:
     directory = Path(checkpoint_dir).expanduser().resolve()
-    candidates = [directory / "checkpoint.json", directory / "params.npz"]
-    missing = [path for path in candidates if not path.is_file()]
-    if missing:
-        raise FileNotFoundError(f"tactile encoder files are missing: {missing}")
+    metadata_path = directory / "checkpoint.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"tactile encoder checkpoint metadata is missing: {metadata_path}")
+    if not metadata_path.is_file():
+        raise ValueError(f"tactile encoder checkpoint metadata must be a regular file: {metadata_path}")
+    with metadata_path.open(encoding="utf-8") as file:
+        metadata = json.load(file)
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"tactile encoder checkpoint metadata must be a mapping: {metadata_path}")
+
+    params_file = metadata.get("params_file", "params.npz")
+    if not isinstance(params_file, str) or not params_file.strip() or "\x00" in params_file:
+        raise ValueError("tactile encoder params_file must be a non-empty relative path")
+    relative_params_path = Path(params_file)
+    if relative_params_path.is_absolute():
+        raise ValueError("tactile encoder params_file must remain within the checkpoint directory")
+    params_path = (directory / relative_params_path).resolve()
+    try:
+        params_path.relative_to(directory)
+    except ValueError as error:
+        raise ValueError(
+            "tactile encoder params_file must remain within the checkpoint directory"
+        ) from error
+    if not params_path.exists():
+        raise FileNotFoundError(f"tactile encoder params_file is missing: {params_path}")
+    if not params_path.is_file():
+        raise ValueError(f"tactile encoder params_file must be a regular file: {params_path}")
+
     digest = hashlib.sha256()
-    for path in candidates:
-        digest.update(path.name.encode())
+    for relative_path, path in (("checkpoint.json", metadata_path), (params_file, params_path)):
+        digest.update(relative_path.encode())
         with path.open("rb") as file:
             while chunk := file.read(8 * 1024 * 1024):
                 digest.update(chunk)

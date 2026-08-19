@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +17,7 @@ from train_pi05_frs.pi05_cache import cache, policy_inputs, prepare
 from train_pi05_frs.pi05_cache import source_model
 from lerobot.policies.pi05_jax import transforms
 from lerobot.policies.pi05_jax.normalize import NormStats
+from lerobot.datasets import tactile_cache
 
 
 class FakeMetadata:
@@ -34,6 +37,151 @@ def make_stats(dim: int) -> NormStats:
         q01=-np.ones(dim, dtype=np.float32),
         q99=np.ones(dim, dtype=np.float32),
     )
+
+
+def expected_encoder_fingerprint(checkpoint_dir: Path, params_name: str) -> str:
+    digest = hashlib.sha256()
+    for relative_path in ("checkpoint.json", params_name):
+        path = checkpoint_dir / relative_path
+        digest.update(relative_path.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+@pytest.mark.parametrize("checkpoint_format", ["legacy", "metadata_params_file"])
+def test_tactile_fingerprint_metadata_and_reader_support_both_checkpoint_formats(
+    tmp_path: Path,
+    checkpoint_format: str,
+) -> None:
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    if checkpoint_format == "legacy":
+        params_name = "params.npz"
+        metadata_payload: dict[str, object] = {
+            "version": 3,
+            "parameter_paths": ["encoder/kernel"],
+        }
+        (encoder_dir / "checkpoint.json").write_text(
+            json.dumps(metadata_payload, sort_keys=True), encoding="utf-8"
+        )
+        np.savez(encoder_dir / params_name, p00000=np.arange(4, dtype=np.float32))
+    else:
+        from train_encoder.utils.checkpoint import save_checkpoint
+        from train_encoder.utils.model import TactileClipConfig
+
+        save_checkpoint(
+            encoder_dir,
+            {"encoder": {"kernel": jnp.arange(4, dtype=jnp.float32)}},
+            epoch=1,
+            metrics={"loss": 0.5},
+            model_id="unit-test",
+            config=TactileClipConfig(),
+        )
+        metadata_payload = json.loads((encoder_dir / "checkpoint.json").read_text(encoding="utf-8"))
+        params_name = metadata_payload["params_file"]
+        assert isinstance(params_name, str) and params_name.startswith("params-")
+
+    fingerprint = tactile_cache.tactile_encoder_fingerprint(encoder_dir)
+
+    assert fingerprint == expected_encoder_fingerprint(encoder_dir, params_name)
+    cache_dir = tmp_path / "tactile-cache"
+    cache_dir.mkdir()
+    metadata = tactile_cache.create_tactile_cache_metadata(
+        repo_id="org/demo",
+        revision="rev-1",
+        dataset_root=tmp_path / "dataset",
+        total_frames=2,
+        tactile_keys=("left", "right"),
+        source_tactile_keys=("observation.left", "observation.right"),
+        embedding_dim=3,
+        image_size=224,
+        dtype="float32",
+        encoder_path=encoder_dir,
+        completed_frames=2,
+        status="complete",
+    )
+    assert metadata["encoder_sha256"] == fingerprint
+    tactile_cache.atomic_write_json(cache_dir / tactile_cache.TACTILE_METADATA_NAME, metadata)
+    expected_embeddings = np.arange(12, dtype=np.float32).reshape(2, 2, 3)
+    np.save(cache_dir / tactile_cache.TACTILE_EMBEDDINGS_NAME, expected_embeddings)
+
+    reader = tactile_cache.TactileEmbeddingCache(
+        cache_dir,
+        repo_id="org/demo",
+        revision="rev-1",
+        total_frames=2,
+        tactile_keys=("left", "right"),
+        source_tactile_keys=("observation.left", "observation.right"),
+        embedding_dim=3,
+        image_size=224,
+        encoder_path=encoder_dir,
+    )
+
+    np.testing.assert_array_equal(reader.get_many([1, 0]), expected_embeddings[[1, 0]])
+
+
+@pytest.mark.parametrize(
+    ("metadata_payload", "missing_name"),
+    [
+        ({"version": 3}, "params.npz"),
+        ({"version": 4, "params_file": "params-missing.npz"}, "params-missing.npz"),
+    ],
+)
+def test_tactile_fingerprint_rejects_missing_params_file(
+    tmp_path: Path,
+    metadata_payload: dict[str, object],
+    missing_name: str,
+) -> None:
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    (encoder_dir / "checkpoint.json").write_text(json.dumps(metadata_payload), encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match=missing_name):
+        tactile_cache.tactile_encoder_fingerprint(encoder_dir)
+
+
+@pytest.mark.parametrize("bad_params_file", [None, 7, [], "", "   "])
+def test_tactile_fingerprint_rejects_invalid_params_file(
+    tmp_path: Path,
+    bad_params_file: object,
+) -> None:
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    (encoder_dir / "checkpoint.json").write_text(
+        json.dumps({"version": 4, "params_file": bad_params_file}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="params_file.*non-empty relative path"):
+        tactile_cache.tactile_encoder_fingerprint(encoder_dir)
+
+
+def test_tactile_fingerprint_rejects_params_path_escape(tmp_path: Path) -> None:
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    outside = tmp_path / "outside.npz"
+    np.savez(outside, p00000=np.ones(1, dtype=np.float32))
+    symlink = encoder_dir / "params-link.npz"
+    symlink.symlink_to(outside)
+
+    for params_file in ("../outside.npz", str(outside), symlink.name):
+        (encoder_dir / "checkpoint.json").write_text(
+            json.dumps({"version": 4, "params_file": params_file}), encoding="utf-8"
+        )
+        tactile_cache.tactile_encoder_fingerprint.cache_clear()
+        with pytest.raises(ValueError, match="params_file.*checkpoint directory"):
+            tactile_cache.tactile_encoder_fingerprint(encoder_dir)
+
+
+def test_tactile_fingerprint_requires_params_to_be_regular_file(tmp_path: Path) -> None:
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    (encoder_dir / "params-directory").mkdir()
+    (encoder_dir / "checkpoint.json").write_text(
+        json.dumps({"version": 4, "params_file": "params-directory"}), encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="params_file.*regular file"):
+        tactile_cache.tactile_encoder_fingerprint(encoder_dir)
 
 
 def test_training_lerobot_is_private() -> None:

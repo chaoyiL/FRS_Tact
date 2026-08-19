@@ -13,6 +13,16 @@ TRAIN_ROOT = ROOT / "train_pi05_frs"
 SETUP_SCRIPT = TRAIN_ROOT / "scripts" / "setup_env.sh"
 SOURCE_ROOT = Path("/home/typhon/FRS_Tact-pi05-frs-jax")
 SOURCE_MANIFEST = TRAIN_ROOT / "source_manifest.sha256"
+APPROVED_ADAPTATIONS = {
+    "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
+    "utils/pi05_source_model.py": "train_pi05_frs/pi05_cache/source_model.py",
+    "utils/integration.py": "train_pi05_frs/pi05_cache/source_model.py",
+    "utils/flow_matching.py": "train_pi05_frs/pi05_cache/source_model.py",
+    "src/lerobot/datasets/__init__.py": "train_pi05_frs/src/lerobot/datasets/__init__.py",
+    "src/lerobot/datasets/tactile_cache.py": (
+        "train_pi05_frs/src/lerobot/datasets/tactile_cache.py"
+    ),
+}
 
 
 def read_source_manifest() -> tuple[dict[str, str], dict[str, str]]:
@@ -274,7 +284,12 @@ def test_private_closure_contains_only_approved_pi05_and_dataset_runtime() -> No
         for target in mappings.values()
         if target.startswith("train_pi05_frs/src/lerobot/")
     }
-    assert files == mapped_private_files | {"datasets/__init__.py"}
+    adapted_private_files = {
+        Path(target).relative_to("train_pi05_frs/src/lerobot").as_posix()
+        for target in APPROVED_ADAPTATIONS.values()
+        if target.startswith("train_pi05_frs/src/lerobot/")
+    }
+    assert files == mapped_private_files | adapted_private_files
 
 
 def test_private_dataset_init_exports_readers_without_writer_imports() -> None:
@@ -340,19 +355,13 @@ def test_standalone_cwd_directly_exports_private_pi05_model_api() -> None:
     assert TRAIN_ROOT / "src" in Path(result.stdout.strip()).parents
 
 
-def test_rewritten_source_files_have_explicit_mapping_tests() -> None:
-    rewritten = {
-        "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
-        "modalities_eval/pi05_utils.py": "train_pi05_frs/pi05_cache/policy_inputs.py",
-        "utils/pi05_source_model.py": "train_pi05_frs/pi05_cache/source_model.py",
-        "utils/cache.py": "train_pi05_frs/pi05_cache/cache.py",
-        "utils/integration.py": "train_pi05_frs/pi05_cache/source_model.py",
-        "utils/flow_matching.py": "train_pi05_frs/pi05_cache/source_model.py",
-        "src/lerobot/datasets/__init__.py": "train_pi05_frs/src/lerobot/datasets/__init__.py",
-    }
+def test_approved_adaptations_have_explicit_mapping_tests() -> None:
     test_source = (TRAIN_ROOT / "tests" / "test_pi05_cache.py").read_text(encoding="utf-8")
+    unchanged_mappings, _ = read_source_manifest()
 
-    assert all((ROOT / target).is_file() for target in rewritten.values())
+    assert set(unchanged_mappings.values()).isdisjoint(APPROVED_ADAPTATIONS.values())
+    assert all((SOURCE_ROOT / source).is_file() for source in APPROVED_ADAPTATIONS)
+    assert all((ROOT / target).is_file() for target in APPROVED_ADAPTATIONS.values())
     for required_behavior in (
         "test_record_selection_is_episode_disjoint_trimmed_and_strided",
         "test_twenty_dimensional_actions_are_padded_to_model_dimension",
@@ -362,5 +371,10 @@ def test_rewritten_source_files_have_explicit_mapping_tests() -> None:
         "test_inversion_mse_matches_per_sample_squared_error",
         "test_reverse_solvers_preserve_shape_and_finiteness",
         "test_prepare_cache_records_provenance_resumes_and_skips_completed_cache",
+        "test_tactile_fingerprint_metadata_and_reader_support_both_checkpoint_formats",
+        "test_tactile_fingerprint_rejects_missing_params_file",
+        "test_tactile_fingerprint_rejects_invalid_params_file",
+        "test_tactile_fingerprint_rejects_params_path_escape",
+        "test_tactile_fingerprint_requires_params_to_be_regular_file",
     ):
         assert required_behavior in test_source
