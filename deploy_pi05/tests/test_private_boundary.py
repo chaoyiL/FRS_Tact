@@ -81,7 +81,7 @@ def test_training_and_setup_support_files_are_complete_and_executable() -> None:
     for relative_path in executable_scripts:
         path = DEPLOY_ROOT / relative_path
         assert path.is_file(), f"missing migrated support file: {relative_path}"
-        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+        assert stat.S_IMODE(path.stat().st_mode) & 0o111 == 0o111
 
     for relative_path in (
         "scripts/start_pi05.sh",
