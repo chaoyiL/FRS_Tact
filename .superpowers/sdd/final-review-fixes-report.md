@@ -230,3 +230,13 @@ foreign read-only asset and still must not overlap any writable root.
   passed in 40.23s`; the separately run protected-deployment command remains `11 passed in 2.43s`,
   for 353 tests across the two explicitly listed matrices.
 - Launcher shell syntax, offline lock, all 47 source hashes, and diff checks remain clean.
+
+### Final replacement review
+
+The same complete-branch reviewer audited `e0209e67..569c21b` after the containment repair and
+reported **Critical=0, Important=0, Minor=0**, with both spec and code-quality verdicts PASS and
+Ready to merge YES. Its fresh evidence was 9 focused launcher/resume/containment tests, the standard
+`342 passed, 18 subtests passed` matrix, and the separate 11-test deployment compatibility matrix,
+plus shell syntax, offline lock, frozen-sync dry-run, all 47 protected-source hashes, and diff checks.
+No production training run is claimed because this host has neither an NVIDIA GPU nor production
+assets; the preflight reports that limitation before importing JAX or loading a model.
