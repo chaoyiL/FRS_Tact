@@ -230,7 +230,11 @@ def _local_path(value: object, field: str) -> Path:
 
 
 def _output_target(value: object, field: str) -> Path:
-    path = _local_path(value, field)
+    text = _nonempty_string(value, field)
+    if _is_url(text):
+        raise ValueError(f"config.{field} must be a local filesystem path")
+    candidate = Path(text).expanduser()
+    path = candidate if candidate.is_absolute() else REPO_ROOT / candidate
     return validate_output_roots({f"config.{field}": path})[f"config.{field}"]
 
 
@@ -444,6 +448,15 @@ def _nonnegative_index(value: object, *, label: str) -> int:
     return value
 
 
+def _nonnegative_number(value: object, *, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{label} must be a non-negative finite number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError(f"{label} must be a non-negative finite number")
+    return result
+
+
 def _validate_dataset_metadata(
     dataset_root: Path,
     *,
@@ -475,6 +488,11 @@ def _validate_dataset_metadata(
         str(key)
         for key, feature in features.items()
         if isinstance(feature, Mapping) and feature.get("dtype") == "video"
+    }
+    image_keys = {
+        str(key)
+        for key, feature in features.items()
+        if isinstance(feature, Mapping) and feature.get("dtype") == "image"
     }
     rename_map = source.get("rename_map", {})
     post_rename_visual_keys = {str(rename_map.get(key, key)) for key in visual_keys}
@@ -545,6 +563,8 @@ def _validate_dataset_metadata(
                     (
                         f"videos/{video_key}/chunk_index",
                         f"videos/{video_key}/file_index",
+                        f"videos/{video_key}/from_timestamp",
+                        f"videos/{video_key}/to_timestamp",
                     )
                 )
             if not required.issubset(episode_file.schema_arrow.names):
@@ -596,6 +616,18 @@ def _validate_dataset_metadata(
                 )
             )
             for video_key in video_keys:
+                from_timestamp = _nonnegative_number(
+                    episode_columns[f"videos/{video_key}/from_timestamp"][row],
+                    label=f"videos/{video_key}/from_timestamp",
+                )
+                to_timestamp = _nonnegative_number(
+                    episode_columns[f"videos/{video_key}/to_timestamp"][row],
+                    label=f"videos/{video_key}/to_timestamp",
+                )
+                if to_timestamp < from_timestamp:
+                    raise ValueError(
+                        f"videos/{video_key}/to_timestamp must not precede from_timestamp"
+                    )
                 video_references.add(
                     (
                         video_key,
@@ -622,9 +654,10 @@ def _validate_dataset_metadata(
             "episode_index",
             "frame_index",
             "timestamp",
+            "task_index",
             "observation.state",
             action_key,
-        }
+        } | image_keys
         for chunk_index, file_index in sorted(data_references):
             data_path = _dataset_asset_path(
                 dataset_root,

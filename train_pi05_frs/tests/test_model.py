@@ -535,6 +535,17 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(metadata["epoch"], 3)
             self.assertEqual(restored.config, model.config)
 
+    def test_v3_snapshot_inside_canonical_generation_root_must_match_its_name(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory) / "output" / "best"
+            save_checkpoint(checkpoint_dir, model, epoch=3, metrics={})
+            mismatched = checkpoint_dir.resolve(strict=True).parent / "wrong-generation"
+            shutil.copytree(checkpoint_dir.resolve(strict=True), mismatched)
+
+            with self.assertRaisesRegex(ValueError, "generation mismatch"):
+                load_checkpoint(mismatched)
+
     def test_save_atomically_upgrades_an_existing_legacy_directory(self):
         model = self.make_model()
         with tempfile.TemporaryDirectory() as directory:

@@ -59,23 +59,38 @@ def _overlap(left: Path, right: Path) -> bool:
 def validate_output_roots(roots: Mapping[str, str | Path]) -> dict[str, Path]:
     """Resolve aliases and reject protected or mutually overlapping roots."""
 
-    resolved = {
-        str(label): Path(value).expanduser().resolve(strict=False)
+    requested = {
+        str(label): Path(value).expanduser().absolute()
         for label, value in roots.items()
+    }
+    resolved = {
+        label: path.resolve(strict=False) for label, path in requested.items()
     }
     exact_protected = tuple(path.resolve(strict=False) for path in _EXACT_PROTECTED)
     protected_subtrees = tuple(path.resolve(strict=False) for path in _PROTECTED_SUBTREES)
     allowed_train_generated = tuple(
-        path.resolve(strict=False) for path in _ALLOWED_TRAIN_GENERATED
+        (path.expanduser().absolute(), path.resolve(strict=False))
+        for path in _ALLOWED_TRAIN_GENERATED
     )
     for label, path in resolved.items():
+        requested_path = requested[label]
         inside_allowed_train_generated = any(
-            _is_same_or_descendant(path, generated)
-            for generated in allowed_train_generated
+            lexical == canonical
+            and _is_same_or_descendant(requested_path, lexical)
+            and _is_same_or_descendant(path, canonical)
+            for lexical, canonical in allowed_train_generated
         )
         inside_repository = _is_same_or_descendant(path, REPO_ROOT)
+        claims_unsafe_generated_root = (
+            any(
+                _is_same_or_descendant(requested_path, lexical)
+                for lexical, _ in allowed_train_generated
+            )
+            and not inside_allowed_train_generated
+        )
         if (
             path in exact_protected
+            or claims_unsafe_generated_root
             or (inside_repository and not inside_allowed_train_generated)
             or any(
                 _is_same_or_descendant(path, protected)

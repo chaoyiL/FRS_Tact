@@ -300,7 +300,12 @@ def _load_metadata(directory: pathlib.Path) -> tuple[pathlib.Path, dict[str, Any
     metadata = _snapshot_metadata(snapshot)
     version = int(metadata.get("version", 1))
     if version >= 3:
-        _validated_v3_metadata(snapshot, metadata)
+        expected_generation = (
+            snapshot.name if snapshot.parent.name == GENERATION_ROOT_NAME else None
+        )
+        _validated_v3_metadata(
+            snapshot, metadata, expected_generation=expected_generation
+        )
     return snapshot, metadata
 
 

@@ -106,7 +106,7 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
         "observation.images.tactile_left_1",
         "observation.images.tactile_right_1",
     ]
-    episode_columns: dict[str, list[int]] = {
+    episode_columns: dict[str, list[int | float]] = {
         "episode_index": [0],
         "dataset_from_index": [0],
         "dataset_to_index": [2],
@@ -116,6 +116,8 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
     for visual_key in visual_keys:
         episode_columns[f"videos/{visual_key}/chunk_index"] = [0]
         episode_columns[f"videos/{visual_key}/file_index"] = [0]
+        episode_columns[f"videos/{visual_key}/from_timestamp"] = [0.0]
+        episode_columns[f"videos/{visual_key}/to_timestamp"] = [1.0 / 30.0]
     pq.write_table(pa.table(episode_columns), episodes / "file-000.parquet")
     data_file = dataset / "data" / "chunk-000" / "file-000.parquet"
     data_file.parent.mkdir(parents=True)
@@ -125,6 +127,7 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
                 "episode_index": [0, 0],
                 "frame_index": [0, 1],
                 "timestamp": [0.0, 1.0 / 30.0],
+                "task_index": [0, 0],
                 "observation.state": [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
                 "actions": [[0.0, 0.0], [0.1, 0.1]],
             }
@@ -513,6 +516,33 @@ def test_schema_allows_only_designated_generated_roots_inside_standalone_project
     validate_config(config, check_paths=False)
 
 
+def test_path_validator_rejects_symlinked_designated_generated_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.utils import path_safety
+
+    repo_root = tmp_path / "repo"
+    train_root = repo_root / "train_pi05_frs"
+    protected_venv = repo_root / ".venv"
+    train_root.mkdir(parents=True)
+    protected_venv.mkdir()
+    (train_root / ".cache").symlink_to(protected_venv, target_is_directory=True)
+    monkeypatch.setattr(path_safety, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(path_safety, "TRAIN_ROOT", train_root)
+    monkeypatch.setattr(
+        path_safety,
+        "_ALLOWED_TRAIN_GENERATED",
+        (train_root / ".cache", train_root / "outputs"),
+    )
+    monkeypatch.setattr(path_safety, "_EXACT_PROTECTED", (Path("/"),))
+    monkeypatch.setattr(path_safety, "_PROTECTED_SUBTREES", ())
+
+    with pytest.raises(ValueError, match="protected"):
+        path_safety.validate_output_roots(
+            {"config.action_cache.root": train_root / ".cache" / "inside-root-venv"}
+        )
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     [
@@ -774,6 +804,8 @@ def test_path_preflight_requires_referenced_lerobot_data_and_video_assets(
         "data/file_index",
         "videos/observation.images.camera0/chunk_index",
         "videos/observation.images.camera0/file_index",
+        "videos/observation.images.camera0/from_timestamp",
+        "videos/observation.images.camera0/to_timestamp",
     ],
 )
 def test_path_preflight_requires_episode_asset_location_fields(
@@ -791,6 +823,33 @@ def test_path_preflight_requires_episode_asset_location_fields(
     pq.write_table(table, episodes_path)
 
     with pytest.raises(ValueError, match=re.escape(missing_column)):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_requires_task_index_in_data_parquet(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    data_path = Path(config["datasets"][0]["root"]) / "data/chunk-000/file-000.parquet"
+    table = pq.read_table(data_path).drop(["task_index"])
+    pq.write_table(table, data_path)
+
+    with pytest.raises(ValueError, match="task_index"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_requires_image_backed_feature_column(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    info_path = Path(config["datasets"][0]["root"]) / "meta/info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    image_key = "observation.images.camera0"
+    info["features"][image_key]["dtype"] = "image"
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=re.escape(image_key)):
         validate_config(config, check_paths=True)
 
 
@@ -1399,7 +1458,11 @@ def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     assert "dereference" in readme and ".checkpoint-generations" in readme
     assert "data parquet" in readme and "video assets" in readme
     assert "never point" in readme and "mutable" in readme and "deployment" in readme
-    assert (
-        "--checkpoint-dir /workspace/frs_pick_tube_pi05/"
-        "run_gated_v7_state_01/.checkpoint-generations/<generation>"
-    ) in readme
+    assert "PINNED_DECODER_CHECKPOINT=" in readme
+    assert "readlink -f" in readme
+    assert '--checkpoint-dir "${PINNED_DECODER_CHECKPOINT}"' in readme
+    for script in re.findall(r"```bash\n(.*?)\n```", readme, flags=re.DOTALL):
+        result = subprocess.run(
+            ["bash", "-n"], input=script, check=False, text=True, capture_output=True
+        )
+        assert result.returncode == 0, result.stderr

@@ -98,11 +98,14 @@ Evaluation resolves images from the dataset repository ID recorded in the action
 loader does not accept a local dataset-root override.
 
 ```bash
+PINNED_DECODER_CHECKPOINT="$(
+  readlink -f /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/best
+)"
 .venv/bin/python -m train_pi05_frs.evaluate \
   --cache-dir /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3/KaiyueChen/pick_tube_05 \
   --dataset-repo-id KaiyueChen/pick_tube_05 \
   --tactile-encoder-dir /workspace/checkpoints/encoder_ckpt_0809 \
-  --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/.checkpoint-generations/<generation> \
+  --checkpoint-dir "${PINNED_DECODER_CHECKPOINT}" \
   --output-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/evaluation
 ```
 
