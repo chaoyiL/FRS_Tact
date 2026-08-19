@@ -233,6 +233,27 @@ def test_legacy_gated_checkpoint_key_is_unchanged_by_bimanual_metrics() -> None:
     assert actual == expected
 
 
+def test_bimanual_checkpoint_key_uses_finite_sentinels_for_missing_strata() -> None:
+    key = checkpoint_selection_key(
+        {
+            "val_mse_gt": float("nan"),
+            "val_gt_gain_high_w_left": float("nan"),
+            "val_gt_gain_high_w_right": 0.1,
+            "val_rank_satisfied_high_frac_left": 0.9,
+            "val_rank_satisfied_high_frac_right": 0.9,
+            "val_low_unsafe_frac_left": 0.0,
+            "val_low_unsafe_frac_right": 0.0,
+        },
+        loss_mode="bimanual_gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        min_high_gate_rank_satisfied=0.8,
+    )
+
+    assert all(not np.isnan(value) for value in key)
+    assert key == (float("inf"),) * len(key)
+
+
 def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
     keys = checkpoint_specialist_keys(
         {

@@ -111,6 +111,8 @@ class EvaluationResult:
     sample_mse_gt_right: np.ndarray | None = None
     sample_mse_vla_left: np.ndarray | None = None
     sample_mse_vla_right: np.ndarray | None = None
+    sample_mse_vla_gt_left: np.ndarray | None = None
+    sample_mse_vla_gt_right: np.ndarray | None = None
     mse_gt_high_w_left: float | None = None
     mse_gt_high_w_right: float | None = None
     mse_vla_high_w_left: float | None = None
@@ -259,6 +261,129 @@ def gate_stratified_decode_metrics(
             }
         )
     return result
+
+
+def bimanual_source_decode_metrics(
+    *,
+    sample_mse_gt_left: np.ndarray,
+    sample_mse_gt_right: np.ndarray,
+    sample_mse_vla_left: np.ndarray,
+    sample_mse_vla_right: np.ndarray,
+    sample_mse_vla_gt_left: np.ndarray,
+    sample_mse_vla_gt_right: np.ndarray,
+    sample_gate_w_left: np.ndarray,
+    sample_gate_w_right: np.ndarray,
+    source_indices: np.ndarray,
+    num_sources: int,
+    low_w_threshold: float,
+    high_w_threshold: float,
+    ranking_margin: float,
+    repair_margin: float,
+    low_safety_margin: float,
+) -> tuple[dict[int, dict[str, float | int]], dict[str, float]]:
+    """Aggregate bimanual safety metrics without pooling datasets or wrists."""
+
+    if num_sources <= 0:
+        raise ValueError(f"num_sources must be positive, got {num_sources}.")
+    arrays = {
+        "mse_gt_left": sample_mse_gt_left,
+        "mse_gt_right": sample_mse_gt_right,
+        "mse_vla_left": sample_mse_vla_left,
+        "mse_vla_right": sample_mse_vla_right,
+        "mse_vla_gt_left": sample_mse_vla_gt_left,
+        "mse_vla_gt_right": sample_mse_vla_gt_right,
+        "gate_w_left": sample_gate_w_left,
+        "gate_w_right": sample_gate_w_right,
+        "source_indices": source_indices,
+    }
+    converted = {name: np.asarray(value) for name, value in arrays.items()}
+    expected_shape = converted["source_indices"].shape
+    if len(expected_shape) != 1 or any(value.shape != expected_shape for value in converted.values()):
+        shapes = {name: value.shape for name, value in converted.items()}
+        raise ValueError(f"bimanual source metric arrays must be shape-matched [N], got {shapes}.")
+    sources = converted.pop("source_indices").astype(np.int64, copy=False)
+    if np.any((sources < 0) | (sources >= num_sources)):
+        raise ValueError(f"source indices must be in [0, {num_sources}), got {sources}.")
+
+    per_source: dict[int, dict[str, float | int]] = {}
+    rollups: dict[str, float] = {}
+    for wrist in ("left", "right"):
+        low_penalties: list[float] = []
+        low_unsafe_fractions: list[float] = []
+        high_gains: list[float] = []
+        high_rank_hinges: list[float] = []
+        high_rank_gaps: list[float] = []
+        high_rank_satisfied: list[float] = []
+        missing_low = False
+        missing_high = False
+        for source_index in range(num_sources):
+            source_metrics = per_source.setdefault(source_index, {})
+            source_mask = sources == source_index
+            gt = converted[f"mse_gt_{wrist}"][source_mask]
+            vla = converted[f"mse_vla_{wrist}"][source_mask]
+            vla_gt = converted[f"mse_vla_gt_{wrist}"][source_mask]
+            gate = converted[f"gate_w_{wrist}"][source_mask]
+            stratified = gate_stratified_decode_metrics(
+                gt,
+                vla,
+                vla_gt,
+                gate,
+                low_w_threshold=low_w_threshold,
+                high_w_threshold=high_w_threshold,
+                ranking_margin=ranking_margin,
+                repair_margin=repair_margin,
+                low_safety_margin=low_safety_margin,
+            )
+            for metric_name in (
+                "low_nearest_endpoint_mse",
+                "low_safety_penalty",
+                "low_unsafe_frac",
+                "gt_gain_high_w",
+                "rank_satisfied_high_frac",
+                "repair_penalty_high_w",
+                "repair_satisfied_high_frac",
+                "n_high_w",
+                "n_low_w",
+                "n_mid_w",
+            ):
+                source_metrics[f"{metric_name}_{wrist}"] = stratified[metric_name]
+            high = gate >= float(high_w_threshold)
+            rank_gap = _mean_or_nan((gt - vla)[high])
+            source_metrics[f"rank_gap_high_w_{wrist}"] = rank_gap
+            source_metrics[f"rank_hinge_high_w_{wrist}"] = stratified[
+                "rank_penalty_high_w"
+            ]
+            if int(stratified["n_low_w"]) > 0:
+                low_penalties.append(float(stratified["low_safety_penalty"]))
+                low_unsafe_fractions.append(float(stratified["low_unsafe_frac"]))
+            else:
+                missing_low = True
+            if int(stratified["n_high_w"]) > 0:
+                high_gains.append(float(stratified["gt_gain_high_w"]))
+                high_rank_hinges.append(float(stratified["rank_penalty_high_w"]))
+                high_rank_gaps.append(rank_gap)
+                high_rank_satisfied.append(float(stratified["rank_satisfied_high_frac"]))
+            else:
+                missing_high = True
+        rollups[f"worst_dataset_low_safety_penalty_{wrist}"] = (
+            float("nan") if missing_low else max(low_penalties)
+        )
+        rollups[f"worst_dataset_low_unsafe_frac_{wrist}"] = (
+            float("nan") if missing_low else max(low_unsafe_fractions)
+        )
+        rollups[f"min_dataset_gt_gain_high_w_{wrist}"] = (
+            float("nan") if missing_high else min(high_gains)
+        )
+        rollups[f"worst_dataset_rank_violation_high_w_{wrist}"] = (
+            float("nan") if missing_high else max(high_rank_hinges)
+        )
+        rollups[f"worst_dataset_rank_gap_high_w_{wrist}"] = (
+            float("nan") if missing_high else max(high_rank_gaps)
+        )
+        rollups[f"min_dataset_rank_satisfied_high_frac_{wrist}"] = (
+            float("nan") if missing_high else min(high_rank_satisfied)
+        )
+    return per_source, rollups
 
 
 def gate_binned_decode_metrics(
@@ -669,6 +794,12 @@ def evaluate_split(
         sample_mse_gt_right=(None if all_mse_gt_wrist is None else all_mse_gt_wrist[:, 1]),
         sample_mse_vla_left=(None if all_mse_vla_wrist is None else all_mse_vla_wrist[:, 0]),
         sample_mse_vla_right=(None if all_mse_vla_wrist is None else all_mse_vla_wrist[:, 1]),
+        sample_mse_vla_gt_left=(
+            None if all_mse_vla_gt_wrist is None else all_mse_vla_gt_wrist[:, 0]
+        ),
+        sample_mse_vla_gt_right=(
+            None if all_mse_vla_gt_wrist is None else all_mse_vla_gt_wrist[:, 1]
+        ),
         mse_gt_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["mse_gt_high_w"]),  # type: ignore[arg-type]
         mse_gt_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["mse_gt_high_w"]),  # type: ignore[arg-type]
         mse_vla_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["mse_pred_high_w"]),  # type: ignore[arg-type]

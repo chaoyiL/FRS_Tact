@@ -10,7 +10,7 @@ from flax import nnx
 
 import train_smolvla_frs.evaluate as evaluate_module
 import train_smolvla_frs.utils.metrics as metrics_module
-from train_smolvla_frs.utils.metrics import evaluate_split
+from train_smolvla_frs.utils.metrics import bimanual_source_decode_metrics, evaluate_split
 from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
 
@@ -80,6 +80,32 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
     assert result.rank_satisfied_high_frac_right == pytest.approx(0.0)
     assert result.low_unsafe_frac_left == pytest.approx(0.0)
     assert result.low_unsafe_frac_right == pytest.approx(0.0)
+
+
+def test_bimanual_source_metrics_keep_a_bad_dataset_from_being_pooled_away() -> None:
+    per_source, rollups = bimanual_source_decode_metrics(
+        sample_mse_gt_left=np.asarray([0.0, 0.0, 4.0, 0.0]),
+        sample_mse_gt_right=np.asarray([0.0, 0.0, 0.0, 0.0]),
+        sample_mse_vla_left=np.asarray([1.0, 0.0, 1.0, 0.0]),
+        sample_mse_vla_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        sample_mse_vla_gt_left=np.ones((4,)),
+        sample_mse_vla_gt_right=np.ones((4,)),
+        sample_gate_w_left=np.asarray([1.0, 0.0, 1.0, 0.0]),
+        sample_gate_w_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        source_indices=np.asarray([0, 0, 1, 1]),
+        num_sources=2,
+        low_w_threshold=0.3,
+        high_w_threshold=0.7,
+        ranking_margin=0.0,
+        repair_margin=0.0,
+        low_safety_margin=0.0,
+    )
+
+    assert per_source[0]["gt_gain_high_w_left"] == pytest.approx(1.0)
+    assert per_source[1]["gt_gain_high_w_left"] == pytest.approx(-3.0)
+    assert rollups["min_dataset_gt_gain_high_w_left"] == pytest.approx(-3.0)
+    assert rollups["min_dataset_rank_satisfied_high_frac_left"] == pytest.approx(0.0)
+    assert rollups["worst_dataset_low_unsafe_frac_left"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(

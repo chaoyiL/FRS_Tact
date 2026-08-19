@@ -154,6 +154,8 @@ def checkpoint_selection_key(
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
     if loss_mode == BIMANUAL_LOSS_MODE:
         aggregate_gt_mse = float(metrics.get("val_mse_gt", float("inf")))
+        if not math.isfinite(aggregate_gt_mse):
+            aggregate_gt_mse = float("inf")
         wrist_values: list[tuple[float, float, float]] = []
         total_violation = 0.0
         for wrist in ("left", "right"):
@@ -179,7 +181,7 @@ def checkpoint_selection_key(
                 math.isfinite(value)
                 for value in (low_unsafe, high_gain, rank_satisfied, aggregate_gt_mse)
             ):
-                return (float("inf"), float("inf"), float("inf"), float("inf"), aggregate_gt_mse)
+                return (float("inf"),) * 5
             total_violation += max(0.0, low_unsafe - float(max_low_gate_unsafe_frac))
             total_violation += max(0.0, float(min_high_gate_gain) - high_gain)
             total_violation += max(
@@ -533,7 +535,10 @@ def train_decoder(
     )
     from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
     from train_smolvla_frs.utils.history_plot import plot_training_history
-    from train_smolvla_frs.utils.metrics import evaluate_split
+    from train_smolvla_frs.utils.metrics import (
+        bimanual_source_decode_metrics,
+        evaluate_split,
+    )
     from train_smolvla_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
@@ -666,11 +671,43 @@ def train_decoder(
         "rank_hinge_high_w",
         "rank_satisfied_high_frac",
     )
+    bimanual_source_metric_names = (
+        "low_nearest_endpoint_mse",
+        "low_safety_penalty",
+        "low_unsafe_frac",
+        "gt_gain_high_w",
+        "rank_gap_high_w",
+        "rank_hinge_high_w",
+        "rank_satisfied_high_frac",
+        "repair_penalty_high_w",
+        "repair_satisfied_high_frac",
+        "n_high_w",
+        "n_low_w",
+        "n_mid_w",
+    )
+    bimanual_rollup_metric_names = (
+        "worst_dataset_low_safety_penalty",
+        "worst_dataset_low_unsafe_frac",
+        "min_dataset_gt_gain_high_w",
+        "worst_dataset_rank_violation_high_w",
+        "worst_dataset_rank_gap_high_w",
+        "min_dataset_rank_satisfied_high_frac",
+    )
+    for wrist in ("left", "right"):
+        history_fields.extend(
+            f"val_{metric_name}_{wrist}"
+            for metric_name in bimanual_rollup_metric_names
+        )
     for source_index in range(len(dataset_sources or ())):
         history_fields.extend(
             f"val_source_{source_index}_{metric_name}"
             for metric_name in source_metric_names
         )
+        for wrist in ("left", "right"):
+            history_fields.extend(
+                f"val_source_{source_index}_{metric_name}_{wrist}"
+                for metric_name in bimanual_source_metric_names
+            )
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
         row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
@@ -1710,6 +1747,35 @@ def train_decoder(
                             metrics["val_worst_dataset_rank_violation_high_w"] = float("nan")
                             metrics["val_worst_dataset_rank_gap_high_w"] = float("nan")
                             metrics["val_min_dataset_rank_satisfied_high_frac"] = float("nan")
+                    elif (
+                        isinstance(pairs, MultiCachedPairs)
+                        and getattr(validation, "sample_gate_w_left", None) is not None
+                    ):
+                        source_indices, _ = pairs.source_and_local_indices(
+                            validation.cache_indices
+                        )
+                        per_source_wrist, wrist_rollups = bimanual_source_decode_metrics(
+                            sample_mse_gt_left=validation.sample_mse_gt_left,
+                            sample_mse_gt_right=validation.sample_mse_gt_right,
+                            sample_mse_vla_left=validation.sample_mse_vla_left,
+                            sample_mse_vla_right=validation.sample_mse_vla_right,
+                            sample_mse_vla_gt_left=validation.sample_mse_vla_gt_left,
+                            sample_mse_vla_gt_right=validation.sample_mse_vla_gt_right,
+                            sample_gate_w_left=validation.sample_gate_w_left,
+                            sample_gate_w_right=validation.sample_gate_w_right,
+                            source_indices=source_indices,
+                            num_sources=len(pairs.sources),
+                            low_w_threshold=rank_low_gate_threshold,
+                            high_w_threshold=rank_high_gate_threshold,
+                            ranking_margin=rank_margin,
+                            repair_margin=repair_margin,
+                            low_safety_margin=low_gate_safety_margin,
+                        )
+                        for source_index, source_metrics in per_source_wrist.items():
+                            for metric_name, value in source_metrics.items():
+                                metrics[f"val_source_{source_index}_{metric_name}"] = value
+                        for metric_name, value in wrist_rollups.items():
+                            metrics[f"val_{metric_name}"] = value
                     selection_key = checkpoint_selection_key(
                         metrics,
                         loss_mode=loss_mode,

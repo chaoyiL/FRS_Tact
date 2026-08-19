@@ -18,6 +18,7 @@ from train_smolvla_frs.utils.data import (
 from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
 from train_smolvla_frs.utils.metrics import (
     EvalTarget,
+    bimanual_source_decode_metrics,
     evaluate_split,
     gate_binned_decode_metrics,
 )
@@ -278,6 +279,26 @@ def evaluate_decoder(
             source_indices, local_indices = pairs.source_and_local_indices(result.cache_indices)
             dataset_indices = pairs.metadata_values(result.cache_indices, "dataset_index")
             episode_indices = pairs.metadata_values(result.cache_indices, "episode_index")
+            bimanual_per_source: dict[int, dict[str, float | int]] | None = None
+            if result.sample_gate_w_left is not None:
+                bimanual_per_source, bimanual_rollups = bimanual_source_decode_metrics(
+                    sample_mse_gt_left=result.sample_mse_gt_left,
+                    sample_mse_gt_right=result.sample_mse_gt_right,
+                    sample_mse_vla_left=result.sample_mse_vla_left,
+                    sample_mse_vla_right=result.sample_mse_vla_right,
+                    sample_mse_vla_gt_left=result.sample_mse_vla_gt_left,
+                    sample_mse_vla_gt_right=result.sample_mse_vla_gt_right,
+                    sample_gate_w_left=result.sample_gate_w_left,
+                    sample_gate_w_right=result.sample_gate_w_right,
+                    source_indices=source_indices,
+                    num_sources=len(pairs.source_names),
+                    low_w_threshold=rank_low_gate_threshold,
+                    high_w_threshold=rank_high_gate_threshold,
+                    ranking_margin=rank_margin,
+                    repair_margin=repair_margin,
+                    low_safety_margin=low_safety_margin,
+                )
+                metrics.update(bimanual_rollups)
             per_dataset: dict[str, dict[str, float | int]] = {}
             for source_index, source_name in enumerate(pairs.source_names):
                 mask = source_indices == source_index
@@ -328,6 +349,8 @@ def evaluate_decoder(
                         source_gate,
                         ranking_margin=rank_margin,
                     )
+                elif bimanual_per_source is not None:
+                    source_metrics.update(bimanual_per_source[source_index])
                 per_dataset[source_name] = source_metrics
             metrics["per_dataset"] = per_dataset
         else:
