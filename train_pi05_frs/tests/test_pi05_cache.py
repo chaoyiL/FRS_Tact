@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -440,6 +441,8 @@ def test_prepare_cache_records_provenance_resumes_and_skips_completed_cache(
         "status": "incomplete",
         "completed_samples": 1,
         "sample_count": 2,
+        "train_sample_count": 1,
+        "val_sample_count": 1,
         "action_horizon": 2,
         "action_dim": 4,
         "state_dim": 3,
@@ -629,6 +632,8 @@ def _prepare_provenance_case(
         "status": status,
         "completed_samples": len(records) if status == "complete" else 1,
         "sample_count": len(records),
+        "train_sample_count": 1,
+        "val_sample_count": 1,
         "action_horizon": 2,
         "action_dim": 4,
         "state_dim": 3,
@@ -636,6 +641,106 @@ def _prepare_provenance_case(
         "records_sha256": cache.records_digest(records),
     }
     return kwargs, manifest
+
+
+def test_prepare_cache_rejects_nonempty_directory_without_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kwargs, _ = _prepare_provenance_case(tmp_path, monkeypatch, status="complete")
+    cache_dir = Path(kwargs["cache_dir"])
+    assert any(cache_dir.iterdir())
+    assert not (cache_dir / cache.MANIFEST_NAME).exists()
+
+    with pytest.raises(FileExistsError, match="not empty.*manifest"):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("status", ["complete", "incomplete"])
+@pytest.mark.parametrize(
+    ("array_name", "row", "bad_value", "diagnostic"),
+    [
+        ("dataset_index", 0, 9, "records_sha256"),
+        ("episode_index", 0, 9, "records_sha256"),
+        ("split", 0, 1, "records_sha256"),
+        ("split", 0, 2, "split.*0.*1"),
+    ],
+)
+def test_prepare_cache_recomputes_records_from_static_arrays_before_skip_or_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    array_name: str,
+    row: int,
+    bad_value: int,
+    diagnostic: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status=status)
+    cache_dir = Path(kwargs["cache_dir"])
+    arrays = cache.open_cache_arrays(cache_dir, mode="r+")
+    arrays[array_name][row] = bad_value
+    cache.flush_arrays(arrays)
+    cache.atomic_write_json(cache_dir / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=diagnostic):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("count_name", ["train_sample_count", "val_sample_count"])
+def test_prepare_cache_rejects_manifest_split_count_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    count_name: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status="complete")
+    manifest[count_name] = 0
+    cache.atomic_write_json(Path(kwargs["cache_dir"]) / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=count_name):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("array_name", "bad_value", "diagnostic"),
+    [
+        ("dataset_index", 9, "records_sha256"),
+        ("episode_index", 9, "records_sha256"),
+        ("split", 2, "split.*0.*1"),
+    ],
+)
+def test_cached_pairs_recomputes_records_before_training_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    array_name: str,
+    bad_value: int,
+    diagnostic: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status="complete")
+    cache_dir = Path(kwargs["cache_dir"])
+    arrays = cache.open_cache_arrays(cache_dir, mode="r+")
+    arrays[array_name][0] = bad_value
+    cache.flush_arrays(arrays)
+    cache.atomic_write_json(cache_dir / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=diagnostic):
+        cache.CachedPairs(cache_dir)
+
+
+def test_local_checkpoint_fingerprint_hashes_contents_not_size_or_mtime(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    weights = checkpoint / "weights"
+    weights.write_bytes(b"content-a")
+    original_stat = weights.stat()
+    before = prepare._checkpoint_fingerprint(checkpoint)
+
+    weights.write_bytes(b"content-b")
+    os.utime(weights, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+
+    assert weights.stat().st_size == original_stat.st_size
+    assert weights.stat().st_mtime_ns == original_stat.st_mtime_ns
+    assert prepare._checkpoint_fingerprint(checkpoint) != before
 
 
 @pytest.mark.parametrize("status", ["complete", "incomplete"])

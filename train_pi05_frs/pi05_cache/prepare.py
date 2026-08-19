@@ -43,6 +43,7 @@ from train_pi05_frs.pi05_cache.cache import load_manifest
 from train_pi05_frs.pi05_cache.cache import open_cache_arrays
 from train_pi05_frs.pi05_cache.cache import records_digest
 from train_pi05_frs.pi05_cache.cache import validate_manifest_progress
+from train_pi05_frs.pi05_cache.cache import validate_cache_records
 from train_pi05_frs.pi05_cache.source_model import deterministic_noise, inversion_mse, sample_and_reverse
 
 
@@ -67,9 +68,14 @@ def _checkpoint_fingerprint(checkpoint_dir: pathlib.Path) -> str:
     if not candidates:
         raise FileNotFoundError(f"no checkpoint files found under {checkpoint_dir}")
     for path in candidates:
-        stat = path.stat()
-        digest.update(str(path.relative_to(checkpoint_dir)).encode())
-        digest.update(f":{stat.st_size}:{stat.st_mtime_ns}\n".encode())
+        relative = str(path.relative_to(checkpoint_dir)).encode()
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        content_digest = hashlib.sha256()
+        with path.open("rb") as file:
+            while chunk := file.read(1024 * 1024):
+                content_digest.update(chunk)
+        digest.update(content_digest.digest())
     return digest.hexdigest()
 
 
@@ -316,6 +322,15 @@ def prepare_cache(
     if drop_tail_action_chunks < 0:
         raise ValueError(f"drop_tail_action_chunks must be >= 0, got {drop_tail_action_chunks}.")
 
+    manifest_path = cache_dir / MANIFEST_NAME
+    if not manifest_path.exists() and cache_dir.exists() and (
+        not cache_dir.is_dir() or any(cache_dir.iterdir())
+    ):
+        raise FileExistsError(
+            f"Cache directory is not empty but has no {MANIFEST_NAME}: {cache_dir}. "
+            "Choose a new directory instead of overwriting unknown files."
+        )
+
     state_stats, action_stats = load_norm_stats_or_raise(norm_stats_dir, norm_stats_asset_id)
     model = Pi05EvalModel(
         checkpoint_dir,
@@ -378,7 +393,6 @@ def prepare_cache(
         "drop_tail_action_chunks": drop_tail_action_chunks,
     }
     digest = records_digest(records)
-    manifest_path = cache_dir / MANIFEST_NAME
     action_dim = model.action_dim
     # Store the dataset's real normalized state width, not the zero padding added for pi0.5.
     state_dim = int(np.asarray(model.state_stats.mean).shape[-1])
@@ -421,6 +435,7 @@ def prepare_cache(
                 f"Existing cache at {cache_dir} has incompatible arrays. "
                 f"Mismatched fields: {', '.join(shape_mismatches)}."
             )
+        validate_cache_records(manifest, arrays)
         if status == "complete":
             print(f"cache already complete: {cache_dir}")
             return cache_dir

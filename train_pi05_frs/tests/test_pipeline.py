@@ -583,6 +583,79 @@ def test_schema_rejects_overlapping_output_and_cache_roots(
 
 
 @pytest.mark.parametrize(
+    "input_name", ["checkpoint", "encoder", "dataset", "norm", "resume"]
+)
+@pytest.mark.parametrize(
+    "writable_name", ["action_cache", "tactile_embedding_cache", "frs_training"]
+)
+@pytest.mark.parametrize(
+    "relation", ["same", "writable_contains_input", "input_contains_writable"]
+)
+def test_schema_rejects_output_overlap_with_every_read_only_asset_root(
+    tmp_path: Path, input_name: str, writable_name: str, relation: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path / f"{input_name}-{relation}")
+    base = tmp_path / f"collision-{input_name}-{relation}"
+    writable, read_only = {
+        "same": (base, base),
+        "writable_contains_input": (base, base / "input"),
+        "input_contains_writable": (base / "output", base),
+    }[relation]
+    writable_key = {
+        "action_cache": "root",
+        "tactile_embedding_cache": "root",
+        "frs_training": "output",
+    }[writable_name]
+    config[writable_name][writable_key] = str(writable)
+    if input_name == "checkpoint":
+        config["checkpoint"] = str(read_only)
+    elif input_name == "encoder":
+        config["model"]["tactile_encoder_path"] = str(read_only)
+    elif input_name == "dataset":
+        config["datasets"][0]["root"] = str(read_only)
+    elif input_name == "norm":
+        config["norm_stats"]["dir"] = str(read_only.parent)
+        config["norm_stats"]["asset_id"] = read_only.name
+    else:
+        config["frs_training"]["resume"] = True
+        config["frs_training"]["resume_from"] = str(read_only)
+
+    with pytest.raises(ValueError, match="read-only.*overlap"):
+        validate_config(config, check_paths=False)
+
+
+def test_schema_rejects_symlink_alias_between_output_and_input(
+    tmp_path: Path,
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path / "config")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    alias = tmp_path / "output-alias"
+    alias.symlink_to(shared, target_is_directory=True)
+    config["checkpoint"] = str(shared)
+    config["frs_training"]["output"] = str(alias)
+
+    with pytest.raises(ValueError, match="read-only.*overlap"):
+        validate_config(config, check_paths=False)
+
+
+def test_path_preflight_rejects_nonempty_fresh_output(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    output = Path(config["frs_training"]["output"])
+    output.mkdir(parents=True)
+    (output / "stale.txt").write_text("stale", encoding="utf-8")
+
+    with pytest.raises(FileExistsError, match="output directory is not empty"):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
     ("mutate", "message"),
     [
         (
@@ -705,49 +778,124 @@ def test_path_preflight_validates_encoder_and_local_norm_stats_files(tmp_path: P
         validate_config(config, check_paths=True)
 
 
-def test_check_preflight_uses_distribution_metadata_and_light_gpu_probe() -> None:
+def test_check_preflight_uses_pyproject_distribution_metadata_and_light_gpu_probe() -> None:
     from train_pi05_frs.tools import train_frs
 
+    requirements = train_frs.production_runtime_requirements()
     calls: list[str] = []
-    versions = {
-        name: expected or "1.0"
-        for name, expected in train_frs.REQUIRED_DISTRIBUTIONS.items()
-    }
+    versions = {requirement.name: train_frs.importlib.metadata.version(requirement.name) for requirement in requirements}
 
     train_frs.preflight_environment(
         version_getter=lambda name: calls.append(name) or versions[name],
         gpu_probe=lambda: ["GPU 0: fake accelerator"],
+        python_version=(3, 12),
     )
 
-    assert calls == list(train_frs.REQUIRED_DISTRIBUTIONS)
+    assert calls == [requirement.name for requirement in requirements]
+    required_names = {requirement.name.lower() for requirement in requirements}
+    assert {
+        "jax",
+        "jax-cuda12-plugin",
+        "jax-cuda12-pjrt",
+        "optax",
+        "torchvision",
+        "torchcodec",
+        "av",
+        "pillow",
+        "huggingface-hub",
+        "sentencepiece",
+        "safetensors",
+    } <= required_names
 
 
-@pytest.mark.parametrize("failure", ["dependency", "version", "gpu"])
-def test_check_preflight_rejects_missing_dependencies_versions_or_gpu(failure: str) -> None:
+def test_check_preflight_rejects_each_applicable_missing_dependency() -> None:
     from importlib.metadata import PackageNotFoundError
     from train_pi05_frs.tools import train_frs
 
-    versions = {
-        name: expected or "1.0"
-        for name, expected in train_frs.REQUIRED_DISTRIBUTIONS.items()
-    }
+    requirements = train_frs.production_runtime_requirements()
+    versions = {requirement.name: train_frs.importlib.metadata.version(requirement.name) for requirement in requirements}
+    for missing in requirements:
+        def version_getter(name: str, *, missing_name: str = missing.name) -> str:
+            if name == missing_name:
+                raise PackageNotFoundError(name)
+            return versions[name]
+
+        with pytest.raises(RuntimeError, match=rf"dependency.*{re.escape(missing.name)}"):
+            train_frs.preflight_environment(
+                version_getter=version_getter,
+                gpu_probe=lambda: ["GPU 0"],
+                python_version=(3, 12),
+            )
+
+
+def test_check_preflight_rejects_unsatisfied_pyproject_specifier() -> None:
+    from train_pi05_frs.tools import train_frs
+
+    requirements = train_frs.production_runtime_requirements()
+    versions = {requirement.name: train_frs.importlib.metadata.version(requirement.name) for requirement in requirements}
 
     def version_getter(name: str) -> str:
-        if failure == "dependency" and name == "jax":
-            raise PackageNotFoundError(name)
-        if failure == "version" and name == "jax":
+        if name == "jax":
             return "0.0.0"
         return versions[name]
 
-    with pytest.raises(RuntimeError, match={
-        "dependency": "dependency.*jax",
-        "version": "jax.*0.5.3",
-        "gpu": "GPU",
-    }[failure]):
+    with pytest.raises(RuntimeError, match="jax.*==0.5.3"):
         train_frs.preflight_environment(
             version_getter=version_getter,
-            gpu_probe=(lambda: [] if failure == "gpu" else ["GPU 0"]),
+            gpu_probe=lambda: ["GPU 0"],
+            python_version=(3, 12),
         )
+
+
+@pytest.mark.parametrize("python_version", [(3, 11), (3, 13)])
+def test_check_preflight_requires_exactly_python_3_12(
+    python_version: tuple[int, int],
+) -> None:
+    from train_pi05_frs.tools import train_frs
+
+    with pytest.raises(RuntimeError, match="Python 3.12"):
+        train_frs.preflight_environment(
+            version_getter=lambda name: pytest.fail(f"read metadata for {name}"),
+            gpu_probe=lambda: pytest.fail("probed GPU"),
+            python_version=python_version,
+        )
+
+
+def test_check_preflight_rejects_missing_gpu_without_importing_jax() -> None:
+    from train_pi05_frs.tools import train_frs
+
+    requirements = train_frs.production_runtime_requirements()
+    versions = {requirement.name: train_frs.importlib.metadata.version(requirement.name) for requirement in requirements}
+    sys.modules.pop("jax", None)
+
+    with pytest.raises(RuntimeError, match="GPU"):
+        train_frs.preflight_environment(
+            version_getter=versions.__getitem__,
+            gpu_probe=lambda: [],
+            python_version=(3, 12),
+        )
+    assert "jax" not in sys.modules
+
+
+def test_production_requirements_respect_platform_markers() -> None:
+    from train_pi05_frs.tools import train_frs
+
+    linux = {
+        requirement.name.lower()
+        for requirement in train_frs.production_runtime_requirements(
+            marker_environment={"sys_platform": "linux", "platform_machine": "x86_64"}
+        )
+    }
+    windows = {
+        requirement.name.lower()
+        for requirement in train_frs.production_runtime_requirements(
+            marker_environment={"sys_platform": "win32", "platform_machine": "AMD64"}
+        )
+    }
+    assert {"jax-cuda12-plugin", "jax-cuda12-pjrt", "nvidia-cuda-nvcc-cu12"} <= linux
+    assert not {"jax-cuda12-plugin", "jax-cuda12-pjrt", "nvidia-cuda-nvcc-cu12"} & windows
+    assert "torchcodec" in linux
+    assert "torchcodec" in windows
 
 
 def test_path_preflight_rejects_zip_that_is_not_a_numpy_archive(tmp_path: Path) -> None:
@@ -976,6 +1124,38 @@ def test_path_preflight_validates_norm_stats_against_dataset_feature_width(
     stats_path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(ValueError, match=rf"norm stats {stat_name}.*{field}.*width"):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    ("stat_name", "field", "bad_value", "diagnostic"),
+    [
+        ("state", "mean", [[0.0, 0.0, 0.0]], "one-dimensional"),
+        ("state", "std", [1.0, -0.1, 1.0], "std.*non-negative"),
+        ("actions", "q99", [-1.0, 1.0], "q99.*greater.*q01"),
+        ("actions", "q99", [-2.0, 1.0], "q99.*greater.*q01"),
+    ],
+)
+def test_path_preflight_rejects_invalid_norm_stat_vector_semantics(
+    tmp_path: Path,
+    stat_name: str,
+    field: str,
+    bad_value: object,
+    diagnostic: str,
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    stats_path = (
+        Path(config["norm_stats"]["dir"])
+        / config["norm_stats"]["asset_id"]
+        / "norm_stats.json"
+    )
+    payload = json.loads(stats_path.read_text(encoding="utf-8"))
+    payload["norm_stats"][stat_name][field] = bad_value
+    stats_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=diagnostic):
         validate_config(config, check_paths=True)
 
 

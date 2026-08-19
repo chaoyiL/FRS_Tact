@@ -27,6 +27,8 @@ dependencies = [
     "pytest>=8.0.0,<10.0.0",
     "transformers==4.53.2",
     "jax[cuda12-local]==0.5.3",
+    "jax-cuda12-plugin==0.5.3; sys_platform == 'linux'",
+    "jax-cuda12-pjrt==0.5.3; sys_platform == 'linux'",
     "jaxlib==0.5.3",
     "nvidia-cuda-nvcc-cu12>=12.8,<13; sys_platform == 'linux'",
     "flax==0.10.2",

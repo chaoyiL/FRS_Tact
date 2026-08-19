@@ -26,11 +26,61 @@ from train_pi05_frs.utils.model import gated_flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import gt_supervised_loss_per_sample
 from train_pi05_frs.utils.model import make_optimizer
 from train_pi05_frs.utils.model import train_step
-from train_pi05_frs.train import _validate_resume_cache_provenance, train_decoder
+from train_pi05_frs.train import (
+    _validate_resume_cache_provenance,
+    _validate_training_path_boundaries,
+    train_decoder,
+)
 import numpy as np
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
+    def test_direct_decoder_rejects_output_overlapping_read_only_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shared = pathlib.Path(temporary) / "shared"
+            shared.mkdir()
+            for label, arguments in (
+                ("encoder", {"tactile_encoder_dir": shared}),
+                ("action cache", {"cache_dir": shared}),
+                ("dataset", {"dataset_root": shared}),
+                ("resume", {"resume_from": shared}),
+            ):
+                values = {
+                    "cache_dir": None,
+                    "cache_dirs": None,
+                    "tactile_encoder_dir": pathlib.Path(temporary) / "encoder",
+                    "output_dir": shared,
+                    "dataset_root": None,
+                    "dataset_sources": None,
+                    "tactile_embedding_cache_root": None,
+                    "resume": False,
+                    "resume_from": None,
+                }
+                values.update(arguments)
+                with self.subTest(label=label), self.assertRaisesRegex(
+                    ValueError, "read-only.*overlap"
+                ):
+                    _validate_training_path_boundaries(**values)
+
+    def test_direct_decoder_rejects_nonempty_fresh_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            output = root / "output"
+            output.mkdir()
+            (output / "stale").write_text("stale", encoding="utf-8")
+            with self.assertRaisesRegex(FileExistsError, "output directory is not empty"):
+                _validate_training_path_boundaries(
+                    cache_dir=root / "cache",
+                    cache_dirs=None,
+                    tactile_encoder_dir=root / "encoder",
+                    output_dir=output,
+                    dataset_root=root / "dataset",
+                    dataset_sources=None,
+                    tactile_embedding_cache_root=None,
+                    resume=False,
+                    resume_from=None,
+                )
+
     def make_model(self, *, tactile_window: int = 3) -> TactileConditionedFlowDecoder:
         return TactileConditionedFlowDecoder(
             DecoderConfig(

@@ -56,8 +56,12 @@ def _overlap(left: Path, right: Path) -> bool:
     return _is_same_or_descendant(left, right) or _is_same_or_descendant(right, left)
 
 
-def validate_output_roots(roots: Mapping[str, str | Path]) -> dict[str, Path]:
-    """Resolve aliases and reject protected or mutually overlapping roots."""
+def validate_output_roots(
+    roots: Mapping[str, str | Path],
+    *,
+    read_only_roots: Mapping[str, str | Path] | None = None,
+) -> dict[str, Path]:
+    """Resolve aliases and reject protected, writable, or read/write overlaps."""
 
     requested = {
         str(label): Path(value).expanduser().absolute()
@@ -106,5 +110,17 @@ def validate_output_roots(roots: Mapping[str, str | Path]) -> dict[str, Path]:
                 raise ValueError(
                     f"output/cache roots overlap: {left_label}={left_path} and "
                     f"{right_label}={right_path}"
+                )
+    resolved_read_only = {
+        str(label): Path(value).expanduser().absolute().resolve(strict=False)
+        for label, value in (read_only_roots or {}).items()
+    }
+    for writable_label, writable_path in items:
+        for read_only_label, read_only_path in resolved_read_only.items():
+            if _overlap(writable_path, read_only_path):
+                raise ValueError(
+                    "writable/read-only roots overlap: "
+                    f"{writable_label}={writable_path} and "
+                    f"{read_only_label}={read_only_path}"
                 )
     return resolved

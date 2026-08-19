@@ -12,9 +12,13 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
+import tomllib
 from typing import Any
 import urllib.parse
 
+from packaging.markers import default_environment
+from packaging.requirements import Requirement
 import yaml
 
 from train_pi05_frs.utils.path_safety import validate_output_roots
@@ -25,20 +29,6 @@ REPO_ROOT = TRAIN_ROOT.parent
 DEFAULT_CONFIG = TRAIN_ROOT / "configs" / "train_pi05_frs.yaml"
 train_decoder: Any = None
 
-# Exact versions are checked for dependencies which the environment contract pins.
-# The remaining entries are still verified without importing their modules.
-REQUIRED_DISTRIBUTIONS: dict[str, str | None] = {
-    "jax": "0.5.3",
-    "jaxlib": "0.5.3",
-    "flax": "0.10.2",
-    "orbax-checkpoint": "0.11.13",
-    "transformers": "4.53.2",
-    "ml-dtypes": "0.4.1",
-    "numpy": None,
-    "torch": None,
-    "datasets": None,
-    "pyarrow": None,
-}
 LEROBOT_V3_DEFAULT_FEATURES = {
     "timestamp": {"dtype": "float32", "shape": (1,), "names": None},
     "frame_index": {"dtype": "int64", "shape": (1,), "names": None},
@@ -279,22 +269,59 @@ def _probe_nvidia_gpu() -> list[str]:
     return gpu_lines
 
 
+def production_runtime_requirements(
+    *,
+    pyproject_path: Path = TRAIN_ROOT / "pyproject.toml",
+    marker_environment: Mapping[str, str] | None = None,
+) -> tuple[Requirement, ...]:
+    """Return applicable production requirements without importing their modules."""
+
+    with pyproject_path.open("rb") as file:
+        project = tomllib.load(file).get("project")
+    if not isinstance(project, Mapping):
+        raise RuntimeError(f"project metadata is missing from {pyproject_path}")
+    dependencies = project.get("dependencies")
+    if not isinstance(dependencies, list) or not dependencies:
+        raise RuntimeError(f"project.dependencies is missing from {pyproject_path}")
+    environment = dict(default_environment())
+    if marker_environment is not None:
+        environment.update(marker_environment)
+    applicable: list[Requirement] = []
+    for value in dependencies:
+        if not isinstance(value, str):
+            raise RuntimeError(f"project dependency must be a string: {value!r}")
+        requirement = Requirement(value)
+        if requirement.marker is None or requirement.marker.evaluate(environment):
+            applicable.append(requirement)
+    return tuple(applicable)
+
+
 def preflight_environment(
     *,
     version_getter: Any = importlib.metadata.version,
     gpu_probe: Any = _probe_nvidia_gpu,
+    python_version: tuple[int, int] = sys.version_info[:2],
 ) -> None:
     """Check the locked runtime and accelerator without importing JAX or a model."""
-    for distribution, expected in REQUIRED_DISTRIBUTIONS.items():
+    if tuple(python_version) != (3, 12):
+        raise RuntimeError(
+            "training requires exactly Python 3.12; "
+            f"found {python_version[0]}.{python_version[1]}"
+        )
+    for requirement in production_runtime_requirements():
+        distribution = requirement.name
         try:
             actual = version_getter(distribution)
         except importlib.metadata.PackageNotFoundError as error:
             raise RuntimeError(
                 f"required dependency {distribution!r} is not installed"
             ) from error
-        if expected is not None and actual != expected:
+        if requirement.specifier and not requirement.specifier.contains(
+            actual, prereleases=True
+        ):
             raise RuntimeError(
-                f"required dependency {distribution} must be {expected}, found {actual}"
+                f"required dependency {distribution} must satisfy "
+                f"{requirement.specifier}, found {actual}"
             )
     if not gpu_probe():
         raise RuntimeError("GPU preflight failed: no NVIDIA GPU was reported")
@@ -381,6 +408,27 @@ def _stat_width(value: object, *, label: str) -> int:
     return int(array.shape[-1])
 
 
+def _stat_vector(value: object, *, label: str, expected_width: int) -> Any:
+    try:
+        import numpy as np
+
+        array = np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must be a numeric array") from error
+    if array.ndim != 1:
+        raise ValueError(f"{label} must be a one-dimensional numeric array")
+    if array.size == 0 or array.dtype.kind not in "fiu":
+        raise ValueError(f"{label} must be a non-empty numeric array")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{label} must contain only finite values")
+    if array.shape != (expected_width,):
+        raise ValueError(
+            f"{label} width {array.shape[0]} does not match "
+            f"dataset feature width {expected_width}"
+        )
+    return array
+
+
 def _validate_norm_stats(
     path: Path,
     *,
@@ -398,19 +446,29 @@ def _validate_norm_stats(
         required = {"mean", "std"}
         if use_quantile_norm:
             required.update(("q01", "q99"))
+        present_quantiles = {"q01", "q99"} & set(values)
+        if present_quantiles and present_quantiles != {"q01", "q99"}:
+            raise ValueError(f"norm stats {name} must provide q01 and q99 together")
+        required.update(present_quantiles)
         missing = required - set(values)
         if missing:
             raise ValueError(f"norm stats {name} are missing {sorted(missing)}")
         expected_width = expected_widths[name]
+        vectors: dict[str, Any] = {}
         for field in sorted(required):
-            actual_width = _stat_width(
-                values[field], label=f"norm stats {name}.{field}"
+            vectors[field] = _stat_vector(
+                values[field],
+                label=f"norm stats {name}.{field}",
+                expected_width=expected_width,
             )
-            if actual_width != expected_width:
-                raise ValueError(
-                    f"norm stats {name}.{field} width {actual_width} does not match "
-                    f"dataset feature width {expected_width}"
-                )
+        if (vectors["std"] < 0).any():
+            raise ValueError(f"norm stats {name}.std must be non-negative")
+        if {"q01", "q99"} <= set(vectors) and not (
+            vectors["q99"] > vectors["q01"]
+        ).all():
+            raise ValueError(
+                f"norm stats {name}.q99 must be greater than q01 at every position"
+            )
 
 
 def _feature_width(features: Mapping[str, Any], key: str, *, label: str) -> int:
@@ -1029,10 +1087,32 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
             training["output"], "frs_training.output"
         ),
     }
-    validate_output_roots(output_roots)
-    _local_path(model["tactile_encoder_path"], "model.tactile_encoder_path")
+    read_only_roots: dict[str, Path] = {
+        "config.model.tactile_encoder_path": _local_path(
+            model["tactile_encoder_path"], "model.tactile_encoder_path"
+        ),
+    }
+    if not _is_url(checkpoint):
+        read_only_roots["config.checkpoint"] = resolve_local_path(checkpoint)
     for index, source in enumerate(datasets):
-        _local_path(source["root"], f"datasets[{index}].root")
+        read_only_roots[f"config.datasets[{index}].root"] = _local_path(
+            source["root"], f"datasets[{index}].root"
+        )
+    norm_dir_value = str(norm_stats["dir"])
+    if not _is_url(norm_dir_value):
+        read_only_roots["config.norm_stats asset"] = (
+            resolve_local_path(norm_dir_value) / str(norm_stats["asset_id"])
+        )
+    resume_from = training.get("resume_from")
+    if resume_from not in (None, ""):
+        read_only_roots["config.frs_training.resume_from"] = resolve_local_path(
+            str(resume_from)
+        )
+    elif training.get("resume", False):
+        read_only_roots["config.frs_training implicit resume"] = (
+            output_roots["config.frs_training.output"] / "last"
+        )
+    validate_output_roots(output_roots, read_only_roots=read_only_roots)
 
     if not check_paths:
         return config
@@ -1085,13 +1165,19 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
             use_quantile_norm=bool(norm_stats["use_quantile_norm"]),
             expected_widths=expected_widths,
         )
-    resume_from = training.get("resume_from")
     if resume_from not in (None, "") and not resolve_local_path(str(resume_from)).is_dir():
         raise FileNotFoundError(f"resume checkpoint does not exist: {resume_from}")
     if training.get("resume", False) and resume_from in (None, ""):
         last = _output_target(training["output"], "frs_training.output") / "last"
         if not last.is_dir():
             raise FileNotFoundError(f"resume checkpoint does not exist: {last}")
+    output_target = output_roots["config.frs_training.output"]
+    is_resume = bool(training.get("resume", False) or resume_from not in (None, ""))
+    if not is_resume and output_target.exists():
+        if not output_target.is_dir() or any(output_target.iterdir()):
+            raise FileExistsError(
+                f"fresh training output directory is not empty: {output_target}"
+            )
     for value, field in (
         (action_cache["root"], "action_cache.root"),
         (tactile_cache["root"], "tactile_embedding_cache.root"),

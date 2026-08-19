@@ -61,6 +61,55 @@ def _validate_resume_cache_provenance(
         )
 
 
+def _validate_training_path_boundaries(
+    *,
+    cache_dir: pathlib.Path | None,
+    cache_dirs: Sequence[pathlib.Path] | None,
+    tactile_encoder_dir: pathlib.Path,
+    output_dir: pathlib.Path,
+    dataset_root: pathlib.Path | None,
+    dataset_sources: Sequence[Mapping[str, Any]] | None,
+    tactile_embedding_cache_root: pathlib.Path | None,
+    resume: bool,
+    resume_from: pathlib.Path | None,
+) -> None:
+    """Validate direct decoder read/write roots before importing heavy runtimes."""
+
+    from train_pi05_frs.utils.path_safety import validate_output_roots
+
+    read_only_roots: dict[str, pathlib.Path] = {
+        "tactile_encoder": tactile_encoder_dir,
+    }
+    if cache_dir is not None:
+        read_only_roots["action_cache"] = cache_dir
+    if cache_dirs is not None:
+        read_only_roots.update(
+            {f"action_cache[{index}]": path for index, path in enumerate(cache_dirs)}
+        )
+    if dataset_root is not None:
+        read_only_roots["dataset"] = dataset_root
+    if dataset_sources is not None:
+        for index, source in enumerate(dataset_sources):
+            root = source.get("root")
+            if root is not None:
+                read_only_roots[f"dataset[{index}]"] = pathlib.Path(str(root))
+    if tactile_embedding_cache_root is not None:
+        read_only_roots["tactile_embedding_cache"] = tactile_embedding_cache_root
+    resolved_resume = _resolve_resume_dir(
+        output_dir=output_dir, resume=resume, resume_from=resume_from
+    )
+    if resolved_resume is not None:
+        read_only_roots["resume_checkpoint"] = resolved_resume
+    validate_output_roots(
+        {"frs_training.output": output_dir}, read_only_roots=read_only_roots
+    )
+    if resolved_resume is None and output_dir.exists():
+        if not output_dir.is_dir() or any(output_dir.iterdir()):
+            raise FileExistsError(
+                f"fresh training output directory is not empty: {output_dir}"
+            )
+
+
 def train_decoder(
     *,
     cache_dir: pathlib.Path | None,
@@ -122,23 +171,17 @@ def train_decoder(
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
 ) -> None:
-    from train_pi05_frs.utils.path_safety import validate_output_roots
-
-    output_and_cache_roots: dict[str, pathlib.Path] = {
-        "frs_training.output": output_dir,
-    }
-    if cache_dir is not None:
-        output_and_cache_roots["action_cache"] = cache_dir
-    if cache_dirs is not None:
-        output_and_cache_roots.update(
-            {
-                f"action_cache[{index}]": path
-                for index, path in enumerate(cache_dirs)
-            }
-        )
-    if tactile_embedding_cache_root is not None:
-        output_and_cache_roots["tactile_embedding_cache"] = tactile_embedding_cache_root
-    validate_output_roots(output_and_cache_roots)
+    _validate_training_path_boundaries(
+        cache_dir=cache_dir,
+        cache_dirs=cache_dirs,
+        tactile_encoder_dir=tactile_encoder_dir,
+        output_dir=output_dir,
+        dataset_root=dataset_root,
+        dataset_sources=dataset_sources,
+        tactile_embedding_cache_root=tactile_embedding_cache_root,
+        resume=resume,
+        resume_from=resume_from,
+    )
 
     import csv
     import json

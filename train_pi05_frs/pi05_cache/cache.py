@@ -273,7 +273,17 @@ def flush_arrays(arrays: dict[str, np.ndarray]) -> None:
             flush()
 
 
-def records_from_arrays(arrays: dict[str, np.ndarray], *, count: int) -> list[SampleRecord]:
+def records_from_arrays(
+    arrays: Mapping[str, np.ndarray], *, count: int
+) -> list[SampleRecord]:
+    for name in ("dataset_index", "episode_index", "split"):
+        if tuple(arrays[name].shape) != (count,):
+            raise ValueError(
+                f"cache array {name} shape must be {(count,)}, got {arrays[name].shape}"
+            )
+    split_values = np.asarray(arrays["split"])
+    if not np.isin(split_values, (0, 1)).all():
+        raise ValueError("cache split values must be exactly 0 or 1")
     records: list[SampleRecord] = []
     for index in range(count):
         split = "val" if int(arrays["split"][index]) == 1 else "train"
@@ -284,6 +294,34 @@ def records_from_arrays(arrays: dict[str, np.ndarray], *, count: int) -> list[Sa
                 split,
             )
         )
+    return records
+
+
+def validate_cache_records(
+    manifest: Mapping[str, Any], arrays: Mapping[str, np.ndarray]
+) -> list[SampleRecord]:
+    """Rebuild manifest record identity from the authoritative static arrays."""
+
+    sample_count = manifest.get("sample_count")
+    if type(sample_count) is not int or sample_count < 0:
+        raise ValueError("cache manifest sample_count must be a non-negative integer")
+    records = records_from_arrays(arrays, count=sample_count)
+    actual_digest = records_digest(records)
+    if manifest.get("records_sha256") != actual_digest:
+        raise ValueError(
+            "cache manifest records_sha256 does not match dataset_indices/"
+            "episode_indices/split arrays"
+        )
+    actual_counts = {
+        "train_sample_count": sum(record.split == "train" for record in records),
+        "val_sample_count": sum(record.split == "val" for record in records),
+    }
+    for name, actual in actual_counts.items():
+        if type(manifest.get(name)) is not int or manifest[name] != actual:
+            raise ValueError(
+                f"cache manifest {name} does not match split array: "
+                f"{manifest.get(name)!r} != {actual}"
+            )
     return records
 
 
@@ -570,6 +608,7 @@ class CachedPairs:
         self.cache_dir = pathlib.Path(cache_dir)
         self.manifest = load_manifest(self.cache_dir)
         self.arrays = open_cache_arrays(self.cache_dir)
+        validate_cache_records(self.manifest, self.arrays)
 
     def indices(self, split: Literal["train", "val"]) -> np.ndarray:
         split_value = 0 if split == "train" else 1
