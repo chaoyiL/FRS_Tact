@@ -1,0 +1,104 @@
+# Unchanged files copied from /home/typhon/FRS_Tact-pi05-frs-jax.
+# Each mapping is followed by a sha256sum-compatible target entry.
+# src/lerobot/__init__.py -> train_pi05_frs/src/lerobot/__init__.py
+e28fb43620c0aed519d435f09d769ece3a4f72c7b429704e1e491941ecb49c0f  train_pi05_frs/src/lerobot/__init__.py
+# src/lerobot/__version__.py -> train_pi05_frs/src/lerobot/__version__.py
+beb2aa5d785c7e7ccbcb910ec4688e2868423458e2a1aac7fd76c1e1a182a470  train_pi05_frs/src/lerobot/__version__.py
+# src/lerobot/configs/__init__.py -> train_pi05_frs/src/lerobot/configs/__init__.py
+9d8af3b5c2d3c3b672adf8f0bec0fd48980afcc5e637dccb5adcf508fba258be  train_pi05_frs/src/lerobot/configs/__init__.py
+# src/lerobot/configs/types.py -> train_pi05_frs/src/lerobot/configs/types.py
+1354e7d24b19d5d4970064104f76d8c85570c204bf2d09e2b4402f93a994ad99  train_pi05_frs/src/lerobot/configs/types.py
+# src/lerobot/configs/video.py -> train_pi05_frs/src/lerobot/configs/video.py
+51dc623e5bab521319b51f730e94eb365a9cb3679f73537c7d797b6f2a77bb56  train_pi05_frs/src/lerobot/configs/video.py
+# src/lerobot/datasets/dataset_metadata.py -> train_pi05_frs/src/lerobot/datasets/dataset_metadata.py
+8f7658eb5cebc0dc2aec87d99f02ad4a5bae8e8b57a3abb075ae486828075dcd  train_pi05_frs/src/lerobot/datasets/dataset_metadata.py
+# src/lerobot/datasets/dataset_reader.py -> train_pi05_frs/src/lerobot/datasets/dataset_reader.py
+e148ecd7eb2fb441639d451e01320a85b79161744cd516bb902b698fb86f9218  train_pi05_frs/src/lerobot/datasets/dataset_reader.py
+# src/lerobot/datasets/dataset_sources.py -> train_pi05_frs/src/lerobot/datasets/dataset_sources.py
+eb708e2cd81733c6198a0f2e071a601a825bb759d5fa08d893105580c193852c  train_pi05_frs/src/lerobot/datasets/dataset_sources.py
+# src/lerobot/datasets/depth_utils.py -> train_pi05_frs/src/lerobot/datasets/depth_utils.py
+dbedec93aa7b8b11e093f1efa6bb0e5a34e283e20fc0314e8e58c66635aaf008  train_pi05_frs/src/lerobot/datasets/depth_utils.py
+# src/lerobot/datasets/feature_utils.py -> train_pi05_frs/src/lerobot/datasets/feature_utils.py
+928369cff50f0d663a125abfc67683ccbae0e552ed2eb22edde9e6bcff2aef81  train_pi05_frs/src/lerobot/datasets/feature_utils.py
+# src/lerobot/datasets/image_writer.py -> train_pi05_frs/src/lerobot/datasets/image_writer.py
+54cad218c99caad105ea8738507ee87fc8c2858832d31aa5b21d324c97360631  train_pi05_frs/src/lerobot/datasets/image_writer.py
+# src/lerobot/datasets/io_utils.py -> train_pi05_frs/src/lerobot/datasets/io_utils.py
+af08c7875f34f8469f80c4fd903af12971d6fa96c179be984887b93ef2f6f91c  train_pi05_frs/src/lerobot/datasets/io_utils.py
+# src/lerobot/datasets/language.py -> train_pi05_frs/src/lerobot/datasets/language.py
+7421ef2791833eb1ed958863a4c037e59197656e19003fe2c609a4978bcd2b2a  train_pi05_frs/src/lerobot/datasets/language.py
+# src/lerobot/datasets/lerobot_dataset.py -> train_pi05_frs/src/lerobot/datasets/lerobot_dataset.py
+ededb0bb10423180b2eef5f97f867aac7b3979d49ce69121916d4e2e0e085295  train_pi05_frs/src/lerobot/datasets/lerobot_dataset.py
+# src/lerobot/datasets/pyav_utils.py -> train_pi05_frs/src/lerobot/datasets/pyav_utils.py
+d53792b446936f08527b598a89a65fc2ca5c002d9bb14e63015206dae5830023  train_pi05_frs/src/lerobot/datasets/pyav_utils.py
+# src/lerobot/datasets/sample_utils.py -> train_pi05_frs/src/lerobot/datasets/sample_utils.py
+f769e5c0d2fd4cce22321d32adc55a27fb4d9bdbae9e44359c27f7b315a64bc4  train_pi05_frs/src/lerobot/datasets/sample_utils.py
+# src/lerobot/datasets/tactile_cache.py -> train_pi05_frs/src/lerobot/datasets/tactile_cache.py
+f408dcb8f7d18c2a8c7905ed75110ff225130f4d08d06c0c64cd133d0d9d1785  train_pi05_frs/src/lerobot/datasets/tactile_cache.py
+# src/lerobot/datasets/utils.py -> train_pi05_frs/src/lerobot/datasets/utils.py
+488b713e643acaaa8c76cca8830ca71cb20584b4ceb3657a9396f81a20b3f83e  train_pi05_frs/src/lerobot/datasets/utils.py
+# src/lerobot/datasets/video_utils.py -> train_pi05_frs/src/lerobot/datasets/video_utils.py
+82d0ced8f3f9adc754d4388122b044d36f2feeadda28d4ddad933cead7cc54d1  train_pi05_frs/src/lerobot/datasets/video_utils.py
+# src/lerobot/policies/__init__.py -> train_pi05_frs/src/lerobot/policies/__init__.py
+5926824883ec41599dc63d86cb2f4f441b5df5d51fac0b690a2bab25417b6ca4  train_pi05_frs/src/lerobot/policies/__init__.py
+# src/lerobot/policies/pi05_jax/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/__init__.py
+8a25169258f913c1466e8d2ee1f73ade80e8166903346116d145a6ed765b517b  train_pi05_frs/src/lerobot/policies/pi05_jax/__init__.py
+# src/lerobot/policies/pi05_jax/array_typing.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/array_typing.py
+a39bcfb8e913ba17effa139b7e8eb4f4b652cf730074697b8e9a85a8ac44c64c  train_pi05_frs/src/lerobot/policies/pi05_jax/array_typing.py
+# src/lerobot/policies/pi05_jax/download.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/download.py
+7197fb02ffc4c0b4eb3cdb9cee709a03bb8eea20c9c0a386beeb97dc2b3ac0e8  train_pi05_frs/src/lerobot/policies/pi05_jax/download.py
+# src/lerobot/policies/pi05_jax/frs.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/frs.py
+f0421eaa42350cc51269ff3f74849938c57394d161148b4fe4f6cdfed5a3b567  train_pi05_frs/src/lerobot/policies/pi05_jax/frs.py
+# src/lerobot/policies/pi05_jax/gemma.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/gemma.py
+ca6af56276396e9bddb215e158e29102f464820d4cbe372d153593555f039903  train_pi05_frs/src/lerobot/policies/pi05_jax/gemma.py
+# src/lerobot/policies/pi05_jax/image_tools.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/image_tools.py
+add565f43a58468ef626bdac6ad760d2302338103dc9776b39a4b84c99d4b4fa  train_pi05_frs/src/lerobot/policies/pi05_jax/image_tools.py
+# src/lerobot/policies/pi05_jax/lora.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/lora.py
+38c2e3ebeec39ec7dfa781ea363fc9770176726039bbc9c522636ceff33f4171  train_pi05_frs/src/lerobot/policies/pi05_jax/lora.py
+# src/lerobot/policies/pi05_jax/model.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/model.py
+23d3f36da98bde2de3366d7780bbf62ab3ae14846fa9f3a7719599065a510bae  train_pi05_frs/src/lerobot/policies/pi05_jax/model.py
+# src/lerobot/policies/pi05_jax/nnx_utils.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/nnx_utils.py
+84ab93bf46d513ffda3a8dc565d307df6e8bd02ec55c49f039aa8a0ed1ef59af  train_pi05_frs/src/lerobot/policies/pi05_jax/nnx_utils.py
+# src/lerobot/policies/pi05_jax/normalize.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/normalize.py
+a9f1578ab66d9d8a5c01b460d1e3f6868a4fabc620c767cb11310b0fdc4eb33f  train_pi05_frs/src/lerobot/policies/pi05_jax/normalize.py
+# src/lerobot/policies/pi05_jax/pi0.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/pi0.py
+1a3e65f95a584aa5c862a14ec4cee5a4c462b604a40b66509124c3ed16788c54  train_pi05_frs/src/lerobot/policies/pi05_jax/pi0.py
+# src/lerobot/policies/pi05_jax/pi0_config.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/pi0_config.py
+1782cc81a9598967e8287eb99b17b67d557850b71e4922c8efc5b951278985c0  train_pi05_frs/src/lerobot/policies/pi05_jax/pi0_config.py
+# src/lerobot/policies/pi05_jax/policies/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/policies/__init__.py
+92070825fe77a38889c189f2ef3df647cbe363a6f4c640d472a43b702371f646  train_pi05_frs/src/lerobot/policies/pi05_jax/policies/__init__.py
+# src/lerobot/policies/pi05_jax/policies/pick_tube_policy.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/policies/pick_tube_policy.py
+0c8819c8e275348e6ed94ebc9e1ffb8ee20d1fa1d9c6c65a3fe0a36475c2270a  train_pi05_frs/src/lerobot/policies/pi05_jax/policies/pick_tube_policy.py
+# src/lerobot/policies/pi05_jax/policy_config.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/policy_config.py
+031bd0d150b1faaec07a8764543ddee1c31aac39553bf1478bce9ecdaef11956  train_pi05_frs/src/lerobot/policies/pi05_jax/policy_config.py
+# src/lerobot/policies/pi05_jax/siglip.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/siglip.py
+ddb6d810dfee9092f0148ae149c51f3d53bf7adea078dc9f051fc66f763c9959  train_pi05_frs/src/lerobot/policies/pi05_jax/siglip.py
+# src/lerobot/policies/pi05_jax/tokenizer.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/tokenizer.py
+2f097c2c703bef2ab3e478f3222968c0b45254fa10461a08f5c7dc00fc82e627  train_pi05_frs/src/lerobot/policies/pi05_jax/tokenizer.py
+# src/lerobot/policies/pi05_jax/training/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/training/__init__.py
+0c78d6079171968d52f5ddc1cdd654b226cd5aafbab02f3d0b2d517b3a8dddc0  train_pi05_frs/src/lerobot/policies/pi05_jax/training/__init__.py
+# src/lerobot/policies/pi05_jax/training/sharding.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/training/sharding.py
+8d3093fb56ad5cc727bffaa4bf983d9cd8cc55d2677d5871c50186291147bbb5  train_pi05_frs/src/lerobot/policies/pi05_jax/training/sharding.py
+# src/lerobot/policies/pi05_jax/transforms.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/transforms.py
+70f7823c73047e200743cb1d8757b4d2c0fdc997f2229832bfdf716ccd94eb81  train_pi05_frs/src/lerobot/policies/pi05_jax/transforms.py
+# src/lerobot/policies/pi05_jax/utils/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/utils/__init__.py
+09c96c99a4021816bb4b4d9cbda990d4eac4bd273eb317d4655125a30918099c  train_pi05_frs/src/lerobot/policies/pi05_jax/utils/__init__.py
+# src/lerobot/policies/pi05_jax/utils/fsq_tokenizer.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/utils/fsq_tokenizer.py
+6a7aa6bd9d439dddc5d21b2b1372e2de4e574fadb6c8daf71e521afeee754fb5  train_pi05_frs/src/lerobot/policies/pi05_jax/utils/fsq_tokenizer.py
+# src/lerobot/utils/__init__.py -> train_pi05_frs/src/lerobot/utils/__init__.py
+bde76c3e46f3f1ac67493d254bc39067b26f3f189f10516542b7a5afbe23751c  train_pi05_frs/src/lerobot/utils/__init__.py
+# src/lerobot/utils/constants.py -> train_pi05_frs/src/lerobot/utils/constants.py
+966887445ea327a72724602b625650212a4c85148ab516e0784a41f167687e73  train_pi05_frs/src/lerobot/utils/constants.py
+# src/lerobot/utils/device_utils.py -> train_pi05_frs/src/lerobot/utils/device_utils.py
+931bd2ca280b6e2ac189bf1bb414a2351195fec02e2831a377618f2bcb308e1f  train_pi05_frs/src/lerobot/utils/device_utils.py
+# src/lerobot/utils/feature_utils.py -> train_pi05_frs/src/lerobot/utils/feature_utils.py
+53d503b8f0eda6e40be90e39504c2949f07b526a6e079d74390893be967aef19  train_pi05_frs/src/lerobot/utils/feature_utils.py
+# src/lerobot/utils/import_utils.py -> train_pi05_frs/src/lerobot/utils/import_utils.py
+e89a0077e8671a8d4a49174f3089a6b16a5b9c429b58f8fb5965242955a84070  train_pi05_frs/src/lerobot/utils/import_utils.py
+# src/lerobot/utils/io_utils.py -> train_pi05_frs/src/lerobot/utils/io_utils.py
+5960c2aadec8a3d3176eeb7fbd33530ef76df27dbe12e11274374cc763755721  train_pi05_frs/src/lerobot/utils/io_utils.py
+# src/lerobot/utils/utils.py -> train_pi05_frs/src/lerobot/utils/utils.py
+1052b37570376aadb56b1b69688c5b755440b7a5b081e762e966bda9fd75bae1  train_pi05_frs/src/lerobot/utils/utils.py
+# utils/cache.py -> train_pi05_frs/pi05_cache/cache.py
+a029cc01a38310a2eeae6c2c5a4298ae3e2c2255ce32e7b288d75108e87f26fa  train_pi05_frs/pi05_cache/cache.py
+# modalities_eval/pi05_utils.py -> train_pi05_frs/pi05_cache/policy_inputs.py
+c7b02739e02f823a70194db3c8cb890d648bfac7abf034ebcfae7d2b5b1a3b24  train_pi05_frs/pi05_cache/policy_inputs.py

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import subprocess
 import textwrap
 import tomllib
@@ -10,6 +11,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 TRAIN_ROOT = ROOT / "train_pi05_frs"
 SETUP_SCRIPT = TRAIN_ROOT / "scripts" / "setup_env.sh"
+SOURCE_ROOT = Path("/home/typhon/FRS_Tact-pi05-frs-jax")
+SOURCE_MANIFEST = TRAIN_ROOT / "source_manifest.sha256"
+
+
+def read_source_manifest() -> tuple[dict[str, str], dict[str, str]]:
+    mappings: dict[str, str] = {}
+    checksums: dict[str, str] = {}
+    for line in SOURCE_MANIFEST.read_text(encoding="utf-8").splitlines():
+        if line.startswith("# ") and " -> " in line:
+            source, target = line[2:].split(" -> ", 1)
+            mappings[source] = target
+        elif line and not line.startswith("#"):
+            digest, target = line.split("  ", 1)
+            checksums[target] = digest
+    return mappings, checksums
 
 
 def run_sourced_setup(
@@ -194,3 +210,136 @@ def test_standalone_metadata_and_ignore_rules_define_a_private_boundary() -> Non
     assert "/train_pi05_frs/src/" not in ignore_rules
     assert "/train_pi05_frs/configs/" not in ignore_rules
     assert "/train_pi05_frs/tests/" not in ignore_rules
+
+
+def test_source_manifest_maps_and_verifies_unchanged_private_files() -> None:
+    mappings, checksums = read_source_manifest()
+
+    assert mappings
+    assert set(mappings.values()) == set(checksums)
+    for source, target in mappings.items():
+        source_path = SOURCE_ROOT / source
+        target_path = ROOT / target
+        assert source_path.is_file(), source
+        assert target_path.is_file(), target
+        assert hashlib.sha256(source_path.read_bytes()).hexdigest() == checksums[target]
+        assert hashlib.sha256(target_path.read_bytes()).hexdigest() == checksums[target]
+
+
+def test_private_closure_contains_only_approved_pi05_and_dataset_runtime() -> None:
+    private_root = TRAIN_ROOT / "src" / "lerobot"
+    files = {
+        path.relative_to(private_root).as_posix()
+        for path in private_root.rglob("*")
+        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    }
+
+    forbidden_fragments = (
+        "smolvla",
+        "deploy",
+        "encoder",
+        "modalities_eval",
+        "train_smolvla",
+        "train_vtsmolvla",
+        "dataset_writer.py",
+        "compute_stats.py",
+    )
+    assert not {
+        path for path in files if any(fragment in path.lower() for fragment in forbidden_fragments)
+    }
+    mappings, _ = read_source_manifest()
+    mapped_private_files = {
+        Path(target).relative_to("train_pi05_frs/src/lerobot").as_posix()
+        for target in mappings.values()
+        if target.startswith("train_pi05_frs/src/lerobot/")
+    }
+    assert files == mapped_private_files | {"datasets/__init__.py"}
+
+
+def test_private_dataset_init_exports_readers_without_writer_imports() -> None:
+    source = (TRAIN_ROOT / "src" / "lerobot" / "datasets" / "__init__.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "LeRobotDatasetMetadata" in source
+    assert "LeRobotDataset" in source
+    assert "compute_stats" not in source
+    assert "dataset_writer" not in source
+
+
+def test_root_level_pi05_cache_import_bootstraps_private_lerobot() -> None:
+    result = subprocess.run(
+        [
+            str(SOURCE_ROOT / ".venv" / "bin" / "python"),
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from train_pi05_frs.pi05_cache import prepare_cache; "
+                "import lerobot; print(Path(lerobot.__file__).resolve())"
+            ),
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": f"{TRAIN_ROOT / 'src'}:{ROOT}",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert TRAIN_ROOT / "src" in Path(result.stdout.strip()).parents
+
+
+def test_standalone_cwd_directly_exports_private_pi05_model_api() -> None:
+    result = subprocess.run(
+        [
+            str(SOURCE_ROOT / ".venv" / "bin" / "python"),
+            "-c",
+            (
+                "from pathlib import Path; "
+                "from lerobot.policies.pi05_jax import Pi0Config, load_pi0; "
+                "import lerobot; print(Path(lerobot.__file__).resolve())"
+            ),
+        ],
+        cwd=TRAIN_ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": f"{TRAIN_ROOT / 'src'}:{ROOT}",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert TRAIN_ROOT / "src" in Path(result.stdout.strip()).parents
+
+
+def test_rewritten_source_files_have_explicit_mapping_tests() -> None:
+    rewritten = {
+        "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
+        "modalities_eval/pi05_utils.py": "train_pi05_frs/pi05_cache/policy_inputs.py",
+        "utils/pi05_source_model.py": "train_pi05_frs/pi05_cache/source_model.py",
+        "utils/cache.py": "train_pi05_frs/pi05_cache/cache.py",
+        "utils/integration.py": "train_pi05_frs/pi05_cache/source_model.py",
+        "utils/flow_matching.py": "train_pi05_frs/pi05_cache/source_model.py",
+        "src/lerobot/datasets/__init__.py": "train_pi05_frs/src/lerobot/datasets/__init__.py",
+    }
+    test_source = (TRAIN_ROOT / "tests" / "test_pi05_cache.py").read_text(encoding="utf-8")
+
+    assert all((ROOT / target).is_file() for target in rewritten.values())
+    for required_behavior in (
+        "test_record_selection_is_episode_disjoint_trimmed_and_strided",
+        "test_twenty_dimensional_actions_are_padded_to_model_dimension",
+        "test_camera_map_rejects_unknown_pi05_slot_before_dataset_access",
+        "test_norm_stats_reject_dimensions_wider_than_dataset",
+        "test_inference_noise_is_deterministic_per_seed_and_dataset_index",
+        "test_inversion_mse_matches_per_sample_squared_error",
+        "test_reverse_solvers_preserve_shape_and_finiteness",
+        "test_prepare_cache_records_provenance_resumes_and_skips_completed_cache",
+    ):
+        assert required_behavior in test_source
