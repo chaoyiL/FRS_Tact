@@ -7,6 +7,11 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from train_smolvla_frs.utils.bimanual_schema import (
+    BIMANUAL_LOSS_MODE,
+    LEFT_ACTION_SLICE,
+    RIGHT_ACTION_SLICE,
+)
 from train_smolvla_frs.utils.data import TactileConditionedBatches
 from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
 from train_smolvla_frs.utils.model import (
@@ -99,6 +104,43 @@ class EvaluationResult:
     tactile_change_p50: float | None = None
     tactile_change_p75: float | None = None
     tactile_change_p90: float | None = None
+    # Bimanual validation fields. Legacy scalar-gate fields above stay unchanged.
+    sample_gate_w_left: np.ndarray | None = None
+    sample_gate_w_right: np.ndarray | None = None
+    sample_mse_gt_left: np.ndarray | None = None
+    sample_mse_gt_right: np.ndarray | None = None
+    sample_mse_vla_left: np.ndarray | None = None
+    sample_mse_vla_right: np.ndarray | None = None
+    mse_gt_high_w_left: float | None = None
+    mse_gt_high_w_right: float | None = None
+    mse_vla_high_w_left: float | None = None
+    mse_vla_high_w_right: float | None = None
+    mse_vla_gt_high_w_left: float | None = None
+    mse_vla_gt_high_w_right: float | None = None
+    gt_gain_high_w_left: float | None = None
+    gt_gain_high_w_right: float | None = None
+    rank_penalty_high_w_left: float | None = None
+    rank_penalty_high_w_right: float | None = None
+    rank_satisfied_high_frac_left: float | None = None
+    rank_satisfied_high_frac_right: float | None = None
+    repair_penalty_high_w_left: float | None = None
+    repair_penalty_high_w_right: float | None = None
+    repair_satisfied_high_frac_left: float | None = None
+    repair_satisfied_high_frac_right: float | None = None
+    low_nearest_endpoint_mse_left: float | None = None
+    low_nearest_endpoint_mse_right: float | None = None
+    low_safety_penalty_left: float | None = None
+    low_safety_penalty_right: float | None = None
+    low_safe_frac_left: float | None = None
+    low_safe_frac_right: float | None = None
+    low_unsafe_frac_left: float | None = None
+    low_unsafe_frac_right: float | None = None
+    n_high_w_left: int | None = None
+    n_high_w_right: int | None = None
+    n_low_w_left: int | None = None
+    n_low_w_right: int | None = None
+    n_mid_w_left: int | None = None
+    n_mid_w_right: int | None = None
 
 
 def _per_sample_errors(prediction: jax.Array, reference: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -276,6 +318,7 @@ def evaluate_split(
     keep_predictions: bool,
     solver: FlowSolver = "euler",
     target: EvalTarget = "gt",
+    loss_mode: str | None = None,
     gate_tau: float | None = None,
     gate_temperature: float | None = None,
     rank_margin: float = 0.0,
@@ -297,6 +340,9 @@ def evaluate_split(
     mse_pred_parts: list[np.ndarray] = []
     mae_pred_parts: list[np.ndarray] = []
     mse_vla_gt_parts: list[np.ndarray] = []
+    mse_gt_wrist_parts: list[np.ndarray] = []
+    mse_vla_wrist_parts: list[np.ndarray] = []
+    mse_vla_gt_wrist_parts: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
@@ -324,7 +370,13 @@ def evaluate_split(
                     dtype=np.float32,
                 )
             )
-            change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
+            if loss_mode == BIMANUAL_LOSS_MODE:
+                change = conditioner.tactile_change_per_wrist_for_cache_indices(
+                    indices,
+                    current_tokens,
+                )
+            else:
+                change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
             gate_w = gate_weights_from_change(change, tau=float(gate_tau), temperature=float(gate_temperature))
         else:
             change = None
@@ -351,6 +403,42 @@ def evaluate_split(
         mse_gt, mae_gt = _per_sample_errors(prediction, gt_action)
         mse_pred, mae_pred = _per_sample_errors(prediction, predicted_action)
         mse_vla_gt, _ = _per_sample_errors(predicted_action, gt_action)
+        if loss_mode == BIMANUAL_LOSS_MODE:
+            if prediction.shape[-1] != RIGHT_ACTION_SLICE.stop:
+                raise ValueError(
+                    "bimanual validation requires 20D actions, "
+                    f"got action_dim={prediction.shape[-1]}."
+                )
+            wrist_mse_gt = jnp.stack(
+                [
+                    jnp.mean(jnp.square(prediction[..., action_slice] - gt_action[..., action_slice]), axis=(1, 2))
+                    for action_slice in (LEFT_ACTION_SLICE, RIGHT_ACTION_SLICE)
+                ],
+                axis=1,
+            )
+            wrist_mse_vla = jnp.stack(
+                [
+                    jnp.mean(
+                        jnp.square(prediction[..., action_slice] - predicted_action[..., action_slice]),
+                        axis=(1, 2),
+                    )
+                    for action_slice in (LEFT_ACTION_SLICE, RIGHT_ACTION_SLICE)
+                ],
+                axis=1,
+            )
+            wrist_mse_vla_gt = jnp.stack(
+                [
+                    jnp.mean(
+                        jnp.square(predicted_action[..., action_slice] - gt_action[..., action_slice]),
+                        axis=(1, 2),
+                    )
+                    for action_slice in (LEFT_ACTION_SLICE, RIGHT_ACTION_SLICE)
+                ],
+                axis=1,
+            )
+            mse_gt_wrist_parts.append(np.asarray(jax.device_get(wrist_mse_gt)))
+            mse_vla_wrist_parts.append(np.asarray(jax.device_get(wrist_mse_vla)))
+            mse_vla_gt_wrist_parts.append(np.asarray(jax.device_get(wrist_mse_vla_gt)))
 
         cache_indices.append(indices)
         flow_gt_parts.append(np.asarray(jax.device_get(flow_gt)))
@@ -377,6 +465,11 @@ def evaluate_split(
     all_mse_pred = np.concatenate(mse_pred_parts)
     all_mae_pred = np.concatenate(mae_pred_parts)
     all_mse_vla_gt = np.concatenate(mse_vla_gt_parts)
+    all_mse_gt_wrist = np.concatenate(mse_gt_wrist_parts) if mse_gt_wrist_parts else None
+    all_mse_vla_wrist = np.concatenate(mse_vla_wrist_parts) if mse_vla_wrist_parts else None
+    all_mse_vla_gt_wrist = (
+        np.concatenate(mse_vla_gt_wrist_parts) if mse_vla_gt_wrist_parts else None
+    )
     all_gt_gain = all_mse_vla_gt - all_mse_gt
     all_relative_gt_error = all_mse_gt / np.maximum(all_mse_vla_gt, 1e-8)
     if target == "gt":
@@ -389,6 +482,7 @@ def evaluate_split(
         )
     primary_rmse = np.sqrt(primary_mse)
 
+    wrist_stratified: dict[str, dict[str, float | int]] | None = None
     if tactile_changes:
         all_change = np.concatenate(tactile_changes)
         all_gate = np.concatenate(gate_weights)
@@ -396,27 +490,59 @@ def evaluate_split(
         tactile_sim = float(np.mean(1.0 - all_change))
         gate_w_mean = float(np.mean(all_gate))
         gate_active_frac = float(np.mean(all_gate > 0.5))
-        stratified = gate_stratified_decode_metrics(
-            all_mse_gt,
-            all_mse_pred,
-            all_mse_vla_gt,
-            all_gate,
-            all_change,
-            low_w_threshold=rank_low_gate_threshold,
-            high_w_threshold=rank_high_gate_threshold,
-            ranking_margin=rank_margin,
-            repair_margin=repair_margin,
-            low_safety_margin=low_safety_margin,
-        )
-        gate_bins = gate_binned_decode_metrics(
-            all_mse_gt,
-            all_mse_pred,
-            all_mse_vla_gt,
-            all_gate,
-            ranking_margin=rank_margin,
-        )
-        gate_quantiles = _quantiles(all_gate)
-        change_quantiles = _quantiles(all_change)
+        if loss_mode == BIMANUAL_LOSS_MODE:
+            assert all_mse_gt_wrist is not None
+            assert all_mse_vla_wrist is not None
+            assert all_mse_vla_gt_wrist is not None
+            wrist_stratified = {}
+            for wrist_index, wrist_name in enumerate(("left", "right")):
+                wrist_stratified[wrist_name] = gate_stratified_decode_metrics(
+                    all_mse_gt_wrist[:, wrist_index],
+                    all_mse_vla_wrist[:, wrist_index],
+                    all_mse_vla_gt_wrist[:, wrist_index],
+                    all_gate[:, wrist_index],
+                    all_change[:, wrist_index],
+                    low_w_threshold=rank_low_gate_threshold,
+                    high_w_threshold=rank_high_gate_threshold,
+                    ranking_margin=rank_margin,
+                    repair_margin=repair_margin,
+                    low_safety_margin=low_safety_margin,
+                )
+            stratified = {name: None for name in (
+                "mse_gt_high_w", "mse_gt_low_w", "mse_pred_high_w", "mse_pred_low_w",
+                "mse_vla_gt_high_w", "mse_vla_gt_low_w", "gt_gain_high_w", "gt_gain_low_w",
+                "relative_gt_error_high_w", "relative_gt_error_low_w", "rank_penalty_high_w",
+                "rank_penalty_low_w", "rank_satisfied_high_frac", "rank_satisfied_low_frac",
+                "repair_penalty_high_w", "repair_satisfied_high_frac", "low_nearest_endpoint_mse",
+                "low_safety_penalty", "low_safe_frac", "low_unsafe_frac", "gate_w_high_mean",
+                "gate_w_low_mean", "tactile_change_high_mean", "tactile_change_low_mean",
+                "n_high_w", "n_low_w", "n_mid_w",
+            )}
+            gate_bins = None
+            gate_quantiles = (None, None, None, None, None)
+            change_quantiles = (None, None, None, None, None)
+        else:
+            stratified = gate_stratified_decode_metrics(
+                all_mse_gt,
+                all_mse_pred,
+                all_mse_vla_gt,
+                all_gate,
+                all_change,
+                low_w_threshold=rank_low_gate_threshold,
+                high_w_threshold=rank_high_gate_threshold,
+                ranking_margin=rank_margin,
+                repair_margin=repair_margin,
+                low_safety_margin=low_safety_margin,
+            )
+            gate_bins = gate_binned_decode_metrics(
+                all_mse_gt,
+                all_mse_pred,
+                all_mse_vla_gt,
+                all_gate,
+                ranking_margin=rank_margin,
+            )
+            gate_quantiles = _quantiles(all_gate)
+            change_quantiles = _quantiles(all_change)
     else:
         all_change = None
         all_gate = None
@@ -491,8 +617,10 @@ def evaluate_split(
         tactile_sim=tactile_sim,
         gate_w=gate_w_mean,
         gate_active_frac=gate_active_frac,
-        sample_tactile_change=all_change,
-        sample_gate_w=all_gate,
+        sample_tactile_change=(
+            None if loss_mode == BIMANUAL_LOSS_MODE else all_change
+        ),
+        sample_gate_w=None if loss_mode == BIMANUAL_LOSS_MODE else all_gate,
         mse_gt_high_w=stratified["mse_gt_high_w"],  # type: ignore[arg-type]
         mse_gt_low_w=stratified["mse_gt_low_w"],  # type: ignore[arg-type]
         mse_pred_high_w=stratified["mse_pred_high_w"],  # type: ignore[arg-type]
@@ -531,4 +659,44 @@ def evaluate_split(
         tactile_change_p50=change_quantiles[2],
         tactile_change_p75=change_quantiles[3],
         tactile_change_p90=change_quantiles[4],
+        sample_gate_w_left=(
+            all_gate[:, 0] if loss_mode == BIMANUAL_LOSS_MODE and all_gate is not None else None
+        ),
+        sample_gate_w_right=(
+            all_gate[:, 1] if loss_mode == BIMANUAL_LOSS_MODE and all_gate is not None else None
+        ),
+        sample_mse_gt_left=(None if all_mse_gt_wrist is None else all_mse_gt_wrist[:, 0]),
+        sample_mse_gt_right=(None if all_mse_gt_wrist is None else all_mse_gt_wrist[:, 1]),
+        sample_mse_vla_left=(None if all_mse_vla_wrist is None else all_mse_vla_wrist[:, 0]),
+        sample_mse_vla_right=(None if all_mse_vla_wrist is None else all_mse_vla_wrist[:, 1]),
+        mse_gt_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["mse_gt_high_w"]),  # type: ignore[arg-type]
+        mse_gt_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["mse_gt_high_w"]),  # type: ignore[arg-type]
+        mse_vla_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["mse_pred_high_w"]),  # type: ignore[arg-type]
+        mse_vla_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["mse_pred_high_w"]),  # type: ignore[arg-type]
+        mse_vla_gt_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["mse_vla_gt_high_w"]),  # type: ignore[arg-type]
+        mse_vla_gt_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["mse_vla_gt_high_w"]),  # type: ignore[arg-type]
+        gt_gain_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["gt_gain_high_w"]),  # type: ignore[arg-type]
+        gt_gain_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["gt_gain_high_w"]),  # type: ignore[arg-type]
+        rank_penalty_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["rank_penalty_high_w"]),  # type: ignore[arg-type]
+        rank_penalty_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["rank_penalty_high_w"]),  # type: ignore[arg-type]
+        rank_satisfied_high_frac_left=(None if wrist_stratified is None else wrist_stratified["left"]["rank_satisfied_high_frac"]),  # type: ignore[arg-type]
+        rank_satisfied_high_frac_right=(None if wrist_stratified is None else wrist_stratified["right"]["rank_satisfied_high_frac"]),  # type: ignore[arg-type]
+        repair_penalty_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["repair_penalty_high_w"]),  # type: ignore[arg-type]
+        repair_penalty_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["repair_penalty_high_w"]),  # type: ignore[arg-type]
+        repair_satisfied_high_frac_left=(None if wrist_stratified is None else wrist_stratified["left"]["repair_satisfied_high_frac"]),  # type: ignore[arg-type]
+        repair_satisfied_high_frac_right=(None if wrist_stratified is None else wrist_stratified["right"]["repair_satisfied_high_frac"]),  # type: ignore[arg-type]
+        low_nearest_endpoint_mse_left=(None if wrist_stratified is None else wrist_stratified["left"]["low_nearest_endpoint_mse"]),  # type: ignore[arg-type]
+        low_nearest_endpoint_mse_right=(None if wrist_stratified is None else wrist_stratified["right"]["low_nearest_endpoint_mse"]),  # type: ignore[arg-type]
+        low_safety_penalty_left=(None if wrist_stratified is None else wrist_stratified["left"]["low_safety_penalty"]),  # type: ignore[arg-type]
+        low_safety_penalty_right=(None if wrist_stratified is None else wrist_stratified["right"]["low_safety_penalty"]),  # type: ignore[arg-type]
+        low_safe_frac_left=(None if wrist_stratified is None else wrist_stratified["left"]["low_safe_frac"]),  # type: ignore[arg-type]
+        low_safe_frac_right=(None if wrist_stratified is None else wrist_stratified["right"]["low_safe_frac"]),  # type: ignore[arg-type]
+        low_unsafe_frac_left=(None if wrist_stratified is None else wrist_stratified["left"]["low_unsafe_frac"]),  # type: ignore[arg-type]
+        low_unsafe_frac_right=(None if wrist_stratified is None else wrist_stratified["right"]["low_unsafe_frac"]),  # type: ignore[arg-type]
+        n_high_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["n_high_w"]),  # type: ignore[arg-type]
+        n_high_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_high_w"]),  # type: ignore[arg-type]
+        n_low_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["n_low_w"]),  # type: ignore[arg-type]
+        n_low_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_low_w"]),  # type: ignore[arg-type]
+        n_mid_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["n_mid_w"]),  # type: ignore[arg-type]
+        n_mid_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_mid_w"]),  # type: ignore[arg-type]
     )

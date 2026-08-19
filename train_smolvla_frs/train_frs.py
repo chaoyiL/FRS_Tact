@@ -152,6 +152,48 @@ def checkpoint_selection_key(
     """
 
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        aggregate_gt_mse = float(metrics.get("val_mse_gt", float("inf")))
+        wrist_values: list[tuple[float, float, float]] = []
+        total_violation = 0.0
+        for wrist in ("left", "right"):
+            low_unsafe = float(
+                metrics.get(
+                    f"val_worst_dataset_low_unsafe_frac_{wrist}",
+                    metrics.get(f"val_low_unsafe_frac_{wrist}", float("nan")),
+                )
+            )
+            high_gain = float(
+                metrics.get(
+                    f"val_min_dataset_gt_gain_high_w_{wrist}",
+                    metrics.get(f"val_gt_gain_high_w_{wrist}", float("nan")),
+                )
+            )
+            rank_satisfied = float(
+                metrics.get(
+                    f"val_min_dataset_rank_satisfied_high_frac_{wrist}",
+                    metrics.get(f"val_rank_satisfied_high_frac_{wrist}", float("nan")),
+                )
+            )
+            if not all(
+                math.isfinite(value)
+                for value in (low_unsafe, high_gain, rank_satisfied, aggregate_gt_mse)
+            ):
+                return (float("inf"), float("inf"), float("inf"), float("inf"), aggregate_gt_mse)
+            total_violation += max(0.0, low_unsafe - float(max_low_gate_unsafe_frac))
+            total_violation += max(0.0, float(min_high_gate_gain) - high_gain)
+            total_violation += max(
+                0.0,
+                float(min_high_gate_rank_satisfied) - rank_satisfied,
+            )
+            wrist_values.append((high_gain, rank_satisfied, low_unsafe))
+        return (
+            total_violation,
+            -min(value[0] for value in wrist_values),
+            -min(value[1] for value in wrist_values),
+            max(value[2] for value in wrist_values),
+            aggregate_gt_mse,
+        )
     if loss_mode != "gated":
         return (0.0, aggregate_mse)
     low_unsafe_frac = float(
@@ -582,6 +624,28 @@ def train_decoder(
         "checkpoint_selection_feasible",
         "early_stop_no_improve_evals",
     ]
+    bimanual_validation_metric_names = (
+        "mse_gt_high_w",
+        "mse_vla_high_w",
+        "mse_vla_gt_high_w",
+        "gt_gain_high_w",
+        "rank_penalty_high_w",
+        "rank_satisfied_high_frac",
+        "repair_penalty_high_w",
+        "repair_satisfied_high_frac",
+        "low_nearest_endpoint_mse",
+        "low_safety_penalty",
+        "low_safe_frac",
+        "low_unsafe_frac",
+        "n_high_w",
+        "n_low_w",
+        "n_mid_w",
+    )
+    for wrist in ("left", "right"):
+        history_fields.extend(
+            f"val_{metric_name}_{wrist}"
+            for metric_name in bimanual_validation_metric_names
+        )
     gate_bin_metric_names = (
         "n",
         "mse_gt",
@@ -1458,12 +1522,25 @@ def train_decoder(
                         keep_predictions=False,
                         solver=aux_decode_solver,
                         target=eval_target,
-                        gate_tau=gate_tau if loss_mode == "gated" else None,
-                        gate_temperature=(gate_temperature if loss_mode == "gated" else None),
-                        rank_margin=rank_margin if loss_mode == "gated" else 0.0,
-                        repair_margin=repair_margin if loss_mode == "gated" else 0.0,
+                        loss_mode=loss_mode,
+                        gate_tau=(
+                            gate_tau if loss_mode in ("gated", BIMANUAL_LOSS_MODE) else None
+                        ),
+                        gate_temperature=(
+                            gate_temperature
+                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            else None
+                        ),
+                        rank_margin=(
+                            rank_margin if loss_mode in ("gated", BIMANUAL_LOSS_MODE) else 0.0
+                        ),
+                        repair_margin=(
+                            repair_margin if loss_mode in ("gated", BIMANUAL_LOSS_MODE) else 0.0
+                        ),
                         low_safety_margin=(
-                            low_gate_safety_margin if loss_mode == "gated" else 0.0
+                            low_gate_safety_margin
+                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            else 0.0
                         ),
                         rank_low_gate_threshold=rank_low_gate_threshold,
                         rank_high_gate_threshold=rank_high_gate_threshold,
@@ -1532,6 +1609,13 @@ def train_decoder(
                                 "val_n_mid_w": int(validation.n_mid_w),
                             }
                         )
+                    if getattr(validation, "n_high_w_left", None) is not None:
+                        for wrist in ("left", "right"):
+                            for metric_name in bimanual_validation_metric_names:
+                                value = getattr(validation, f"{metric_name}_{wrist}")
+                                metrics[f"val_{metric_name}_{wrist}"] = (
+                                    int(value) if metric_name.startswith("n_") else float(value)
+                                )
                     if validation.gate_bin_metrics is not None:
                         for bin_id, bin_metrics in validation.gate_bin_metrics.items():
                             for metric_name in gate_bin_metric_names:

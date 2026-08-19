@@ -159,6 +159,80 @@ def test_checkpoint_constraints_do_not_cancel_each_other() -> None:
     assert one_failed_constraint < two_failed_constraints
 
 
+def test_bimanual_checkpoint_selection_is_governed_by_worse_wrist() -> None:
+    compensated = checkpoint_selection_key(
+        {
+            "val_mse": 0.01,
+            "val_mse_gt": 0.2,
+            "val_gt_gain_high_w_left": 3.0,
+            "val_gt_gain_high_w_right": -0.1,
+            "val_rank_satisfied_high_frac_left": 1.0,
+            "val_rank_satisfied_high_frac_right": 0.7,
+            "val_low_unsafe_frac_left": 0.0,
+            "val_low_unsafe_frac_right": 0.2,
+        },
+        loss_mode="bimanual_gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        min_high_gate_rank_satisfied=0.8,
+    )
+    safe_but_higher_mse = checkpoint_selection_key(
+        {
+            "val_mse": 9.0,
+            "val_mse_gt": 0.3,
+            "val_gt_gain_high_w_left": 0.2,
+            "val_gt_gain_high_w_right": 0.1,
+            "val_rank_satisfied_high_frac_left": 0.9,
+            "val_rank_satisfied_high_frac_right": 0.85,
+            "val_low_unsafe_frac_left": 0.05,
+            "val_low_unsafe_frac_right": 0.08,
+        },
+        loss_mode="bimanual_gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        min_high_gate_rank_satisfied=0.8,
+    )
+
+    assert compensated[0] == pytest.approx(0.3)
+    assert safe_but_higher_mse[0] == 0.0
+    assert safe_but_higher_mse < compensated
+    assert safe_but_higher_mse[1:] == pytest.approx((-0.1, -0.85, 0.08, 0.3))
+
+
+def test_legacy_gated_checkpoint_key_is_unchanged_by_bimanual_metrics() -> None:
+    legacy_metrics = {
+        "val_mse": 0.2,
+        "val_low_unsafe_frac": 0.05,
+        "val_gt_gain_high_w": 0.03,
+        "val_mse_gt_high_w": 0.08,
+        "val_mse_pred_high_w": 0.12,
+        "val_rank_satisfied_high_frac": 0.9,
+    }
+    expected = checkpoint_selection_key(
+        legacy_metrics,
+        loss_mode="gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
+    )
+    actual = checkpoint_selection_key(
+        {
+            **legacy_metrics,
+            "val_gt_gain_high_w_left": -100.0,
+            "val_gt_gain_high_w_right": -100.0,
+            "val_rank_satisfied_high_frac_left": 0.0,
+            "val_rank_satisfied_high_frac_right": 0.0,
+            "val_low_unsafe_frac_left": 1.0,
+            "val_low_unsafe_frac_right": 1.0,
+        },
+        loss_mode="gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        high_gate_rank_margin=0.01,
+    )
+    assert actual == expected
+
+
 def test_specialist_checkpoint_keys_keep_distinct_objectives() -> None:
     keys = checkpoint_specialist_keys(
         {

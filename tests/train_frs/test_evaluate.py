@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 
 import jax.numpy as jnp
@@ -8,14 +9,85 @@ import pytest
 from flax import nnx
 
 import train_smolvla_frs.evaluate as evaluate_module
+import train_smolvla_frs.utils.metrics as metrics_module
+from train_smolvla_frs.utils.metrics import evaluate_split
 from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
 
+def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
+    gt_action = np.zeros((2, 1, 20), dtype=np.float32)
+    predicted_action = np.ones((2, 1, 20), dtype=np.float32)
+    prediction = np.ones((2, 1, 20), dtype=np.float32)
+    prediction[0, :, :10] = 0.0
+    prediction[1, :, 10:] = 2.0
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((4, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1], dtype=np.int64),
+                np.zeros_like(gt_action),
+                predicted_action,
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 4, 4), dtype=np.float32),
+            )
+
+        def gate_current_tokens(self, indices, tactile_input):
+            del indices
+            return tactile_input[:, -1]
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    monkeypatch.setattr(metrics_module, "encode_tactile_embeddings", lambda model, value: value)
+    monkeypatch.setattr(
+        metrics_module,
+        "flow_matching_loss_per_sample",
+        lambda model, x_base, target, t, tactile_input, state: np.zeros((2,), dtype=np.float32),
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "decode_actions",
+        lambda model, x_base, tactile_input, num_steps, solver, state: prediction,
+    )
+
+    result = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=False,
+        loss_mode="bimanual_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+    )
+
+    np.testing.assert_allclose(result.sample_gate_w_left, [1.0, 0.0], atol=0.01)
+    np.testing.assert_allclose(result.sample_gate_w_right, [0.0, 1.0], atol=0.01)
+    np.testing.assert_allclose(result.sample_mse_gt_left, [0.0, 1.0])
+    np.testing.assert_allclose(result.sample_mse_gt_right, [1.0, 4.0])
+    np.testing.assert_allclose(result.sample_mse_vla_left, [1.0, 0.0])
+    np.testing.assert_allclose(result.sample_mse_vla_right, [0.0, 1.0])
+    assert result.gt_gain_high_w_left == pytest.approx(1.0)
+    assert result.gt_gain_high_w_right == pytest.approx(-3.0)
+    assert result.rank_satisfied_high_frac_left == pytest.approx(1.0)
+    assert result.rank_satisfied_high_frac_right == pytest.approx(0.0)
+    assert result.low_unsafe_frac_left == pytest.approx(0.0)
+    assert result.low_unsafe_frac_right == pytest.approx(0.0)
+
+
 @pytest.mark.parametrize(
-    ("loss_mode", "gate_metadata", "build_episode_baselines", "expect_gate_strata"),
+    ("loss_mode", "gate_metadata", "build_episode_baselines", "gate_kind"),
     [
-        ("gated", {"gate_tau": 0.5, "gate_temperature": 0.1}, True, True),
-        ("gt", {}, False, False),
+        ("gated", {"gate_tau": 0.5, "gate_temperature": 0.1}, True, "scalar"),
+        ("bimanual_gated", {"gate_tau": 0.5, "gate_temperature": 0.1}, True, "bimanual"),
+        ("gt", {}, False, "none"),
     ],
 )
 def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
@@ -24,11 +96,12 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     loss_mode,
     gate_metadata,
     build_episode_baselines,
-    expect_gate_strata,
+    gate_kind,
 ):
+    action_dim = 20 if gate_kind == "bimanual" else 1
     model = TactileConditionedFlowDecoder(
         DecoderConfig(
-            action_dim=1,
+            action_dim=action_dim,
             action_horizon=2,
             tactile_window=2,
             gru_hidden_dim=4,
@@ -44,7 +117,7 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     class FakePairs:
         manifest = {
             "action_horizon": 2,
-            "action_dim": 1,
+            "action_dim": action_dim,
             "state_dim": 0,
             "records_sha256": "test-digest",
         }
@@ -71,9 +144,9 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             assert split == "val"
             yield (
                 np.asarray([0, 1], dtype=np.int64),
-                np.zeros((2, 2, 1), dtype=np.float32),
-                np.zeros((2, 2, 1), dtype=np.float32),
-                np.ones((2, 2, 1), dtype=np.float32),
+                np.zeros((2, 2, action_dim), dtype=np.float32),
+                np.zeros((2, 2, action_dim), dtype=np.float32),
+                np.ones((2, 2, action_dim), dtype=np.float32),
                 np.zeros((2, 0), dtype=np.float32),
                 jnp.ones((2, 2, 1, 4), dtype=jnp.float32),
             )
@@ -81,6 +154,10 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         def tactile_change_for_cache_indices(self, indices, current_tokens):
             del indices, current_tokens
             return np.asarray([0.1, 0.9], dtype=np.float32)
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([[0.1, 0.9], [0.9, 0.1]], dtype=np.float32)
 
         def close(self):
             return None
@@ -128,12 +205,25 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     )
 
     written_metrics = json.loads((tmp_path / "output" / "metrics.json").read_text())
-    if expect_gate_strata:
+    if gate_kind == "scalar":
         assert metrics["n_high_w"] == 1
         assert metrics["n_low_w"] == 1
         assert "gate_w_mean" in metrics
         assert written_metrics["n_high_w"] == 1
         assert written_metrics["n_low_w"] == 1
+    elif gate_kind == "bimanual":
+        assert metrics["n_high_w_left"] == 1
+        assert metrics["n_low_w_left"] == 1
+        assert metrics["n_high_w_right"] == 1
+        assert metrics["n_low_w_right"] == 1
+        assert "n_high_w" not in metrics
+        assert written_metrics["n_high_w_left"] == 1
+        with (tmp_path / "output" / "per_sample.csv").open(newline="", encoding="utf-8") as file:
+            rows = list(csv.DictReader(file))
+        assert float(rows[0]["gate_w_left"]) == pytest.approx(1.0 / (1.0 + np.exp(4.0)))
+        assert float(rows[0]["gate_w_right"]) == pytest.approx(1.0 / (1.0 + np.exp(-4.0)))
+        assert float(rows[0]["mse_gt_left"]) >= 0.0
+        assert float(rows[0]["mse_vla_right"]) >= 0.0
     else:
         assert "n_high_w" not in metrics
         assert "n_low_w" not in metrics

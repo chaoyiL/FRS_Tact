@@ -94,7 +94,7 @@ def evaluate_decoder(
     loss_mode = str(extra.get("loss_mode", "gt"))
     if target is None:
         target = "predicted" if loss_mode == "predicted" else "gt"
-    track_gate = loss_mode == "gated"
+    track_gate = loss_mode in ("gated", "bimanual_gated")
     gate_tau = float(extra["gate_tau"]) if track_gate else None
     gate_temperature = float(extra["gate_temperature"]) if track_gate else None
     rank_margin = float(extra.get("rank_margin", 0.0)) if track_gate else 0.0
@@ -170,6 +170,7 @@ def evaluate_decoder(
             solver=solver,
             keep_predictions=save_predictions,
             target=target,
+            loss_mode=loss_mode,
             gate_tau=gate_tau,
             gate_temperature=gate_temperature,
             rank_margin=rank_margin,
@@ -250,6 +251,29 @@ def evaluate_decoder(
                 }
             )
             metrics["gate_bins"] = result.gate_bin_metrics
+        if result.n_high_w_left is not None:
+            for wrist in ("left", "right"):
+                for metric_name in (
+                    "mse_gt_high_w",
+                    "mse_vla_high_w",
+                    "mse_vla_gt_high_w",
+                    "gt_gain_high_w",
+                    "rank_penalty_high_w",
+                    "rank_satisfied_high_frac",
+                    "repair_penalty_high_w",
+                    "repair_satisfied_high_frac",
+                    "low_nearest_endpoint_mse",
+                    "low_safety_penalty",
+                    "low_safe_frac",
+                    "low_unsafe_frac",
+                    "n_high_w",
+                    "n_low_w",
+                    "n_mid_w",
+                ):
+                    value = getattr(result, f"{metric_name}_{wrist}")
+                    metrics[f"{metric_name}_{wrist}"] = (
+                        int(value) if metric_name.startswith("n_") else float(value)
+                    )
         if isinstance(pairs, MultiCachedPairs):
             source_indices, local_indices = pairs.source_and_local_indices(result.cache_indices)
             dataset_indices = pairs.metadata_values(result.cache_indices, "dataset_index")
@@ -335,6 +359,12 @@ def evaluate_decoder(
                     "relative_gt_error",
                     "tactile_change",
                     "gate_w",
+                    "gate_w_left",
+                    "gate_w_right",
+                    "mse_gt_left",
+                    "mse_gt_right",
+                    "mse_vla_left",
+                    "mse_vla_right",
                     "gate_region",
                     "gate_bin",
                 ],
@@ -369,6 +399,36 @@ def evaluate_decoder(
                             else float(result.sample_tactile_change[position])
                         ),
                         "gate_w": ("" if result.sample_gate_w is None else float(result.sample_gate_w[position])),
+                        "gate_w_left": (
+                            ""
+                            if result.sample_gate_w_left is None
+                            else float(result.sample_gate_w_left[position])
+                        ),
+                        "gate_w_right": (
+                            ""
+                            if result.sample_gate_w_right is None
+                            else float(result.sample_gate_w_right[position])
+                        ),
+                        "mse_gt_left": (
+                            ""
+                            if result.sample_mse_gt_left is None
+                            else float(result.sample_mse_gt_left[position])
+                        ),
+                        "mse_gt_right": (
+                            ""
+                            if result.sample_mse_gt_right is None
+                            else float(result.sample_mse_gt_right[position])
+                        ),
+                        "mse_vla_left": (
+                            ""
+                            if result.sample_mse_vla_left is None
+                            else float(result.sample_mse_vla_left[position])
+                        ),
+                        "mse_vla_right": (
+                            ""
+                            if result.sample_mse_vla_right is None
+                            else float(result.sample_mse_vla_right[position])
+                        ),
                         "gate_region": (
                             ""
                             if result.sample_gate_w is None
