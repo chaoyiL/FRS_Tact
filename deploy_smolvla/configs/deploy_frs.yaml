@@ -4,7 +4,7 @@
 # 仅检查配置路径与认证信息：
 #   bash ./deploy_smolvla/scripts/start_frs.sh --check
 
-# FRS 训练 action cache 时使用的同一份“合并后的”视觉 SmolVLA JAX checkpoint。
+#纯视觉 SmolVLA JAX checkpoint。
 checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax
 revision: null
 allow_download: false
