@@ -1,0 +1,638 @@
+"""Online tactile conditioning: frozen ResNet window features for a trainable GRU."""
+
+from __future__ import annotations
+
+import pathlib
+from collections.abc import Iterator, Mapping, Sequence
+from typing import Any, Literal
+
+import jax
+import jax.numpy as jnp
+import numpy as np
+
+from train_pi05_frs.pi05_cache.cache import CachedPairs, MultiCachedPairs
+from lerobot.datasets import LeRobotDatasetMetadata
+from lerobot.datasets.dataset_sources import resolve_source_visual_keys
+from lerobot.datasets.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
+from train_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_encoder
+from train_encoder.utils.image_dataset import create_image_dataset
+from train_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
+from train_encoder.utils.prefetch import prefetch_iterator
+from train_pi05_frs.utils.mp_batches import MpTactileWindowLoader
+from train_pi05_frs.utils.window_io import (
+    NUM_TACTILE_STREAMS,
+    TACTILE_KEYS,
+    _frame_streams_from_images,
+    load_tactile_windows,
+)
+
+Array = jax.Array
+SplitName = Literal["train", "val"]
+LossMode = Literal["gt", "predicted", "gated"]
+
+
+def resolve_tactile_window(*, action_horizon: int, window_divisor: int) -> int:
+    """Return window = action_horizon // window_divisor (must divide evenly)."""
+
+    if action_horizon <= 0:
+        raise ValueError(f"action_horizon must be positive, got {action_horizon}.")
+    if window_divisor <= 0:
+        raise ValueError(f"window_divisor must be positive, got {window_divisor}.")
+    if action_horizon % window_divisor != 0:
+        raise ValueError(
+            f"action_horizon ({action_horizon}) must be divisible by "
+            f"window_divisor ({window_divisor})."
+        )
+    window = action_horizon // window_divisor
+    if window <= 0:
+        raise ValueError(f"Resolved tactile window must be positive, got {window}.")
+    return window
+
+
+def resnet_embedding_dim_from_encoder(bundle: TactileEncoderBundle) -> int:
+    config = tactile_clip_config_from_dict(bundle.metadata["tactile_clip_config"])
+    return int(config.embedding_dim)
+
+
+def resolve_dataset_repo_id(
+    pairs: CachedPairs,
+    *,
+    dataset_repo_id: str | None = None,
+) -> str:
+    if dataset_repo_id is not None:
+        return dataset_repo_id
+    configuration = pairs.manifest.get("configuration") or {}
+    repo_id = configuration.get("dataset_repo_id")
+    if not repo_id:
+        raise ValueError(
+            "Cache manifest is missing configuration.dataset_repo_id; "
+            "pass --dataset-repo-id explicitly."
+        )
+    if isinstance(repo_id, list):
+        if len(repo_id) != 1:
+            raise ValueError(
+                f"Expected a single dataset_repo_id in cache manifest, got {repo_id!r}."
+            )
+        return str(repo_id[0])
+    return str(repo_id)
+
+
+def resolve_dataset_root(
+    pairs: CachedPairs,
+    *,
+    dataset_root: pathlib.Path | None = None,
+) -> pathlib.Path | None:
+    if dataset_root is not None:
+        return dataset_root
+    configuration = pairs.manifest.get("configuration") or {}
+    root = configuration.get("dataset_root")
+    return pathlib.Path(root) if root else None
+
+
+def _l2_normalize(vectors: np.ndarray, *, eps: float = 1e-8) -> np.ndarray:
+    norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    return vectors / np.maximum(norms, eps)
+
+
+def tactile_change_from_tokens(
+    current_tokens: np.ndarray,
+    baseline_tokens: np.ndarray,
+) -> np.ndarray:
+    """Per-sample tactile change ``s = mean_i(1 - cos)`` for tokens ``[B, 4, D]``."""
+
+    if current_tokens.ndim != 3 or baseline_tokens.ndim != 3:
+        raise ValueError(
+            f"Expected tokens [B, 4, D], got current={current_tokens.shape}, "
+            f"baseline={baseline_tokens.shape}."
+        )
+    if current_tokens.shape != baseline_tokens.shape:
+        raise ValueError(
+            f"current/baseline shape mismatch: {current_tokens.shape} vs {baseline_tokens.shape}."
+        )
+    current_n = _l2_normalize(current_tokens.astype(np.float32))
+    baseline_n = _l2_normalize(baseline_tokens.astype(np.float32))
+    cosine = np.sum(current_n * baseline_n, axis=-1)  # [B, 4]
+    return np.mean(1.0 - cosine, axis=-1).astype(np.float32)
+
+
+def gate_weights_from_change(
+    change: np.ndarray,
+    *,
+    tau: float,
+    temperature: float,
+) -> np.ndarray:
+    """``w(s) = sigmoid((s - tau) / T)``."""
+
+    if temperature <= 0:
+        raise ValueError(f"temperature must be positive, got {temperature}.")
+    logits = (np.asarray(change, dtype=np.float32) - float(tau)) / float(temperature)
+    return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+
+
+class TactileConditionedBatches:
+    """Yields (indices, x_base, predicted, gt_action, state, tactile_seq).
+
+    Tactile ResNet features are frozen; normalized current state comes from cache v3.
+
+    ``tactile_seq`` has shape ``[B, T, 4, D]`` (oldest→newest; 4 sensor streams).
+    """
+
+    def __init__(
+        self,
+        pairs: CachedPairs,
+        *,
+        tactile_encoder_dir: pathlib.Path,
+        tactile_window: int,
+        dataset_repo_id: str | None = None,
+        dataset_root: pathlib.Path | None = None,
+        image_cache_size: int = 8192,
+        history_stride: int = 1,
+        encode_batch_size: int = 256,
+        build_episode_baselines: bool = False,
+        num_workers: int = 8,
+        prefetch_batches: int = 8,
+        load_threads: int = 16,
+        pipeline_prefetch: int = 4,
+    ):
+        if tactile_window <= 0:
+            raise ValueError(f"tactile_window must be positive, got {tactile_window}.")
+        if history_stride <= 0:
+            raise ValueError(f"history_stride must be positive, got {history_stride}.")
+        if encode_batch_size <= 0:
+            raise ValueError(f"encode_batch_size must be positive, got {encode_batch_size}.")
+        if num_workers < 0:
+            raise ValueError(f"num_workers must be non-negative, got {num_workers}.")
+        if prefetch_batches <= 0:
+            raise ValueError(f"prefetch_batches must be positive, got {prefetch_batches}.")
+        if load_threads <= 0:
+            raise ValueError(f"load_threads must be positive, got {load_threads}.")
+        if pipeline_prefetch <= 0:
+            raise ValueError(f"pipeline_prefetch must be positive, got {pipeline_prefetch}.")
+
+        self.pairs = pairs
+        self.bundle = load_tactile_encoder(tactile_encoder_dir)
+        self.tactile_window = int(tactile_window)
+        self.history_stride = int(history_stride)
+        self.encode_batch_size = int(encode_batch_size)
+        self.num_workers = int(num_workers)
+        self.prefetch_batches = int(prefetch_batches)
+        self.load_threads = int(load_threads)
+        self.pipeline_prefetch = int(pipeline_prefetch)
+        self.image_cache_size = int(image_cache_size)
+        config = tactile_clip_config_from_dict(self.bundle.metadata["tactile_clip_config"])
+        self.resnet_embedding_dim = int(config.embedding_dim)
+        self.image_size = int(config.tactile_image_size)
+        if "tactile_resnet" not in self.bundle.params:
+            raise KeyError("Tactile encoder checkpoint is missing tactile_resnet params.")
+
+        self.repo_id = resolve_dataset_repo_id(pairs, dataset_repo_id=dataset_repo_id)
+        del dataset_root
+        self.dataset = create_image_dataset(
+            self.repo_id,
+            image_size=self.image_size,
+            cache_size=image_cache_size,
+        ).dataset
+        self.tactile_keys = TACTILE_KEYS
+        self.episode_baselines: dict[int, np.ndarray] = {}
+        self._mp_loader: MpTactileWindowLoader | None = None
+        # Build gated baselines before spawning workers so parent JAX/CUDA inits cleanly
+        # and workers never need to touch ResNet.
+        if build_episode_baselines:
+            self.build_episode_baseline_embeddings()
+        if self.num_workers > 1:
+            self._mp_loader = MpTactileWindowLoader(
+                repo_id=self.repo_id,
+                image_size=self.image_size,
+                image_cache_size=self.image_cache_size,
+                tactile_window=self.tactile_window,
+                history_stride=self.history_stride,
+                num_workers=self.num_workers,
+                prefetch_batches=self.prefetch_batches,
+                load_threads=self.load_threads,
+            )
+            self._mp_loader.start()
+
+    def close(self) -> None:
+        if self._mp_loader is not None:
+            self._mp_loader.close()
+            self._mp_loader = None
+
+    def _encode_images_frozen(self, images: np.ndarray | Array) -> Array:
+        """images: [M, H, W, C] → [M, D] with stop_gradient."""
+
+        embeddings, _ = encode_resnet18(
+            self.bundle.params["tactile_resnet"],
+            jnp.asarray(images, dtype=jnp.float32),
+            train=False,
+            embedding_dim=self.resnet_embedding_dim,
+        )
+        return jax.lax.stop_gradient(embeddings)
+
+    def _encode_window_images(self, batch_images: np.ndarray) -> Array:
+        """``[B, T, 4, H, W, C]`` → ``[B, T, 4, D]`` via frozen ResNet microbatches."""
+
+        if batch_images.dtype == np.uint8:
+            batch_images = batch_images.astype(np.float32) / 255.0
+        else:
+            batch_images = np.asarray(batch_images, dtype=np.float32)
+        batch_size, time_steps, num_streams = batch_images.shape[:3]
+        flat = batch_images.reshape(
+            (batch_size * time_steps * num_streams,) + batch_images.shape[3:]
+        )
+        encoded_parts: list[Array] = []
+        for start in range(0, flat.shape[0], self.encode_batch_size):
+            encoded_parts.append(
+                self._encode_images_frozen(flat[start : start + self.encode_batch_size])
+            )
+        encoded = jnp.concatenate(encoded_parts, axis=0)
+        return encoded.reshape(batch_size, time_steps, num_streams, self.resnet_embedding_dim)
+
+    def _encode_frame_streams(self, frame_index: int) -> np.ndarray:
+        """Encode one frame's four tactile images → ``[4, D]``."""
+
+        images = self.dataset.get_images(int(frame_index), self.tactile_keys, as_float=True)
+        stacked = _frame_streams_from_images(images, self.tactile_keys).astype(np.float32)
+        encoded = self._encode_images_frozen(stacked)
+        return np.asarray(encoded, dtype=np.float32)
+
+    def build_episode_baseline_embeddings(self) -> dict[int, np.ndarray]:
+        """Precompute episode-first-frame ResNet tokens for all cache episodes."""
+
+        episode_indices = np.unique(np.asarray(self.pairs.arrays["episode_index"], dtype=np.int64))
+        episode_list = [int(ep) for ep in episode_indices.tolist()]
+        print(
+            f"building episode baselines for {len(episode_list)} episodes "
+            f"(load_threads={self.load_threads}, encode_batch={self.encode_batch_size})...",
+            flush=True,
+        )
+
+        # Collect first-frame indices, then decode unique frames in parallel.
+        first_frames: list[int] = []
+        for episode_index in episode_list:
+            episode_frames = self.dataset.indices_for_episode(episode_index)
+            if not episode_frames:
+                raise ValueError(f"Episode {episode_index} has no frames.")
+            first_frames.append(int(episode_frames[0]))
+
+        unique_frames = list(dict.fromkeys(first_frames))
+
+        def _load_one(frame_index: int) -> tuple[int, np.ndarray]:
+            images = self.dataset.get_images(int(frame_index), self.tactile_keys, as_float=True)
+            stacked = _frame_streams_from_images(images, self.tactile_keys).astype(np.float32)
+            return int(frame_index), stacked
+
+        decoded: dict[int, np.ndarray] = {}
+        if self.load_threads == 1 or len(unique_frames) <= 1:
+            for frame_index in unique_frames:
+                key, value = _load_one(frame_index)
+                decoded[key] = value
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            workers = min(self.load_threads, len(unique_frames))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for frame_index, stacked in pool.map(_load_one, unique_frames, chunksize=4):
+                    decoded[frame_index] = stacked
+        print(f"decoded {len(decoded)} unique first frames; encoding ResNet...", flush=True)
+
+        stacked_images = np.stack([decoded[frame] for frame in first_frames], axis=0)  # [E,4,H,W,C]
+        flat = stacked_images.reshape((-1,) + stacked_images.shape[2:])
+        encoded_parts: list[np.ndarray] = []
+        total = flat.shape[0]
+        for start in range(0, total, self.encode_batch_size):
+            chunk = self._encode_images_frozen(flat[start : start + self.encode_batch_size])
+            encoded_parts.append(np.asarray(chunk, dtype=np.float32))
+            done = min(start + self.encode_batch_size, total)
+            if start == 0 or done == total or done % max(self.encode_batch_size * 4, 1) == 0:
+                print(f"  ResNet baseline encode {done}/{total}", flush=True)
+        encoded = np.concatenate(encoded_parts, axis=0).reshape(
+            len(episode_list), NUM_TACTILE_STREAMS, self.resnet_embedding_dim
+        )
+        baselines = {
+            episode_index: encoded[i]
+            for i, episode_index in enumerate(episode_list)
+        }
+        self.episode_baselines = baselines
+        print(f"episode_baselines={len(baselines)} (first-frame ResNet tokens)", flush=True)
+        return baselines
+
+    def tactile_change_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+    ) -> np.ndarray:
+        """Per-sample ``s = mean_i(1 - cos)`` vs episode first-frame baselines."""
+
+        if not self.episode_baselines:
+            raise RuntimeError(
+                "Episode baselines are empty; call build_episode_baseline_embeddings() first."
+            )
+        current = np.asarray(current_tokens, dtype=np.float32)
+        if current.ndim != 3 or current.shape[1] != NUM_TACTILE_STREAMS:
+            raise ValueError(f"Expected current_tokens [B, 4, D], got {current.shape}.")
+        baselines = []
+        arrays = self.pairs.arrays
+        for cache_index in cache_indices:
+            episode_index = int(arrays["episode_index"][cache_index])
+            if episode_index not in self.episode_baselines:
+                raise KeyError(f"Missing episode baseline for episode_index={episode_index}.")
+            baselines.append(self.episode_baselines[episode_index])
+        baseline_batch = np.stack(baselines, axis=0)
+        return tactile_change_from_tokens(current, baseline_batch)
+
+    def gate_weights_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+        *,
+        tau: float,
+        temperature: float,
+    ) -> np.ndarray:
+        """Compute ``w(s)`` using current-frame tokens vs episode baselines."""
+
+        change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
+        return gate_weights_from_change(change, tau=tau, temperature=temperature)
+
+    def _samples_for_cache_indices(
+        self, cache_indices: Sequence[int]
+    ) -> list[tuple[int, int]]:
+        arrays = self.pairs.arrays
+        return [
+            (
+                int(arrays["dataset_index"][cache_index]),
+                int(arrays["episode_index"][cache_index]),
+            )
+            for cache_index in cache_indices
+        ]
+
+    def load_window_images(self, cache_indices: Sequence[int]) -> np.ndarray:
+        """Load uint8 tactile windows ``[B, T, 4, H, W, C]`` in-process."""
+
+        return load_tactile_windows(
+            self.dataset,
+            self._samples_for_cache_indices(cache_indices),
+            tactile_window=self.tactile_window,
+            history_stride=self.history_stride,
+            tactile_keys=self.tactile_keys,
+            load_threads=self.load_threads,
+            as_float=False,
+        )
+
+    def encode_cache_indices(self, cache_indices: Sequence[int]) -> Array:
+        """Load temporal windows for cache rows and return ``[B, T, 4, D]``."""
+
+        if len(cache_indices) == 0:
+            raise ValueError("cache_indices must be non-empty.")
+        return self._encode_window_images(self.load_window_images(cache_indices))
+
+    def encode_window_images(self, batch_images: np.ndarray) -> Array:
+        """Encode a preloaded image batch ``[B, T, 4, H, W, C]`` → ``[B, T, 4, D]``."""
+
+        return self._encode_window_images(batch_images)
+
+    def _iter_pair_batches(
+        self,
+        split: SplitName,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        yield from self.pairs.batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
+
+    def batches(
+        self,
+        split: SplitName,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
+        pair_batches = list(
+            self._iter_pair_batches(split, batch_size=batch_size, shuffle=shuffle, seed=seed)
+        )
+        if not pair_batches:
+            return
+
+        if self._mp_loader is not None:
+            sample_batches = [
+                self._samples_for_cache_indices(indices) for indices, *_ in pair_batches
+            ]
+
+            def _produce() -> Iterator[
+                tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            ]:
+                for pair_batch, images in zip(
+                    pair_batches,
+                    self._mp_loader.iter_image_batches(sample_batches),
+                    strict=True,
+                ):
+                    indices, x_base, predicted, gt_action, state = pair_batch
+                    yield indices, x_base, predicted, gt_action, state, images
+
+            image_iter = prefetch_iterator(_produce(), buffer_size=self.pipeline_prefetch)
+            for indices, x_base, predicted, gt_action, state, images in image_iter:
+                tactile_seq = self._encode_window_images(images)
+                yield indices, x_base, predicted, gt_action, state, tactile_seq
+            return
+
+        def _produce_local() -> Iterator[
+            tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+        ]:
+            for indices, x_base, predicted, gt_action, state in pair_batches:
+                images = self.load_window_images(indices)
+                yield indices, x_base, predicted, gt_action, state, images
+
+        for indices, x_base, predicted, gt_action, state, images in prefetch_iterator(
+            _produce_local(),
+            buffer_size=self.pipeline_prefetch,
+        ):
+            tactile_seq = self._encode_window_images(images)
+            yield indices, x_base, predicted, gt_action, state, tactile_seq
+
+
+class CachedTactileEmbeddingBatches:
+    """Source-aware FRS batches backed by precomputed frozen ResNet embeddings."""
+
+    def __init__(
+        self,
+        pairs: MultiCachedPairs,
+        *,
+        sources: Sequence[Mapping[str, Any]],
+        tactile_cache_root: pathlib.Path,
+        tactile_encoder_dir: pathlib.Path,
+        tactile_keys: Sequence[str],
+        tactile_window: int,
+        history_stride: int,
+        embedding_dim: int,
+        image_size: int,
+        build_episode_baselines: bool = False,
+    ):
+        if len(sources) != len(pairs.sources):
+            raise ValueError(
+                f"dataset source/action cache length mismatch: {len(sources)} != {len(pairs.sources)}"
+            )
+        if tactile_window <= 0 or history_stride <= 0:
+            raise ValueError("tactile_window and history_stride must be positive")
+        self.pairs = pairs
+        self.sources = tuple(dict(source) for source in sources)
+        self.tactile_window = int(tactile_window)
+        self.history_stride = int(history_stride)
+        self.resnet_embedding_dim = int(embedding_dim)
+        self.image_size = int(image_size)
+        self.tactile_keys = tuple(str(key) for key in tactile_keys)
+        self.repo_id = tuple(str(source["repo_id"]) for source in self.sources)
+        self._embedding_caches: list[TactileEmbeddingCache] = []
+        self._episode_starts: list[np.ndarray] = []
+        self.episode_baselines: dict[tuple[int, int], np.ndarray] = {}
+
+        for source_index, source in enumerate(self.sources):
+            repo_id = str(source["repo_id"])
+            root_value = source.get("root")
+            root = None if root_value in (None, "") else pathlib.Path(root_value).expanduser()
+            revision = source.get("revision")
+            metadata = LeRobotDatasetMetadata(
+                repo_id=repo_id,
+                root=root,
+                revision=revision,
+            )
+            rename_map = dict(source.get("rename_map") or {})
+            source_tactile_keys = tuple(
+                resolve_source_visual_keys(
+                    self.tactile_keys,
+                    rename_map,
+                    metadata.camera_keys,
+                )
+            )
+            cache = TactileEmbeddingCache(
+                tactile_cache_dir(tactile_cache_root, repo_id),
+                repo_id=repo_id,
+                revision=metadata.revision,
+                total_frames=metadata.total_frames,
+                tactile_keys=self.tactile_keys,
+                source_tactile_keys=source_tactile_keys,
+                embedding_dim=self.resnet_embedding_dim,
+                image_size=self.image_size,
+                encoder_path=tactile_encoder_dir,
+            )
+            starts = np.asarray(
+                [int(metadata.episodes[index]["dataset_from_index"]) for index in range(metadata.total_episodes)],
+                dtype=np.int64,
+            )
+            self._embedding_caches.append(cache)
+            self._episode_starts.append(starts)
+            print(
+                f"tactile_embedding_source={source_index}:{repo_id} "
+                f"frames={metadata.total_frames} episodes={metadata.total_episodes} "
+                f"cache={cache.cache_dir}",
+                flush=True,
+            )
+        if build_episode_baselines:
+            self.build_episode_baseline_embeddings()
+
+    def close(self) -> None:
+        return
+
+    def _source_episode_frames(
+        self, cache_indices: Sequence[int] | np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        global_indices = np.asarray(cache_indices, dtype=np.int64)
+        source_indices, _ = self.pairs.source_and_local_indices(global_indices)
+        dataset_indices = self.pairs.metadata_values(global_indices, "dataset_index")
+        episode_indices = self.pairs.metadata_values(global_indices, "episode_index")
+        return source_indices, dataset_indices, episode_indices
+
+    def _window_indices(self, cache_indices: Sequence[int] | np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        source_indices, current_frames, episode_indices = self._source_episode_frames(cache_indices)
+        windows = np.empty((len(current_frames), self.tactile_window), dtype=np.int64)
+        offsets = np.arange(self.tactile_window - 1, -1, -1, dtype=np.int64) * self.history_stride
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            episodes = episode_indices[positions]
+            starts_table = self._episode_starts[int(source_index)]
+            if np.any(episodes < 0) or np.any(episodes >= len(starts_table)):
+                raise IndexError(f"episode index out of range for source {source_index}")
+            starts = starts_table[episodes]
+            current = current_frames[positions]
+            if np.any(current < starts):
+                raise ValueError(f"cache frame precedes episode start for source {source_index}")
+            windows[positions] = np.maximum(current[:, None] - offsets[None, :], starts[:, None])
+        return source_indices, windows
+
+    def encode_cache_indices(self, cache_indices: Sequence[int] | np.ndarray) -> Array:
+        source_indices, windows = self._window_indices(cache_indices)
+        output = np.empty(
+            (
+                len(windows),
+                self.tactile_window,
+                len(self.tactile_keys),
+                self.resnet_embedding_dim,
+            ),
+            dtype=np.float32,
+        )
+        for source_index in np.unique(source_indices):
+            positions = np.flatnonzero(source_indices == source_index)
+            cache = self._embedding_caches[int(source_index)]
+            encoded = cache.get_many(windows[positions].reshape(-1)).reshape(
+                len(positions),
+                self.tactile_window,
+                len(self.tactile_keys),
+                self.resnet_embedding_dim,
+            )
+            output[positions] = encoded.astype(np.float32, copy=False)
+        return jnp.asarray(output)
+
+    def build_episode_baseline_embeddings(self) -> dict[tuple[int, int], np.ndarray]:
+        baselines: dict[tuple[int, int], np.ndarray] = {}
+        for source_index, (starts, cache) in enumerate(
+            zip(self._episode_starts, self._embedding_caches, strict=True)
+        ):
+            encoded = cache.get_many(starts).astype(np.float32, copy=False)
+            baselines.update(
+                {(source_index, episode_index): encoded[episode_index] for episode_index in range(len(starts))}
+            )
+        self.episode_baselines = baselines
+        print(f"episode_baselines={len(baselines)} (cached first-frame tokens)", flush=True)
+        return baselines
+
+    def tactile_change_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+    ) -> np.ndarray:
+        if not self.episode_baselines:
+            raise RuntimeError("episode baselines have not been built")
+        current = np.asarray(current_tokens, dtype=np.float32)
+        source_indices, _, episode_indices = self._source_episode_frames(cache_indices)
+        baseline = np.stack(
+            [
+                self.episode_baselines[(int(source_index), int(episode_index))]
+                for source_index, episode_index in zip(source_indices, episode_indices, strict=True)
+            ],
+            axis=0,
+        )
+        return tactile_change_from_tokens(current, baseline)
+
+    def gate_weights_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+        *,
+        tau: float,
+        temperature: float,
+    ) -> np.ndarray:
+        change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
+        return gate_weights_from_change(change, tau=tau, temperature=temperature)
+
+    def batches(
+        self,
+        split: SplitName,
+        *,
+        batch_size: int,
+        shuffle: bool,
+        seed: int,
+    ) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, Array]]:
+        for indices, x_base, predicted, gt_action, state in self.pairs.batches(
+            split, batch_size=batch_size, shuffle=shuffle, seed=seed
+        ):
+            yield indices, x_base, predicted, gt_action, state, self.encode_cache_indices(indices)
