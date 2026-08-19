@@ -6,6 +6,10 @@ TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
 TRAIN_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"
 export PYTHONPATH="${TRAIN_ROOT}/src:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
+# The standalone directory contains ``utils/`` as part of ``train_pi05_frs``.
+# Never let the working directory expose it as a top-level package that shadows
+# the protected repository's ``utils`` imports used by ``train_encoder``.
+export PYTHONSAFEPATH=1
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pi05_train}"
 
 log() {

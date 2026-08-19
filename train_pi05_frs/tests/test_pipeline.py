@@ -1437,8 +1437,36 @@ def test_launcher_uses_private_src_and_training_interpreter_without_uv() -> None
 
     assert 'TRAIN_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"' in script
     assert 'export PYTHONPATH="${TRAIN_ROOT}/src:${REPO_ROOT}' in script
+    assert "export PYTHONSAFEPATH=1" in script
     assert 'cd "${TRAIN_ROOT}"' in script
     assert "uv run" not in script
+
+
+def test_launcher_python_path_does_not_shadow_protected_root_utils() -> None:
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            (
+                f'source "{LAUNCHER}"\n'
+                'cd "${TRAIN_ROOT}"\n'
+                '"${TRAIN_PYTHON}" -c \'import train_pi05_frs.utils.data; '
+                'import utils; print(utils.__file__)\''
+            ),
+        ],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "JAX_PLATFORMS": "cpu",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert Path(result.stdout.strip()).resolve() == REPO_ROOT / "utils/__init__.py"
 
 
 def test_spawn_workers_complete_a_real_synthetic_batch(tmp_path: Path) -> None:

@@ -82,6 +82,7 @@ The launcher is preferred, but each stage can be invoked with the same environme
 ```bash
 cd /home/typhon/FRS_Tact/train_pi05_frs
 export PYTHONPATH="$PWD/src:$(dirname "$PWD")${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONSAFEPATH=1
 
 .venv/bin/python -m train_pi05_frs.tools.precompute_tactile_embeddings \
   --config configs/train_pi05_frs.yaml
