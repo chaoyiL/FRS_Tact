@@ -17,6 +17,7 @@ from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
 from train_smolvla_frs.utils.model import (
     FlowSolver,
     TactileConditionedFlowDecoder,
+    bimanual_composite_endpoint,
     decode_actions,
     encode_tactile_embeddings,
     flow_matching_loss_per_sample,
@@ -107,6 +108,34 @@ class EvaluationResult:
     # Bimanual validation fields. Legacy scalar-gate fields above stay unchanged.
     sample_gate_w_left: np.ndarray | None = None
     sample_gate_w_right: np.ndarray | None = None
+    composite_fm: float | None = None
+    sample_composite_fm: np.ndarray | None = None
+    tactile_change_left: float | None = None
+    tactile_change_right: float | None = None
+    sample_tactile_change_left: np.ndarray | None = None
+    sample_tactile_change_right: np.ndarray | None = None
+    gate_w_left: float | None = None
+    gate_w_right: float | None = None
+    gate_w_p10_left: float | None = None
+    gate_w_p25_left: float | None = None
+    gate_w_p50_left: float | None = None
+    gate_w_p75_left: float | None = None
+    gate_w_p90_left: float | None = None
+    gate_w_p10_right: float | None = None
+    gate_w_p25_right: float | None = None
+    gate_w_p50_right: float | None = None
+    gate_w_p75_right: float | None = None
+    gate_w_p90_right: float | None = None
+    tactile_change_p10_left: float | None = None
+    tactile_change_p25_left: float | None = None
+    tactile_change_p50_left: float | None = None
+    tactile_change_p75_left: float | None = None
+    tactile_change_p90_left: float | None = None
+    tactile_change_p10_right: float | None = None
+    tactile_change_p25_right: float | None = None
+    tactile_change_p50_right: float | None = None
+    tactile_change_p75_right: float | None = None
+    tactile_change_p90_right: float | None = None
     sample_mse_gt_left: np.ndarray | None = None
     sample_mse_gt_right: np.ndarray | None = None
     sample_mse_vla_left: np.ndarray | None = None
@@ -472,6 +501,7 @@ def evaluate_split(
     cache_indices: list[np.ndarray] = []
     flow_gt_parts: list[np.ndarray] = []
     flow_pred_parts: list[np.ndarray] = []
+    composite_flow_parts: list[np.ndarray] = []
     mse_gt_parts: list[np.ndarray] = []
     mae_gt_parts: list[np.ndarray] = []
     mse_pred_parts: list[np.ndarray] = []
@@ -529,6 +559,29 @@ def evaluate_split(
         flow_pred = flow_matching_loss_per_sample(
             model, x_base, predicted_action, t, tactile_input, state=state
         )
+        if loss_mode == BIMANUAL_LOSS_MODE:
+            if gate_w is None:
+                raise ValueError(
+                    "bimanual validation requires finite per-wrist gate weights"
+                )
+            composite_target, _ = bimanual_composite_endpoint(
+                gt_action,
+                predicted_action,
+                jnp.asarray(gate_w),
+                low_gate_threshold=rank_low_gate_threshold,
+                high_gate_threshold=rank_high_gate_threshold,
+            )
+            composite_flow = flow_matching_loss_per_sample(
+                model,
+                x_base,
+                composite_target,
+                t,
+                tactile_input,
+                state=state,
+            )
+            composite_flow_parts.append(
+                np.asarray(jax.device_get(composite_flow))
+            )
         prediction = decode_actions(
             model,
             x_base,
@@ -597,6 +650,9 @@ def evaluate_split(
     all_indices = np.concatenate(cache_indices)
     all_flow_gt = np.concatenate(flow_gt_parts)
     all_flow_pred = np.concatenate(flow_pred_parts)
+    all_composite_flow = (
+        np.concatenate(composite_flow_parts) if composite_flow_parts else None
+    )
     all_mse_gt = np.concatenate(mse_gt_parts)
     all_mae_gt = np.concatenate(mae_gt_parts)
     all_mse_pred = np.concatenate(mse_pred_parts)
@@ -620,6 +676,14 @@ def evaluate_split(
     primary_rmse = np.sqrt(primary_mse)
 
     wrist_stratified: dict[str, dict[str, float | int]] | None = None
+    wrist_gate_means: tuple[float | None, float | None] = (None, None)
+    wrist_change_means: tuple[float | None, float | None] = (None, None)
+    wrist_gate_quantiles: tuple[
+        tuple[float | None, ...], tuple[float | None, ...]
+    ] = ((None,) * 5, (None,) * 5)
+    wrist_change_quantiles: tuple[
+        tuple[float | None, ...], tuple[float | None, ...]
+    ] = ((None,) * 5, (None,) * 5)
     if tactile_changes:
         all_change = np.concatenate(tactile_changes)
         all_gate = np.concatenate(gate_weights)
@@ -632,6 +696,22 @@ def evaluate_split(
             assert all_mse_vla_wrist is not None
             assert all_mse_vla_gt_wrist is not None
             wrist_stratified = {}
+            wrist_gate_means = (
+                float(np.mean(all_gate[:, 0])),
+                float(np.mean(all_gate[:, 1])),
+            )
+            wrist_change_means = (
+                float(np.mean(all_change[:, 0])),
+                float(np.mean(all_change[:, 1])),
+            )
+            wrist_gate_quantiles = (
+                _quantiles(all_gate[:, 0]),
+                _quantiles(all_gate[:, 1]),
+            )
+            wrist_change_quantiles = (
+                _quantiles(all_change[:, 0]),
+                _quantiles(all_change[:, 1]),
+            )
             for wrist_index, wrist_name in enumerate(("left", "right")):
                 wrist_stratified[wrist_name] = gate_stratified_decode_metrics(
                     all_mse_gt_wrist[:, wrist_index],
@@ -802,6 +882,44 @@ def evaluate_split(
         sample_gate_w_right=(
             all_gate[:, 1] if loss_mode == BIMANUAL_LOSS_MODE and all_gate is not None else None
         ),
+        composite_fm=(
+            None if all_composite_flow is None else float(np.mean(all_composite_flow))
+        ),
+        sample_composite_fm=all_composite_flow,
+        tactile_change_left=wrist_change_means[0],
+        tactile_change_right=wrist_change_means[1],
+        sample_tactile_change_left=(
+            all_change[:, 0]
+            if loss_mode == BIMANUAL_LOSS_MODE and all_change is not None
+            else None
+        ),
+        sample_tactile_change_right=(
+            all_change[:, 1]
+            if loss_mode == BIMANUAL_LOSS_MODE and all_change is not None
+            else None
+        ),
+        gate_w_left=wrist_gate_means[0],
+        gate_w_right=wrist_gate_means[1],
+        gate_w_p10_left=wrist_gate_quantiles[0][0],
+        gate_w_p25_left=wrist_gate_quantiles[0][1],
+        gate_w_p50_left=wrist_gate_quantiles[0][2],
+        gate_w_p75_left=wrist_gate_quantiles[0][3],
+        gate_w_p90_left=wrist_gate_quantiles[0][4],
+        gate_w_p10_right=wrist_gate_quantiles[1][0],
+        gate_w_p25_right=wrist_gate_quantiles[1][1],
+        gate_w_p50_right=wrist_gate_quantiles[1][2],
+        gate_w_p75_right=wrist_gate_quantiles[1][3],
+        gate_w_p90_right=wrist_gate_quantiles[1][4],
+        tactile_change_p10_left=wrist_change_quantiles[0][0],
+        tactile_change_p25_left=wrist_change_quantiles[0][1],
+        tactile_change_p50_left=wrist_change_quantiles[0][2],
+        tactile_change_p75_left=wrist_change_quantiles[0][3],
+        tactile_change_p90_left=wrist_change_quantiles[0][4],
+        tactile_change_p10_right=wrist_change_quantiles[1][0],
+        tactile_change_p25_right=wrist_change_quantiles[1][1],
+        tactile_change_p50_right=wrist_change_quantiles[1][2],
+        tactile_change_p75_right=wrist_change_quantiles[1][3],
+        tactile_change_p90_right=wrist_change_quantiles[1][4],
         sample_mse_gt_left=(None if all_mse_gt_wrist is None else all_mse_gt_wrist[:, 0]),
         sample_mse_gt_right=(None if all_mse_gt_wrist is None else all_mse_gt_wrist[:, 1]),
         sample_mse_vla_left=(None if all_mse_vla_wrist is None else all_mse_vla_wrist[:, 0]),

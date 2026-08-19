@@ -42,13 +42,21 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
 
         def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
             del indices, current_tokens
-            return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+            return np.asarray([[1.0, 0.0], [0.0, 0.8]], dtype=np.float32)
 
     monkeypatch.setattr(metrics_module, "encode_tactile_embeddings", lambda model, value: value)
+    flow_targets: list[np.ndarray] = []
+
+    def fake_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        target_array = np.asarray(target)
+        flow_targets.append(target_array)
+        return np.mean(np.square(target_array), axis=(1, 2))
+
     monkeypatch.setattr(
         metrics_module,
         "flow_matching_loss_per_sample",
-        lambda model, x_base, target, t, tactile_input, state: np.zeros((2,), dtype=np.float32),
+        fake_flow,
     )
     monkeypatch.setattr(
         metrics_module,
@@ -69,7 +77,23 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
     )
 
     np.testing.assert_allclose(result.sample_gate_w_left, [1.0, 0.0], atol=0.01)
-    np.testing.assert_allclose(result.sample_gate_w_right, [0.0, 1.0], atol=0.01)
+    np.testing.assert_allclose(
+        result.sample_gate_w_right,
+        [1.0 / (1.0 + np.exp(5.0)), 1.0 / (1.0 + np.exp(-3.0))],
+    )
+    expected_composite = np.ones_like(gt_action)
+    expected_composite[0, :, :10] = 0.0
+    expected_composite[1, :, 10:] = 0.0
+    np.testing.assert_allclose(flow_targets[2], expected_composite)
+    np.testing.assert_allclose(result.sample_composite_fm, [0.5, 0.5])
+    assert result.composite_fm == pytest.approx(0.5)
+    np.testing.assert_allclose(result.sample_tactile_change_left, [1.0, 0.0])
+    np.testing.assert_allclose(result.sample_tactile_change_right, [0.0, 0.8])
+    assert result.gate_w_left != pytest.approx(result.gate_w_right)
+    assert result.gate_w_p90_left != pytest.approx(result.gate_w_p90_right)
+    assert result.tactile_change_p90_left != pytest.approx(
+        result.tactile_change_p90_right
+    )
     np.testing.assert_allclose(result.sample_mse_gt_left, [0.0, 1.0])
     np.testing.assert_allclose(result.sample_mse_gt_right, [1.0, 4.0])
     np.testing.assert_allclose(result.sample_mse_vla_left, [1.0, 0.0])
@@ -208,7 +232,7 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
 
         def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
             del indices, current_tokens
-            return np.asarray([[0.1, 0.9], [0.9, 0.1]], dtype=np.float32)
+            return np.asarray([[0.1, 0.9], [0.7, 0.2]], dtype=np.float32)
 
         def close(self):
             return None
@@ -269,10 +293,20 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert metrics["n_low_w_right"] == 1
         assert "n_high_w" not in metrics
         assert written_metrics["n_high_w_left"] == 1
+        assert written_metrics["composite_fm"] >= 0.0
+        assert written_metrics["gate_w_mean_left"] != pytest.approx(
+            written_metrics["gate_w_mean_right"]
+        )
+        assert written_metrics["gate_w_p90_left"] != pytest.approx(
+            written_metrics["gate_w_p90_right"]
+        )
         with (tmp_path / "output" / "per_sample.csv").open(newline="", encoding="utf-8") as file:
             rows = list(csv.DictReader(file))
         assert float(rows[0]["gate_w_left"]) == pytest.approx(1.0 / (1.0 + np.exp(4.0)))
         assert float(rows[0]["gate_w_right"]) == pytest.approx(1.0 / (1.0 + np.exp(-4.0)))
+        assert float(rows[0]["tactile_change_left"]) == pytest.approx(0.1)
+        assert float(rows[0]["tactile_change_right"]) == pytest.approx(0.9)
+        assert float(rows[0]["composite_fm"]) >= 0.0
         assert float(rows[0]["mse_gt_left"]) >= 0.0
         assert float(rows[0]["mse_vla_right"]) >= 0.0
     else:

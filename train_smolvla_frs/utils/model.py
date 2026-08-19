@@ -9,6 +9,7 @@ from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import nnx
 from flax.core import FrozenDict
@@ -1385,7 +1386,7 @@ def gated_flow_matching_loss_per_sample(
         "state_dropout_rate",
     ),
 )
-def train_step(
+def _train_step_jit(
     model: TactileConditionedFlowDecoder,
     optimizer: nnx.Optimizer,
     x_base: Array,
@@ -1587,6 +1588,81 @@ def train_step(
     (loss, components), gradients = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(model, gradients)
     return loss, components
+
+
+def train_step(
+    model: TactileConditionedFlowDecoder,
+    optimizer: nnx.Optimizer,
+    x_base: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    tactile_seq: Array,
+    gate_weights: Array,
+    key: Array,
+    source_indices: Array | None = None,
+    source_rank_weights: Array | None = None,
+    *,
+    state: Array | None = None,
+    state_dropout_rate: float = 0.0,
+    loss_mode: str = "gt",
+    gate_lambda: float = 1.0,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
+    low_gate_safety_weight: float = 0.0,
+    low_gate_safety_margin: float = 0.0,
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
+    rank_low_gate_threshold: float = 0.3,
+    rank_high_gate_threshold: float = 0.7,
+    source_balanced_loss: bool = False,
+    num_sources: int = 1,
+    high_gate_rank_aggregation: HighGateRankAggregation = "balanced_mean",
+    high_gate_rank_hard_fraction: float = 0.3,
+    high_gate_rank_worst_beta: float = 20.0,
+) -> tuple[Array, dict[str, Array]]:
+    """Validate the small bimanual gate on host, then run the compiled update."""
+
+    if loss_mode == "bimanual_gated":
+        # This intentionally synchronizes only the [B, 2] label at the public
+        # mutation boundary; the model/optimizer update remains compiled.
+        host_gates = np.asarray(jax.device_get(gate_weights))
+        if np.any(~np.isfinite(host_gates)):
+            raise ValueError("bimanual gate_weights must be finite before optimizer update")
+    return _train_step_jit(
+        model,
+        optimizer,
+        x_base,
+        gt_action,
+        predicted_action,
+        tactile_seq,
+        gate_weights,
+        key,
+        source_indices,
+        source_rank_weights,
+        state=state,
+        state_dropout_rate=state_dropout_rate,
+        loss_mode=loss_mode,
+        gate_lambda=gate_lambda,
+        aux_decode_weight=aux_decode_weight,
+        aux_decode_steps=aux_decode_steps,
+        aux_decode_solver=aux_decode_solver,
+        low_gate_safety_weight=low_gate_safety_weight,
+        low_gate_safety_margin=low_gate_safety_margin,
+        rank_weight=rank_weight,
+        rank_margin=rank_margin,
+        repair_weight=repair_weight,
+        repair_margin=repair_margin,
+        rank_low_gate_threshold=rank_low_gate_threshold,
+        rank_high_gate_threshold=rank_high_gate_threshold,
+        source_balanced_loss=source_balanced_loss,
+        num_sources=num_sources,
+        high_gate_rank_aggregation=high_gate_rank_aggregation,
+        high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,
+        high_gate_rank_worst_beta=high_gate_rank_worst_beta,
+    )
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))

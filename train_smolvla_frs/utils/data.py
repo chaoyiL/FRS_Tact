@@ -153,8 +153,15 @@ def gate_weights_from_change(
 
     if temperature <= 0:
         raise ValueError(f"temperature must be positive, got {temperature}.")
-    logits = (np.asarray(change, dtype=np.float32) - float(tau)) / float(temperature)
-    return (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+    changes = np.asarray(change, dtype=np.float32)
+    if np.any(~np.isfinite(changes)):
+        raise ValueError("tactile change values must be finite")
+    logits = (changes - float(tau)) / float(temperature)
+    with np.errstate(over="ignore", invalid="ignore"):
+        gates = (1.0 / (1.0 + np.exp(-logits))).astype(np.float32)
+    if np.any(~np.isfinite(gates)):
+        raise ValueError("computed gate weights must be finite")
+    return gates
 
 
 class TactileConditionedBatches:

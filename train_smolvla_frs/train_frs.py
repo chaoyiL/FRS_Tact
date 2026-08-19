@@ -32,6 +32,7 @@ from train_smolvla_frs.utils.bimanual_schema import (  # noqa: E402
     RIGHT_ACTION_SLICE,
     RIGHT_WRIST_TOKEN_INDICES,
     validate_bimanual_objective_metadata,
+    validate_bimanual_tactile_keys,
 )
 
 LossMode = Literal["gt", "predicted", "gated", "bimanual_gated"]
@@ -519,6 +520,9 @@ def train_decoder(
     high_gate_rank_worst_beta: float = 20.0,
     high_gate_rank_source_weights: Mapping[str, float] | None = None,
 ) -> None:
+    if loss_mode == BIMANUAL_LOSS_MODE and tactile_keys is not None:
+        validate_bimanual_tactile_keys(tactile_keys)
+
     import csv
     import json
 
@@ -571,6 +575,7 @@ def train_decoder(
         # Backward-compatible alias for readers of pre-refactor histories.
         "train_flow_loss",
         "val_flow_loss",
+        "val_composite_fm",
         "val_mse",
         "val_rmse",
         "val_mae",
@@ -653,10 +658,28 @@ def train_decoder(
         "n_low_w",
         "n_mid_w",
     )
+    bimanual_distribution_metric_names = (
+        "gate_w",
+        "gate_w_p10",
+        "gate_w_p25",
+        "gate_w_p50",
+        "gate_w_p75",
+        "gate_w_p90",
+        "tactile_change",
+        "tactile_change_p10",
+        "tactile_change_p25",
+        "tactile_change_p50",
+        "tactile_change_p75",
+        "tactile_change_p90",
+    )
     for wrist in ("left", "right"):
         history_fields.extend(
             f"val_{metric_name}_{wrist}"
             for metric_name in bimanual_validation_metric_names
+        )
+        history_fields.extend(
+            f"val_{metric_name}_{wrist}"
+            for metric_name in bimanual_distribution_metric_names
         )
     gate_bin_metric_names = (
         "n",
@@ -1610,6 +1633,15 @@ def train_decoder(
                         "val_relative_gt_error": validation.relative_gt_error,
                         "eval_target": validation.target,
                     }
+                    validation_composite_fm = getattr(
+                        validation,
+                        "composite_fm",
+                        None,
+                    )
+                    if validation_composite_fm is not None:
+                        metrics["val_composite_fm"] = float(
+                            validation_composite_fm
+                        )
                     if validation.n_high_w is not None:
                         metrics.update(
                             {
@@ -1657,6 +1689,10 @@ def train_decoder(
                         )
                     if getattr(validation, "n_high_w_left", None) is not None:
                         for wrist in ("left", "right"):
+                            for metric_name in bimanual_distribution_metric_names:
+                                metrics[f"val_{metric_name}_{wrist}"] = float(
+                                    getattr(validation, f"{metric_name}_{wrist}")
+                                )
                             for metric_name in bimanual_validation_metric_names:
                                 value = getattr(validation, f"{metric_name}_{wrist}")
                                 metrics[f"val_{metric_name}_{wrist}"] = (
@@ -2405,6 +2441,14 @@ def train_from_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"config.{name} must be a mapping")
     if not action_cache.get("root") or not tactile_cache.get("root"):
         raise ValueError("action_cache.root and tactile_embedding_cache.root are required")
+    if loss_settings.loss_mode == BIMANUAL_LOSS_MODE:
+        configured_tactile_keys = model.get("tactile_keys")
+        if not isinstance(configured_tactile_keys, Sequence) or isinstance(
+            configured_tactile_keys,
+            (str, bytes),
+        ):
+            raise ValueError("model.tactile_keys must be a sequence")
+        validate_bimanual_tactile_keys(configured_tactile_keys)
     from train_smolvla_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
 
     prepare_tactile_embeddings_from_config(config)

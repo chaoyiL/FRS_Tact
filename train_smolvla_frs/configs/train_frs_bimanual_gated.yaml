@@ -5,11 +5,11 @@
 #        --base lerobot/smolvla_base \
 #        --output /workspace/checkpoints/model/pick_tube_01_jax
 #   2) uv run --no-sync python -m train_smolvla_frs.compare_frs_reverse_solvers \
-#        --config train_smolvla_frs/configs/train_frs.yaml
+#        --config train_smolvla_frs/configs/train_frs_bimanual_gated.yaml
 #   3) uv run --no-sync python -m train_smolvla_frs.prepare_frs_caches \
-#        --config train_smolvla_frs/configs/train_frs.yaml
+#        --config train_smolvla_frs/configs/train_frs_bimanual_gated.yaml
 #   4) uv run --no-sync python -m train_smolvla_frs.train_frs \
-#        --config train_smolvla_frs/configs/train_frs.yaml
+#        --config train_smolvla_frs/configs/train_frs_bimanual_gated.yaml
 
 # 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
 checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax
@@ -97,8 +97,7 @@ model:
   state_dropout_rate: 0.1
 
 frs_training:
-  # Explicit gate_w conditioning changes the decoder parameter tree; keep this
-  # experiment separate from checkpoints trained with the hidden gate label.
+  # 双手组合端点使用 objective-v2 metadata，与旧 scalar-gate 实验分目录保存。
   output: /workspace/frs_pick_tube_05/frs_0815_03_all_encoders_bimanual_gated
   # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
@@ -110,8 +109,7 @@ frs_training:
   # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
   gate_tau: 0.4
   gate_temperature: 0.1
-  # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
-  # 关掉则不计算该项，weight 被忽略。
+  # 每个样本只训练一条指向双手组合端点的 FM 轨迹。
   aux_decode: true
   aux_decode_weight: 4.0
   aux_decode_steps: 10
@@ -122,8 +120,8 @@ frs_training:
   low_gate_safety_weight: 0.5
   low_gate_safety_margin: 0.03
   # 三段式 Gate：低区只做安全约束，高区做 GT decode/rank/repair，中间区只保留 FM 过渡。
-  # v7: FM 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区弱 VLA、高区纯 GT，
-  # 中间区连续过渡；原始 w 仍作为 decoder conditioning，不会丢掉 Gate 强度信息。
+  # FM 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区锚定 VLA、高区锚定 GT，
+  # 中间区连续过渡；原始 w 仅用于按手辅助项和指标，decoder 输入仍为触觉历史与 state。
   # 各约束在自己的活跃 Gate 组内归一化，不被其他 Gate 区域的样本数稀释。
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7

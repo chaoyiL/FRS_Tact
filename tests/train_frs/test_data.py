@@ -41,6 +41,22 @@ def test_tactile_change_per_wrist_rejects_non_four_token_input():
         )
 
 
+def test_gate_weights_reject_nonfinite_change_and_computed_gate() -> None:
+    with pytest.raises(ValueError, match=r"change.*finite"):
+        gate_weights_from_change(
+            np.asarray([[0.1, np.nan]], dtype=np.float32),
+            tau=0.5,
+            temperature=0.1,
+        )
+
+    with pytest.raises(ValueError, match=r"gate.*finite"):
+        gate_weights_from_change(
+            np.asarray([[0.1, 0.9]], dtype=np.float32),
+            tau=float("nan"),
+            temperature=0.1,
+        )
+
+
 class FakePairs:
     def __init__(self):
         self.manifest = {

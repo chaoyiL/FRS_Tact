@@ -57,6 +57,13 @@ class HistoryPlotTest(unittest.TestCase):
             "train_loss_composite_fm",
             "train_gate_w_left",
             "train_gate_w_right",
+            "val_composite_fm",
+            "val_gate_w_left",
+            "val_gate_w_right",
+            "val_gate_w_p90_left",
+            "val_gate_w_p90_right",
+            "val_tactile_change_p10_left",
+            "val_tactile_change_p10_right",
         }
         self.assertTrue(expected_fields <= set(HISTORY_FIELDS))
         with tempfile.TemporaryDirectory() as directory:
@@ -69,6 +76,13 @@ class HistoryPlotTest(unittest.TestCase):
                     "train_loss_composite_fm": 0.2,
                     "train_gate_w_left": 0.8,
                     "train_gate_w_right": 0.1,
+                    "val_composite_fm": 0.25,
+                    "val_gate_w_left": 0.75,
+                    "val_gate_w_right": 0.2,
+                    "val_gate_w_p90_left": 0.95,
+                    "val_gate_w_p90_right": 0.4,
+                    "val_tactile_change_p10_left": 0.6,
+                    "val_tactile_change_p10_right": 0.05,
                 }
             )
             with history.open("w", newline="", encoding="utf-8") as file:
@@ -84,6 +98,11 @@ class HistoryPlotTest(unittest.TestCase):
             self.assertEqual(parsed[0]["train_loss_composite_fm"], 0.2)
             self.assertEqual(parsed[0]["train_gate_w_left"], 0.8)
             self.assertEqual(parsed[0]["train_gate_w_right"], 0.1)
+            self.assertEqual(parsed[0]["val_composite_fm"], 0.25)
+            self.assertEqual(parsed[0]["val_gate_w_left"], 0.75)
+            self.assertEqual(parsed[0]["val_gate_w_right"], 0.2)
+            self.assertEqual(parsed[0]["val_gate_w_p90_left"], 0.95)
+            self.assertEqual(parsed[0]["val_gate_w_p90_right"], 0.4)
 
     def test_plots_vla_baseline_repair_and_gate_quantiles(self):
         with tempfile.TemporaryDirectory() as directory:

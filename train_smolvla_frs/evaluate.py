@@ -206,6 +206,8 @@ def evaluate_decoder(
             "gt_gain": result.gt_gain,
             "relative_gt_error": result.relative_gt_error,
         }
+        if result.composite_fm is not None:
+            metrics["composite_fm"] = float(result.composite_fm)
         if result.n_high_w is not None:
             metrics.update(
                 {
@@ -254,6 +256,19 @@ def evaluate_decoder(
             metrics["gate_bins"] = result.gate_bin_metrics
         if result.n_high_w_left is not None:
             for wrist in ("left", "right"):
+                metrics[f"gate_w_mean_{wrist}"] = float(
+                    getattr(result, f"gate_w_{wrist}")
+                )
+                metrics[f"tactile_change_mean_{wrist}"] = float(
+                    getattr(result, f"tactile_change_{wrist}")
+                )
+                for quantile in ("p10", "p25", "p50", "p75", "p90"):
+                    metrics[f"gate_w_{quantile}_{wrist}"] = float(
+                        getattr(result, f"gate_w_{quantile}_{wrist}")
+                    )
+                    metrics[f"tactile_change_{quantile}_{wrist}"] = float(
+                        getattr(result, f"tactile_change_{quantile}_{wrist}")
+                    )
                 for metric_name in (
                     "mse_gt_high_w",
                     "mse_vla_high_w",
@@ -380,7 +395,10 @@ def evaluate_decoder(
                     "mse_vla_gt",
                     "gt_gain",
                     "relative_gt_error",
+                    "composite_fm",
                     "tactile_change",
+                    "tactile_change_left",
+                    "tactile_change_right",
                     "gate_w",
                     "gate_w_left",
                     "gate_w_right",
@@ -416,10 +434,25 @@ def evaluate_decoder(
                         "mse_vla_gt": float(result.sample_mse_vla_gt[position]),
                         "gt_gain": float(result.sample_gt_gain[position]),
                         "relative_gt_error": float(result.sample_relative_gt_error[position]),
+                        "composite_fm": (
+                            ""
+                            if result.sample_composite_fm is None
+                            else float(result.sample_composite_fm[position])
+                        ),
                         "tactile_change": (
                             ""
                             if result.sample_tactile_change is None
                             else float(result.sample_tactile_change[position])
+                        ),
+                        "tactile_change_left": (
+                            ""
+                            if result.sample_tactile_change_left is None
+                            else float(result.sample_tactile_change_left[position])
+                        ),
+                        "tactile_change_right": (
+                            ""
+                            if result.sample_tactile_change_right is None
+                            else float(result.sample_tactile_change_right[position])
                         ),
                         "gate_w": ("" if result.sample_gate_w is None else float(result.sample_gate_w[position])),
                         "gate_w_left": (

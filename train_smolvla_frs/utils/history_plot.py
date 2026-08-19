@@ -23,6 +23,20 @@ GATE_BIN_HISTORY_METRICS = (
     "relative_gt_error",
     "rank_satisfied_frac",
 )
+BIMANUAL_DISTRIBUTION_HISTORY_METRICS = (
+    "gate_w",
+    "gate_w_p10",
+    "gate_w_p25",
+    "gate_w_p50",
+    "gate_w_p75",
+    "gate_w_p90",
+    "tactile_change",
+    "tactile_change_p10",
+    "tactile_change_p25",
+    "tactile_change_p50",
+    "tactile_change_p75",
+    "tactile_change_p90",
+)
 
 HISTORY_FIELDS = (
     "epoch",
@@ -38,6 +52,7 @@ HISTORY_FIELDS = (
     "train_gate_w_right",
     "train_flow_loss",
     "val_flow_loss",
+    "val_composite_fm",
     "val_mse",
     "val_rmse",
     "val_mae",
@@ -101,6 +116,10 @@ HISTORY_FIELDS = (
     "checkpoint_selection_key",
     "checkpoint_selection_feasible",
     "early_stop_no_improve_evals",
+) + tuple(
+    f"val_{metric_name}_{wrist}"
+    for wrist in ("left", "right")
+    for metric_name in BIMANUAL_DISTRIBUTION_HISTORY_METRICS
 ) + tuple(
     f"val_gate_bin_{bin_id}_{metric_name}"
     for bin_id, _, _ in GATE_BIN_SPECS
@@ -208,6 +227,10 @@ def plot_training_history(
     train_gate_left_epochs, train_gate_left = _finite_series(rows, "train_gate_w_left")
     train_gate_right_epochs, train_gate_right = _finite_series(rows, "train_gate_w_right")
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
+    val_composite_epochs, val_composite_fm = _finite_series(
+        rows,
+        "val_composite_fm",
+    )
     high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
     low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
     high_pred_epochs, mse_pred_high = _finite_series(rows, "val_mse_pred_high_w")
@@ -230,6 +253,22 @@ def plot_training_history(
     change_p10_epochs, change_p10 = _finite_series(rows, "val_tactile_change_p10")
     change_p50_epochs, change_p50 = _finite_series(rows, "val_tactile_change_p50")
     change_p90_epochs, change_p90 = _finite_series(rows, "val_tactile_change_p90")
+    bimanual_gate_series = {
+        (wrist, statistic): _finite_series(
+            rows,
+            f"val_gate_w{statistic}_{wrist}",
+        )
+        for wrist in ("left", "right")
+        for statistic in ("", "_p10", "_p50", "_p90")
+    }
+    bimanual_change_series = {
+        (wrist, statistic): _finite_series(
+            rows,
+            f"val_tactile_change{statistic}_{wrist}",
+        )
+        for wrist in ("left", "right")
+        for statistic in ("", "_p10", "_p50", "_p90")
+    }
     # Fallback for older histories without stratified columns.
     mse_gt_epochs, val_mse_gt = _finite_series(rows, "val_mse_gt")
     mse_pred_epochs, val_mse_pred = _finite_series(rows, "val_mse_pred")
@@ -333,6 +372,16 @@ def plot_training_history(
             linewidth=2.0,
             color="#55A868",
             marker="o",
+            markersize=5,
+        )
+    if val_composite_epochs:
+        axes[row].plot(
+            val_composite_epochs,
+            val_composite_fm,
+            label="val_composite_fm",
+            linewidth=2.0,
+            color="#C44E52",
+            marker="s",
             markersize=5,
         )
     axes[row].set_ylabel("loss")
@@ -590,6 +639,23 @@ def plot_training_history(
         ):
             if epochs:
                 gate_axis.plot(epochs, values, label=label, linestyle=style, linewidth=1.8)
+        for wrist, color in (("left", "#C44E52"), ("right", "#4C72B0")):
+            for statistic, label, style in (
+                ("", "mean", "-"),
+                ("_p10", "p10", ":"),
+                ("_p50", "p50", "-."),
+                ("_p90", "p90", "--"),
+            ):
+                epochs, values = bimanual_gate_series[(wrist, statistic)]
+                if epochs:
+                    gate_axis.plot(
+                        epochs,
+                        values,
+                        label=f"gate {wrist} {label}",
+                        color=color,
+                        linestyle=style,
+                        linewidth=1.6,
+                    )
         gate_axis.set_ylabel("gate w")
         gate_axis.set_ylim(-0.02, 1.02)
         gate_axis.set_title("Gate and tactile-change validation quantiles", pad=8)
@@ -609,6 +675,24 @@ def plot_training_history(
                     linewidth=1.6,
                     alpha=0.75,
                 )
+        for wrist, color in (("left", "#DD8452"), ("right", "#55A868")):
+            for statistic, label, style in (
+                ("", "mean", "-"),
+                ("_p10", "p10", ":"),
+                ("_p50", "p50", "-."),
+                ("_p90", "p90", "--"),
+            ):
+                epochs, values = bimanual_change_series[(wrist, statistic)]
+                if epochs:
+                    change_axis.plot(
+                        epochs,
+                        values,
+                        label=f"change {wrist} {label}",
+                        color=color,
+                        linestyle=style,
+                        linewidth=1.4,
+                        alpha=0.8,
+                    )
         change_axis.set_ylabel("tactile change")
         handles, labels = gate_axis.get_legend_handles_labels()
         change_handles, change_labels = change_axis.get_legend_handles_labels()

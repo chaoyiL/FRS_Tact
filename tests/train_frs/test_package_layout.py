@@ -10,6 +10,7 @@ import tomllib
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from train_smolvla_frs.utils.bimanual_schema import (
@@ -40,6 +41,32 @@ def test_bimanual_schema_has_fixed_contract_and_validates_metadata() -> None:
             "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
         }
     )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "group_name", "invalid_group"),
+    (
+        ("action_slices", "left", [False, 10]),
+        ("action_slices", "right", [10.0, 20]),
+        ("wrist_token_indices", "left", [0, True]),
+        ("wrist_token_indices", "right", [2.0, 3]),
+    ),
+)
+def test_bimanual_metadata_groups_require_actual_integers(
+    field_name: str,
+    group_name: str,
+    invalid_group: list[object],
+) -> None:
+    metadata = {
+        "loss_mode": "bimanual_gated",
+        "loss_objective_version": 2,
+        "action_slices": {"left": [0, 10], "right": [10, 20]},
+        "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
+    }
+    metadata[field_name][group_name] = invalid_group  # type: ignore[index]
+
+    with pytest.raises(ValueError, match=rf"{field_name}\.{group_name}"):
+        validate_bimanual_objective_metadata(metadata)
 
 
 def test_core_frs_files_live_in_train_smolvla_frs() -> None:
@@ -144,6 +171,24 @@ def test_bimanual_config_only_changes_objective_and_output() -> None:
         "/workspace/frs_pick_tube_05/frs_0815_03_all_encoders_bimanual_gated"
     )
     assert bimanual == expected
+
+
+def test_bimanual_config_commands_and_comments_describe_the_active_objective() -> None:
+    config_path = (
+        ROOT
+        / "train_smolvla_frs"
+        / "configs"
+        / "train_frs_bimanual_gated.yaml"
+    )
+    text = config_path.read_text(encoding="utf-8")
+
+    assert text.count(
+        "--config train_smolvla_frs/configs/train_frs_bimanual_gated.yaml"
+    ) == 3
+    assert "--config train_smolvla_frs/configs/train_frs.yaml" not in text
+    assert "gate_lambda" not in text
+    assert "Explicit gate_w conditioning" not in text
+    assert "原始 w 仍作为 decoder conditioning" not in text
 
 
 def test_readme_distinguishes_legacy_and_bimanual_loss_modes() -> None:

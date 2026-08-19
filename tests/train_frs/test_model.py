@@ -195,6 +195,84 @@ def test_yaml_training_entry_routes_legacy_and_bimanual_modes(
     assert captured["gate_lambda"] == expected_gate_lambda
 
 
+@pytest.mark.parametrize(
+    "tactile_keys",
+    (
+        [
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
+        [
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
+        [
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
+        ],
+        [
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_2",
+            "observation.images.tactile_right_1",
+        ],
+    ),
+    ids=("reordered", "duplicate", "missing", "wrong-suffix"),
+)
+def test_bimanual_training_entry_rejects_noncanonical_tactile_keys_before_side_effects(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tactile_keys: list[str],
+) -> None:
+    import train_smolvla_frs.prepare_frs_caches as prepare_module
+    import train_smolvla_frs.train_frs as train_module
+
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    cache_dir = tmp_path / "action-cache"
+    cache_dir.mkdir()
+    (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    prepare_called = False
+
+    def fake_prepare(config: object) -> None:
+        nonlocal prepare_called
+        del config
+        prepare_called = True
+
+    monkeypatch.setattr(
+        prepare_module,
+        "prepare_tactile_embeddings_from_config",
+        fake_prepare,
+    )
+    monkeypatch.setattr(train_module, "source_cache_dir", lambda root, repo_id: cache_dir)
+    monkeypatch.setattr(train_module, "train_decoder", lambda **kwargs: None)
+    output_dir = tmp_path / "output"
+    config = {
+        "datasets": [{"repo_id": "owner/data"}],
+        "action_cache": {"root": str(tmp_path / "action-cache-root")},
+        "tactile_embedding_cache": {"root": str(tmp_path / "tactile-cache-root")},
+        "model": {
+            "tactile_encoder_path": str(encoder_dir),
+            "tactile_keys": tactile_keys,
+        },
+        "frs_training": {
+            "output": str(output_dir),
+            "loss_mode": "bimanual_gated",
+        },
+    }
+
+    with pytest.raises(ValueError, match=r"model\.tactile_keys"):
+        train_module.train_from_config(config)
+
+    assert not prepare_called
+    assert not (output_dir / train_module.RUN_CONFIG_NAME).exists()
+
+
 def test_bimanual_composite_endpoint_selects_each_hand_independently() -> None:
     gt = jnp.arange(40, dtype=jnp.float32).reshape(1, 2, 20)
     vla = -gt
@@ -223,6 +301,60 @@ def test_bimanual_composite_endpoint_rejects_nonfinite_gate() -> None:
             low_gate_threshold=0.3,
             high_gate_threshold=0.7,
         )
+
+
+def test_public_bimanual_train_step_rejects_nonfinite_gate_without_mutation() -> None:
+    model = TactileConditionedFlowDecoder(
+        DecoderConfig(
+            action_dim=20,
+            action_horizon=2,
+            tactile_window=3,
+            gru_hidden_dim=8,
+            resnet_embedding_dim=4,
+            model_dim=8,
+            depth=1,
+            num_heads=2,
+        ),
+        rngs=nnx.Rngs(220),
+    )
+    optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+
+    def snapshot(node: object) -> object:
+        pure = nnx.to_pure_dict(nnx.state(node))
+        return jax.tree.map(
+            lambda value: np.asarray(jax.device_get(value)).copy(),
+            pure,
+        )
+
+    def assert_snapshot_equal(expected: object, actual: object) -> None:
+        assert jax.tree.structure(expected) == jax.tree.structure(actual)
+        for expected_leaf, actual_leaf in zip(
+            jax.tree.leaves(expected),
+            jax.tree.leaves(actual),
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual_leaf, expected_leaf)
+
+    model_before = snapshot(model)
+    optimizer_before = snapshot(optimizer)
+    zeros = jnp.zeros((1, 2, 20), dtype=jnp.float32)
+
+    with pytest.raises(ValueError, match=r"(?i)(finite.*gate|gate.*finite)"):
+        train_step(
+            model,
+            optimizer,
+            zeros,
+            zeros,
+            zeros,
+            jnp.zeros((1, 3, 4, 4), dtype=jnp.float32),
+            jnp.asarray([[jnp.nan, 0.5]], dtype=jnp.float32),
+            jax.random.key(221),
+            loss_mode="bimanual_gated",
+            aux_decode_weight=0.0,
+        )
+
+    assert_snapshot_equal(model_before, snapshot(model))
+    assert_snapshot_equal(optimizer_before, snapshot(optimizer))
 
 
 def test_bimanual_loss_components_uses_one_composite_fm_call() -> None:
@@ -278,6 +410,53 @@ def test_bimanual_loss_components_uses_one_composite_fm_call() -> None:
     np.testing.assert_allclose(components["gt_fm"], jnp.zeros_like(expected))
     np.testing.assert_allclose(components["vla_fm"], jnp.zeros_like(expected))
     np.testing.assert_allclose(sum(components.values()), expected)
+
+
+def test_bimanual_repair_weight_zero_preserves_value_and_gradient() -> None:
+    class ScaledVelocity:
+        def __init__(self, scale: jax.Array) -> None:
+            self.scale = scale
+
+        def __call__(self, x_t, t, tactile_seq, *, state=None, state_keep_mask=None):
+            del t, tactile_seq, state, state_keep_mask
+            return self.scale * x_t
+
+    x_base = jnp.full((2, 1, 20), 0.25, dtype=jnp.float32)
+    gt = jnp.ones_like(x_base)
+    predicted = -jnp.ones_like(x_base)
+    gate = jnp.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+    t = jnp.asarray([0.25, 0.75], dtype=jnp.float32)
+    tactile = jnp.zeros((2, 1, 1), dtype=jnp.float32)
+
+    def objective(scale: jax.Array, *, explicit_zero: bool) -> jax.Array:
+        options: dict[str, object] = {
+            "aux_decode_weight": 0.0,
+            "low_gate_safety_weight": 0.0,
+            "rank_weight": 0.0,
+        }
+        if explicit_zero:
+            options.update(repair_weight=0.0, repair_margin=1e6)
+        components = bimanual_loss_components_per_sample(
+            ScaledVelocity(scale),
+            x_base,
+            gt,
+            predicted,
+            t,
+            tactile,
+            gate,
+            **options,
+        )
+        return jnp.mean(sum(components.values()))
+
+    implicit_value, implicit_gradient = jax.value_and_grad(
+        lambda scale: objective(scale, explicit_zero=False)
+    )(jnp.asarray(0.5, dtype=jnp.float32))
+    explicit_value, explicit_gradient = jax.value_and_grad(
+        lambda scale: objective(scale, explicit_zero=True)
+    )(jnp.asarray(0.5, dtype=jnp.float32))
+
+    np.testing.assert_allclose(explicit_value, implicit_value)
+    np.testing.assert_allclose(explicit_gradient, implicit_gradient)
 
 
 class _ZeroBimanualVelocity:
@@ -674,6 +853,43 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
             "gate_bin_metrics": None,
         },
     )()
+    if loss_mode == "bimanual_gated":
+        validation.composite_fm = 0.375
+        for wrist, gate_mean, change_mean in (
+            ("left", 0.85, 0.75),
+            ("right", 0.15, 0.25),
+        ):
+            setattr(validation, f"gate_w_{wrist}", gate_mean)
+            setattr(validation, f"tactile_change_{wrist}", change_mean)
+            for quantile, offset in zip(
+                ("p10", "p25", "p50", "p75", "p90"),
+                (-0.1, -0.05, 0.0, 0.05, 0.1),
+                strict=True,
+            ):
+                setattr(validation, f"gate_w_{quantile}_{wrist}", gate_mean + offset)
+                setattr(
+                    validation,
+                    f"tactile_change_{quantile}_{wrist}",
+                    change_mean + offset,
+                )
+            for metric_name, value in {
+                "mse_gt_high_w": 0.1,
+                "mse_vla_high_w": 0.2,
+                "mse_vla_gt_high_w": 0.3,
+                "gt_gain_high_w": 0.2,
+                "rank_penalty_high_w": 0.0,
+                "rank_satisfied_high_frac": 1.0,
+                "repair_penalty_high_w": 0.0,
+                "repair_satisfied_high_frac": 1.0,
+                "low_nearest_endpoint_mse": 0.0,
+                "low_safety_penalty": 0.0,
+                "low_safe_frac": 1.0,
+                "low_unsafe_frac": 0.0,
+                "n_high_w": 1,
+                "n_low_w": 1,
+                "n_mid_w": 0,
+            }.items():
+                setattr(validation, f"{metric_name}_{wrist}", value)
 
     monkeypatch.setattr(cache_module, "CachedPairs", FakePairs)
     monkeypatch.setattr(data_module, "TactileConditionedBatches", FakeConditioner)
@@ -767,6 +983,13 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         assert float(history_row["train_gate_w_right"]) == pytest.approx(
             expected_gate[0, 1]
         )
+        assert float(history_row["val_composite_fm"]) == pytest.approx(0.375)
+        assert float(history_row["val_gate_w_left"]) == pytest.approx(0.85)
+        assert float(history_row["val_gate_w_right"]) == pytest.approx(0.15)
+        assert float(history_row["val_gate_w_p90_left"]) == pytest.approx(0.95)
+        assert float(history_row["val_gate_w_p90_right"]) == pytest.approx(0.25)
+        assert float(history_row["val_tactile_change_p10_left"]) == pytest.approx(0.65)
+        assert float(history_row["val_tactile_change_p10_right"]) == pytest.approx(0.15)
     else:
         assert history_row["train_gate_w_left"] == ""
         assert history_row["train_gate_w_right"] == ""
