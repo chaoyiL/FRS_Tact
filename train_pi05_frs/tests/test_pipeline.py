@@ -931,6 +931,98 @@ def test_launcher_uses_private_src_and_training_interpreter_without_uv() -> None
     assert "uv run" not in script
 
 
+def test_spawn_workers_complete_a_real_synthetic_batch(tmp_path: Path) -> None:
+    stub_root = tmp_path / "stubs"
+    image_dataset_module = stub_root / "train_encoder" / "utils" / "image_dataset.py"
+    image_dataset_module.parent.mkdir(parents=True)
+    (stub_root / "train_encoder" / "__init__.py").write_text("", encoding="utf-8")
+    (stub_root / "train_encoder" / "utils" / "__init__.py").write_text("", encoding="utf-8")
+    image_dataset_module.write_text(
+        """
+import numpy as np
+
+
+class SyntheticDataset:
+    def indices_for_episode(self, episode_index):
+        assert episode_index == 0
+        return (0, 1, 2)
+
+    def get_images(self, frame_index, tactile_keys, *, as_float):
+        assert not as_float
+        return {
+            key: np.full((2, 2, 3), frame_index, dtype=np.uint8)
+            for key in tactile_keys
+        }
+
+
+class DatasetBundle:
+    dataset = SyntheticDataset()
+
+
+def create_image_dataset(repo_id, *, image_size, cache_size):
+    assert repo_id == "org/synthetic"
+    assert image_size == 2
+    assert cache_size == 256
+    return DatasetBundle()
+""",
+        encoding="utf-8",
+    )
+    driver = tmp_path / "spawn_driver.py"
+    driver.write_text(
+        """
+import json
+
+from train_pi05_frs.utils.mp_batches import MpTactileWindowLoader
+
+
+def main():
+    loader = MpTactileWindowLoader(
+        repo_id="org/synthetic",
+        image_size=2,
+        image_cache_size=8,
+        tactile_window=2,
+        history_stride=1,
+        num_workers=2,
+        prefetch_batches=1,
+        load_threads=1,
+    )
+    try:
+        batches = list(loader.iter_image_batches([[(2, 0)]]))
+    finally:
+        loader.close()
+    batch = batches[0]
+    assert batch.shape == (1, 2, 4, 2, 2, 3)
+    assert (batch[:, 0] == 1).all()
+    assert (batch[:, 1] == 2).all()
+    print(json.dumps({"shape": list(batch.shape), "dtype": str(batch.dtype)}))
+
+
+if __name__ == "__main__":
+    main()
+""",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(TRAIN_ROOT / ".venv/bin/python"), str(driver)],
+        cwd=REPO_ROOT,
+        env={
+            **os.environ,
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONPATH": ":".join(
+                (str(stub_root), str(TRAIN_ROOT / "src"), str(REPO_ROOT))
+            ),
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload == {"shape": [1, 2, 4, 2, 2, 3], "dtype": "uint8"}
+
+
 def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     readme = (TRAIN_ROOT / "README.md").read_text(encoding="utf-8")
 
@@ -949,3 +1041,6 @@ def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     assert "/home/typhon/FRS_Tact-pi05-frs-jax" not in readme
     assert "--dataset-root" not in readme
     assert "dataset repository ID recorded in the action-cache manifest" in readme
+    assert "Automated mock/CPU verification" in readme
+    assert "Real GPU/data/checkpoint verification" in readme
+    assert "has not been run" in readme

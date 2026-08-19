@@ -106,3 +106,25 @@ Then follow `deploy_pi05/README.md`; training does not start or modify a robot c
 Encoder training remains in `train_encoder`, and modality analysis remains outside this project.
 This package consumes their stable outputs only. It does not contain deployment clients, encoder
 training, SmolVLA training, or general modality-analysis workflows.
+
+## Verification status
+
+### Automated mock/CPU verification
+
+The migration verification covers shell syntax, the isolated offline lock and frozen environment,
+source hashes and project boundaries, dependency-light preflight behavior, and the complete Python
+test suite. The tests use CPU-sized decoder models and synthetic/mock data to exercise forward,
+loss, one optimizer step, checkpoint save/restore, deployment-runtime loading, real spawned tactile
+workers, exact three-stage ordering, failure-stop behavior, and cache resume/provenance contracts.
+These checks validate integration contracts; they are not evidence of a production dataset run or
+a completed GPU training job.
+
+### Real GPU/data/checkpoint verification
+
+The real three-stage GPU pipeline has not been run as part of this migration handoff. The checked-in
+configuration intentionally retains `/workspace` example paths, and those paths must be replaced
+with the deployment machine's real Pi0.5 checkpoint, LeRobot v3 datasets, tactile encoder, norm
+statistics, cache roots, and output directory. On that machine, first run the launcher with
+`--check`, confirm a GPU is visible and every asset passes preflight, then run a bounded cache/training
+smoke before starting the full job. Preserve the resulting pipeline log and checkpoint/evaluation
+metadata as the evidence for that real run.

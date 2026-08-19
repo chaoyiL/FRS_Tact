@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import hashlib
 import subprocess
+import sys
 import textwrap
 import tomllib
 from pathlib import Path
@@ -13,6 +14,53 @@ TRAIN_ROOT = ROOT / "train_pi05_frs"
 SETUP_SCRIPT = TRAIN_ROOT / "scripts" / "setup_env.sh"
 SOURCE_ROOT = Path("/home/typhon/FRS_Tact-pi05-frs-jax")
 SOURCE_MANIFEST = TRAIN_ROOT / "source_manifest.sha256"
+DESIGN_COMMIT = "9a321e6"
+TRAINING_SOURCE_MAPPINGS = {
+    f"train_pi05_frs/{relative}": f"train_pi05_frs/{relative}"
+    for relative in (
+        "__init__.py",
+        "evaluate.py",
+        "plot_history.py",
+        "tests/__init__.py",
+        "tests/test_data.py",
+        "tests/test_model.py",
+        "train.py",
+        "utils/__init__.py",
+        "utils/checkpoint.py",
+        "utils/data.py",
+        "utils/history_plot.py",
+        "utils/integration.py",
+        "utils/metrics.py",
+        "utils/model.py",
+        "utils/mp_batches.py",
+        "utils/visualize.py",
+        "utils/window_io.py",
+    )
+}
+PIPELINE_SOURCE_MAPPINGS = {
+    "configs/train_pi05_frs.yaml": "train_pi05_frs/configs/train_pi05_frs.yaml",
+    "scripts/start_frs_pi05_train.sh": (
+        "train_pi05_frs/scripts/start_frs_pi05_train.sh"
+    ),
+    "tools/precompute_tactile_embeddings.py": (
+        "train_pi05_frs/tools/precompute_tactile_embeddings.py"
+    ),
+    "tools/prepare_frs_pi05_cache.py": (
+        "train_pi05_frs/tools/prepare_frs_pi05_cache.py"
+    ),
+    "tools/train_frs.py": "train_pi05_frs/tools/train_frs.py",
+}
+PROTECTED = (
+    "pyproject.toml",
+    "uv.lock",
+    "lerobot",
+    "train_encoder",
+    "utils",
+    "deploy_pi05",
+    "train_smolvla",
+    "train_smolvla_frs",
+    "train_vtsmolvla",
+)
 APPROVED_ADAPTATIONS = {
     "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
     "utils/pi05_source_model.py": "train_pi05_frs/pi05_cache/source_model.py",
@@ -378,3 +426,203 @@ def test_approved_adaptations_have_explicit_mapping_tests() -> None:
         "test_tactile_fingerprint_requires_params_to_be_regular_file",
     ):
         assert required_behavior in test_source
+
+
+def _git_lines(repository: Path, *arguments: str) -> set[str]:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    return {line for line in result.stdout.splitlines() if line}
+
+
+def test_all_source_training_python_paths_have_explicit_target_mappings() -> None:
+    source_python = {
+        path
+        for path in _git_lines(SOURCE_ROOT, "ls-files", "train_pi05_frs")
+        if path.endswith(".py")
+    }
+
+    assert len(source_python) == 17
+    assert source_python == set(TRAINING_SOURCE_MAPPINGS)
+    assert all((ROOT / target).is_file() for target in TRAINING_SOURCE_MAPPINGS.values())
+    assert set(TRAINING_SOURCE_MAPPINGS.values()) <= _git_lines(
+        ROOT, "ls-files", "train_pi05_frs"
+    )
+
+
+def test_all_source_pipeline_entries_have_explicit_target_mappings() -> None:
+    assert all((SOURCE_ROOT / source).is_file() for source in PIPELINE_SOURCE_MAPPINGS)
+    assert all((ROOT / target).is_file() for target in PIPELINE_SOURCE_MAPPINGS.values())
+    assert set(PIPELINE_SOURCE_MAPPINGS.values()) <= _git_lines(
+        ROOT, "ls-files", "train_pi05_frs"
+    )
+
+
+def test_training_project_tracks_no_forbidden_package_or_generated_artifact() -> None:
+    tracked = _git_lines(ROOT, "ls-files", "train_pi05_frs")
+    forbidden_packages = {
+        "deploy_pi05_frs",
+        "tactile_encoder",
+        "modalities_eval",
+        "train_smolvla",
+        "train_smolvla_frs",
+        "train_vtsmolvla",
+    }
+    generated_parts = {
+        ".venv",
+        ".cache",
+        ".pytest_cache",
+        "__pycache__",
+        "action-cache",
+        "action_cache",
+        "best",
+        "cache",
+        "caches",
+        "checkpoints",
+        "last",
+        "outputs",
+        "tactile-cache",
+        "tactile_cache",
+        "tactile-embeddings",
+        "tactile_embeddings",
+    }
+    generated_suffixes = {
+        ".ckpt",
+        ".npy",
+        ".npz",
+        ".pt",
+        ".pth",
+        ".pyc",
+        ".pyo",
+        ".safetensors",
+    }
+    generated_metadata = {"checkpoint.json", "manifest.json", "metadata.json"}
+
+    def is_generated_artifact(path: str) -> bool:
+        candidate = Path(path)
+        return bool(
+            generated_parts.intersection(candidate.parts)
+            or candidate.suffix in generated_suffixes
+            or candidate.name in generated_metadata
+        )
+
+    assert not {
+        path
+        for path in tracked
+        if forbidden_packages.intersection(Path(path).parts)
+    }
+    assert not {
+        path
+        for path in tracked
+        if is_generated_artifact(path)
+    }
+    for generated_path in (
+        "train_pi05_frs/.pytest_cache/v/cache/nodeids",
+        "train_pi05_frs/action_cache/demo/manifest.json",
+        "train_pi05_frs/tactile_embeddings/demo/embeddings.npy",
+        "train_pi05_frs/run/best/checkpoint.json",
+        "train_pi05_frs/run/last/params.npz",
+        "train_pi05_frs/run/model.safetensors",
+    ):
+        assert is_generated_artifact(generated_path)
+    assert not is_generated_artifact("train_pi05_frs/pi05_cache/cache.py")
+    assert not is_generated_artifact("train_pi05_frs/utils/checkpoint.py")
+
+
+def test_protected_root_paths_have_no_branch_or_worktree_diff() -> None:
+    changed = _git_lines(ROOT, "diff", "--name-only", DESIGN_COMMIT, "--", *PROTECTED)
+
+    assert changed == set()
+
+
+def test_rejected_pi05_cache_import_does_not_pollute_sys_path() -> None:
+    script = textwrap.dedent(
+        f"""
+        import json
+        import sys
+
+        private_src = {str(TRAIN_ROOT / 'src')!r}
+        sys.path[:] = [entry for entry in sys.path if entry != private_src]
+        import lerobot
+        before = list(sys.path)
+        try:
+            import train_pi05_frs.pi05_cache
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("foreign lerobot import was not rejected")
+        if sys.path != before:
+            raise AssertionError(json.dumps({{"before": before, "after": sys.path}}))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_failed_pi05_cache_submodule_import_restores_sys_path() -> None:
+    init_path = TRAIN_ROOT / "pi05_cache" / "__init__.py"
+    script = textwrap.dedent(
+        f"""
+        import importlib.util
+        import json
+        import sys
+
+        blocked_name = "train_pi05_frs.pi05_cache_probe.prepare"
+
+        class BlockPrepare:
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == blocked_name:
+                    raise ModuleNotFoundError("injected prepare import failure", name=fullname)
+                return None
+
+        private_src = {str(TRAIN_ROOT / 'src')!r}
+        sys.path[:] = [entry for entry in sys.path if entry != private_src]
+        before = list(sys.path)
+        sys.meta_path.insert(0, BlockPrepare())
+        spec = importlib.util.spec_from_file_location(
+            "train_pi05_frs.pi05_cache_probe",
+            {str(init_path)!r},
+            submodule_search_locations=[{str(init_path.parent)!r}],
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except ModuleNotFoundError as exc:
+            if exc.name != blocked_name:
+                raise
+        else:
+            raise AssertionError("probe import unexpectedly succeeded")
+        if sys.path != before:
+            raise AssertionError(json.dumps({{"before": before, "after": sys.path}}))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": str(ROOT),
+            "PYTHONDONTWRITEBYTECODE": "1",
+        },
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 0, result.stderr

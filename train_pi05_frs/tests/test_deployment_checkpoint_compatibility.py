@@ -24,6 +24,7 @@ DEPLOY_PYTHON = Path(
         "/home/typhon/FRS_Tact/deploy_pi05/.venv/bin/python",
     )
 )
+LEGACY_NONE_SLOT = (68, "str:tactile_gru/str:cell/str:dense_h/str:bias")
 
 
 DEPLOY_LOAD_SCRIPT = r'''
@@ -111,7 +112,7 @@ def _model_digest(model: TactileConditionedFlowDecoder) -> str:
 def _rewrite_as_legacy_full_checkpoint(
     checkpoint_dir: Path,
     model: TactileConditionedFlowDecoder,
-) -> None:
+) -> list[tuple[int, str]]:
     metadata_path = checkpoint_dir / "checkpoint.json"
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     with np.load(checkpoint_dir / "params.npz", allow_pickle=False) as archive:
@@ -121,7 +122,12 @@ def _rewrite_as_legacy_full_checkpoint(
         }
 
     ordered_full = sorted(_flat_parameters(model).items(), key=lambda item: _path_name(item[0]))
-    assert any(value is None for _, value in ordered_full)
+    none_slots = [
+        (index, _path_name(path))
+        for index, (path, value) in enumerate(ordered_full)
+        if value is None
+    ]
+    assert none_slots == [LEGACY_NONE_SLOT]
     legacy_arrays = {
         f"p{index:05d}": filtered_arrays[_path_name(path)]
         for index, (path, value) in enumerate(ordered_full)
@@ -130,6 +136,7 @@ def _rewrite_as_legacy_full_checkpoint(
     np.savez(checkpoint_dir / "params.npz", **legacy_arrays)
     metadata["parameter_paths"] = [_path_name(path) for path, _ in ordered_full]
     metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+    return none_slots
 
 
 class DeploymentCheckpointCompatibilityTest(unittest.TestCase):
@@ -176,7 +183,11 @@ class DeploymentCheckpointCompatibilityTest(unittest.TestCase):
                     metrics={"val_mse": 0.125},
                 )
                 if path_format == "legacy_full":
-                    _rewrite_as_legacy_full_checkpoint(checkpoint_dir, model)
+                    none_slots = _rewrite_as_legacy_full_checkpoint(checkpoint_dir, model)
+                    with np.load(checkpoint_dir / "params.npz", allow_pickle=False) as archive:
+                        self.assertEqual(none_slots, [LEGACY_NONE_SLOT])
+                        self.assertNotIn("p00068", archive.files)
+                        self.assertIn("p00069", archive.files)
 
                 restored, metadata = load_checkpoint(checkpoint_dir)
                 self.assert_all_numeric_leaves_equal(model, restored)
