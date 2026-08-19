@@ -106,6 +106,31 @@ def test_bimanual_source_metrics_keep_a_bad_dataset_from_being_pooled_away() -> 
     assert rollups["min_dataset_gt_gain_high_w_left"] == pytest.approx(-3.0)
     assert rollups["min_dataset_rank_satisfied_high_frac_left"] == pytest.approx(0.0)
     assert rollups["worst_dataset_low_unsafe_frac_left"] == pytest.approx(0.0)
+    assert rollups["worst_dataset_repair_penalty_high_w_left"] == pytest.approx(3.0)
+    assert rollups["min_dataset_repair_satisfied_high_frac_left"] == pytest.approx(0.0)
+    assert rollups["worst_dataset_repair_penalty_high_w_right"] == pytest.approx(0.0)
+    assert rollups["min_dataset_repair_satisfied_high_frac_right"] == pytest.approx(1.0)
+
+    _, missing_high_rollups = bimanual_source_decode_metrics(
+        sample_mse_gt_left=np.asarray([0.0, 0.0, 4.0, 0.0]),
+        sample_mse_gt_right=np.asarray([0.0, 0.0, 0.0, 0.0]),
+        sample_mse_vla_left=np.asarray([1.0, 0.0, 1.0, 0.0]),
+        sample_mse_vla_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        sample_mse_vla_gt_left=np.ones((4,)),
+        sample_mse_vla_gt_right=np.ones((4,)),
+        sample_gate_w_left=np.asarray([1.0, 0.0, 0.0, 0.0]),
+        sample_gate_w_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        source_indices=np.asarray([0, 0, 1, 1]),
+        num_sources=2,
+        low_w_threshold=0.3,
+        high_w_threshold=0.7,
+        ranking_margin=0.0,
+        repair_margin=0.0,
+        low_safety_margin=0.0,
+    )
+    assert np.isnan(missing_high_rollups["worst_dataset_repair_penalty_high_w_left"])
+    assert np.isnan(missing_high_rollups["min_dataset_repair_satisfied_high_frac_left"])
+    assert missing_high_rollups["worst_dataset_repair_penalty_high_w_right"] == pytest.approx(0.0)
 
 
 @pytest.mark.parametrize(

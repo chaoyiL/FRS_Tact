@@ -699,6 +699,8 @@ def train_decoder(
         "worst_dataset_rank_violation_high_w",
         "worst_dataset_rank_gap_high_w",
         "min_dataset_rank_satisfied_high_frac",
+        "worst_dataset_repair_penalty_high_w",
+        "min_dataset_repair_satisfied_high_frac",
     )
     for wrist in ("left", "right"):
         history_fields.extend(

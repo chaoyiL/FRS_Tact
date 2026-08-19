@@ -314,6 +314,8 @@ def bimanual_source_decode_metrics(
         high_rank_hinges: list[float] = []
         high_rank_gaps: list[float] = []
         high_rank_satisfied: list[float] = []
+        high_repair_penalties: list[float] = []
+        high_repair_satisfied: list[float] = []
         missing_low = False
         missing_high = False
         for source_index in range(num_sources):
@@ -363,6 +365,10 @@ def bimanual_source_decode_metrics(
                 high_rank_hinges.append(float(stratified["rank_penalty_high_w"]))
                 high_rank_gaps.append(rank_gap)
                 high_rank_satisfied.append(float(stratified["rank_satisfied_high_frac"]))
+                high_repair_penalties.append(float(stratified["repair_penalty_high_w"]))
+                high_repair_satisfied.append(
+                    float(stratified["repair_satisfied_high_frac"])
+                )
             else:
                 missing_high = True
         rollups[f"worst_dataset_low_safety_penalty_{wrist}"] = (
@@ -382,6 +388,12 @@ def bimanual_source_decode_metrics(
         )
         rollups[f"min_dataset_rank_satisfied_high_frac_{wrist}"] = (
             float("nan") if missing_high else min(high_rank_satisfied)
+        )
+        rollups[f"worst_dataset_repair_penalty_high_w_{wrist}"] = (
+            float("nan") if missing_high else max(high_repair_penalties)
+        )
+        rollups[f"min_dataset_repair_satisfied_high_frac_{wrist}"] = (
+            float("nan") if missing_high else min(high_repair_satisfied)
         )
     return per_source, rollups
 
