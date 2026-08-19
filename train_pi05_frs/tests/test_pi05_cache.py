@@ -670,6 +670,25 @@ def test_prepare_cache_rejects_every_output_provenance_mismatch_before_skip_or_r
         prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("status", ["complete", "incomplete"])
+@pytest.mark.parametrize("array_name", sorted(cache.ARRAY_FILENAMES))
+def test_prepare_cache_rejects_every_cache_array_shape_before_skip_or_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    array_name: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status=status)
+    cache_dir = Path(kwargs["cache_dir"])
+    filename = cache.ARRAY_FILENAMES[array_name]
+    with (cache_dir / filename).open("wb") as file:
+        np.save(file, np.zeros((1,), dtype=np.float32), allow_pickle=False)
+    cache.atomic_write_json(cache_dir / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=rf"arrays\.{array_name}\.shape"):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
+
+
 def test_cache_arrays_preserve_names_and_dtypes(tmp_path: Path) -> None:
     records = [
         cache.SampleRecord(3, 0, "train"),

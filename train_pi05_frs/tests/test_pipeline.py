@@ -49,6 +49,11 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
                 "total_episodes": 1,
                 "total_frames": 2,
                 "total_tasks": 1,
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+                "video_path": (
+                    "videos/{video_key}/chunk-{chunk_index:03d}/"
+                    "file-{file_index:03d}.mp4"
+                ),
                 "features": {
                     "actions": {"dtype": "float32", "shape": [2]},
                     "observation.state": {"dtype": "float32", "shape": [3]},
@@ -93,16 +98,49 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
     )
     episodes = dataset / "meta" / "episodes" / "chunk-000"
     episodes.mkdir(parents=True)
+    visual_keys = [
+        "observation.images.camera0",
+        "observation.images.camera1",
+        "observation.images.tactile_left_0",
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_1",
+        "observation.images.tactile_right_1",
+    ]
+    episode_columns: dict[str, list[int]] = {
+        "episode_index": [0],
+        "dataset_from_index": [0],
+        "dataset_to_index": [2],
+        "data/chunk_index": [0],
+        "data/file_index": [0],
+    }
+    for visual_key in visual_keys:
+        episode_columns[f"videos/{visual_key}/chunk_index"] = [0]
+        episode_columns[f"videos/{visual_key}/file_index"] = [0]
+    pq.write_table(pa.table(episode_columns), episodes / "file-000.parquet")
+    data_file = dataset / "data" / "chunk-000" / "file-000.parquet"
+    data_file.parent.mkdir(parents=True)
     pq.write_table(
         pa.table(
             {
-                "episode_index": [0],
-                "dataset_from_index": [0],
-                "dataset_to_index": [2],
+                "episode_index": [0, 0],
+                "frame_index": [0, 1],
+                "timestamp": [0.0, 1.0 / 30.0],
+                "observation.state": [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
+                "actions": [[0.0, 0.0], [0.1, 0.1]],
             }
         ),
-        episodes / "file-000.parquet",
+        data_file,
     )
+    for visual_key in visual_keys:
+        video_file = (
+            dataset
+            / "videos"
+            / visual_key
+            / "chunk-000"
+            / "file-000.mp4"
+        )
+        video_file.parent.mkdir(parents=True)
+        video_file.write_bytes(b"synthetic-video-asset")
     norm_stats = tmp_path / "norm-stats" / "robot"
     norm_stats.mkdir(parents=True)
     (norm_stats / "norm_stats.json").write_text(
@@ -441,6 +479,41 @@ def test_schema_rejects_symlink_alias_of_protected_source_tree(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
+    ("section", "key", "protected"),
+    [
+        ("frs_training", "output", REPO_ROOT / ".venv" / "frs-output"),
+        ("action_cache", "root", TRAIN_ROOT / ".venv" / "frs-cache"),
+        ("tactile_embedding_cache", "root", TRAIN_ROOT / "new_module.py"),
+    ],
+)
+def test_schema_rejects_repository_descendants_and_all_environment_trees(
+    tmp_path: Path, section: str, key: str, protected: Path
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config[section][key] = str(protected)
+
+    with pytest.raises(ValueError, match="protected"):
+        validate_config(config, check_paths=False)
+
+
+def test_schema_allows_only_designated_generated_roots_inside_standalone_project(
+    tmp_path: Path,
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["action_cache"]["root"] = str(TRAIN_ROOT / ".cache" / "action")
+    config["tactile_embedding_cache"]["root"] = str(
+        TRAIN_ROOT / ".cache" / "tactile"
+    )
+    config["frs_training"]["output"] = str(TRAIN_ROOT / "outputs" / "review")
+
+    validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
     ("left", "right"),
     [
         ("action_cache", "tactile_embedding_cache"),
@@ -670,6 +743,54 @@ def test_path_preflight_requires_complete_lerobot_v3_metadata(
     target.unlink()
 
     with pytest.raises((FileNotFoundError, ValueError), match=missing):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize("missing", ["data", "video"])
+def test_path_preflight_requires_referenced_lerobot_data_and_video_assets(
+    tmp_path: Path, missing: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    dataset = Path(config["datasets"][0]["root"])
+    target = {
+        "data": dataset / "data/chunk-000/file-000.parquet",
+        "video": (
+            dataset
+            / "videos/observation.images.camera0/chunk-000/file-000.mp4"
+        ),
+    }[missing]
+    target.unlink()
+
+    with pytest.raises((FileNotFoundError, ValueError), match=missing):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    "missing_column",
+    [
+        "data/chunk_index",
+        "data/file_index",
+        "videos/observation.images.camera0/chunk_index",
+        "videos/observation.images.camera0/file_index",
+    ],
+)
+def test_path_preflight_requires_episode_asset_location_fields(
+    tmp_path: Path, missing_column: str
+) -> None:
+    import pyarrow.parquet as pq
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    episodes_path = (
+        Path(config["datasets"][0]["root"])
+        / "meta/episodes/chunk-000/file-000.parquet"
+    )
+    table = pq.read_table(episodes_path).drop([missing_column])
+    pq.write_table(table, episodes_path)
+
+    with pytest.raises(ValueError, match=re.escape(missing_column)):
         validate_config(config, check_paths=True)
 
 
@@ -1276,3 +1397,9 @@ def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     assert "Real GPU/data/checkpoint verification" in readme
     assert "has not been run" in readme
     assert "dereference" in readme and ".checkpoint-generations" in readme
+    assert "data parquet" in readme and "video assets" in readme
+    assert "never point" in readme and "mutable" in readme and "deployment" in readme
+    assert (
+        "--checkpoint-dir /workspace/frs_pick_tube_pi05/"
+        "run_gated_v7_state_01/.checkpoint-generations/<generation>"
+    ) in readme

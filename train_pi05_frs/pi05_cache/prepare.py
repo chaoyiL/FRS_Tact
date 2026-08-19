@@ -261,6 +261,9 @@ def _cache_array_shape_mismatches(
             mismatches.append(f"arrays.{key}.shape")
     if tuple(arrays["state"].shape) != (sample_count, state_dim):
         mismatches.append("arrays.state.shape")
+    for key in ("dataset_index", "episode_index", "split", "inversion_mse"):
+        if tuple(arrays[key].shape) != (sample_count,):
+            mismatches.append(f"arrays.{key}.shape")
     return mismatches
 
 

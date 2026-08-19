@@ -194,9 +194,10 @@ class DeploymentCheckpointCompatibilityTest(unittest.TestCase):
 
                 restored, metadata = load_checkpoint(checkpoint_dir)
                 self.assert_all_numeric_leaves_equal(model, restored)
+                deployment_snapshot = checkpoint_dir.resolve(strict=True)
 
                 result = subprocess.run(
-                    [str(DEPLOY_PYTHON), "-c", DEPLOY_LOAD_SCRIPT, str(checkpoint_dir)],
+                    [str(DEPLOY_PYTHON), "-c", DEPLOY_LOAD_SCRIPT, str(deployment_snapshot)],
                     cwd=REPO_ROOT,
                     env={
                         **os.environ,
@@ -212,6 +213,34 @@ class DeploymentCheckpointCompatibilityTest(unittest.TestCase):
                 self.assertEqual(payload["digest"], _model_digest(model))
                 self.assertEqual(payload["parameter_paths"], metadata["parameter_paths"])
                 self.assertTrue(payload["finite"])
+
+    def test_deployment_uses_a_pinned_generation_while_mutable_alias_advances(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = Path(directory) / "output" / "best"
+            model_a = self.make_model()
+            save_checkpoint(checkpoint_dir, model_a, epoch=1, metrics={})
+            pinned_a = checkpoint_dir.resolve(strict=True)
+            model_b = TactileConditionedFlowDecoder(
+                model_a.config, rngs=nnx.Rngs(918)
+            )
+            save_checkpoint(checkpoint_dir, model_b, epoch=2, metrics={})
+            self.assertNotEqual(pinned_a, checkpoint_dir.resolve(strict=True))
+
+            result = subprocess.run(
+                [str(DEPLOY_PYTHON), "-c", DEPLOY_LOAD_SCRIPT, str(pinned_a)],
+                cwd=REPO_ROOT,
+                env={
+                    **os.environ,
+                    "JAX_PLATFORMS": "cpu",
+                    "PYTHONDONTWRITEBYTECODE": "1",
+                    "PYTHONPATH": f"{REPO_ROOT / 'deploy_pi05/src'}:{REPO_ROOT}",
+                },
+                check=True,
+                text=True,
+                capture_output=True,
+            )
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(payload["digest"], _model_digest(model_a))
 
 
 if __name__ == "__main__":

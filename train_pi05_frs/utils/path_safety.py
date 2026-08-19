@@ -11,11 +11,10 @@ REPO_ROOT = TRAIN_ROOT.parent
 
 _EXACT_PROTECTED = (
     Path("/"),
-    REPO_ROOT,
-    TRAIN_ROOT,
     REPO_ROOT / "pyproject.toml",
     REPO_ROOT / "uv.lock",
 )
+_ALLOWED_TRAIN_GENERATED = (TRAIN_ROOT / ".cache", TRAIN_ROOT / "outputs")
 _PROTECTED_SUBTREES = tuple(
     REPO_ROOT / name
     for name in (
@@ -66,9 +65,22 @@ def validate_output_roots(roots: Mapping[str, str | Path]) -> dict[str, Path]:
     }
     exact_protected = tuple(path.resolve(strict=False) for path in _EXACT_PROTECTED)
     protected_subtrees = tuple(path.resolve(strict=False) for path in _PROTECTED_SUBTREES)
+    allowed_train_generated = tuple(
+        path.resolve(strict=False) for path in _ALLOWED_TRAIN_GENERATED
+    )
     for label, path in resolved.items():
-        if path in exact_protected or any(
-            _is_same_or_descendant(path, protected) for protected in protected_subtrees
+        inside_allowed_train_generated = any(
+            _is_same_or_descendant(path, generated)
+            for generated in allowed_train_generated
+        )
+        inside_repository = _is_same_or_descendant(path, REPO_ROOT)
+        if (
+            path in exact_protected
+            or (inside_repository and not inside_allowed_train_generated)
+            or any(
+                _is_same_or_descendant(path, protected)
+                for protected in protected_subtrees
+            )
         ):
             raise ValueError(f"{label} targets a protected repository/source path: {path}")
 

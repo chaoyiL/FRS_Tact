@@ -226,8 +226,9 @@ def _validated_v3_metadata(
     expected_generation: str | None = None,
 ) -> None:
     generation = metadata.get("generation")
-    expected_generation = expected_generation or snapshot.name
-    if not isinstance(generation, str) or generation != expected_generation:
+    if not isinstance(generation, str) or not generation:
+        raise ValueError("checkpoint v3 metadata has no generation")
+    if expected_generation is not None and generation != expected_generation:
         raise ValueError(
             "checkpoint generation mismatch: "
             f"metadata={generation!r}, directory={expected_generation!r}"

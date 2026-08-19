@@ -417,6 +417,33 @@ def _feature_width(features: Mapping[str, Any], key: str, *, label: str) -> int:
     return int(shape[0])
 
 
+def _dataset_asset_path(
+    dataset_root: Path,
+    template: str,
+    *,
+    label: str,
+    format_values: Mapping[str, Any],
+) -> Path:
+    try:
+        relative = Path(template.format(**format_values))
+    except (KeyError, ValueError) as error:
+        raise ValueError(f"dataset {label} path template is invalid: {error}") from error
+    if relative.is_absolute():
+        raise ValueError(f"dataset {label} path must be relative: {relative}")
+    resolved = (dataset_root / relative).resolve(strict=False)
+    try:
+        resolved.relative_to(dataset_root.resolve())
+    except ValueError as error:
+        raise ValueError(f"dataset {label} path escapes its root: {relative}") from error
+    return resolved
+
+
+def _nonnegative_index(value: object, *, label: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{label} must be a non-negative integer")
+    return value
+
+
 def _validate_dataset_metadata(
     dataset_root: Path,
     *,
@@ -429,10 +456,13 @@ def _validate_dataset_metadata(
     info = _json_mapping(meta / "info.json", f"dataset {index} metadata")
     if info.get("codebase_version") != "v3.0":
         raise ValueError(f"dataset must be LeRobot v3.0: {dataset_root}")
-    for field in ("fps", "total_episodes", "total_frames", "total_tasks"):
+    fps = info.get("fps")
+    if isinstance(fps, bool) or not isinstance(fps, (int, float)) or fps <= 0:
+        raise ValueError(f"dataset info fps must be positive: {dataset_root}")
+    for field in ("total_episodes", "total_frames", "total_tasks"):
         value = info.get(field)
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
-            raise ValueError(f"dataset info {field} must be positive: {dataset_root}")
+        if type(value) is not int or value <= 0:
+            raise ValueError(f"dataset info {field} must be a positive integer: {dataset_root}")
     features = info.get("features")
     if not isinstance(features, Mapping):
         raise ValueError(f"dataset features must be a mapping: {dataset_root}")
@@ -440,6 +470,11 @@ def _validate_dataset_metadata(
         str(key)
         for key, feature in features.items()
         if isinstance(feature, Mapping) and feature.get("dtype") in ("image", "video")
+    }
+    video_keys = {
+        str(key)
+        for key, feature in features.items()
+        if isinstance(feature, Mapping) and feature.get("dtype") == "video"
     }
     rename_map = source.get("rename_map", {})
     post_rename_visual_keys = {str(rename_map.get(key, key)) for key in visual_keys}
@@ -491,22 +526,147 @@ def _validate_dataset_metadata(
         import pyarrow.parquet as pq
 
         tasks_file = pq.ParquetFile(tasks_path)
-        if not {"task", "task_index"}.issubset(tasks_file.schema.names):
+        if not {"task", "task_index"}.issubset(tasks_file.schema_arrow.names):
             raise ValueError("tasks schema must contain task and task_index")
         if tasks_file.metadata.num_rows != int(info["total_tasks"]):
             raise ValueError("tasks row count does not match info.total_tasks")
-        episode_rows = 0
+        episode_columns: dict[str, list[Any]] = {}
         for episode_path in episode_paths:
             episode_file = pq.ParquetFile(episode_path)
-            required = {"episode_index", "dataset_from_index", "dataset_to_index"}
-            if not required.issubset(episode_file.schema.names):
-                raise ValueError(
-                    "episodes schema must contain episode_index, dataset_from_index, "
-                    "and dataset_to_index"
+            required = {
+                "episode_index",
+                "dataset_from_index",
+                "dataset_to_index",
+                "data/chunk_index",
+                "data/file_index",
+            }
+            for video_key in video_keys:
+                required.update(
+                    (
+                        f"videos/{video_key}/chunk_index",
+                        f"videos/{video_key}/file_index",
+                    )
                 )
-            episode_rows += episode_file.metadata.num_rows
-        if episode_rows != int(info["total_episodes"]):
+            if not required.issubset(episode_file.schema_arrow.names):
+                missing = sorted(required - set(episode_file.schema_arrow.names))
+                raise ValueError(
+                    f"episodes schema is missing asset location fields: {missing}"
+                )
+            table = episode_file.read(columns=sorted(required))
+            for name in required:
+                episode_columns.setdefault(name, []).extend(table[name].to_pylist())
+        episode_rows = len(episode_columns["episode_index"])
+        if episode_rows != info["total_episodes"]:
             raise ValueError("episodes row count does not match info.total_episodes")
+
+        episode_indices = [
+            _nonnegative_index(value, label="episode_index")
+            for value in episode_columns["episode_index"]
+        ]
+        if episode_indices != list(range(info["total_episodes"])):
+            raise ValueError("episode_index values must be contiguous from zero")
+        expected_start = 0
+        data_references: set[tuple[int, int]] = set()
+        video_references: set[tuple[str, int, int]] = set()
+        for row in range(episode_rows):
+            start = _nonnegative_index(
+                episode_columns["dataset_from_index"][row],
+                label="dataset_from_index",
+            )
+            stop = _nonnegative_index(
+                episode_columns["dataset_to_index"][row],
+                label="dataset_to_index",
+            )
+            if start != expected_start or stop <= start:
+                raise ValueError(
+                    "episode dataset_from_index/dataset_to_index ranges must be "
+                    "contiguous and non-empty"
+                )
+            expected_start = stop
+            data_references.add(
+                (
+                    _nonnegative_index(
+                        episode_columns["data/chunk_index"][row],
+                        label="data/chunk_index",
+                    ),
+                    _nonnegative_index(
+                        episode_columns["data/file_index"][row],
+                        label="data/file_index",
+                    ),
+                )
+            )
+            for video_key in video_keys:
+                video_references.add(
+                    (
+                        video_key,
+                        _nonnegative_index(
+                            episode_columns[f"videos/{video_key}/chunk_index"][row],
+                            label=f"videos/{video_key}/chunk_index",
+                        ),
+                        _nonnegative_index(
+                            episode_columns[f"videos/{video_key}/file_index"][row],
+                            label=f"videos/{video_key}/file_index",
+                        ),
+                    )
+                )
+        if expected_start != info["total_frames"]:
+            raise ValueError("episode frame ranges do not match info.total_frames")
+
+        data_template = info.get(
+            "data_path", "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+        )
+        if not isinstance(data_template, str) or not data_template:
+            raise ValueError("dataset info data_path must be a non-empty string")
+        data_rows = 0
+        required_data_columns = {
+            "episode_index",
+            "frame_index",
+            "timestamp",
+            "observation.state",
+            action_key,
+        }
+        for chunk_index, file_index in sorted(data_references):
+            data_path = _dataset_asset_path(
+                dataset_root,
+                data_template,
+                label="data parquet",
+                format_values={
+                    "chunk_index": chunk_index,
+                    "file_index": file_index,
+                },
+            )
+            if not data_path.is_file():
+                raise FileNotFoundError(f"dataset data parquet is missing: {data_path}")
+            data_file = pq.ParquetFile(data_path)
+            missing_columns = required_data_columns - set(data_file.schema_arrow.names)
+            if missing_columns:
+                raise ValueError(
+                    f"dataset data parquet is missing columns: {sorted(missing_columns)}"
+                )
+            data_rows += data_file.metadata.num_rows
+        if data_rows != info["total_frames"]:
+            raise ValueError("data parquet row count does not match info.total_frames")
+
+        if video_keys:
+            video_template = info.get(
+                "video_path",
+                "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
+            )
+            if not isinstance(video_template, str) or not video_template:
+                raise ValueError("dataset info video_path must be a non-empty string")
+            for video_key, chunk_index, file_index in sorted(video_references):
+                video_path = _dataset_asset_path(
+                    dataset_root,
+                    video_template,
+                    label=f"video assets {video_key}",
+                    format_values={
+                        "video_key": video_key,
+                        "chunk_index": chunk_index,
+                        "file_index": file_index,
+                    },
+                )
+                if not video_path.is_file() or video_path.stat().st_size == 0:
+                    raise FileNotFoundError(f"dataset video asset is missing: {video_path}")
     except (OSError, ValueError) as error:
         raise ValueError(f"invalid dataset tasks/episodes metadata: {error}") from error
     return widths

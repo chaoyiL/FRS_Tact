@@ -42,7 +42,8 @@ paths are resolved from the repository root. URL values such as `gs://...` remai
 never converted through `Path`.
 
 - `checkpoint`: Pi0.5 checkpoint URL or a local directory containing `params/`.
-- `datasets[].root`: a LeRobot v3 dataset containing `meta/info.json`; `repo_id`, `action_key`, and
+- `datasets[].root`: a complete LeRobot v3 dataset containing info/tasks/stats/episodes metadata,
+  every referenced data parquet, and all referenced video assets; `repo_id`, `action_key`, and
   `rename_map` describe its identity and source columns.
 - `action_cache.root`: parent of one sanitized `repo_id` subdirectory per dataset.
 - `tactile_embedding_cache.root`: parent of per-dataset, per-frame frozen ResNet embeddings.
@@ -69,6 +70,10 @@ Each save first writes and verifies an immutable generation under
 `<output>/.checkpoint-generations/`, then atomically switches the `last` or `best` symlink. Tools
 may consume those aliases directly. When copying a checkpoint outside its output directory,
 dereference the symlink so the canonical metadata, parameters, and optimizer files travel together.
+Because the protected deployment loader opens metadata and parameters separately, never point
+deployment at the mutable `last` or `best` alias while training can update it. Resolve the alias to
+its immutable `.checkpoint-generations/<generation>` directory (or use a dereferenced copy) and put
+that pinned path in the deployment configuration.
 
 ## Manual stages and evaluation
 
@@ -97,7 +102,7 @@ loader does not accept a local dataset-root override.
   --cache-dir /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3/KaiyueChen/pick_tube_05 \
   --dataset-repo-id KaiyueChen/pick_tube_05 \
   --tactile-encoder-dir /workspace/checkpoints/encoder_ckpt_0809 \
-  --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/best \
+  --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/.checkpoint-generations/<generation> \
   --output-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/evaluation
 ```
 

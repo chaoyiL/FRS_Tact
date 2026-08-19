@@ -522,6 +522,19 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             _, restored_metadata = load_checkpoint(legacy)
             self.assertEqual(restored_metadata["version"], 2)
 
+    def test_v3_snapshot_can_be_dereferenced_into_a_named_handoff_directory(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory) / "output" / "best"
+            save_checkpoint(checkpoint_dir, model, epoch=3, metrics={})
+            handoff = pathlib.Path(directory) / "chosen-checkpoint"
+            shutil.copytree(checkpoint_dir.resolve(strict=True), handoff)
+
+            restored, metadata = load_checkpoint(handoff)
+
+            self.assertEqual(metadata["epoch"], 3)
+            self.assertEqual(restored.config, model.config)
+
     def test_save_atomically_upgrades_an_existing_legacy_directory(self):
         model = self.make_model()
         with tempfile.TemporaryDirectory() as directory:
