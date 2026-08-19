@@ -491,14 +491,23 @@ def _validate_dataset_metadata(
         if not isinstance(feature, Mapping):
             raise ValueError(f"dataset default feature {key!r} is missing")
         shape = feature.get("shape")
-        actual = {
-            "dtype": feature.get("dtype"),
-            "shape": tuple(shape) if isinstance(shape, (list, tuple)) else shape,
-            "names": feature.get("names"),
-        }
-        if actual != expected:
+        if (
+            type(feature.get("dtype")) is not str
+            or feature["dtype"] != expected["dtype"]
+        ):
             raise ValueError(
-                f"dataset default feature {key!r} is invalid: {actual} != {expected}"
+                f"dataset default feature {key!r} dtype must be {expected['dtype']!r}"
+            )
+        if (
+            not isinstance(shape, (list, tuple))
+            or len(shape) != 1
+            or type(shape[0]) is not int
+            or shape[0] != 1
+        ):
+            raise ValueError(f"dataset default feature {key!r} shape must be [1]")
+        if "names" not in feature or feature["names"] is not None:
+            raise ValueError(
+                f"dataset default feature {key!r} names must be explicitly null"
             )
     visual_keys = {
         str(key)

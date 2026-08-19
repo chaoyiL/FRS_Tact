@@ -872,6 +872,8 @@ def test_path_preflight_requires_lerobot_v3_default_feature_declarations(
     [
         ("timestamp", "dtype", "float64"),
         ("frame_index", "shape", [2]),
+        ("episode_index", "shape", [True]),
+        ("task_index", "shape", [1.0]),
         ("index", "names", ["unexpected"]),
     ],
 )
@@ -887,6 +889,19 @@ def test_path_preflight_requires_exact_lerobot_v3_default_feature_specs(
     info_path.write_text(json.dumps(info), encoding="utf-8")
 
     with pytest.raises(ValueError, match=feature_name):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_requires_default_feature_names_field(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    info_path = Path(config["datasets"][0]["root"]) / "meta/info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    del info["features"]["timestamp"]["names"]
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="timestamp.*names"):
         validate_config(config, check_paths=True)
 
 
