@@ -63,6 +63,7 @@ PROTECTED = (
 )
 APPROVED_ADAPTATIONS = {
     "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
+    "utils/cache.py": "train_pi05_frs/pi05_cache/cache.py",
     "utils/pi05_source_model.py": "train_pi05_frs/pi05_cache/source_model.py",
     "utils/integration.py": "train_pi05_frs/pi05_cache/source_model.py",
     "utils/flow_matching.py": "train_pi05_frs/pi05_cache/source_model.py",
@@ -466,6 +467,7 @@ def test_approved_adaptations_have_explicit_mapping_tests() -> None:
         "test_inversion_mse_matches_per_sample_squared_error",
         "test_reverse_solvers_preserve_shape_and_finiteness",
         "test_prepare_cache_records_provenance_resumes_and_skips_completed_cache",
+        "test_load_manifest_rejects_inconsistent_progress",
         "test_tactile_fingerprint_metadata_and_reader_support_both_checkpoint_formats",
         "test_tactile_fingerprint_rejects_missing_params_file",
         "test_tactile_fingerprint_rejects_invalid_params_file",

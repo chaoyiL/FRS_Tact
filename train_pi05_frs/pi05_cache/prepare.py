@@ -42,6 +42,7 @@ from train_pi05_frs.pi05_cache.cache import flush_arrays
 from train_pi05_frs.pi05_cache.cache import load_manifest
 from train_pi05_frs.pi05_cache.cache import open_cache_arrays
 from train_pi05_frs.pi05_cache.cache import records_digest
+from train_pi05_frs.pi05_cache.cache import validate_manifest_progress
 from train_pi05_frs.pi05_cache.source_model import deterministic_noise, inversion_mse, sample_and_reverse
 
 
@@ -404,6 +405,9 @@ def prepare_cache(
                 f"Mismatched fields: {', '.join(mismatches)}. "
                 "Choose a new cache directory instead of mixing runs."
             )
+        status, completed, _ = validate_manifest_progress(
+            manifest, expected_sample_count=len(records)
+        )
         arrays = open_cache_arrays(cache_dir, mode="r+")
         shape_mismatches = _cache_array_shape_mismatches(
             arrays,
@@ -417,10 +421,9 @@ def prepare_cache(
                 f"Existing cache at {cache_dir} has incompatible arrays. "
                 f"Mismatched fields: {', '.join(shape_mismatches)}."
             )
-        if manifest.get("status") == "complete":
+        if status == "complete":
             print(f"cache already complete: {cache_dir}")
             return cache_dir
-        completed = int(manifest.get("completed_samples", 0))
         print(f"resuming cache at sample {completed}/{len(records)}")
     else:
         cache_dir.mkdir(parents=True, exist_ok=True)

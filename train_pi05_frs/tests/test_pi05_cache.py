@@ -689,6 +689,75 @@ def test_prepare_cache_rejects_every_cache_array_shape_before_skip_or_resume(
         prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("status", "completed_samples", "sample_count", "diagnostic"),
+    [
+        ("unknown", 1, 2, "status"),
+        ("complete", 1, 2, "completed_samples"),
+        ("incomplete", 2, 2, "completed_samples"),
+        ("incomplete", -1, 2, "completed_samples"),
+        ("incomplete", 3, 2, "completed_samples"),
+        ("incomplete", 1.0, 2, "completed_samples"),
+        ("complete", 2, 3, "sample_count"),
+        ("complete", 2, True, "sample_count"),
+    ],
+)
+def test_prepare_cache_rejects_inconsistent_progress_before_skip_or_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    completed_samples: object,
+    sample_count: object,
+    diagnostic: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status="complete")
+    manifest.update(
+        {
+            "status": status,
+            "completed_samples": completed_samples,
+            "sample_count": sample_count,
+        }
+    )
+    cache.atomic_write_json(Path(kwargs["cache_dir"]) / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=diagnostic):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("status", "completed_samples", "sample_count", "diagnostic"),
+    [
+        ("unknown", 1, 2, "status"),
+        ("complete", 1, 2, "completed_samples"),
+        ("incomplete", 2, 2, "completed_samples"),
+        ("incomplete", -1, 2, "completed_samples"),
+        ("incomplete", 3, 2, "completed_samples"),
+        ("incomplete", 1.0, 2, "completed_samples"),
+        ("complete", 2, -1, "sample_count"),
+        ("complete", 2, True, "sample_count"),
+    ],
+)
+def test_load_manifest_rejects_inconsistent_progress(
+    tmp_path: Path,
+    status: str,
+    completed_samples: object,
+    sample_count: object,
+    diagnostic: str,
+) -> None:
+    cache.atomic_write_json(
+        tmp_path / cache.MANIFEST_NAME,
+        {
+            "version": cache.CACHE_VERSION,
+            "status": status,
+            "completed_samples": completed_samples,
+            "sample_count": sample_count,
+        },
+    )
+
+    with pytest.raises(ValueError, match=diagnostic):
+        cache.load_manifest(tmp_path, require_complete=False)
+
+
 def test_cache_arrays_preserve_names_and_dtypes(tmp_path: Path) -> None:
     records = [
         cache.SampleRecord(3, 0, "train"),

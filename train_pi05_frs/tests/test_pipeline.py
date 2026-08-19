@@ -55,6 +55,11 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
                     "file-{file_index:03d}.mp4"
                 ),
                 "features": {
+                    "timestamp": {"dtype": "float32", "shape": [1], "names": None},
+                    "frame_index": {"dtype": "int64", "shape": [1], "names": None},
+                    "episode_index": {"dtype": "int64", "shape": [1], "names": None},
+                    "index": {"dtype": "int64", "shape": [1], "names": None},
+                    "task_index": {"dtype": "int64", "shape": [1], "names": None},
                     "actions": {"dtype": "float32", "shape": [2]},
                     "observation.state": {"dtype": "float32", "shape": [3]},
                     "observation.images.camera0": {"dtype": "video", "shape": [3, 224, 224]},
@@ -126,6 +131,7 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
             {
                 "episode_index": [0, 0],
                 "frame_index": [0, 1],
+                "index": [0, 1],
                 "timestamp": [0.0, 1.0 / 30.0],
                 "task_index": [0, 0],
                 "observation.state": [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
@@ -826,17 +832,95 @@ def test_path_preflight_requires_episode_asset_location_fields(
         validate_config(config, check_paths=True)
 
 
-def test_path_preflight_requires_task_index_in_data_parquet(tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing_column", ["index", "task_index"])
+def test_path_preflight_requires_default_index_columns_in_data_parquet(
+    tmp_path: Path, missing_column: str
+) -> None:
     import pyarrow.parquet as pq
     from train_pi05_frs.tools.train_frs import validate_config
 
     config = _valid_config(tmp_path)
     data_path = Path(config["datasets"][0]["root"]) / "data/chunk-000/file-000.parquet"
-    table = pq.read_table(data_path).drop(["task_index"])
+    table = pq.read_table(data_path).drop([missing_column])
     pq.write_table(table, data_path)
 
-    with pytest.raises(ValueError, match="task_index"):
+    with pytest.raises(ValueError, match=missing_column):
         validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    "missing_feature",
+    ["timestamp", "frame_index", "episode_index", "index", "task_index"],
+)
+def test_path_preflight_requires_lerobot_v3_default_feature_declarations(
+    tmp_path: Path, missing_feature: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    info_path = Path(config["datasets"][0]["root"]) / "meta/info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    del info["features"][missing_feature]
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=missing_feature):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    ("feature_name", "field", "bad_value"),
+    [
+        ("timestamp", "dtype", "float64"),
+        ("frame_index", "shape", [2]),
+        ("index", "names", ["unexpected"]),
+    ],
+)
+def test_path_preflight_requires_exact_lerobot_v3_default_feature_specs(
+    tmp_path: Path, feature_name: str, field: str, bad_value: object
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    info_path = Path(config["datasets"][0]["root"]) / "meta/info.json"
+    info = json.loads(info_path.read_text(encoding="utf-8"))
+    info["features"][feature_name][field] = bad_value
+    info_path.write_text(json.dumps(info), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=feature_name):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_fixture_loads_through_real_lerobot_v3_reader_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf-datasets-cache"))
+    import datasets
+    from lerobot.datasets.feature_utils import get_hf_features_from_features
+    from lerobot.datasets.io_utils import load_nested_dataset
+    from lerobot.datasets.utils import DatasetInfo
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    monkeypatch.setattr(
+        datasets.config, "HF_DATASETS_CACHE", str(tmp_path / "hf-datasets-cache")
+    )
+
+    config = _valid_config(tmp_path)
+    validate_config(config, check_paths=True)
+    dataset_root = Path(config["datasets"][0]["root"])
+    info = json.loads((dataset_root / "meta/info.json").read_text(encoding="utf-8"))
+    dataset_info = DatasetInfo.from_dict(info)
+
+    loaded = load_nested_dataset(
+        dataset_root / "data",
+        features=get_hf_features_from_features(dataset_info.features),
+    )
+
+    assert len(loaded) == info["total_frames"]
+    assert set(loaded.column_names) == {
+        key
+        for key, feature in dataset_info.features.items()
+        if feature["dtype"] != "video"
+    }
 
 
 def test_path_preflight_requires_image_backed_feature_column(tmp_path: Path) -> None:

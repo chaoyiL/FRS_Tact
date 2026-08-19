@@ -5,7 +5,7 @@ import hashlib
 import json
 import os
 import pathlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any, Literal
 
 import numpy as np
@@ -382,12 +382,45 @@ def load_manifest(cache_dir: pathlib.Path, *, require_complete: bool = True) -> 
         manifest = json.load(file)
     if manifest.get("version") != CACHE_VERSION:
         raise ValueError(f"Unsupported cache version {manifest.get('version')}; expected {CACHE_VERSION}.")
-    if require_complete and manifest.get("status") != "complete":
+    status, _, _ = validate_manifest_progress(manifest)
+    if require_complete and status != "complete":
         raise ValueError(
             f"Cache is not complete ({manifest.get('completed_samples', 0)}/{manifest.get('sample_count')}). "
             "Resume prepare_pi05.py first."
         )
     return manifest
+
+
+def validate_manifest_progress(
+    manifest: Mapping[str, Any], *, expected_sample_count: int | None = None
+) -> tuple[str, int, int]:
+    """Validate status/count invariants before a cache can be skipped, resumed, or read."""
+
+    status = manifest.get("status")
+    if status not in ("incomplete", "complete"):
+        raise ValueError(f"cache manifest status is invalid: {status!r}")
+    sample_count = manifest.get("sample_count")
+    if type(sample_count) is not int or sample_count < 0:
+        raise ValueError("cache manifest sample_count must be a non-negative integer")
+    if expected_sample_count is not None and sample_count != expected_sample_count:
+        raise ValueError(
+            "cache manifest sample_count does not match current records: "
+            f"{sample_count} != {expected_sample_count}"
+        )
+    completed = manifest.get("completed_samples")
+    if type(completed) is not int:
+        raise ValueError("cache manifest completed_samples must be an integer")
+    valid = (
+        completed == sample_count
+        if status == "complete"
+        else 0 <= completed < sample_count
+    )
+    if not valid:
+        raise ValueError(
+            "cache manifest completed_samples is inconsistent with status/sample_count: "
+            f"status={status!r}, completed_samples={completed}, sample_count={sample_count}"
+        )
+    return status, completed, sample_count
 
 
 def sample_pred_gt_mse(pred: np.ndarray, gt: np.ndarray) -> np.ndarray:

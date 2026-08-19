@@ -39,6 +39,13 @@ REQUIRED_DISTRIBUTIONS: dict[str, str | None] = {
     "datasets": None,
     "pyarrow": None,
 }
+LEROBOT_V3_DEFAULT_FEATURES = {
+    "timestamp": {"dtype": "float32", "shape": (1,), "names": None},
+    "frame_index": {"dtype": "int64", "shape": (1,), "names": None},
+    "episode_index": {"dtype": "int64", "shape": (1,), "names": None},
+    "index": {"dtype": "int64", "shape": (1,), "names": None},
+    "task_index": {"dtype": "int64", "shape": (1,), "names": None},
+}
 
 ROOT_KEYS = {
     "checkpoint",
@@ -479,6 +486,20 @@ def _validate_dataset_metadata(
     features = info.get("features")
     if not isinstance(features, Mapping):
         raise ValueError(f"dataset features must be a mapping: {dataset_root}")
+    for key, expected in LEROBOT_V3_DEFAULT_FEATURES.items():
+        feature = features.get(key)
+        if not isinstance(feature, Mapping):
+            raise ValueError(f"dataset default feature {key!r} is missing")
+        shape = feature.get("shape")
+        actual = {
+            "dtype": feature.get("dtype"),
+            "shape": tuple(shape) if isinstance(shape, (list, tuple)) else shape,
+            "names": feature.get("names"),
+        }
+        if actual != expected:
+            raise ValueError(
+                f"dataset default feature {key!r} is invalid: {actual} != {expected}"
+            )
     visual_keys = {
         str(key)
         for key, feature in features.items()
@@ -489,10 +510,10 @@ def _validate_dataset_metadata(
         for key, feature in features.items()
         if isinstance(feature, Mapping) and feature.get("dtype") == "video"
     }
-    image_keys = {
+    non_video_keys = {
         str(key)
         for key, feature in features.items()
-        if isinstance(feature, Mapping) and feature.get("dtype") == "image"
+        if isinstance(feature, Mapping) and feature.get("dtype") != "video"
     }
     rename_map = source.get("rename_map", {})
     post_rename_visual_keys = {str(rename_map.get(key, key)) for key in visual_keys}
@@ -657,7 +678,7 @@ def _validate_dataset_metadata(
             "task_index",
             "observation.state",
             action_key,
-        } | image_keys
+        } | non_video_keys
         for chunk_index, file_index in sorted(data_references):
             data_path = _dataset_asset_path(
                 dataset_root,
