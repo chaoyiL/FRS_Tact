@@ -106,6 +106,9 @@ tensorboard/
 *.bin
 /train_smolvla/outputs/
 /train_vtsmolvla/outputs/
+/train_pi05_frs/.venv/
+/train_pi05_frs/.cache/
+/train_pi05_frs/outputs/
 
 # Hugging Face cache (local)
 .huggingface/
