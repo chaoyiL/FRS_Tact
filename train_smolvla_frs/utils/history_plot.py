@@ -12,7 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from train_frs.utils.gate_regions import GATE_BIN_SPECS
+from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
 
 GATE_BIN_HISTORY_METRICS = (
     "n",

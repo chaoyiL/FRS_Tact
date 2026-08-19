@@ -12,9 +12,9 @@ import pytest
 from flax import nnx
 from flax import traverse_util
 
-from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
-from train_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
-from train_frs.verify_gt_fm import (
+from train_smolvla_frs.utils.checkpoint import load_checkpoint, save_checkpoint
+from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
+from train_smolvla_frs.verify_gt_fm import (
     RUN_NAMES,
     format_run_line,
     plot_relative_reduction,
@@ -248,7 +248,7 @@ def test_write_relative_reduction_plots_adds_combined_curve(tmp_path: Path) -> N
 
 def test_verify_gt_fm_module_help() -> None:
     completed = subprocess.run(
-        [sys.executable, "-m", "train_frs.verify_gt_fm", "--help"],
+        [sys.executable, "-m", "train_smolvla_frs.verify_gt_fm", "--help"],
         cwd=Path(__file__).resolve().parents[2],
         text=True,
         capture_output=True,
@@ -262,7 +262,7 @@ def test_verify_gt_fm_module_help() -> None:
 
 
 def test_prepare_tactile_embeddings_skips_when_disabled() -> None:
-    from train_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
+    from train_smolvla_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
 
     assert prepare_tactile_embeddings_from_config({}) is None
     assert (
@@ -274,7 +274,7 @@ def test_prepare_tactile_embeddings_skips_when_disabled() -> None:
 
 
 def test_prepare_tactile_embeddings_invokes_shared_precompute(monkeypatch, tmp_path: Path) -> None:
-    from train_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
+    from train_smolvla_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
 
     seen: dict[str, object] = {}
 

@@ -8,21 +8,21 @@ from typing import Any
 
 import numpy as np
 
-from train_frs.train_frs import resolve_decode_solver
-from train_frs.utils.checkpoint import load_checkpoint
-from train_frs.utils.data import (
+from train_smolvla_frs.train_frs import resolve_decode_solver
+from train_smolvla_frs.utils.checkpoint import load_checkpoint
+from train_smolvla_frs.utils.data import (
     CachedTactileEmbeddingBatches,
     TactileConditionedBatches,
     resolve_tactile_window,
 )
-from train_frs.utils.gate_regions import GATE_BIN_SPECS
-from train_frs.utils.metrics import (
+from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
+from train_smolvla_frs.utils.metrics import (
     EvalTarget,
     evaluate_split,
     gate_binned_decode_metrics,
 )
-from train_frs.utils.model import FlowSolver
-from train_frs.utils.visualize import write_evaluation_plots
+from train_smolvla_frs.utils.model import FlowSolver
+from train_smolvla_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs, MultiCachedPairs, atomic_write_json
 
 
@@ -512,7 +512,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     if args.config is not None:
-        from train_frs.train_frs import load_config, source_cache_dir
+        from train_smolvla_frs.train_frs import load_config, source_cache_dir
 
         config = load_config(args.config)
         datasets = config.get("datasets") or []

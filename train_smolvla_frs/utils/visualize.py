@@ -10,11 +10,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from train_frs.utils.data import TactileConditionedBatches
-from train_frs.utils.metrics import EvaluationResult
-from train_frs.utils.model import FlowSolver
-from train_frs.utils.model import TactileConditionedFlowDecoder
-from train_frs.utils.model import decode_actions
+from train_smolvla_frs.utils.data import TactileConditionedBatches
+from train_smolvla_frs.utils.metrics import EvaluationResult
+from train_smolvla_frs.utils.model import FlowSolver
+from train_smolvla_frs.utils.model import TactileConditionedFlowDecoder
+from train_smolvla_frs.utils.model import decode_actions
 from utils.cache import CachedPairs
 from utils.cache import MultiCachedPairs
 
@@ -420,4 +420,4 @@ def _plot_episode_action_strips(
 
 
 # Re-export for train.py callers.
-from train_frs.utils.history_plot import plot_training_history as plot_training_history
+from train_smolvla_frs.utils.history_plot import plot_training_history as plot_training_history

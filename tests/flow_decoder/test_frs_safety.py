@@ -9,14 +9,14 @@ import pytest
 import torch
 
 from train_smolvla.configuration import JaxSmolVLAConfig
-from train_frs.compare_frs_reverse_solvers import mean_ratio, summarize_inversion_mse
-from train_frs.prepare_frs_caches import (
+from train_smolvla_frs.compare_frs_reverse_solvers import mean_ratio, summarize_inversion_mse
+from train_smolvla_frs.prepare_frs_caches import (
     _ActionCacheRecordDataset,
     _create_batch_loader,
     _prepare_observation_batch,
     _require_finite_cache_batch,
 )
-from train_frs.train_frs import (
+from train_smolvla_frs.train_frs import (
     _existing_run_artifacts,
     _validate_resume_cache,
     checkpoint_selection_key,
@@ -24,7 +24,7 @@ from train_frs.train_frs import (
     high_gate_rank_statistics,
     update_early_stop_state,
 )
-from train_frs.train_frs import resolve_resume_mode
+from train_smolvla_frs.train_frs import resolve_resume_mode
 from utils.cache import SampleRecord
 
 

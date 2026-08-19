@@ -7,9 +7,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from train_frs.utils.data import TactileConditionedBatches
-from train_frs.utils.gate_regions import GATE_BIN_SPECS
-from train_frs.utils.model import (
+from train_smolvla_frs.utils.data import TactileConditionedBatches
+from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
+from train_smolvla_frs.utils.model import (
     FlowSolver,
     TactileConditionedFlowDecoder,
     decode_actions,
@@ -284,7 +284,7 @@ def evaluate_split(
     rank_low_gate_threshold: float = 0.3,
     rank_high_gate_threshold: float = 0.7,
 ) -> EvaluationResult:
-    from train_frs.utils.data import gate_weights_from_change
+    from train_smolvla_frs.utils.data import gate_weights_from_change
 
     if target not in ("gt", "predicted"):
         raise ValueError(f"target must be 'gt' or 'predicted', got {target!r}.")

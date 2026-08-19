@@ -17,8 +17,8 @@ from train_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_en
 from train_encoder.utils.image_dataset import create_image_dataset
 from train_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 from train_encoder.utils.prefetch import prefetch_iterator
-from train_frs.utils.mp_batches import MpTactileWindowLoader
-from train_frs.utils.window_io import (
+from train_smolvla_frs.utils.mp_batches import MpTactileWindowLoader
+from train_smolvla_frs.utils.window_io import (
     NUM_TACTILE_STREAMS,
     TACTILE_KEYS,
     _frame_streams_from_images,

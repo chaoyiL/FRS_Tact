@@ -402,23 +402,23 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
-    from train_frs.utils.checkpoint import (
+    from train_smolvla_frs.utils.checkpoint import (
         CHECKPOINT_NAME,
         load_checkpoint,
         load_optimizer_state,
         restore_optimizer_state,
         save_checkpoint,
     )
-    from train_frs.utils.data import (
+    from train_smolvla_frs.utils.data import (
         CachedTactileEmbeddingBatches,
         TactileConditionedBatches,
         gate_weights_from_change,
         resolve_tactile_window,
     )
-    from train_frs.utils.gate_regions import GATE_BIN_SPECS
-    from train_frs.utils.history_plot import plot_training_history
-    from train_frs.utils.metrics import evaluate_split
-    from train_frs.utils.model import (
+    from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
+    from train_smolvla_frs.utils.history_plot import plot_training_history
+    from train_smolvla_frs.utils.metrics import evaluate_split
+    from train_smolvla_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
         TactileConditionedFlowDecoder,
@@ -2063,7 +2063,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
             raise ValueError(f"config.{name} must be a mapping")
     if not action_cache.get("root") or not tactile_cache.get("root"):
         raise ValueError("action_cache.root and tactile_embedding_cache.root are required")
-    from train_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
+    from train_smolvla_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
 
     prepare_tactile_embeddings_from_config(config)
     encoder_dir = Path(str(model["tactile_encoder_path"])).expanduser()
@@ -2073,7 +2073,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
     missing = [path for path in cache_dirs if not (path / "manifest.json").is_file()]
     if missing:
         raise FileNotFoundError(
-            f"action caches are missing: {missing}. Run python -m train_frs.prepare_frs_caches first."
+            f"action caches are missing: {missing}. Run python -m train_smolvla_frs.prepare_frs_caches first."
         )
 
     output_dir = Path(str(training["output"])).expanduser()

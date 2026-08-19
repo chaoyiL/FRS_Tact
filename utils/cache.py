@@ -305,7 +305,7 @@ def load_manifest(cache_dir: pathlib.Path, *, require_complete: bool = True) -> 
     if require_complete and manifest.get("status") != "complete":
         raise ValueError(
             f"Cache is not complete ({manifest.get('completed_samples', 0)}/{manifest.get('sample_count')}). "
-            "Resume python -m train_frs.prepare_frs_caches first."
+            "Resume python -m train_smolvla_frs.prepare_frs_caches first."
         )
     return manifest
 

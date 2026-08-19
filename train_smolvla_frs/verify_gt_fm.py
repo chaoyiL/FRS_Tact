@@ -192,7 +192,7 @@ def evaluate_verify_split(
     import jax.numpy as jnp
     import numpy as np
 
-    from train_frs.utils.model import decode_actions
+    from train_smolvla_frs.utils.model import decode_actions
 
     mse_frs_parts: list[np.ndarray] = []
     mse_vla_parts: list[np.ndarray] = []
@@ -240,7 +240,7 @@ def _fm_train_step(model, optimizer, x_base, gt_action, tactile_seq, key):
     import jax.numpy as jnp
     from flax import nnx
 
-    from train_frs.utils.model import flow_matching_loss_per_sample
+    from train_smolvla_frs.utils.model import flow_matching_loss_per_sample
 
     t = jax.random.uniform(key, (x_base.shape[0],), minval=0.0, maxval=1.0)
 
@@ -302,8 +302,8 @@ def train_one_run(
     import numpy as np
     from flax import nnx
 
-    from train_frs.utils.checkpoint import save_checkpoint
-    from train_frs.utils.model import (
+    from train_smolvla_frs.utils.checkpoint import save_checkpoint
+    from train_smolvla_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
         TactileConditionedFlowDecoder,
@@ -455,8 +455,8 @@ def train_one_run(
 
 
 def verify_from_config(config: Mapping[str, Any], *, runs: Sequence[RunName] = RUN_NAMES) -> dict[str, Any]:
-    from train_frs.train_frs import resolve_decode_solver
-    from train_frs.utils.data import CachedTactileEmbeddingBatches
+    from train_smolvla_frs.train_frs import resolve_decode_solver
+    from train_smolvla_frs.utils.data import CachedTactileEmbeddingBatches
     from utils.cache import MultiCachedPairs, atomic_write_json
 
     datasets = config.get("datasets") or []
@@ -468,7 +468,7 @@ def verify_from_config(config: Mapping[str, Any], *, runs: Sequence[RunName] = R
     training = _require_mapping(config, "verify_training")
     if not action_cache.get("root") or not tactile_cache.get("root"):
         raise ValueError("action_cache.root and tactile_embedding_cache.root are required")
-    from train_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
+    from train_smolvla_frs.prepare_frs_caches import prepare_tactile_embeddings_from_config
 
     prepare_tactile_embeddings_from_config(config)
     encoder_dir = Path(str(model_cfg["tactile_encoder_path"])).expanduser()
@@ -485,7 +485,7 @@ def verify_from_config(config: Mapping[str, Any], *, runs: Sequence[RunName] = R
     missing = [path for path in cache_dirs if not (path / "manifest.json").is_file()]
     if missing:
         raise FileNotFoundError(
-            f"action caches are missing: {missing}. Run python -m train_frs.prepare_frs_caches first."
+            f"action caches are missing: {missing}. Run python -m train_smolvla_frs.prepare_frs_caches first."
         )
     output_root = Path(str(training["output"])).expanduser()
     output_root.mkdir(parents=True, exist_ok=True)

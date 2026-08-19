@@ -4,7 +4,7 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-CONFIG_PATH="${1:-${PROJECT_ROOT}/train_frs/configs/train_frs.yaml}"
+CONFIG_PATH="${1:-${PROJECT_ROOT}/train_smolvla_frs/configs/train_frs.yaml}"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube}"
 
@@ -133,7 +133,7 @@ log "合并/检查 SmolVLA PEFT checkpoint"
     "${download_flag}"
 
 log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
-"${UV_BIN}" run --no-sync python -m train_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
+"${UV_BIN}" run --no-sync python -m train_smolvla_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
 
 log "生成/补齐 tactile embedding caches 与 SmolVLA action caches"
 # JAX/XLA 0.8.3's generic Triton GEMM emitter cannot tile one SmolVLA prefix
@@ -142,7 +142,7 @@ log "生成/补齐 tactile embedding caches 与 SmolVLA action caches"
 PREPARE_XLA_FLAGS="${FRS_PREPARE_XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
 log "action-cache XLA_FLAGS=${PREPARE_XLA_FLAGS}"
 XLA_FLAGS="${PREPARE_XLA_FLAGS}" \
-    "${UV_BIN}" run --no-sync python -m train_frs.prepare_frs_caches --config "${CONFIG_PATH}"
+    "${UV_BIN}" run --no-sync python -m train_smolvla_frs.prepare_frs_caches --config "${CONFIG_PATH}"
 
 log "开始 multi-dataset tactile FRS 训练"
-"${UV_BIN}" run --no-sync python -m train_frs.train_frs --config "${CONFIG_PATH}"
+"${UV_BIN}" run --no-sync python -m train_smolvla_frs.train_frs --config "${CONFIG_PATH}"

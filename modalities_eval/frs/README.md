@@ -4,7 +4,7 @@ Run the modality evaluation against a trained FRS checkpoint with gated-training
 
 ```bash
 PYTHONPATH=.:tests uv run --no-sync python -m modalities_eval.frs.evaluate \
-  --config train_frs/configs/train_frs.yaml \
+  --config train_smolvla_frs/configs/train_frs.yaml \
   --checkpoint-dir /path/to/frs/best \
   --output-dir eval_outputs/frs_modalities \
   --allow-unverified-provenance

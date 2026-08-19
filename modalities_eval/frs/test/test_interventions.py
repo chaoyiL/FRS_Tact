@@ -114,12 +114,12 @@ def test_interventions_validate_gate_batch_and_actual_sensor_dimension():
         )
 
 
-def test_intervention_module_import_does_not_load_train_frs_dependencies():
+def test_intervention_module_import_does_not_load_train_smolvla_frs_dependencies():
     script = "\n".join(
         (
             "import sys",
             "import modalities_eval.frs.interventions",
-            "assert 'train_frs.utils.data' not in sys.modules",
+            "assert 'train_smolvla_frs.utils.data' not in sys.modules",
         )
     )
 

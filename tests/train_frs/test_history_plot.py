@@ -6,8 +6,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-import train_frs.utils.history_plot as history_plot_module
-from train_frs.utils.history_plot import HISTORY_FIELDS, plot_training_history
+import train_smolvla_frs.utils.history_plot as history_plot_module
+from train_smolvla_frs.utils.history_plot import HISTORY_FIELDS, plot_training_history
 
 
 class HistoryPlotTest(unittest.TestCase):

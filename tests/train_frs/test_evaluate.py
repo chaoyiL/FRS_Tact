@@ -7,8 +7,8 @@ import numpy as np
 import pytest
 from flax import nnx
 
-import train_frs.evaluate as evaluate_module
-from train_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
+import train_smolvla_frs.evaluate as evaluate_module
+from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
 
 @pytest.mark.parametrize(

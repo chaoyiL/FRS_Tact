@@ -10,7 +10,7 @@ revision: null
 allow_download: false
 seed: 0
 jit: true
-# 必须与 train_frs/configs/train_frs.yaml 的 action_cache.model_sample_steps 一致。
+# 必须与 train_smolvla_frs/configs/train_frs.yaml 的 action_cache.model_sample_steps 一致。
 num_steps: 10
 
 # 这里描述的是基础 SmolVLA，而不是单独的 FRS 触觉输入。
@@ -34,9 +34,9 @@ frs:
   # 第 10/20 维夹爪宽度低于 threshold 时乘 multiplier，高于时乘 above_multiplier。
   gripper_gain:
     threshold: 0.08
-    multiplier: 0.7
+    multiplier: 0.8
     above_multiplier: 1.0
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_no_repair
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_no_rank/best
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:
@@ -82,7 +82,7 @@ observation:
 
 control:
   # 训练数据是 30 Hz；FRS v1 逐 action 重定向，完整协商 horizon 不截断执行。
-  control_frequency: 30.0
+  control_frequency: 20.0
   controller_frequency: 80.0
   action_horizon: 20
   steps_per_inference: 20

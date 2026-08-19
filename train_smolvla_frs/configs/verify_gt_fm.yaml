@@ -2,8 +2,8 @@
 # 无 GRU、无历史窗。一次跑完四组对照：
 #   tactile / zero_tactile_tokens：纯 GT Flow Matching
 #   vla_direct / vla_tactile_direct：直接回归，不用流匹配
-#   uv run --no-sync python -m train_frs.verify_gt_fm \
-#     --config train_frs/configs/verify_gt_fm.yaml
+#   uv run --no-sync python -m train_smolvla_frs.verify_gt_fm \
+#     --config train_smolvla_frs/configs/verify_gt_fm.yaml
 
 datasets:
   - repo_id: KaiyueChen/pick_tube_05

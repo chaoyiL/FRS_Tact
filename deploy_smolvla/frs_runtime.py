@@ -21,9 +21,9 @@ from modalities_eval.utils import EvalObservation
 from train_encoder.utils.checkpoint import load_tactile_encoder
 from train_encoder.utils.model import tactile_clip_config_from_dict
 from train_encoder.utils.resnet import encode_resnet18
-from train_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
-from train_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
-from train_frs.utils.model import decode_actions
+from train_smolvla_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
+from train_smolvla_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
+from train_smolvla_frs.utils.model import decode_actions
 from train_vtsmolvla.preprocessing import prepare_tactile_batch
 from utils.integration import REVERSE_INTEGRATION_VERSION
 from utils.source_model import reverse_integrate_actions
@@ -374,7 +374,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
 
 
 def _checkpoint_fingerprint(checkpoint_dir: Path) -> str:
-    """Match the source-checkpoint identity stored by ``train_frs.prepare_frs_caches``."""
+    """Match the source-checkpoint identity stored by ``train_smolvla_frs.prepare_frs_caches``."""
 
     checkpoint_dir = checkpoint_dir.expanduser().resolve()
     if checkpoint_dir.name == "params":

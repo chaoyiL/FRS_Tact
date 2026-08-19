@@ -269,7 +269,7 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
             "validation_steps": 17,
         },
     }
-    train_config = types.ModuleType("train_frs.train_frs")
+    train_config = types.ModuleType("train_smolvla_frs.train_frs")
     train_config.load_config = lambda path: config
     train_config.source_cache_dir = lambda root, repo_id: tmp_path / "actions" / repo_id
     checkpoint_extra = {
@@ -285,19 +285,19 @@ def test_load_evaluation_context_uses_fakes_for_cache_checkpoint_and_source_meta
         "history_stride": 3,
         "tactile_window_divisor": 1,
     }
-    checkpoint = types.ModuleType("train_frs.utils.checkpoint")
+    checkpoint = types.ModuleType("train_smolvla_frs.utils.checkpoint")
     checkpoint.load_checkpoint = lambda directory: (
         model,
         {"extra_metadata": checkpoint_extra},
     )
-    data = types.ModuleType("train_frs.utils.data")
+    data = types.ModuleType("train_smolvla_frs.utils.data")
     data.CachedTactileEmbeddingBatches = FakeConditioner
     data.resolve_tactile_window = lambda **kwargs: kwargs["action_horizon"] // kwargs["window_divisor"]
     cache = types.ModuleType("utils.cache")
     cache.MultiCachedPairs = FakePairs
-    monkeypatch.setitem(sys.modules, "train_frs.train_frs", train_config)
-    monkeypatch.setitem(sys.modules, "train_frs.utils.checkpoint", checkpoint)
-    monkeypatch.setitem(sys.modules, "train_frs.utils.data", data)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.train_frs", train_config)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.utils.checkpoint", checkpoint)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.utils.data", data)
     monkeypatch.setitem(sys.modules, "utils.cache", cache)
     monkeypatch.setattr(
         evaluate,
@@ -420,18 +420,18 @@ def test_unverified_provenance_fails_before_action_cache_or_model_load(monkeypat
         "frs_training": {"output": str(tmp_path / "unused")},
     }
 
-    train_config = types.ModuleType("train_frs.train_frs")
+    train_config = types.ModuleType("train_smolvla_frs.train_frs")
     train_config.load_config = lambda path: config
     train_config.source_cache_dir = lambda root, repo_id: tmp_path / "actions" / repo_id
 
-    checkpoint = types.ModuleType("train_frs.utils.checkpoint")
+    checkpoint = types.ModuleType("train_smolvla_frs.utils.checkpoint")
 
     def load_checkpoint(directory):
         calls["checkpoint"] += 1
         raise AssertionError("decoder checkpoint must not load before provenance opt-in")
 
     checkpoint.load_checkpoint = load_checkpoint
-    data = types.ModuleType("train_frs.utils.data")
+    data = types.ModuleType("train_smolvla_frs.utils.data")
     data.CachedTactileEmbeddingBatches = object
     data.resolve_tactile_window = lambda **kwargs: 1
     cache = types.ModuleType("utils.cache")
@@ -442,9 +442,9 @@ def test_unverified_provenance_fails_before_action_cache_or_model_load(monkeypat
             raise AssertionError("action caches must not load before provenance opt-in")
 
     cache.MultiCachedPairs = FakePairs
-    monkeypatch.setitem(sys.modules, "train_frs.train_frs", train_config)
-    monkeypatch.setitem(sys.modules, "train_frs.utils.checkpoint", checkpoint)
-    monkeypatch.setitem(sys.modules, "train_frs.utils.data", data)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.train_frs", train_config)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.utils.checkpoint", checkpoint)
+    monkeypatch.setitem(sys.modules, "train_smolvla_frs.utils.data", data)
     monkeypatch.setitem(sys.modules, "utils.cache", cache)
 
     with pytest.raises(ValueError, match="--allow-unverified-provenance"):

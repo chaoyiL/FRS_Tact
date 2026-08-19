@@ -15,14 +15,14 @@ from flax import nnx
 from flax import traverse_util
 
 from train_encoder.utils.resnet import init_resnet18_params
-from train_frs.utils.checkpoint import load_checkpoint, save_checkpoint
-from train_frs.utils.metrics import (
+from train_smolvla_frs.utils.checkpoint import load_checkpoint, save_checkpoint
+from train_smolvla_frs.utils.metrics import (
     evaluate_split,
     gate_binned_decode_metrics,
     gate_stratified_decode_metrics,
 )
-from train_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
-from train_frs.utils.model import (
+from train_smolvla_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
+from train_smolvla_frs.utils.model import (
     DecoderConfig,
     TactileConditionedFlowDecoder,
     decode_actions,
@@ -170,10 +170,10 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
 
 
 def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path, monkeypatch):
-    import train_frs.train_frs as train_module
-    import train_frs.utils.data as data_module
-    import train_frs.utils.metrics as metrics_module
-    import train_frs.utils.model as model_module
+    import train_smolvla_frs.train_frs as train_module
+    import train_smolvla_frs.utils.data as data_module
+    import train_smolvla_frs.utils.metrics as metrics_module
+    import train_smolvla_frs.utils.model as model_module
     import utils.cache as cache_module
 
     class FakePairs:
@@ -988,11 +988,11 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertTrue((checkpoint_dir / metadata["params_file"]).is_file())
 
     def test_optimizer_state_round_trip(self):
-        from train_frs.utils.checkpoint import (
+        from train_smolvla_frs.utils.checkpoint import (
             load_optimizer_state,
             restore_optimizer_state,
         )
-        from train_frs.utils.model import make_optimizer
+        from train_smolvla_frs.utils.model import make_optimizer
 
         model = self.make_model()
         optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0, total_steps=10)

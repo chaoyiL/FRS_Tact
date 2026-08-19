@@ -5,17 +5,17 @@
 # and keeps the other three on. Shared caches are prepared once from the
 # official YAML; checkpoints go to <repo>/checkpoints/frs/no_<loss>.
 #
-#   bash train_frs/scripts/start_frs_loss_ablation.sh
-#   bash train_frs/scripts/start_frs_loss_ablation.sh train_frs/configs/train_frs.yaml
+#   bash train_smolvla_frs/scripts/start_frs_loss_ablation.sh
+#   bash train_smolvla_frs/scripts/start_frs_loss_ablation.sh train_smolvla_frs/configs/train_frs.yaml
 #
 # Skip merge/cache prep when they already exist:
-#   FRS_SKIP_PREP=1 bash train_frs/scripts/start_frs_loss_ablation.sh
+#   FRS_SKIP_PREP=1 bash train_smolvla_frs/scripts/start_frs_loss_ablation.sh
 
 set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-CONFIG_PATH="${1:-${PROJECT_ROOT}/train_frs/configs/train_frs.yaml}"
+CONFIG_PATH="${1:-${PROJECT_ROOT}/train_smolvla_frs/configs/train_frs.yaml}"
 OUTPUT_ROOT="${FRS_ABLATION_OUTPUT_ROOT:-${PROJECT_ROOT}/checkpoints/frs}"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_loss_ablation}"
@@ -136,20 +136,20 @@ if [[ "${FRS_SKIP_PREP:-0}" != "1" ]]; then
         "${download_flag}"
 
     log "小样本 A/B 检查 FireFlow 与 SlerpFlow 反向积分"
-    "${UV_BIN}" run --no-sync python -m train_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
+    "${UV_BIN}" run --no-sync python -m train_smolvla_frs.compare_frs_reverse_solvers --config "${CONFIG_PATH}"
 
     log "生成/补齐 tactile embedding caches 与 SmolVLA action caches"
     PREPARE_XLA_FLAGS="${FRS_PREPARE_XLA_FLAGS:---xla_gpu_enable_triton_gemm=false}"
     log "action-cache XLA_FLAGS=${PREPARE_XLA_FLAGS}"
     XLA_FLAGS="${PREPARE_XLA_FLAGS}" \
-        "${UV_BIN}" run --no-sync python -m train_frs.prepare_frs_caches --config "${CONFIG_PATH}"
+        "${UV_BIN}" run --no-sync python -m train_smolvla_frs.prepare_frs_caches --config "${CONFIG_PATH}"
 else
     log "跳过 checkpoint 合并与 cache 准备（FRS_SKIP_PREP=1）"
 fi
 
 log "写出 leave-one-out 配置到 ${OUTPUT_ROOT}"
 mapfile -t ABLATION_RUNS < <(
-    "${UV_BIN}" run --no-sync python -m train_frs.utils.loss_ablation \
+    "${UV_BIN}" run --no-sync python -m train_smolvla_frs.utils.loss_ablation \
         --config "${CONFIG_PATH}" \
         --output-root "${OUTPUT_ROOT}"
 )
@@ -164,7 +164,7 @@ for entry in "${ABLATION_RUNS[@]}"; do
         continue
     fi
     log "开始训练 ${run_name}  config=${run_config}"
-    "${UV_BIN}" run --no-sync python -m train_frs.train_frs --config "${run_config}"
+    "${UV_BIN}" run --no-sync python -m train_smolvla_frs.train_frs --config "${run_config}"
     log "完成 ${run_name}  output=${run_dir}"
 done
 

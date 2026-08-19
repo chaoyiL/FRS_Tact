@@ -31,7 +31,7 @@ def decode_tactile_window_batch(
 ) -> np.ndarray:
     """Decode one batch of tactile windows, including mixed-source 3-tuples."""
 
-    from train_frs.utils.window_io import load_tactile_windows
+    from train_smolvla_frs.utils.window_io import load_tactile_windows
 
     if not samples:
         raise ValueError("samples must be non-empty")
@@ -90,7 +90,7 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     try:
         from train_encoder.utils.image_dataset import create_image_dataset
 
-        window_io = importlib.import_module("train_frs.utils.window_io")
+        window_io = importlib.import_module("train_smolvla_frs.utils.window_io")
         tactile_keys = window_io.TACTILE_KEYS
         repo_ids = tuple(init.get("repo_ids") or (init["repo_id"],))
         image_size = int(init["image_size"])

@@ -14,7 +14,7 @@ from flax import nnx
 from flax.core import FrozenDict
 
 from train_encoder.utils.resnet import encode_resnet18, init_resnet18_params
-from train_frs.utils.integration import fireflow_integrate_velocity
+from train_smolvla_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]

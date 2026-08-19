@@ -192,7 +192,7 @@ class EvaluationContext:
         num_steps: int,
         solver: str,
     ) -> np.ndarray:
-        from train_frs.utils.model import decode_actions
+        from train_smolvla_frs.utils.model import decode_actions
 
         return np.asarray(
             decode_actions(
@@ -260,7 +260,7 @@ def load_evaluation_context(
 ) -> EvaluationContext:
     """Load and validate a gated FRS checkpoint plus its multi-source caches."""
 
-    from train_frs.train_frs import load_config, source_cache_dir
+    from train_smolvla_frs.train_frs import load_config, source_cache_dir
 
     config = load_config(Path(config_path))
     datasets = config.get("datasets")
@@ -297,8 +297,8 @@ def load_evaluation_context(
             "with the explicit --allow-unverified-provenance flag."
         )
 
-    from train_frs.utils.checkpoint import load_checkpoint
-    from train_frs.utils.data import CachedTactileEmbeddingBatches, resolve_tactile_window
+    from train_smolvla_frs.utils.checkpoint import load_checkpoint
+    from train_smolvla_frs.utils.data import CachedTactileEmbeddingBatches, resolve_tactile_window
     from utils.cache import MultiCachedPairs
 
     source_names = []

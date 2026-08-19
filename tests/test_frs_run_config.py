@@ -5,10 +5,10 @@ from pathlib import Path
 import pytest
 import yaml
 
-from train_frs.train_frs import resolve_decode_solver
-from train_frs.train_frs import resolve_optional_loss_weight
-from train_frs.train_frs import RUN_CONFIG_NAME, save_run_config
-from train_frs.utils.loss_ablation import (
+from train_smolvla_frs.train_frs import resolve_decode_solver
+from train_smolvla_frs.train_frs import resolve_optional_loss_weight
+from train_smolvla_frs.train_frs import RUN_CONFIG_NAME, save_run_config
+from train_smolvla_frs.utils.loss_ablation import (
     DEFAULT_ABLATION_REPAIR_WEIGHT,
     LOSS_ABLATION_SWITCHES,
     build_loss_ablation_runs,
@@ -17,7 +17,7 @@ from train_frs.utils.loss_ablation import (
 
 
 def test_default_frs_config_is_pick05_state_conditioned_asymmetric_objective() -> None:
-    config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
+    config_path = Path(__file__).parents[1] / "train_smolvla_frs" / "configs" / "train_frs.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in config["datasets"]] == [
         "KaiyueChen/pick_tube_05"
@@ -66,8 +66,8 @@ def test_resolve_optional_loss_weight_is_the_on_off_switch() -> None:
         resolve_optional_loss_weight(True, -0.1)
 
 
-def test_train_frs_yaml_exposes_optional_loss_switches() -> None:
-    config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
+def test_train_smolvla_frs_yaml_exposes_optional_loss_switches() -> None:
+    config_path = Path(__file__).parents[1] / "train_smolvla_frs" / "configs" / "train_frs.yaml"
     training = yaml.safe_load(config_path.read_text(encoding="utf-8"))["frs_training"]
     assert training["aux_decode"] is True
     assert training["low_gate_safety"] is True
@@ -80,7 +80,7 @@ def test_train_frs_yaml_exposes_optional_loss_switches() -> None:
 
 
 def test_loss_ablation_closes_one_switch_and_keeps_the_other_three(tmp_path: Path) -> None:
-    config_path = Path(__file__).parents[1] / "train_frs" / "configs" / "train_frs.yaml"
+    config_path = Path(__file__).parents[1] / "train_smolvla_frs" / "configs" / "train_frs.yaml"
     base = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     output_root = tmp_path / "checkpoints" / "frs"
 

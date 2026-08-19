@@ -8,18 +8,18 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from train_frs.utils.data import CachedTactileEmbeddingBatches
-from train_frs.utils.data import NUM_TACTILE_STREAMS
-from train_frs.utils.data import TACTILE_KEYS
-from train_frs.utils.data import TactileConditionedBatches
-from train_frs.utils.data import gate_weights_from_change
-from train_frs.utils.data import resolve_dataset_repo_id
-from train_frs.utils.data import resolve_tactile_window
-from train_frs.utils.data import resnet_embedding_dim_from_encoder
-from train_frs.utils.data import tactile_change_from_tokens
-from train_frs.utils.mp_batches import decode_tactile_window_batch
-from train_frs.utils.window_io import load_tactile_windows
-from train_frs.utils.window_io import window_frame_indices
+from train_smolvla_frs.utils.data import CachedTactileEmbeddingBatches
+from train_smolvla_frs.utils.data import NUM_TACTILE_STREAMS
+from train_smolvla_frs.utils.data import TACTILE_KEYS
+from train_smolvla_frs.utils.data import TactileConditionedBatches
+from train_smolvla_frs.utils.data import gate_weights_from_change
+from train_smolvla_frs.utils.data import resolve_dataset_repo_id
+from train_smolvla_frs.utils.data import resolve_tactile_window
+from train_smolvla_frs.utils.data import resnet_embedding_dim_from_encoder
+from train_smolvla_frs.utils.data import tactile_change_from_tokens
+from train_smolvla_frs.utils.mp_batches import decode_tactile_window_batch
+from train_smolvla_frs.utils.window_io import load_tactile_windows
+from train_smolvla_frs.utils.window_io import window_frame_indices
 
 
 class FakePairs:
@@ -355,16 +355,16 @@ class CachedRawImageLoaderTest(unittest.TestCase):
         metadata.root = "/tmp"
         loader = mock.Mock()
         with (
-            mock.patch("train_frs.utils.data.LeRobotDatasetMetadata", return_value=metadata),
+            mock.patch("train_smolvla_frs.utils.data.LeRobotDatasetMetadata", return_value=metadata),
             mock.patch(
-                "train_frs.utils.data.resolve_source_visual_keys",
+                "train_smolvla_frs.utils.data.resolve_source_visual_keys",
                 return_value=tuple(TACTILE_KEYS),
             ),
-            mock.patch("train_frs.utils.data.create_image_dataset") as create_image_dataset,
-            mock.patch("train_frs.utils.data.TactileEmbeddingCache"),
-            mock.patch("train_frs.utils.data.tactile_cache_dir", return_value="/tmp/cache"),
+            mock.patch("train_smolvla_frs.utils.data.create_image_dataset") as create_image_dataset,
+            mock.patch("train_smolvla_frs.utils.data.TactileEmbeddingCache"),
+            mock.patch("train_smolvla_frs.utils.data.tactile_cache_dir", return_value="/tmp/cache"),
             mock.patch(
-                "train_frs.utils.data.MpTactileWindowLoader",
+                "train_smolvla_frs.utils.data.MpTactileWindowLoader",
                 return_value=loader,
             ) as loader_cls,
         ):

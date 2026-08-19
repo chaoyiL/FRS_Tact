@@ -4,7 +4,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 FILES = (
-    "train_frs/utils/data.py",
+    "train_smolvla_frs/utils/data.py",
     "tools/precompute_tactile_embeddings.py",
     "tools/convert_smolvla_pt_to_jax.py",
     "modalities_eval/utils.py",
