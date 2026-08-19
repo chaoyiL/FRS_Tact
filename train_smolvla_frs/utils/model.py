@@ -613,6 +613,38 @@ def bimanual_composite_endpoint(
     return per_dim * gt_action + (1.0 - per_dim) * predicted_action, effective
 
 
+def bimanual_mse_per_sample(left: Array, right: Array) -> Array:
+    """Return endpoint MSE independently for the fixed left and right wrists."""
+
+    squared = jnp.square(left - right)
+    return jnp.stack(
+        [
+            jnp.mean(squared[..., LEFT_ACTION_SLICE], axis=(1, 2)),
+            jnp.mean(squared[..., RIGHT_ACTION_SLICE], axis=(1, 2)),
+        ],
+        axis=1,
+    )
+
+
+def _average_active_wrist_terms(
+    left_term: Array,
+    left_active: Array,
+    right_term: Array,
+    right_active: Array,
+) -> Array:
+    """Average wrist terms without counting globally inactive wrists."""
+
+    left_active = jnp.asarray(left_active)
+    right_active = jnp.asarray(right_active)
+    active_count = left_active.astype(left_term.dtype) + right_active.astype(left_term.dtype)
+    total = jnp.where(left_active, left_term, 0.0) + jnp.where(
+        right_active,
+        right_term,
+        0.0,
+    )
+    return total / jnp.maximum(active_count, 1.0)
+
+
 def _active_group_normalized_per_sample(penalty: Array, strength: Array) -> tuple[Array, Array]:
     """Return a vector whose batch mean is the active group's weighted mean."""
 
@@ -1078,33 +1110,190 @@ def bimanual_loss_components_per_sample(
     gate_weights: Array,
     **loss_options: object,
 ) -> dict[str, Array]:
-    """Return the one-FM bimanual composite objective and zeroed auxiliary terms."""
+    """Return the one-FM bimanual objective with independently gated wrist auxiliaries."""
 
-    target, _ = bimanual_composite_endpoint(
+    low_threshold = float(loss_options.get("rank_low_gate_threshold", 0.3))
+    high_threshold = float(loss_options.get("rank_high_gate_threshold", 0.7))
+    target, effective = bimanual_composite_endpoint(
         gt_action,
         predicted_action,
         gate_weights,
-        low_gate_threshold=float(loss_options.get("rank_low_gate_threshold", 0.3)),
-        high_gate_threshold=float(loss_options.get("rank_high_gate_threshold", 0.7)),
+        low_gate_threshold=low_threshold,
+        high_gate_threshold=high_threshold,
     )
+    state = cast(Array | None, loss_options.get("state"))
+    state_keep_mask = cast(Array | None, loss_options.get("state_keep_mask"))
     flow = flow_matching_loss_per_sample(
         model,
         x_base,
         target,
         t,
         tactile_seq,
-        state=cast(Array | None, loss_options.get("state")),
-        state_keep_mask=cast(Array | None, loss_options.get("state_keep_mask")),
+        state=state,
+        state_keep_mask=state_keep_mask,
     )
     zeros = jnp.zeros_like(flow)
+    low_safety_term = zeros
+    decode_term = zeros
+    rank_term = zeros
+    repair_term = zeros
+
+    aux_decode_weight = float(loss_options.get("aux_decode_weight", 1.0))
+    low_safety_weight = float(loss_options.get("low_gate_safety_weight", 0.0))
+    rank_weight = float(loss_options.get("rank_weight", 0.0))
+    repair_weight = float(loss_options.get("repair_weight", 0.0))
+    needs_decode = any(
+        weight != 0.0
+        for weight in (aux_decode_weight, low_safety_weight, rank_weight, repair_weight)
+    )
+    if needs_decode:
+        decoded = decode_actions(
+            model,
+            x_base,
+            tactile_seq,
+            num_steps=int(loss_options.get("aux_decode_steps", 10)),
+            solver=cast(FlowSolver, loss_options.get("aux_decode_solver", "euler")),
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+        mse_gt = bimanual_mse_per_sample(decoded, gt_action)
+        mse_vla = bimanual_mse_per_sample(decoded, predicted_action)
+        raw_gates = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+        source_indices = cast(Array | None, loss_options.get("source_indices"))
+        num_sources = int(loss_options.get("num_sources", 1))
+
+        def normalize_wrist(
+            penalty: Array,
+            strength: Array,
+        ) -> tuple[Array, Array]:
+            if source_indices is None:
+                return _active_group_normalized_per_sample(penalty, strength)
+            normalized, active_sources = _source_group_normalized_per_sample(
+                penalty,
+                strength,
+                source_indices,
+                num_sources=num_sources,
+            )
+            normalized = normalized * (
+                float(num_sources)
+                / jnp.maximum(jnp.sum(active_sources.astype(normalized.dtype)), 1.0)
+            )
+            return normalized, jnp.any(active_sources)
+
+        if aux_decode_weight != 0.0:
+            decode_term = aux_decode_weight * jnp.mean(
+                effective * mse_gt + (1.0 - effective) * mse_vla,
+                axis=1,
+            )
+
+        low_strength = (1.0 - raw_gates) * (raw_gates <= low_threshold)
+        high_strength = raw_gates * (raw_gates >= high_threshold)
+
+        if low_safety_weight != 0.0:
+            low_margin = float(loss_options.get("low_gate_safety_margin", 0.0))
+            low_penalty = jax.nn.relu(jnp.minimum(mse_gt, mse_vla) - low_margin)
+            left_term, left_active = normalize_wrist(
+                low_penalty[:, 0],
+                low_strength[:, 0],
+            )
+            right_term, right_active = normalize_wrist(
+                low_penalty[:, 1],
+                low_strength[:, 1],
+            )
+            low_safety_term = low_safety_weight * _average_active_wrist_terms(
+                left_term,
+                left_active,
+                right_term,
+                right_active,
+            )
+
+        if rank_weight != 0.0:
+            rank_margin = float(loss_options.get("rank_margin", 0.0))
+            rank_penalty = jax.nn.relu(mse_gt - mse_vla + rank_margin)
+            rank_aggregation = cast(
+                HighGateRankAggregation,
+                loss_options.get("high_gate_rank_aggregation", "balanced_mean"),
+            )
+            if rank_aggregation == "balanced_mean":
+                left_term, left_active = normalize_wrist(
+                    rank_penalty[:, 0],
+                    high_strength[:, 0],
+                )
+                right_term, right_active = normalize_wrist(
+                    rank_penalty[:, 1],
+                    high_strength[:, 1],
+                )
+            else:
+                if source_indices is None:
+                    raise ValueError("worst_source_cvar rank aggregation requires source_indices")
+                source_rank_weights = cast(
+                    Array | None,
+                    loss_options.get("source_rank_weights"),
+                )
+                if source_rank_weights is None:
+                    source_rank_weights = jnp.ones(
+                        (num_sources,),
+                        dtype=rank_penalty.dtype,
+                    )
+                cvar_options = {
+                    "num_sources": num_sources,
+                    "hard_fraction": float(
+                        loss_options.get("high_gate_rank_hard_fraction", 0.3)
+                    ),
+                    "worst_beta": float(
+                        loss_options.get("high_gate_rank_worst_beta", 20.0)
+                    ),
+                }
+                left_loss, left_active = high_gate_worst_source_cvar_loss(
+                    rank_penalty[:, 0],
+                    high_strength[:, 0],
+                    source_indices,
+                    source_rank_weights,
+                    **cvar_options,
+                )
+                right_loss, right_active = high_gate_worst_source_cvar_loss(
+                    rank_penalty[:, 1],
+                    high_strength[:, 1],
+                    source_indices,
+                    source_rank_weights,
+                    **cvar_options,
+                )
+                left_term = jnp.full_like(flow, left_loss)
+                right_term = jnp.full_like(flow, right_loss)
+            rank_term = rank_weight * _average_active_wrist_terms(
+                left_term,
+                left_active,
+                right_term,
+                right_active,
+            )
+
+        if repair_weight != 0.0:
+            repair_margin = float(loss_options.get("repair_margin", 0.0))
+            baseline = bimanual_mse_per_sample(predicted_action, gt_action)
+            repair_penalty = jax.nn.relu(mse_gt - baseline + repair_margin)
+            left_term, left_active = normalize_wrist(
+                repair_penalty[:, 0],
+                high_strength[:, 0],
+            )
+            right_term, right_active = normalize_wrist(
+                repair_penalty[:, 1],
+                high_strength[:, 1],
+            )
+            repair_term = repair_weight * _average_active_wrist_terms(
+                left_term,
+                left_active,
+                right_term,
+                right_active,
+            )
+
     return {
         "gt_fm": zeros,
         "vla_fm": zeros,
         "composite_fm": flow,
-        "low_safety": zeros,
-        "decode": zeros,
-        "rank": zeros,
-        "repair": zeros,
+        "low_safety": low_safety_term,
+        "decode": decode_term,
+        "rank": rank_term,
+        "repair": repair_term,
     }
 
 
@@ -1373,7 +1562,11 @@ def train_step(
                 repair_margin=repair_margin,
                 rank_low_gate_threshold=rank_low_gate_threshold,
                 rank_high_gate_threshold=rank_high_gate_threshold,
-                source_indices=source_indices,
+                source_indices=(
+                    source_indices
+                    if source_balanced_loss or rank_requires_sources
+                    else None
+                ),
                 source_rank_weights=source_rank_weights,
                 num_sources=num_sources,
                 high_gate_rank_aggregation=high_gate_rank_aggregation,

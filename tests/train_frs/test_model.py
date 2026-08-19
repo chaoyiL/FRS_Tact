@@ -11,22 +11,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from flax import nnx
-from flax import traverse_util
+from flax import nnx, traverse_util
 
 from train_encoder.utils.resnet import init_resnet18_params
 from train_smolvla_frs.utils.checkpoint import load_checkpoint, save_checkpoint
+from train_smolvla_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 from train_smolvla_frs.utils.metrics import (
     evaluate_split,
     gate_binned_decode_metrics,
     gate_stratified_decode_metrics,
 )
-from train_smolvla_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 from train_smolvla_frs.utils.model import (
-    bimanual_composite_endpoint,
-    bimanual_loss_components_per_sample,
     DecoderConfig,
     TactileConditionedFlowDecoder,
+    bimanual_composite_endpoint,
+    bimanual_loss_components_per_sample,
     decode_actions,
     decode_mse_per_sample,
     flow_matching_loss_per_sample,
@@ -106,10 +105,10 @@ def test_bimanual_loss_components_uses_one_composite_fm_call() -> None:
         jnp.zeros((2, 3, 4, 4), dtype=jnp.float32),
         gate,
         gate_lambda=5.0,
-        aux_decode_weight=7.0,
-        low_gate_safety_weight=11.0,
-        rank_weight=13.0,
-        repair_weight=17.0,
+        aux_decode_weight=0.0,
+        low_gate_safety_weight=0.0,
+        rank_weight=0.0,
+        repair_weight=0.0,
     )
 
     expected = jnp.mean(jnp.square(target - x_base), axis=(1, 2))
@@ -127,6 +126,173 @@ def test_bimanual_loss_components_uses_one_composite_fm_call() -> None:
     np.testing.assert_allclose(components["gt_fm"], jnp.zeros_like(expected))
     np.testing.assert_allclose(components["vla_fm"], jnp.zeros_like(expected))
     np.testing.assert_allclose(sum(components.values()), expected)
+
+
+class _ZeroBimanualVelocity:
+    def __call__(self, x_t, t, tactile_seq, *, state=None, state_keep_mask=None):
+        del t, tactile_seq, state, state_keep_mask
+        return jnp.zeros_like(x_t)
+
+
+def _bimanual_aux_components(
+    monkeypatch: pytest.MonkeyPatch,
+    decoded: jax.Array,
+    gt: jax.Array,
+    predicted: jax.Array,
+    gate: jax.Array,
+    **options: object,
+) -> tuple[dict[str, jax.Array], int]:
+    decode_calls = 0
+
+    def fake_decode_actions(*args: object, **kwargs: object) -> jax.Array:
+        nonlocal decode_calls
+        del args, kwargs
+        decode_calls += 1
+        return decoded
+
+    monkeypatch.setitem(
+        bimanual_loss_components_per_sample.__globals__,
+        "decode_actions",
+        fake_decode_actions,
+    )
+    components = bimanual_loss_components_per_sample(
+        _ZeroBimanualVelocity(),
+        jnp.zeros_like(gt),
+        gt,
+        predicted,
+        jnp.full((gt.shape[0],), 0.5, dtype=jnp.float32),
+        jnp.zeros((gt.shape[0], 1, 1), dtype=jnp.float32),
+        gate,
+        aux_decode_weight=1.0,
+        aux_decode_steps=2,
+        low_gate_safety_weight=1.0,
+        low_gate_safety_margin=0.1,
+        rank_weight=1.0,
+        rank_margin=0.1,
+        repair_weight=1.0,
+        repair_margin=0.1,
+        **options,
+    )
+    return components, decode_calls
+
+
+def test_bimanual_aux_exact_per_wrist_endpoints_are_zero_and_share_decode(monkeypatch) -> None:
+    gt = jnp.zeros((1, 1, 20), dtype=jnp.float32)
+    predicted = jnp.full_like(gt, 2.0)
+    decoded = jnp.concatenate([gt[..., :10], predicted[..., 10:]], axis=-1)
+
+    components, decode_calls = _bimanual_aux_components(
+        monkeypatch,
+        decoded,
+        gt,
+        predicted,
+        jnp.asarray([[1.0, 0.0]], dtype=jnp.float32),
+    )
+
+    assert components["decode"][0] == pytest.approx(0.0)
+    assert components["low_safety"][0] == pytest.approx(0.0)
+    assert components["rank"][0] == pytest.approx(0.0)
+    assert components["repair"][0] == pytest.approx(0.0)
+    assert decode_calls == 1
+
+
+@pytest.mark.parametrize("high_wrist", [0, 1])
+def test_bimanual_aux_wrist_damage_does_not_change_other_wrist_rank_or_repair(
+    monkeypatch, high_wrist
+) -> None:
+    gt = jnp.zeros((1, 1, 20), dtype=jnp.float32)
+    predicted = jnp.full_like(gt, 2.0)
+    gate = jnp.asarray([[1.0, 0.0] if high_wrist == 0 else [0.0, 1.0]])
+    decoded = predicted.at[..., high_wrist * 10 : (high_wrist + 1) * 10].set(2.5)
+    baseline, _ = _bimanual_aux_components(monkeypatch, decoded, gt, predicted, gate)
+
+    low_wrist = 1 - high_wrist
+    damaged = decoded.at[..., low_wrist * 10 : (low_wrist + 1) * 10].set(5.0)
+    damaged_components, _ = _bimanual_aux_components(
+        monkeypatch,
+        damaged,
+        gt,
+        predicted,
+        gate,
+    )
+
+    assert damaged_components["decode"][0] > baseline["decode"][0]
+    assert damaged_components["low_safety"][0] > baseline["low_safety"][0]
+    np.testing.assert_allclose(damaged_components["rank"], baseline["rank"])
+    np.testing.assert_allclose(damaged_components["repair"], baseline["repair"])
+
+
+def test_bimanual_aux_single_active_wrist_rank_is_not_halved(monkeypatch) -> None:
+    gt = jnp.zeros((2, 1, 20), dtype=jnp.float32)
+    predicted = jnp.full_like(gt, 2.0)
+    decoded = predicted.at[..., :10].set(2.5)
+
+    components, _ = _bimanual_aux_components(
+        monkeypatch,
+        decoded,
+        gt,
+        predicted,
+        jnp.asarray([[1.0, 0.5], [1.0, 0.5]], dtype=jnp.float32),
+    )
+
+    np.testing.assert_allclose(components["rank"], jnp.full((2,), 6.1), atol=1e-6)
+
+
+def test_bimanual_aux_source_balanced_normalizes_each_active_wrist(monkeypatch) -> None:
+    gt = jnp.zeros((3, 1, 20), dtype=jnp.float32)
+    predicted = jnp.full_like(gt, 2.0)
+    desired_rank = jnp.asarray([2.0, 6.0, 0.0], dtype=jnp.float32)
+    left_values = (desired_rank + 3.9) / 4.0
+    decoded = predicted.at[..., :10].set(left_values[:, None, None])
+    sources = jnp.asarray([0, 0, 1], dtype=jnp.int32)
+
+    components, _ = _bimanual_aux_components(
+        monkeypatch,
+        decoded,
+        gt,
+        predicted,
+        jnp.asarray([[1.0, 0.5], [1.0, 0.5], [0.5, 0.5]], dtype=jnp.float32),
+        source_indices=sources,
+        num_sources=2,
+    )
+
+    np.testing.assert_allclose(components["rank"], jnp.asarray([4.0, 12.0, 0.0]), atol=1e-5)
+    assert source_balanced_mean(components["rank"], sources, num_sources=2) == pytest.approx(4.0)
+
+
+def test_bimanual_aux_worst_source_cvar_ignores_inactive_wrist(monkeypatch) -> None:
+    gt = jnp.zeros((4, 1, 20), dtype=jnp.float32)
+    predicted = jnp.full_like(gt, 2.0)
+    rank_penalties = jnp.asarray([1.0, 2.0, 3.0, 4.0], dtype=jnp.float32)
+    left_values = (rank_penalties + 3.9) / 4.0
+    decoded = predicted.at[..., :10].set(left_values[:, None, None])
+    sources = jnp.asarray([0, 0, 1, 1], dtype=jnp.int32)
+    source_weights = jnp.ones((2,), dtype=jnp.float32)
+
+    components, _ = _bimanual_aux_components(
+        monkeypatch,
+        decoded,
+        gt,
+        predicted,
+        jnp.asarray([[1.0, 0.5]] * 4, dtype=jnp.float32),
+        source_indices=sources,
+        source_rank_weights=source_weights,
+        num_sources=2,
+        high_gate_rank_aggregation="worst_source_cvar",
+        high_gate_rank_hard_fraction=0.5,
+        high_gate_rank_worst_beta=20.0,
+    )
+    expected, _ = high_gate_worst_source_cvar_loss(
+        rank_penalties,
+        jnp.ones_like(rank_penalties),
+        sources,
+        source_weights,
+        num_sources=2,
+        hard_fraction=0.5,
+        worst_beta=20.0,
+    )
+
+    np.testing.assert_allclose(components["rank"], jnp.full((4,), expected), atol=1e-5)
 
 
 def test_high_gate_worst_source_cvar_downweights_easy_source_prior() -> None:
@@ -692,10 +858,10 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertGreater(float(components["composite_fm"]), 0.0)
         self.assertEqual(float(components["gt_fm"]), 0.0)
         self.assertEqual(float(components["vla_fm"]), 0.0)
-        self.assertEqual(float(components["decode"]), 0.0)
-        self.assertEqual(float(components["low_safety"]), 0.0)
-        self.assertEqual(float(components["rank"]), 0.0)
-        self.assertEqual(float(components["repair"]), 0.0)
+        self.assertGreater(float(components["decode"]), 0.0)
+        for name in ("low_safety", "rank", "repair"):
+            self.assertTrue(bool(jnp.isfinite(components[name])))
+            self.assertGreaterEqual(float(components[name]), 0.0)
 
     def test_gate_stratified_decode_metrics(self):
         out = gate_stratified_decode_metrics(
