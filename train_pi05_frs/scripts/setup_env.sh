@@ -6,7 +6,8 @@ TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
 TRAIN_VENV="${TRAIN_PI05_FRS_VENV:-${TRAIN_ROOT}/.venv}"
 UV_BIN="${UV_BIN:-uv}"
-TRAIN_PI05_FRS_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_VENV}/bin/python}"
+TRAIN_PI05_FRS_PYTHON_OVERRIDE="${TRAIN_PI05_FRS_PYTHON:-}"
+TRAIN_PI05_FRS_PYTHON="${TRAIN_PI05_FRS_PYTHON_OVERRIDE:-${TRAIN_VENV}/bin/python}"
 
 fail() {
     printf '%s\n' "$*" >&2
@@ -15,12 +16,21 @@ fail() {
 
 validate_environment_targets() {
     TRAIN_VENV="$(realpath -m -- "${TRAIN_VENV}")"
-    local root_venv deploy_venv
+    local root_venv deploy_venv train_python override_bin override_venv
     root_venv="$(realpath -m -- "${REPO_ROOT}/.venv")"
     deploy_venv="$(realpath -m -- "${REPO_ROOT}/deploy_pi05/.venv")"
     [[ "${TRAIN_VENV}" != "${root_venv}" && "${TRAIN_VENV}" != "${deploy_venv}" ]] \
         || fail "Pi0.5 FRS 训练必须使用独立虚拟环境：${TRAIN_VENV}"
-    TRAIN_PI05_FRS_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_VENV}/bin/python}"
+    train_python="${TRAIN_VENV}/bin/python"
+    if [[ -n "${TRAIN_PI05_FRS_PYTHON_OVERRIDE}" ]]; then
+        override_bin="$(dirname -- "${TRAIN_PI05_FRS_PYTHON_OVERRIDE}")"
+        override_venv="$(realpath -m -- "$(dirname -- "${override_bin}")")"
+        [[ "$(basename -- "${TRAIN_PI05_FRS_PYTHON_OVERRIDE}")" == "python" \
+            && "$(basename -- "${override_bin}")" == "bin" \
+            && "${override_venv}" == "${TRAIN_VENV}" ]] \
+            || fail "Pi0.5 FRS 训练必须使用独立虚拟环境 Python：${TRAIN_PI05_FRS_PYTHON_OVERRIDE}"
+    fi
+    TRAIN_PI05_FRS_PYTHON="${train_python}"
 }
 
 sync_environment() {

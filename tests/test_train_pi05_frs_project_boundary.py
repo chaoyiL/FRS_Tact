@@ -81,6 +81,33 @@ def test_setup_syncs_only_the_train_project_environment(tmp_path: Path) -> None:
     ]
 
 
+def test_setup_derives_python_from_the_canonicalized_train_environment(tmp_path: Path) -> None:
+    train_venv_alias = TRAIN_ROOT / "alias" / ".." / ".venv"
+    result = run_sourced_setup(
+        tmp_path,
+        train_venv=train_venv_alias,
+        function='validate_environment_targets; printf "%s" "${TRAIN_PI05_FRS_PYTHON}"',
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == str(TRAIN_ROOT / ".venv" / "bin" / "python")
+    assert not (tmp_path / "uv.called").exists()
+
+
+def test_setup_rejects_root_or_deploy_python_before_uv(tmp_path: Path) -> None:
+    for forbidden in (ROOT / ".venv/bin/python", ROOT / "deploy_pi05/.venv/bin/python"):
+        result = run_sourced_setup(
+            tmp_path,
+            train_venv=TRAIN_ROOT / ".venv",
+            function="sync_environment",
+            extra_environment={"TRAIN_PI05_FRS_PYTHON": str(forbidden)},
+        )
+
+        assert result.returncode != 0
+        assert "独立虚拟环境" in result.stderr
+        assert not (tmp_path / "uv.called").exists()
+
+
 def test_sourcing_setup_exposes_default_python_without_running_main(tmp_path: Path) -> None:
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
