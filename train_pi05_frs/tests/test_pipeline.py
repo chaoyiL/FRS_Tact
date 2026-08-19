@@ -476,6 +476,72 @@ def test_path_preflight_validates_encoder_and_local_norm_stats_files(tmp_path: P
         validate_config(config, check_paths=True)
 
 
+def _set_encoder_params_file(config: dict[str, Any], params_file: str | None) -> Path:
+    encoder = Path(config["model"]["tactile_encoder_path"])
+    metadata_path = encoder / "checkpoint.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if params_file is None:
+        metadata.pop("params_file", None)
+    else:
+        metadata["params_file"] = params_file
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    return encoder
+
+
+@pytest.mark.parametrize("escape_kind", ["absolute", "parent", "symlink"])
+def test_path_preflight_rejects_encoder_params_file_escape(
+    tmp_path: Path, escape_kind: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    external = tmp_path / "external-params.npz"
+    np.savez(external, p00000=np.zeros((1,), dtype=np.float32))
+    encoder = Path(config["model"]["tactile_encoder_path"])
+    if escape_kind == "absolute":
+        params_file = str(external)
+    elif escape_kind == "parent":
+        params_file = "../external-params.npz"
+    else:
+        params_file = "linked-params.npz"
+        (encoder / params_file).symlink_to(external)
+    _set_encoder_params_file(config, params_file)
+
+    with pytest.raises(ValueError, match="params_file.*within.*checkpoint directory"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_rejects_encoder_params_file_directory(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    encoder = _set_encoder_params_file(config, "params-dir")
+    (encoder / "params-dir").mkdir()
+
+    with pytest.raises(ValueError, match="params_file.*regular file"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_rejects_missing_encoder_params_file(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    _set_encoder_params_file(config, "missing.npz")
+
+    with pytest.raises(FileNotFoundError, match="params_file.*missing"):
+        validate_config(config, check_paths=True)
+
+
+def test_path_preflight_accepts_legacy_default_encoder_params_file(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    encoder = _set_encoder_params_file(config, None)
+    (encoder / "params-fake.npz").replace(encoder / "params.npz")
+
+    validate_config(config, check_paths=True)
+
+
 @pytest.mark.parametrize(
     ("metadata_key", "bad_value", "message"),
     [

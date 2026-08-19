@@ -238,9 +238,25 @@ def _validate_encoder_checkpoint(
     params_name = _nonempty_string(
         metadata.get("params_file", "params.npz"), "model.tactile_encoder params_file"
     )
-    params_path = path / params_name
-    if not params_path.is_file() or not zipfile.is_zipfile(params_path):
-        raise FileNotFoundError(f"tactile encoder checkpoint params are missing/invalid: {params_path}")
+    encoder_dir = path.resolve()
+    relative_params_path = Path(params_name)
+    if relative_params_path.is_absolute():
+        raise ValueError(
+            "tactile encoder params_file must remain within the checkpoint directory"
+        )
+    params_path = (encoder_dir / relative_params_path).resolve(strict=False)
+    try:
+        params_path.relative_to(encoder_dir)
+    except ValueError as error:
+        raise ValueError(
+            "tactile encoder params_file must remain within the checkpoint directory"
+        ) from error
+    if not params_path.exists():
+        raise FileNotFoundError(f"tactile encoder params_file is missing: {params_path}")
+    if not params_path.is_file():
+        raise ValueError(f"tactile encoder params_file must be a regular file: {params_path}")
+    if not zipfile.is_zipfile(params_path):
+        raise ValueError(f"tactile encoder params_file is not a valid npz file: {params_path}")
     parameter_paths = metadata.get("parameter_paths")
     if not isinstance(parameter_paths, list) or not parameter_paths:
         raise ValueError("tactile encoder checkpoint parameter_paths must be a non-empty list")
