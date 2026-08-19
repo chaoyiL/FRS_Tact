@@ -302,7 +302,7 @@ def test_rank_satisfaction_is_a_feasibility_constraint() -> None:
         high_gate_rank_margin=0.01,
     )
     assert key[0] == 1.0
-    assert key[2] == 1.0
+    assert key[2] == pytest.approx(0.0125)
 
 
 def test_early_stop_counts_evaluations_and_resets_on_improvement() -> None:

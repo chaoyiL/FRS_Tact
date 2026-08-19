@@ -21,6 +21,7 @@ from modalities_eval.utils import EvalObservation
 from train_encoder.utils.checkpoint import load_tactile_encoder
 from train_encoder.utils.model import tactile_clip_config_from_dict
 from train_encoder.utils.resnet import encode_resnet18
+from train_smolvla_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
 from train_smolvla_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
 from train_smolvla_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
 from train_smolvla_frs.utils.model import decode_actions
@@ -558,7 +559,10 @@ class FRSSteeringPolicy:
         extra = self.metadata.get("extra_metadata")
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
-        _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
+        if extra.get("loss_mode") == "bimanual_gated":
+            validate_bimanual_objective_metadata(extra)
+        else:
+            _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
         decoder_input_version = extra.get("decoder_input_version")
         if (
             not isinstance(decoder_input_version, int)
