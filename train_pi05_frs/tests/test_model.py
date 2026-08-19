@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 import pathlib
+import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import jax
 import jax.numpy as jnp
@@ -21,6 +26,7 @@ from train_pi05_frs.utils.model import gated_flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import gt_supervised_loss_per_sample
 from train_pi05_frs.utils.model import make_optimizer
 from train_pi05_frs.utils.model import train_step
+from train_pi05_frs.train import _validate_resume_cache_provenance, train_decoder
 import numpy as np
 
 
@@ -39,6 +45,53 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             ),
             rngs=nnx.Rngs(0),
         )
+
+    def test_resume_rejects_same_shape_checkpoint_from_a_different_cache(self):
+        for changed_field in ("cache_records_sha256", "cache_configuration"):
+            checkpoint_metadata = {
+                "extra_metadata": {
+                    "cache_records_sha256": "same-records",
+                    "cache_configuration": {"dataset_repo_id": "org/cache-a"},
+                }
+            }
+            current_cache_manifest = {
+                "action_horizon": 6,
+                "action_dim": 3,
+                "state_dim": 5,
+                "records_sha256": "same-records",
+                "configuration": {"dataset_repo_id": "org/cache-a"},
+            }
+            if changed_field == "cache_records_sha256":
+                current_cache_manifest["records_sha256"] = "other-records"
+            else:
+                current_cache_manifest["configuration"] = {
+                    "dataset_repo_id": "org/cache-b"
+                }
+
+            with self.subTest(changed_field=changed_field), self.assertRaisesRegex(
+                ValueError, f"{changed_field}.*fine-tun"
+            ):
+                _validate_resume_cache_provenance(
+                    checkpoint_metadata, current_cache_manifest
+                )
+
+    def test_resume_rejects_checkpoint_without_cache_provenance(self):
+        with self.assertRaisesRegex(ValueError, "cache_records_sha256.*cache_configuration"):
+            _validate_resume_cache_provenance(
+                {"extra_metadata": {}},
+                {"records_sha256": "current", "configuration": {}},
+            )
+
+    def test_resume_checks_cache_before_optimizer_restore_or_history_write(self):
+        source = inspect.getsource(train_decoder)
+        validate_at = source.index("_validate_resume_cache_provenance(")
+        restore_at = source.index("load_optimizer_state(resume_dir)")
+        history_at = source.index("output_dir.mkdir(parents=True, exist_ok=True)")
+        pin_at = source.index("resolve_checkpoint_snapshot(resume_dir)")
+
+        self.assertLess(pin_at, validate_at)
+        self.assertLess(validate_at, restore_at)
+        self.assertLess(validate_at, history_at)
 
     def _tactile_seq(self, key, batch: int, window: int = 3):
         return jax.random.normal(key, (batch, window, 4, 4))
@@ -247,7 +300,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         tactile = jnp.ones((2, 3, 4, 4), dtype=jnp.float32)
         expected = model(x, t, tactile)
         with tempfile.TemporaryDirectory() as directory:
-            checkpoint_dir = pathlib.Path(directory)
+            checkpoint_dir = pathlib.Path(directory) / "output" / "last"
             save_checkpoint(checkpoint_dir, model, epoch=3, metrics={"val_mse": 0.5})
             restored, metadata = load_checkpoint(checkpoint_dir)
             self.assertTrue(jnp.array_equal(expected, restored(x, t, tactile)))
@@ -282,7 +335,7 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
         optimizer.step.value = jnp.asarray(4, dtype=jnp.uint32)
         with tempfile.TemporaryDirectory() as directory:
-            checkpoint_dir = pathlib.Path(directory)
+            checkpoint_dir = pathlib.Path(directory) / "output" / "last"
             save_checkpoint(
                 checkpoint_dir,
                 model,
@@ -309,6 +362,192 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             self.assertEqual(len(expected_leaves), len(restored_leaves))
             for expected_leaf, restored_leaf in zip(expected_leaves, restored_leaves, strict=True):
                 self.assertTrue(jnp.array_equal(expected_leaf, restored_leaf))
+
+    def test_checkpoint_publishes_immutable_checksummed_generation(self):
+        from train_pi05_frs.utils.checkpoint import load_optimizer_state
+
+        model = self.make_model()
+        optimizer = make_optimizer(
+            model, learning_rate=1e-3, weight_decay=0.0, total_steps=10
+        )
+        optimizer.step.value = jnp.asarray(7, dtype=jnp.uint32)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory) / "output" / "last"
+            save_checkpoint(
+                checkpoint_dir,
+                model,
+                epoch=4,
+                metrics={"val_mse": 0.25},
+                optimizer=optimizer,
+            )
+
+            self.assertTrue(checkpoint_dir.is_symlink())
+            snapshot = checkpoint_dir.resolve(strict=True)
+            self.assertEqual(snapshot.parent.name, ".checkpoint-generations")
+            metadata = json.loads(
+                (snapshot / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(metadata["version"], 3)
+            self.assertEqual(metadata["generation"], snapshot.name)
+            self.assertEqual(
+                set(metadata["files"]),
+                {
+                    "checkpoint.json",
+                    "params.npz",
+                    "opt_state.npz",
+                    "opt_state.treedef.pkl",
+                },
+            )
+            for name, record in metadata["files"].items():
+                payload = (snapshot / name).read_bytes()
+                if name == "checkpoint.json":
+                    # The metadata record covers the canonical metadata payload with
+                    # its own checksum field blanked to avoid recursive hashing.
+                    canonical = json.loads(payload)
+                    canonical["files"][name]["sha256"] = ""
+                    payload = (json.dumps(canonical, sort_keys=True) + "\n").encode()
+                self.assertEqual(record["size"], len(payload))
+                self.assertEqual(record["sha256"], hashlib.sha256(payload).hexdigest())
+                self.assertEqual(record["generation"], snapshot.name)
+
+            _, loaded_metadata = load_checkpoint(checkpoint_dir)
+            _, step = load_optimizer_state(checkpoint_dir)
+            self.assertEqual(loaded_metadata["generation"], snapshot.name)
+            self.assertEqual(step, 7)
+
+    def test_checkpoint_faults_never_expose_a_mixed_generation(self):
+        from train_pi05_frs.utils import checkpoint as checkpoint_module
+
+        stages = (
+            "after_params_fsync",
+            "after_opt_state_fsync",
+            "after_opt_treedef_fsync",
+            "after_metadata_fsync",
+            "after_snapshot_validation",
+            "after_snapshot_dir_fsync",
+            "after_generation_publish",
+            "after_pointer_prepare",
+            "after_pointer_publish",
+            "after_pointer_parent_fsync",
+        )
+        for stage in stages:
+            with self.subTest(stage=stage), tempfile.TemporaryDirectory() as directory:
+                checkpoint_dir = pathlib.Path(directory) / "output" / "last"
+                model_a = self.make_model()
+                optimizer_a = make_optimizer(
+                    model_a, learning_rate=1e-3, weight_decay=0.0, total_steps=10
+                )
+                optimizer_a.step.value = jnp.asarray(1, dtype=jnp.uint32)
+                save_checkpoint(
+                    checkpoint_dir,
+                    model_a,
+                    epoch=1,
+                    metrics={"val_mse": 1.0},
+                    optimizer=optimizer_a,
+                )
+                generation_a = checkpoint_dir.resolve(strict=True).name
+                model_b = TactileConditionedFlowDecoder(
+                    model_a.config, rngs=nnx.Rngs(99)
+                )
+                optimizer_b = make_optimizer(
+                    model_b, learning_rate=1e-3, weight_decay=0.0, total_steps=10
+                )
+                optimizer_b.step.value = jnp.asarray(2, dtype=jnp.uint32)
+
+                def fail_at(actual: str) -> None:
+                    if actual == stage:
+                        raise OSError(f"injected failure at {stage}")
+
+                with mock.patch.object(
+                    checkpoint_module, "_checkpoint_fault", side_effect=fail_at
+                ), self.assertRaisesRegex(OSError, stage):
+                    save_checkpoint(
+                        checkpoint_dir,
+                        model_b,
+                        epoch=2,
+                        metrics={"val_mse": 0.5},
+                        optimizer=optimizer_b,
+                    )
+
+                _, metadata = load_checkpoint(checkpoint_dir)
+                opt_state, step = checkpoint_module.load_optimizer_state(checkpoint_dir)
+                pointer_was_published = stage in {
+                    "after_pointer_publish",
+                    "after_pointer_parent_fsync",
+                }
+                self.assertEqual(metadata["epoch"], 2 if pointer_was_published else 1)
+                self.assertEqual(step, 2 if pointer_was_published else 1)
+                self.assertIsNotNone(opt_state)
+                self.assertEqual(
+                    checkpoint_dir.resolve(strict=True).name == generation_a,
+                    not pointer_was_published,
+                )
+
+    def test_v3_checkpoint_checksum_corruption_fails_closed(self):
+        from train_pi05_frs.utils.checkpoint import load_optimizer_state
+
+        model = self.make_model()
+        optimizer = make_optimizer(
+            model, learning_rate=1e-3, weight_decay=0.0, total_steps=10
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory) / "output" / "last"
+            save_checkpoint(
+                checkpoint_dir,
+                model,
+                epoch=1,
+                metrics={},
+                optimizer=optimizer,
+            )
+            with (checkpoint_dir / "opt_state.npz").open("ab") as file:
+                file.write(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "checksum|size"):
+                load_optimizer_state(checkpoint_dir)
+
+    def test_loader_keeps_legacy_v2_directory_compatibility(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint_dir = pathlib.Path(directory) / "output" / "last"
+            save_checkpoint(checkpoint_dir, model, epoch=3, metrics={})
+            snapshot = checkpoint_dir.resolve(strict=True)
+            legacy = pathlib.Path(directory) / "legacy"
+            shutil.copytree(snapshot, legacy)
+            metadata_path = legacy / "checkpoint.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["version"] = 2
+            metadata.pop("generation")
+            metadata.pop("files")
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            _, restored_metadata = load_checkpoint(legacy)
+            self.assertEqual(restored_metadata["version"], 2)
+
+    def test_save_atomically_upgrades_an_existing_legacy_directory(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory) / "output"
+            seed = output / "seed"
+            save_checkpoint(seed, model, epoch=1, metrics={})
+            legacy = output / "last"
+            shutil.copytree(seed.resolve(strict=True), legacy)
+            metadata_path = legacy / "checkpoint.json"
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            metadata["version"] = 2
+            metadata.pop("generation")
+            metadata.pop("files")
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+            save_checkpoint(legacy, model, epoch=2, metrics={})
+
+            self.assertTrue(legacy.is_symlink())
+            _, restored = load_checkpoint(legacy)
+            self.assertEqual(restored["epoch"], 2)
+            retired = list((output / ".checkpoint-generations").glob("legacy-*"))
+            self.assertEqual(len(retired), 1)
+            retired_metadata = json.loads(
+                (retired[0] / "checkpoint.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(retired_metadata["epoch"], 1)
 
 
 if __name__ == "__main__":

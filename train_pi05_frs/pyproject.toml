@@ -69,6 +69,23 @@ explicit = true
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
-[tool.setuptools.packages.find]
-where = ["src", ".."]
-include = ["train_pi05_frs*", "lerobot*"]
+[tool.setuptools]
+packages = [
+    "train_pi05_frs",
+    "train_pi05_frs.pi05_cache",
+    "train_pi05_frs.tools",
+    "train_pi05_frs.utils",
+    "lerobot",
+    "lerobot.configs",
+    "lerobot.datasets",
+    "lerobot.policies",
+    "lerobot.policies.pi05_jax",
+    "lerobot.policies.pi05_jax.policies",
+    "lerobot.policies.pi05_jax.training",
+    "lerobot.policies.pi05_jax.utils",
+    "lerobot.utils",
+]
+
+[tool.setuptools.package-dir]
+train_pi05_frs = "."
+lerobot = "src/lerobot"

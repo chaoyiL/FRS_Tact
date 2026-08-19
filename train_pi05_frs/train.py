@@ -28,6 +28,39 @@ def _resolve_resume_dir(
     return None
 
 
+def _validate_resume_cache_provenance(
+    checkpoint_metadata: Mapping[str, Any],
+    current_cache_manifest: Mapping[str, Any],
+) -> None:
+    extra = checkpoint_metadata.get("extra_metadata")
+    if not isinstance(extra, Mapping):
+        extra = {}
+    missing = [
+        key
+        for key in ("cache_records_sha256", "cache_configuration")
+        if key not in extra
+    ]
+    if missing:
+        raise ValueError(
+            "Resume checkpoint is missing cache provenance fields: "
+            f"{', '.join(missing)}. Resume is only for the exact original cache."
+        )
+    mismatches = [
+        key
+        for key in ("cache_records_sha256", "cache_configuration")
+        if extra[key]
+        != current_cache_manifest[
+            "records_sha256" if key == "cache_records_sha256" else "configuration"
+        ]
+    ]
+    if mismatches:
+        raise ValueError(
+            "Resume checkpoint cache provenance does not match the current cache: "
+            f"{', '.join(mismatches)}. Resume cannot be used for fine-tuning; "
+            "start a new output directory with an explicit fine-tune workflow."
+        )
+
+
 def train_decoder(
     *,
     cache_dir: pathlib.Path | None,
@@ -89,6 +122,24 @@ def train_decoder(
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
 ) -> None:
+    from train_pi05_frs.utils.path_safety import validate_output_roots
+
+    output_and_cache_roots: dict[str, pathlib.Path] = {
+        "frs_training.output": output_dir,
+    }
+    if cache_dir is not None:
+        output_and_cache_roots["action_cache"] = cache_dir
+    if cache_dirs is not None:
+        output_and_cache_roots.update(
+            {
+                f"action_cache[{index}]": path
+                for index, path in enumerate(cache_dirs)
+            }
+        )
+    if tactile_embedding_cache_root is not None:
+        output_and_cache_roots["tactile_embedding_cache"] = tactile_embedding_cache_root
+    validate_output_roots(output_and_cache_roots)
+
     import csv
     import json
 
@@ -101,6 +152,7 @@ def train_decoder(
         CHECKPOINT_NAME,
         load_checkpoint,
         load_optimizer_state,
+        resolve_checkpoint_snapshot,
         restore_optimizer_state,
         save_checkpoint,
     )
@@ -197,22 +249,9 @@ def train_decoder(
     resumed_opt_state = None
     resumed_opt_step: int | None = None
     if resume_dir is not None:
+        resume_dir = resolve_checkpoint_snapshot(resume_dir)
         if not (resume_dir / CHECKPOINT_NAME).exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_dir}")
-        model, resume_metadata = load_checkpoint(resume_dir)
-        resumed_opt_state, resumed_opt_step = load_optimizer_state(resume_dir)
-        start_epoch = int(resume_metadata["epoch"]) + 1
-        print(
-            f"resuming from {resume_dir} epoch={resume_metadata['epoch']} "
-            f"next_epoch={start_epoch} has_opt_state={resumed_opt_state is not None}",
-            flush=True,
-        )
-        if start_epoch > epochs:
-            print(
-                f"already finished: last epoch {resume_metadata['epoch']} >= --epochs {epochs}",
-                flush=True,
-            )
-            return
 
     print(f"jax_devices={jax.devices()}", flush=True)
     if not any(d.platform == "gpu" for d in jax.devices()):
@@ -238,6 +277,10 @@ def train_decoder(
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
         pairs = CachedPairs(cache_dir)
+    if resume_dir is not None:
+        model, resume_metadata = load_checkpoint(resume_dir)
+        _validate_resume_cache_provenance(resume_metadata, pairs.manifest)
+        start_epoch = int(resume_metadata["epoch"]) + 1
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
@@ -299,6 +342,20 @@ def train_decoder(
                 "state-conditioned decoder."
             )
         # ``model`` already loaded above.
+        if start_epoch > epochs:
+            conditioner.close()
+            print(
+                f"already finished: last epoch {resume_metadata['epoch']} >= --epochs {epochs}",
+                flush=True,
+            )
+            return
+        assert resume_dir is not None
+        resumed_opt_state, resumed_opt_step = load_optimizer_state(resume_dir)
+        print(
+            f"resuming from {resume_dir} epoch={resume_metadata['epoch']} "
+            f"next_epoch={start_epoch} has_opt_state={resumed_opt_state is not None}",
+            flush=True,
+        )
     train_samples = len(pairs.indices("train"))
     steps_per_epoch = max(1, (train_samples + batch_size - 1) // batch_size)
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch

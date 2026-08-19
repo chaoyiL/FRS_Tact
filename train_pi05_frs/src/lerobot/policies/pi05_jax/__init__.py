@@ -1,6 +1,4 @@
-"""Pure-JAX pi0.5, vendored from openpi. See README.md in this directory for what was vendored
-verbatim, what deviates, and why openpi is copied in rather than installed.
-"""
+"""Selected pure-JAX Pi0.5 modules adapted from openpi for this private runtime copy."""
 
 from .frs import Pi0PrefixCache, build_prefix_cache, denoise_step
 from .model import Actions, Observation

@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 from typing import Any
+import zipfile
 
 import numpy as np
 import pytest
@@ -44,18 +45,63 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
         json.dumps(
             {
                 "codebase_version": "v3.0",
+                "fps": 30,
+                "total_episodes": 1,
+                "total_frames": 2,
+                "total_tasks": 1,
                 "features": {
-                    "actions": {"dtype": "float32"},
-                    "observation.images.camera0": {"dtype": "video"},
-                    "observation.images.camera1": {"dtype": "video"},
-                    "observation.images.tactile_left_0": {"dtype": "video"},
-                    "observation.images.tactile_right_0": {"dtype": "video"},
-                    "observation.images.tactile_left_1": {"dtype": "video"},
-                    "observation.images.tactile_right_1": {"dtype": "video"},
+                    "actions": {"dtype": "float32", "shape": [2]},
+                    "observation.state": {"dtype": "float32", "shape": [3]},
+                    "observation.images.camera0": {"dtype": "video", "shape": [3, 224, 224]},
+                    "observation.images.camera1": {"dtype": "video", "shape": [3, 224, 224]},
+                    "observation.images.tactile_left_0": {"dtype": "video", "shape": [3, 224, 224]},
+                    "observation.images.tactile_right_0": {"dtype": "video", "shape": [3, 224, 224]},
+                    "observation.images.tactile_left_1": {"dtype": "video", "shape": [3, 224, 224]},
+                    "observation.images.tactile_right_1": {"dtype": "video", "shape": [3, 224, 224]},
                 },
             }
         ),
         encoding="utf-8",
+    )
+    (dataset / "meta" / "stats.json").write_text(
+        json.dumps(
+            {
+                "observation.state": {
+                    "min": [0.0, 0.0, 0.0],
+                    "max": [1.0, 1.0, 1.0],
+                    "mean": [0.5, 0.5, 0.5],
+                    "std": [1.0, 1.0, 1.0],
+                    "count": [2],
+                },
+                "actions": {
+                    "min": [0.0, 0.0],
+                    "max": [1.0, 1.0],
+                    "mean": [0.5, 0.5],
+                    "std": [1.0, 1.0],
+                    "count": [2],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    pq.write_table(
+        pa.table({"task": ["demo"], "task_index": [0]}),
+        dataset / "meta" / "tasks.parquet",
+    )
+    episodes = dataset / "meta" / "episodes" / "chunk-000"
+    episodes.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "dataset_from_index": [0],
+                "dataset_to_index": [2],
+            }
+        ),
+        episodes / "file-000.parquet",
     )
     norm_stats = tmp_path / "norm-stats" / "robot"
     norm_stats.mkdir(parents=True)
@@ -63,12 +109,17 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
         json.dumps(
             {
                 "norm_stats": {
-                    "state": {"mean": [0.0], "std": [1.0], "q01": [-1.0], "q99": [1.0]},
+                    "state": {
+                        "mean": [0.0, 0.0, 0.0],
+                        "std": [1.0, 1.0, 1.0],
+                        "q01": [-1.0, -1.0, -1.0],
+                        "q99": [1.0, 1.0, 1.0],
+                    },
                     "actions": {
-                        "mean": [0.0],
-                        "std": [1.0],
-                        "q01": [-1.0],
-                        "q99": [1.0],
+                        "mean": [0.0, 0.0],
+                        "std": [1.0, 1.0],
+                        "q01": [-1.0, -1.0],
+                        "q99": [1.0, 1.0],
                     },
                 }
             }
@@ -354,6 +405,75 @@ def test_schema_rejects_url_output_paths(tmp_path: Path, section: str, key: str)
 
 
 @pytest.mark.parametrize(
+    ("section", "key", "protected"),
+    [
+        ("frs_training", "output", REPO_ROOT / "pyproject.toml"),
+        ("action_cache", "root", REPO_ROOT / "uv.lock"),
+        ("frs_training", "output", REPO_ROOT / "deploy_pi05" / "generated"),
+        ("action_cache", "root", REPO_ROOT / "train_encoder" / "cache"),
+        ("tactile_embedding_cache", "root", TRAIN_ROOT / "src" / "cache"),
+        ("frs_training", "output", TRAIN_ROOT / "configs" / "generated"),
+        ("action_cache", "root", TRAIN_ROOT / "tests" / "cache"),
+    ],
+)
+def test_schema_rejects_protected_output_or_cache_descendants(
+    tmp_path: Path, section: str, key: str, protected: Path
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config[section][key] = str(protected)
+
+    with pytest.raises(ValueError, match=rf"config\.{re.escape(section)}\.{key}.*protected"):
+        validate_config(config, check_paths=False)
+
+
+def test_schema_rejects_symlink_alias_of_protected_source_tree(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    alias = tmp_path / "source-alias"
+    alias.symlink_to(TRAIN_ROOT / "utils", target_is_directory=True)
+    config["frs_training"]["output"] = str(alias / "generated")
+
+    with pytest.raises(ValueError, match=r"frs_training\.output.*protected"):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("action_cache", "tactile_embedding_cache"),
+        ("action_cache", "frs_training"),
+        ("tactile_embedding_cache", "frs_training"),
+    ],
+)
+@pytest.mark.parametrize("relation", ["same", "left_contains_right", "right_contains_left"])
+def test_schema_rejects_overlapping_output_and_cache_roots(
+    tmp_path: Path, left: str, right: str, relation: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    key = {
+        "action_cache": "root",
+        "tactile_embedding_cache": "root",
+        "frs_training": "output",
+    }
+    base = tmp_path / "collision"
+    left_value, right_value = {
+        "same": (base, base),
+        "left_contains_right": (base, base / "nested"),
+        "right_contains_left": (base / "nested", base),
+    }[relation]
+    config[left][key[left]] = str(left_value)
+    config[right][key[right]] = str(right_value)
+
+    with pytest.raises(ValueError, match="overlap"):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
     ("mutate", "message"),
     [
         (
@@ -473,6 +593,110 @@ def test_path_preflight_validates_encoder_and_local_norm_stats_files(tmp_path: P
     )
     stats_file.unlink()
     with pytest.raises(FileNotFoundError, match="norm stats"):
+        validate_config(config, check_paths=True)
+
+
+def test_check_preflight_uses_distribution_metadata_and_light_gpu_probe() -> None:
+    from train_pi05_frs.tools import train_frs
+
+    calls: list[str] = []
+    versions = {
+        name: expected or "1.0"
+        for name, expected in train_frs.REQUIRED_DISTRIBUTIONS.items()
+    }
+
+    train_frs.preflight_environment(
+        version_getter=lambda name: calls.append(name) or versions[name],
+        gpu_probe=lambda: ["GPU 0: fake accelerator"],
+    )
+
+    assert calls == list(train_frs.REQUIRED_DISTRIBUTIONS)
+
+
+@pytest.mark.parametrize("failure", ["dependency", "version", "gpu"])
+def test_check_preflight_rejects_missing_dependencies_versions_or_gpu(failure: str) -> None:
+    from importlib.metadata import PackageNotFoundError
+    from train_pi05_frs.tools import train_frs
+
+    versions = {
+        name: expected or "1.0"
+        for name, expected in train_frs.REQUIRED_DISTRIBUTIONS.items()
+    }
+
+    def version_getter(name: str) -> str:
+        if failure == "dependency" and name == "jax":
+            raise PackageNotFoundError(name)
+        if failure == "version" and name == "jax":
+            return "0.0.0"
+        return versions[name]
+
+    with pytest.raises(RuntimeError, match={
+        "dependency": "dependency.*jax",
+        "version": "jax.*0.5.3",
+        "gpu": "GPU",
+    }[failure]):
+        train_frs.preflight_environment(
+            version_getter=version_getter,
+            gpu_probe=(lambda: [] if failure == "gpu" else ["GPU 0"]),
+        )
+
+
+def test_path_preflight_rejects_zip_that_is_not_a_numpy_archive(tmp_path: Path) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    params = Path(config["model"]["tactile_encoder_path"]) / "params-fake.npz"
+    params.unlink()
+    with zipfile.ZipFile(params, "w") as archive:
+        archive.writestr("plain.txt", "not a numpy array")
+
+    with pytest.raises(ValueError, match="valid npz.*array"):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize("missing", ["tasks", "stats", "episodes"])
+def test_path_preflight_requires_complete_lerobot_v3_metadata(
+    tmp_path: Path, missing: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    meta = Path(config["datasets"][0]["root"]) / "meta"
+    target = {
+        "tasks": meta / "tasks.parquet",
+        "stats": meta / "stats.json",
+        "episodes": meta / "episodes/chunk-000/file-000.parquet",
+    }[missing]
+    target.unlink()
+
+    with pytest.raises((FileNotFoundError, ValueError), match=missing):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    ("stat_name", "field", "bad_value"),
+    [
+        ("state", "mean", [0.0, 0.0, 0.0, 0.0]),
+        ("state", "std", [1.0, 1.0]),
+        ("actions", "q99", [1.0, 1.0, 1.0]),
+    ],
+)
+def test_path_preflight_validates_norm_stats_against_dataset_feature_width(
+    tmp_path: Path, stat_name: str, field: str, bad_value: list[float]
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    stats_path = (
+        Path(config["norm_stats"]["dir"])
+        / config["norm_stats"]["asset_id"]
+        / "norm_stats.json"
+    )
+    payload = json.loads(stats_path.read_text(encoding="utf-8"))
+    payload["norm_stats"][stat_name][field] = bad_value
+    stats_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"norm stats {stat_name}.*{field}.*width"):
         validate_config(config, check_paths=True)
 
 
@@ -769,6 +993,12 @@ def _run_launcher(
     config_path, config = _write_config(tmp_path)
     event_log = tmp_path / "events.txt"
     fake_python = _fake_python(tmp_path)
+    fake_nvidia_smi = tmp_path / "nvidia-smi"
+    fake_nvidia_smi.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' 'GPU 0: test accelerator'\n",
+        encoding="utf-8",
+    )
+    fake_nvidia_smi.chmod(0o755)
     selected_python = fake_python
     if symlink_python:
         selected_python = tmp_path / "venv" / "bin" / "python"
@@ -785,6 +1015,7 @@ def _run_launcher(
         "FRS_REAL_PYTHON": sys.executable,
         "FRS_EVENT_LOG": str(event_log),
         "FRS_FAIL_STAGE": fail_stage or "",
+        "FRS_NVIDIA_SMI": str(fake_nvidia_smi),
     }
     if foreground:
         environment["FRS_FOREGROUND"] = "1"
@@ -1044,3 +1275,4 @@ def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     assert "Automated mock/CPU verification" in readme
     assert "Real GPU/data/checkpoint verification" in readme
     assert "has not been run" in readme
+    assert "dereference" in readme and ".checkpoint-generations" in readme

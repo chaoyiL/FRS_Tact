@@ -5,22 +5,40 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Mapping, Sequence
+import importlib.metadata
 import json
 import math
 import os
 from pathlib import Path
+import shutil
+import subprocess
 from typing import Any
 import urllib.parse
-import zipfile
 
 import yaml
 
-from train_pi05_frs.train import train_decoder
+from train_pi05_frs.utils.path_safety import validate_output_roots
 
 
 TRAIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = TRAIN_ROOT.parent
 DEFAULT_CONFIG = TRAIN_ROOT / "configs" / "train_pi05_frs.yaml"
+train_decoder: Any = None
+
+# Exact versions are checked for dependencies which the environment contract pins.
+# The remaining entries are still verified without importing their modules.
+REQUIRED_DISTRIBUTIONS: dict[str, str | None] = {
+    "jax": "0.5.3",
+    "jaxlib": "0.5.3",
+    "flax": "0.10.2",
+    "orbax-checkpoint": "0.11.13",
+    "transformers": "4.53.2",
+    "ml-dtypes": "0.4.1",
+    "numpy": None,
+    "torch": None,
+    "datasets": None,
+    "pyarrow": None,
+}
 
 ROOT_KEYS = {
     "checkpoint",
@@ -213,9 +231,7 @@ def _local_path(value: object, field: str) -> Path:
 
 def _output_target(value: object, field: str) -> Path:
     path = _local_path(value, field)
-    if path.resolve(strict=False) in (Path("/"), REPO_ROOT.resolve(), TRAIN_ROOT.resolve()):
-        raise ValueError(f"config.{field} must not target a repository or filesystem root")
-    return path
+    return validate_output_roots({f"config.{field}": path})[f"config.{field}"]
 
 
 def _json_mapping(path: Path, label: str) -> Mapping[str, Any]:
@@ -229,6 +245,48 @@ def _json_mapping(path: Path, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{label} must contain a JSON mapping: {path}")
     return value
+
+
+def _probe_nvidia_gpu() -> list[str]:
+    executable = os.environ.get("FRS_NVIDIA_SMI") or shutil.which("nvidia-smi")
+    if not executable:
+        raise RuntimeError("GPU preflight failed: nvidia-smi is not available")
+    try:
+        result = subprocess.run(
+            [executable, "-L"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeError(f"GPU preflight failed while running nvidia-smi: {error}") from error
+    gpu_lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if result.returncode != 0 or not gpu_lines:
+        detail = result.stderr.strip() or "no NVIDIA GPU was reported"
+        raise RuntimeError(f"GPU preflight failed: {detail}")
+    return gpu_lines
+
+
+def preflight_environment(
+    *,
+    version_getter: Any = importlib.metadata.version,
+    gpu_probe: Any = _probe_nvidia_gpu,
+) -> None:
+    """Check the locked runtime and accelerator without importing JAX or a model."""
+    for distribution, expected in REQUIRED_DISTRIBUTIONS.items():
+        try:
+            actual = version_getter(distribution)
+        except importlib.metadata.PackageNotFoundError as error:
+            raise RuntimeError(
+                f"required dependency {distribution!r} is not installed"
+            ) from error
+        if expected is not None and actual != expected:
+            raise RuntimeError(
+                f"required dependency {distribution} must be {expected}, found {actual}"
+            )
+    if not gpu_probe():
+        raise RuntimeError("GPU preflight failed: no NVIDIA GPU was reported")
 
 
 def _validate_encoder_checkpoint(
@@ -255,11 +313,30 @@ def _validate_encoder_checkpoint(
         raise FileNotFoundError(f"tactile encoder params_file is missing: {params_path}")
     if not params_path.is_file():
         raise ValueError(f"tactile encoder params_file must be a regular file: {params_path}")
-    if not zipfile.is_zipfile(params_path):
-        raise ValueError(f"tactile encoder params_file is not a valid npz file: {params_path}")
     parameter_paths = metadata.get("parameter_paths")
     if not isinstance(parameter_paths, list) or not parameter_paths:
         raise ValueError("tactile encoder checkpoint parameter_paths must be a non-empty list")
+    try:
+        import numpy as np
+
+        with np.load(params_path, allow_pickle=False) as archive:
+            expected_names = {f"p{index:05d}" for index in range(len(parameter_paths))}
+            actual_names = set(archive.files)
+            if actual_names != expected_names:
+                raise ValueError(
+                    "array names do not match checkpoint parameter_paths: "
+                    f"{sorted(actual_names)} != {sorted(expected_names)}"
+                )
+            for name in sorted(actual_names):
+                array = archive[name]
+                if array.dtype.hasobject or array.dtype.fields is not None:
+                    raise ValueError(f"array {name} has an unsafe dtype")
+                if array.size == 0:
+                    raise ValueError(f"array {name} is empty")
+    except (OSError, KeyError, ValueError) as error:
+        raise ValueError(
+            f"tactile encoder params_file is not a valid npz array archive: {params_path}: {error}"
+        ) from error
     if not any(str(value).startswith("tactile_resnet/") for value in parameter_paths):
         raise ValueError("tactile encoder checkpoint is missing tactile_resnet parameters")
     clip_config = metadata.get("tactile_clip_config")
@@ -279,7 +356,26 @@ def _validate_encoder_checkpoint(
         )
 
 
-def _validate_norm_stats(path: Path, *, use_quantile_norm: bool) -> None:
+def _stat_width(value: object, *, label: str) -> int:
+    try:
+        import numpy as np
+
+        array = np.asarray(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{label} must be a numeric array") from error
+    if array.ndim < 1 or array.size == 0 or array.dtype.kind not in "fiu":
+        raise ValueError(f"{label} must be a non-empty numeric array")
+    if not np.isfinite(array).all():
+        raise ValueError(f"{label} must contain only finite values")
+    return int(array.shape[-1])
+
+
+def _validate_norm_stats(
+    path: Path,
+    *,
+    use_quantile_norm: bool,
+    expected_widths: Mapping[str, int],
+) -> None:
     payload = _json_mapping(path / "norm_stats.json", "norm stats")
     stats = payload.get("norm_stats")
     if not isinstance(stats, Mapping):
@@ -294,6 +390,126 @@ def _validate_norm_stats(path: Path, *, use_quantile_norm: bool) -> None:
         missing = required - set(values)
         if missing:
             raise ValueError(f"norm stats {name} are missing {sorted(missing)}")
+        expected_width = expected_widths[name]
+        for field in sorted(required):
+            actual_width = _stat_width(
+                values[field], label=f"norm stats {name}.{field}"
+            )
+            if actual_width != expected_width:
+                raise ValueError(
+                    f"norm stats {name}.{field} width {actual_width} does not match "
+                    f"dataset feature width {expected_width}"
+                )
+
+
+def _feature_width(features: Mapping[str, Any], key: str, *, label: str) -> int:
+    feature = features.get(key)
+    if not isinstance(feature, Mapping):
+        raise ValueError(f"{label} feature {key!r} is missing")
+    shape = feature.get("shape")
+    if (
+        not isinstance(shape, list)
+        or len(shape) != 1
+        or type(shape[0]) is not int
+        or shape[0] < 1
+    ):
+        raise ValueError(f"{label} feature {key!r} must have a one-dimensional shape")
+    return int(shape[0])
+
+
+def _validate_dataset_metadata(
+    dataset_root: Path,
+    *,
+    index: int,
+    source: Mapping[str, Any],
+    camera_map: Mapping[str, str],
+    tactile_keys: Sequence[str],
+) -> dict[str, int]:
+    meta = dataset_root / "meta"
+    info = _json_mapping(meta / "info.json", f"dataset {index} metadata")
+    if info.get("codebase_version") != "v3.0":
+        raise ValueError(f"dataset must be LeRobot v3.0: {dataset_root}")
+    for field in ("fps", "total_episodes", "total_frames", "total_tasks"):
+        value = info.get(field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"dataset info {field} must be positive: {dataset_root}")
+    features = info.get("features")
+    if not isinstance(features, Mapping):
+        raise ValueError(f"dataset features must be a mapping: {dataset_root}")
+    visual_keys = {
+        str(key)
+        for key, feature in features.items()
+        if isinstance(feature, Mapping) and feature.get("dtype") in ("image", "video")
+    }
+    rename_map = source.get("rename_map", {})
+    post_rename_visual_keys = {str(rename_map.get(key, key)) for key in visual_keys}
+    required_visual_keys = set(camera_map.values()) | set(tactile_keys)
+    missing_visual_keys = required_visual_keys - post_rename_visual_keys
+    if missing_visual_keys:
+        raise ValueError(
+            "config.model.camera_map/tactile_keys reference missing dataset features "
+            f"after rename for {source['repo_id']}: {sorted(missing_visual_keys)}"
+        )
+    action_key = str(source.get("action_key") or "action")
+    widths = {
+        "state": _feature_width(
+            features, "observation.state", label=f"dataset {index}"
+        ),
+        "actions": _feature_width(features, action_key, label=f"dataset {index}"),
+    }
+
+    stats = _json_mapping(meta / "stats.json", f"dataset {index} stats")
+    for stat_name, feature_key in (
+        ("state", "observation.state"),
+        ("actions", action_key),
+    ):
+        feature_stats = stats.get(feature_key)
+        if not isinstance(feature_stats, Mapping):
+            raise ValueError(f"dataset stats are missing {feature_key}: {dataset_root}")
+        for field in ("min", "max", "mean", "std", "count"):
+            if field not in feature_stats:
+                raise ValueError(
+                    f"dataset stats {feature_key} are missing {field}: {dataset_root}"
+                )
+        for field in ("min", "max", "mean", "std"):
+            actual = _stat_width(
+                feature_stats[field], label=f"dataset stats {feature_key}.{field}"
+            )
+            if actual != widths[stat_name]:
+                raise ValueError(
+                    f"dataset stats {feature_key}.{field} width {actual} does not match "
+                    f"feature width {widths[stat_name]}"
+                )
+
+    tasks_path = meta / "tasks.parquet"
+    episode_paths = sorted((meta / "episodes").glob("**/*.parquet"))
+    if not tasks_path.is_file():
+        raise FileNotFoundError(f"dataset tasks metadata is missing: {tasks_path}")
+    if not episode_paths:
+        raise FileNotFoundError(f"dataset episodes metadata is missing: {meta / 'episodes'}")
+    try:
+        import pyarrow.parquet as pq
+
+        tasks_file = pq.ParquetFile(tasks_path)
+        if not {"task", "task_index"}.issubset(tasks_file.schema.names):
+            raise ValueError("tasks schema must contain task and task_index")
+        if tasks_file.metadata.num_rows != int(info["total_tasks"]):
+            raise ValueError("tasks row count does not match info.total_tasks")
+        episode_rows = 0
+        for episode_path in episode_paths:
+            episode_file = pq.ParquetFile(episode_path)
+            required = {"episode_index", "dataset_from_index", "dataset_to_index"}
+            if not required.issubset(episode_file.schema.names):
+                raise ValueError(
+                    "episodes schema must contain episode_index, dataset_from_index, "
+                    "and dataset_to_index"
+                )
+            episode_rows += episode_file.metadata.num_rows
+        if episode_rows != int(info["total_episodes"]):
+            raise ValueError("episodes row count does not match info.total_episodes")
+    except (OSError, ValueError) as error:
+        raise ValueError(f"invalid dataset tasks/episodes metadata: {error}") from error
+    return widths
 
 
 def source_cache_dir(cache_root: str | Path, repo_id: str) -> Path:
@@ -579,12 +795,18 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     if _is_url(checkpoint) and not allow_download:
         raise ValueError("config.allow_download must be true for a URL checkpoint")
 
-    for value, field in (
-        (action_cache["root"], "action_cache.root"),
-        (tactile_cache["root"], "tactile_embedding_cache.root"),
-        (training["output"], "frs_training.output"),
-    ):
-        _output_target(value, field)
+    output_roots = {
+        "config.action_cache.root": _output_target(
+            action_cache["root"], "action_cache.root"
+        ),
+        "config.tactile_embedding_cache.root": _output_target(
+            tactile_cache["root"], "tactile_embedding_cache.root"
+        ),
+        "config.frs_training.output": _output_target(
+            training["output"], "frs_training.output"
+        ),
+    }
+    validate_output_roots(output_roots)
     _local_path(model["tactile_encoder_path"], "model.tactile_encoder_path")
     for index, source in enumerate(datasets):
         _local_path(source["root"], f"datasets[{index}].root")
@@ -609,40 +831,26 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         expected_embedding_dim=model_integers["tactile_embedding_dim"],
         expected_image_size=model_integers["tactile_image_size"],
     )
+    dataset_widths: list[dict[str, int]] = []
     for index, source in enumerate(datasets):
         dataset_root = _local_path(source["root"], f"datasets[{index}].root")
         if not dataset_root.is_dir():
             raise FileNotFoundError(f"dataset does not exist: {dataset_root}")
-        info_path = dataset_root / "meta" / "info.json"
-        if not info_path.is_file():
-            raise FileNotFoundError(f"dataset is missing meta/info.json: {dataset_root}")
-        info = _json_mapping(info_path, f"dataset {index} metadata")
-        if info.get("codebase_version") != "v3.0":
-            raise ValueError(f"dataset must be LeRobot v3.0: {dataset_root}")
-        features = info.get("features")
-        if not isinstance(features, Mapping):
-            raise ValueError(f"dataset features must be a mapping: {dataset_root}")
-        visual_keys = {
-            str(key)
-            for key, feature in features.items()
-            if isinstance(feature, Mapping) and feature.get("dtype") in ("image", "video")
-        }
-        rename_map = source.get("rename_map", {})
-        post_rename_visual_keys = {
-            str(rename_map.get(key, key)) for key in visual_keys
-        }
-        required_visual_keys = set(camera_map.values()) | set(tactile_keys)
-        missing_visual_keys = required_visual_keys - post_rename_visual_keys
-        if missing_visual_keys:
-            raise ValueError(
-                f"config.model.camera_map/tactile_keys reference missing dataset features "
-                f"after rename for {source['repo_id']}: {sorted(missing_visual_keys)}"
+        dataset_widths.append(
+            _validate_dataset_metadata(
+                dataset_root,
+                index=index,
+                source=source,
+                camera_map=camera_map,
+                tactile_keys=tactile_keys,
             )
-        action_key = source.get("action_key")
-        if action_key is not None and action_key not in features:
+        )
+    expected_widths = dataset_widths[0]
+    for index, widths in enumerate(dataset_widths[1:], start=1):
+        if widths != expected_widths:
             raise ValueError(
-                f"config.datasets[{index}].action_key is missing from dataset features: "
-                f"{action_key}"
+                f"dataset {index} state/action feature widths {widths} do not match "
+                f"dataset 0 {expected_widths}"
             )
     norm_dir = str(norm_stats["dir"])
     if not _is_url(norm_dir):
@@ -652,6 +860,7 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         _validate_norm_stats(
             asset_dir,
             use_quantile_norm=bool(norm_stats["use_quantile_norm"]),
+            expected_widths=expected_widths,
         )
     resume_from = training.get("resume_from")
     if resume_from not in (None, "") and not resolve_local_path(str(resume_from)).is_dir():
@@ -680,6 +889,11 @@ def _positive_int(config: Mapping[str, Any], key: str, default: int) -> int:
 
 def train_from_config(config: Mapping[str, Any]) -> None:
     validate_config(config, check_paths=True)
+    # Keep the validation-only path free of JAX/model imports.
+    decoder = train_decoder
+    if decoder is None:
+        from train_pi05_frs.train import train_decoder as decoder
+
     datasets = config["datasets"]
     action_cache = config["action_cache"]
     tactile_cache = config["tactile_embedding_cache"]
@@ -694,7 +908,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
     if missing:
         raise FileNotFoundError(f"action caches are missing: {missing}")
 
-    train_decoder(
+    decoder(
         cache_dir=None,
         tactile_encoder_dir=encoder_dir,
         output_dir=resolve_local_path(str(training["output"])),
@@ -764,6 +978,7 @@ def main() -> None:
     args = parser.parse_args()
     config = load_config(args.config)
     if args.check:
+        preflight_environment()
         validate_config(config, check_paths=True)
         if args.print_output:
             print(resolve_local_path(str(config["frs_training"]["output"])))

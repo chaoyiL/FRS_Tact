@@ -65,6 +65,10 @@ the precompute tool's explicit `--overwrite` only when replacement is intentiona
 To resume decoder training, set `frs_training.resume: true` (for `<output>/last`) or set
 `frs_training.resume_from` to a checkpoint directory, then rerun the same launcher. Completed cache
 stages remain skip/resume safe and the decoder restores compatible parameters and optimizer state.
+Each save first writes and verifies an immutable generation under
+`<output>/.checkpoint-generations/`, then atomically switches the `last` or `best` symlink. Tools
+may consume those aliases directly. When copying a checkpoint outside its output directory,
+dereference the symlink so the canonical metadata, parameters, and optimizer files travel together.
 
 ## Manual stages and evaluation
 

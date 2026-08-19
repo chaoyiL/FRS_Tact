@@ -134,6 +134,9 @@ def _rewrite_as_legacy_full_checkpoint(
         if value is not None
     }
     np.savez(checkpoint_dir / "params.npz", **legacy_arrays)
+    metadata["version"] = 2
+    metadata.pop("generation", None)
+    metadata.pop("files", None)
     metadata["parameter_paths"] = [_path_name(path) for path, _ in ordered_full]
     metadata_path.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
     return none_slots
@@ -174,7 +177,7 @@ class DeploymentCheckpointCompatibilityTest(unittest.TestCase):
         self.assertTrue(DEPLOY_PYTHON.is_file(), f"missing deployment Python: {DEPLOY_PYTHON}")
         for path_format in ("filtered", "legacy_full"):
             with self.subTest(path_format=path_format), tempfile.TemporaryDirectory() as directory:
-                checkpoint_dir = Path(directory)
+                checkpoint_dir = Path(directory) / "output" / "last"
                 model = self.make_model()
                 save_checkpoint(
                     checkpoint_dir,

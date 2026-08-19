@@ -217,6 +217,53 @@ def load_norm_stats_or_raise(
     return stats["state"], stats["actions"]
 
 
+def _cache_provenance_mismatches(
+    manifest: Mapping[str, Any],
+    *,
+    configuration: Mapping[str, Any],
+    records_sha256: str,
+    action_horizon: int,
+    action_dim: int,
+    state_dim: int,
+) -> list[str]:
+    mismatches: list[str] = []
+    previous_configuration = manifest.get("configuration")
+    if not isinstance(previous_configuration, Mapping):
+        mismatches.append("configuration")
+    else:
+        for key in sorted(set(previous_configuration) | set(configuration)):
+            if previous_configuration.get(key) != configuration.get(key):
+                mismatches.append(f"configuration.{key}")
+    if manifest.get("records_sha256") != records_sha256:
+        mismatches.append("records_sha256")
+    for key, expected in (
+        ("action_horizon", action_horizon),
+        ("action_dim", action_dim),
+        ("state_dim", state_dim),
+    ):
+        if manifest.get(key) != expected:
+            mismatches.append(key)
+    return mismatches
+
+
+def _cache_array_shape_mismatches(
+    arrays: Mapping[str, np.ndarray],
+    *,
+    sample_count: int,
+    action_horizon: int,
+    action_dim: int,
+    state_dim: int,
+) -> list[str]:
+    mismatches: list[str] = []
+    action_shape = (sample_count, action_horizon, action_dim)
+    for key in ("x_base", "target", "gt_action"):
+        if tuple(arrays[key].shape) != action_shape:
+            mismatches.append(f"arrays.{key}.shape")
+    if tuple(arrays["state"].shape) != (sample_count, state_dim):
+        mismatches.append("arrays.state.shape")
+    return mismatches
+
+
 def prepare_cache(
     *,
     checkpoint_dir: str,
@@ -311,6 +358,10 @@ def prepare_cache(
         "norm_stats_asset_id": norm_stats_asset_id,
         "use_quantile_norm": use_quantile_norm,
         "base_model": "pi0.5",
+        "action_dim": int(model.action_dim),
+        "action_horizon": int(model.action_horizon),
+        "paligemma_variant": paligemma_variant,
+        "action_expert_variant": action_expert_variant,
         "model_sample_steps": model_sample_steps,
         "reverse_steps": reverse_steps,
         "reverse_solver": reverse_solver,
@@ -336,15 +387,36 @@ def prepare_cache(
 
     if manifest_path.exists():
         manifest = load_manifest(cache_dir, require_complete=False)
-        if manifest.get("configuration") != configuration or manifest.get("records_sha256") != digest:
+        mismatches = _cache_provenance_mismatches(
+            manifest,
+            configuration=configuration,
+            records_sha256=digest,
+            action_horizon=action_horizon,
+            action_dim=action_dim,
+            state_dim=state_dim,
+        )
+        if mismatches:
             raise ValueError(
                 f"Existing cache at {cache_dir} was created with different inputs. "
+                f"Mismatched fields: {', '.join(mismatches)}. "
                 "Choose a new cache directory instead of mixing runs."
+            )
+        arrays = open_cache_arrays(cache_dir, mode="r+")
+        shape_mismatches = _cache_array_shape_mismatches(
+            arrays,
+            sample_count=len(records),
+            action_horizon=action_horizon,
+            action_dim=action_dim,
+            state_dim=state_dim,
+        )
+        if shape_mismatches:
+            raise ValueError(
+                f"Existing cache at {cache_dir} has incompatible arrays. "
+                f"Mismatched fields: {', '.join(shape_mismatches)}."
             )
         if manifest.get("status") == "complete":
             print(f"cache already complete: {cache_dir}")
             return cache_dir
-        arrays = open_cache_arrays(cache_dir, mode="r+")
         completed = int(manifest.get("completed_samples", 0))
         print(f"resuming cache at sample {completed}/{len(records)}")
     else:

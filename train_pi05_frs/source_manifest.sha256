@@ -38,8 +38,6 @@ f769e5c0d2fd4cce22321d32adc55a27fb4d9bdbae9e44359c27f7b315a64bc4  train_pi05_frs
 82d0ced8f3f9adc754d4388122b044d36f2feeadda28d4ddad933cead7cc54d1  train_pi05_frs/src/lerobot/datasets/video_utils.py
 # src/lerobot/policies/__init__.py -> train_pi05_frs/src/lerobot/policies/__init__.py
 5926824883ec41599dc63d86cb2f4f441b5df5d51fac0b690a2bab25417b6ca4  train_pi05_frs/src/lerobot/policies/__init__.py
-# src/lerobot/policies/pi05_jax/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/__init__.py
-8a25169258f913c1466e8d2ee1f73ade80e8166903346116d145a6ed765b517b  train_pi05_frs/src/lerobot/policies/pi05_jax/__init__.py
 # src/lerobot/policies/pi05_jax/array_typing.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/array_typing.py
 a39bcfb8e913ba17effa139b7e8eb4f4b652cf730074697b8e9a85a8ac44c64c  train_pi05_frs/src/lerobot/policies/pi05_jax/array_typing.py
 # src/lerobot/policies/pi05_jax/download.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/download.py
@@ -72,8 +70,6 @@ a9f1578ab66d9d8a5c01b460d1e3f6868a4fabc620c767cb11310b0fdc4eb33f  train_pi05_frs
 ddb6d810dfee9092f0148ae149c51f3d53bf7adea078dc9f051fc66f763c9959  train_pi05_frs/src/lerobot/policies/pi05_jax/siglip.py
 # src/lerobot/policies/pi05_jax/tokenizer.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/tokenizer.py
 2f097c2c703bef2ab3e478f3222968c0b45254fa10461a08f5c7dc00fc82e627  train_pi05_frs/src/lerobot/policies/pi05_jax/tokenizer.py
-# src/lerobot/policies/pi05_jax/training/__init__.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/training/__init__.py
-0c78d6079171968d52f5ddc1cdd654b226cd5aafbab02f3d0b2d517b3a8dddc0  train_pi05_frs/src/lerobot/policies/pi05_jax/training/__init__.py
 # src/lerobot/policies/pi05_jax/training/sharding.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/training/sharding.py
 8d3093fb56ad5cc727bffaa4bf983d9cd8cc55d2677d5871c50186291147bbb5  train_pi05_frs/src/lerobot/policies/pi05_jax/training/sharding.py
 # src/lerobot/policies/pi05_jax/transforms.py -> train_pi05_frs/src/lerobot/policies/pi05_jax/transforms.py

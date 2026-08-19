@@ -70,6 +70,12 @@ APPROVED_ADAPTATIONS = {
     "src/lerobot/datasets/tactile_cache.py": (
         "train_pi05_frs/src/lerobot/datasets/tactile_cache.py"
     ),
+    "src/lerobot/policies/pi05_jax/__init__.py": (
+        "train_pi05_frs/src/lerobot/policies/pi05_jax/__init__.py"
+    ),
+    "src/lerobot/policies/pi05_jax/training/__init__.py": (
+        "train_pi05_frs/src/lerobot/policies/pi05_jax/training/__init__.py"
+    ),
 }
 
 
@@ -261,11 +267,7 @@ def test_standalone_metadata_and_ignore_rules_define_a_private_boundary() -> Non
     assert (TRAIN_ROOT / "uv.lock").is_file()
     assert metadata["project"]["name"] == "pi05-frs-training"
     assert metadata["project"]["requires-python"] == ">=3.12,<3.13"
-    assert metadata["tool"]["setuptools"]["packages"]["find"]["where"] == ["src", ".."]
-    assert metadata["tool"]["setuptools"]["packages"]["find"]["include"] == [
-        "train_pi05_frs*",
-        "lerobot*",
-    ]
+    assert "find" not in metadata["tool"]["setuptools"].get("packages", {})
 
     dependencies = metadata["project"]["dependencies"]
     for pinned_dependency in (
@@ -289,6 +291,51 @@ def test_standalone_metadata_and_ignore_rules_define_a_private_boundary() -> Non
     assert "/train_pi05_frs/src/" not in ignore_rules
     assert "/train_pi05_frs/configs/" not in ignore_rules
     assert "/train_pi05_frs/tests/" not in ignore_rules
+
+
+def test_setuptools_resolves_every_package_to_the_standalone_project() -> None:
+    """Exercise setuptools' expanded configuration, not just TOML literals."""
+    from setuptools import Distribution
+    from setuptools.command.build_py import build_py
+    from setuptools.config import pyprojecttoml
+
+    distribution = pyprojecttoml.apply_configuration(
+        Distribution(), TRAIN_ROOT / "pyproject.toml"
+    )
+    command = build_py(distribution)
+    command.ensure_finalized()
+    packages = list(distribution.packages or ())
+
+    assert packages
+    assert len(packages) == len(set(packages))
+    assert "lerobot.processor" not in packages
+    assert "train_pi05_frs.tools" in packages
+    for package in packages:
+        package_dir = (TRAIN_ROOT / command.get_package_dir(package)).resolve()
+        if package == "lerobot" or package.startswith("lerobot."):
+            expected_root = (TRAIN_ROOT / "src" / "lerobot").resolve()
+        elif package == "train_pi05_frs" or package.startswith("train_pi05_frs."):
+            expected_root = TRAIN_ROOT.resolve()
+        else:
+            raise AssertionError(f"unexpected package in standalone build: {package}")
+        assert package_dir == expected_root or expected_root in package_dir.parents
+
+    private_init = (TRAIN_ROOT / command.get_package_dir("lerobot") / "__init__.py").resolve()
+    assert private_init.read_bytes() == (TRAIN_ROOT / "src/lerobot/__init__.py").read_bytes()
+
+
+def test_vendored_package_docs_describe_the_trimmed_private_copy() -> None:
+    package_doc = (
+        TRAIN_ROOT / "src/lerobot/policies/pi05_jax/__init__.py"
+    ).read_text(encoding="utf-8")
+    training_doc = (
+        TRAIN_ROOT / "src/lerobot/policies/pi05_jax/training/__init__.py"
+    ).read_text(encoding="utf-8")
+
+    assert "README.md in this directory" not in package_doc
+    assert "selected" in package_doc.lower() and "private" in package_doc
+    assert "Mirrors upstream module-for-module" not in training_doc
+    assert "sharding" in training_doc and "only" in training_doc
 
 
 def test_source_manifest_maps_and_verifies_unchanged_private_files() -> None:

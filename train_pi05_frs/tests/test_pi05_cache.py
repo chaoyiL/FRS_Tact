@@ -420,6 +420,10 @@ def test_prepare_cache_records_provenance_resumes_and_skips_completed_cache(
         "norm_stats_asset_id": "asset",
         "use_quantile_norm": True,
         "base_model": "pi0.5",
+        "action_dim": 4,
+        "action_horizon": 2,
+        "paligemma_variant": "gemma_2b",
+        "action_expert_variant": "gemma_300m",
         "model_sample_steps": 2,
         "reverse_steps": 3,
         "reverse_solver": "euler",
@@ -436,6 +440,9 @@ def test_prepare_cache_records_provenance_resumes_and_skips_completed_cache(
         "status": "incomplete",
         "completed_samples": 1,
         "sample_count": 2,
+        "action_horizon": 2,
+        "action_dim": 4,
+        "state_dim": 3,
         "configuration": expected_configuration,
         "records_sha256": cache.records_digest(records),
     }
@@ -485,6 +492,182 @@ def test_prepare_cache_records_provenance_resumes_and_skips_completed_cache(
     assert len(sample_calls) == 1
     with pytest.raises(ValueError, match="different inputs"):
         prepare.prepare_cache(**{**kwargs, "inference_seed": 99})
+
+
+def _prepare_provenance_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    status: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    checkpoint = tmp_path / "checkpoint"
+    (checkpoint / "params").mkdir(parents=True)
+    (checkpoint / "params" / "weights").write_bytes(b"weights")
+    cache_dir = tmp_path / "cache"
+    records = [
+        cache.SampleRecord(dataset_index=0, episode_index=0, split="train"),
+        cache.SampleRecord(dataset_index=1, episode_index=1, split="val"),
+    ]
+
+    class FakeEvalModel:
+        dataset_repo_id = "org/demo"
+        dataset_root = tmp_path / "dataset"
+        dataset_revision = "rev-1"
+        action_key = "action"
+        state_stats = make_stats(3)
+        model = object()
+
+        def __init__(
+            self,
+            checkpoint_dir: str,
+            *,
+            action_dim: int,
+            action_horizon: int,
+            **kwargs: object,
+        ) -> None:
+            assert checkpoint_dir == str(checkpoint)
+            self.action_dim = action_dim
+            self.action_horizon = action_horizon
+
+    class RuntimeMetadata:
+        camera_keys = ("observation.images.camera0",)
+        total_episodes = 2
+        episodes = [
+            {"dataset_from_index": 0, "dataset_to_index": 1},
+            {"dataset_from_index": 1, "dataset_to_index": 2},
+        ]
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class MustNotReadDataset:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+        def select_columns(self, action_key: str) -> object:
+            raise AssertionError("provenance mismatch must fail before dataset access")
+
+    monkeypatch.setattr(
+        prepare, "load_norm_stats_or_raise", lambda *_: (make_stats(3), make_stats(3))
+    )
+    monkeypatch.setattr(prepare, "Pi05EvalModel", FakeEvalModel)
+    monkeypatch.setattr(prepare, "LeRobotDatasetMetadata", RuntimeMetadata)
+    monkeypatch.setattr(prepare, "LeRobotDataset", MustNotReadDataset)
+    monkeypatch.setattr(
+        prepare,
+        "build_records",
+        lambda *_args, **_kwargs: (records, (0,), (1,)),
+    )
+
+    arrays = cache.create_cache_arrays(
+        cache_dir,
+        records,
+        action_horizon=2,
+        action_dim=4,
+        state_dim=3,
+    )
+    cache.flush_arrays(arrays)
+    kwargs: dict[str, object] = {
+        "checkpoint_dir": str(checkpoint),
+        "cache_dir": cache_dir,
+        "dataset_repo_id": "org/demo",
+        "dataset_root": tmp_path / "dataset",
+        "dataset_revision": "rev-1",
+        "action_key": "action",
+        "rename_map": None,
+        "camera_map": {"base_0_rgb": "observation.images.camera0"},
+        "norm_stats_dir": tmp_path / "stats",
+        "norm_stats_asset_id": "asset",
+        "use_quantile_norm": True,
+        "action_dim": 4,
+        "action_horizon": 2,
+        "paligemma_variant": "gemma_2b",
+        "action_expert_variant": "gemma_300m",
+        "model_sample_steps": 2,
+        "reverse_steps": 3,
+        "reverse_solver": "euler",
+        "batch_size": 1,
+        "load_workers": 1,
+        "inference_seed": 5,
+        "split_seed": 7,
+        "val_fraction": 0.5,
+        "frame_stride": 1,
+        "max_episodes": None,
+        "max_samples": None,
+        "drop_tail_action_chunks": 0,
+    }
+    configuration = {
+        "checkpoint_dir": str(checkpoint.resolve()),
+        "checkpoint_fingerprint": prepare._checkpoint_fingerprint(checkpoint),
+        "dataset_repo_id": "org/demo",
+        "dataset_root": str((tmp_path / "dataset").resolve()),
+        "dataset_revision": "rev-1",
+        "action_key": "action",
+        "rename_map": None,
+        "camera_map": {"base_0_rgb": "observation.images.camera0"},
+        "norm_stats_dir": str(tmp_path / "stats"),
+        "norm_stats_asset_id": "asset",
+        "use_quantile_norm": True,
+        "base_model": "pi0.5",
+        "action_dim": 4,
+        "action_horizon": 2,
+        "paligemma_variant": "gemma_2b",
+        "action_expert_variant": "gemma_300m",
+        "model_sample_steps": 2,
+        "reverse_steps": 3,
+        "reverse_solver": "euler",
+        "inference_seed": 5,
+        "split_seed": 7,
+        "val_fraction": 0.5,
+        "frame_stride": 1,
+        "max_episodes": None,
+        "max_samples": None,
+        "drop_tail_action_chunks": 0,
+    }
+    manifest: dict[str, object] = {
+        "version": cache.CACHE_VERSION,
+        "status": status,
+        "completed_samples": len(records) if status == "complete" else 1,
+        "sample_count": len(records),
+        "action_horizon": 2,
+        "action_dim": 4,
+        "state_dim": 3,
+        "configuration": configuration,
+        "records_sha256": cache.records_digest(records),
+    }
+    return kwargs, manifest
+
+
+@pytest.mark.parametrize("status", ["complete", "incomplete"])
+@pytest.mark.parametrize(
+    ("field_path", "bad_value", "diagnostic"),
+    [
+        (("configuration", "action_dim"), 5, "configuration.action_dim"),
+        (("configuration", "action_horizon"), 3, "configuration.action_horizon"),
+        (("configuration", "paligemma_variant"), "dummy", "configuration.paligemma_variant"),
+        (("configuration", "action_expert_variant"), "dummy", "configuration.action_expert_variant"),
+        (("action_dim",), 5, "action_dim"),
+        (("action_horizon",), 3, "action_horizon"),
+        (("state_dim",), 4, "state_dim"),
+    ],
+)
+def test_prepare_cache_rejects_every_output_provenance_mismatch_before_skip_or_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    field_path: tuple[str, ...],
+    bad_value: object,
+    diagnostic: str,
+) -> None:
+    kwargs, manifest = _prepare_provenance_case(tmp_path, monkeypatch, status=status)
+    target: dict[str, object] = manifest
+    for part in field_path[:-1]:
+        target = target[part]  # type: ignore[assignment]
+    target[field_path[-1]] = bad_value
+    cache.atomic_write_json(Path(kwargs["cache_dir"]) / cache.MANIFEST_NAME, manifest)
+
+    with pytest.raises(ValueError, match=diagnostic.replace(".", r"\.")):
+        prepare.prepare_cache(**kwargs)  # type: ignore[arg-type]
 
 
 def test_cache_arrays_preserve_names_and_dtypes(tmp_path: Path) -> None:
