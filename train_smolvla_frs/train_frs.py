@@ -13,6 +13,7 @@ import math
 import pathlib
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -22,8 +23,49 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-LossMode = Literal["gt", "predicted", "gated"]
+from train_smolvla_frs.utils.bimanual_schema import (  # noqa: E402
+    BIMANUAL_ACTION_DIM,
+    BIMANUAL_LOSS_MODE,
+    BIMANUAL_OBJECTIVE_VERSION,
+    LEFT_ACTION_SLICE,
+    LEFT_WRIST_TOKEN_INDICES,
+    RIGHT_ACTION_SLICE,
+    RIGHT_WRIST_TOKEN_INDICES,
+    validate_bimanual_objective_metadata,
+)
+
+LossMode = Literal["gt", "predicted", "gated", "bimanual_gated"]
 DecodeSolver = Literal["euler", "fireflow"]
+
+
+@dataclass(frozen=True)
+class LossSettings:
+    loss_mode: LossMode
+    gate_tau: float
+    gate_temperature: float
+    gate_lambda: float
+
+
+def parse_loss_settings(config: Mapping[str, Any]) -> LossSettings:
+    """Parse loss settings while keeping legacy scalar-gate semantics explicit."""
+
+    training = config.get("frs_training") or {}
+    if not isinstance(training, Mapping):
+        raise ValueError("config.frs_training must be a mapping")
+    loss_mode = str(training.get("loss_mode", "gated"))
+    if loss_mode not in ("gt", "predicted", "gated", "bimanual_gated"):
+        raise ValueError(
+            "frs_training.loss_mode must be 'gt', 'predicted', 'gated', or "
+            f"'bimanual_gated', got {loss_mode!r}"
+        )
+    if loss_mode == "bimanual_gated" and "gate_lambda" in training:
+        raise ValueError("frs_training.gate_lambda is not supported with bimanual_gated")
+    return LossSettings(
+        loss_mode=loss_mode,  # type: ignore[arg-type]
+        gate_tau=float(training.get("gate_tau", 0.5)),
+        gate_temperature=float(training.get("gate_temperature", 0.1)),
+        gate_lambda=float(training.get("gate_lambda", 1.0)),
+    )
 
 
 def resolve_decode_solver(value: Any, *, default: DecodeSolver = "euler") -> DecodeSolver:
@@ -308,6 +350,21 @@ def _validate_resume_cache(
         raise ValueError("resume checkpoint was trained with a different action-cache configuration")
 
 
+def _validate_resume_loss_objective(
+    resume_metadata: Mapping[str, Any],
+    *,
+    loss_mode: LossMode,
+) -> None:
+    """Validate only the new objective contract, preserving legacy resume behavior."""
+
+    if loss_mode != BIMANUAL_LOSS_MODE:
+        return
+    extra = resume_metadata.get("extra_metadata")
+    if not isinstance(extra, Mapping):
+        raise ValueError("resume checkpoint is missing bimanual loss objective metadata")
+    validate_bimanual_objective_metadata(extra)
+
+
 def _resolve_resume_dir(
     *,
     output_dir: pathlib.Path,
@@ -319,6 +376,23 @@ def _resolve_resume_dir(
     if resume:
         return output_dir / "last"
     return None
+
+
+def _history_fieldnames_for_write(
+    history_path: pathlib.Path,
+    *,
+    default_fields: Sequence[str],
+    append: bool,
+) -> list[str]:
+    """Keep an existing CSV header stable when resuming a legacy run."""
+
+    if not append or not history_path.exists():
+        return list(default_fields)
+    import csv
+
+    with history_path.open(encoding="utf-8", newline="") as file:
+        existing = csv.DictReader(file).fieldnames
+    return list(existing) if existing else list(default_fields)
 
 
 def train_decoder(
@@ -433,10 +507,13 @@ def train_decoder(
         "train_loss_total",
         "train_loss_gt_fm",
         "train_loss_vla_fm",
+        "train_loss_composite_fm",
         "train_loss_low_safety",
         "train_loss_decode",
         "train_loss_rank",
         "train_loss_repair",
+        "train_gate_w_left",
+        "train_gate_w_right",
         # Backward-compatible alias for readers of pre-refactor histories.
         "train_flow_loss",
         "val_flow_loss",
@@ -543,8 +620,11 @@ def train_decoder(
         raise ValueError("warmup_epochs must be non-negative.")
     if not 0.0 <= min_learning_rate_ratio <= 1.0:
         raise ValueError("min_learning_rate_ratio must be in [0, 1].")
-    if loss_mode not in ("gt", "predicted", "gated"):
-        raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
+    if loss_mode not in ("gt", "predicted", "gated", "bimanual_gated"):
+        raise ValueError(
+            "loss_mode must be 'gt', 'predicted', 'gated', or "
+            f"'bimanual_gated', got {loss_mode!r}."
+        )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
     if gate_temperature <= 0:
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
@@ -584,8 +664,13 @@ def train_decoder(
         raise ValueError("high_gate_rank_hard_fraction must be in (0, 1]")
     if high_gate_rank_worst_beta <= 0.0:
         raise ValueError("high_gate_rank_worst_beta must be positive")
-    if loss_mode != "gated" and (rank_weight != 0 or repair_weight != 0):
-        raise ValueError("rank_weight and repair_weight are only supported with loss_mode='gated'.")
+    if loss_mode not in ("gated", "bimanual_gated") and (
+        rank_weight != 0 or repair_weight != 0
+    ):
+        raise ValueError(
+            "rank_weight and repair_weight are only supported with "
+            "loss_mode='gated' or 'bimanual_gated'."
+        )
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
     if tactile_num_tokens <= 0:
@@ -614,6 +699,7 @@ def train_decoder(
         if not (resume_dir / CHECKPOINT_NAME).exists():
             raise FileNotFoundError(f"Resume checkpoint not found: {resume_dir}")
         model, resume_metadata = load_checkpoint(resume_dir)
+        _validate_resume_loss_objective(resume_metadata, loss_mode=loss_mode)
         resumed_opt_state, resumed_opt_step = load_optimizer_state(resume_dir)
         start_epoch = int(resume_metadata["epoch"]) + 1
         print(
@@ -662,6 +748,14 @@ def train_decoder(
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
         pairs = CachedPairs(cache_dir)
+    if (
+        loss_mode == "bimanual_gated"
+        and int(pairs.manifest["action_dim"]) != BIMANUAL_ACTION_DIM
+    ):
+        raise ValueError(
+            f"loss_mode='bimanual_gated' requires action_dim={BIMANUAL_ACTION_DIM}, got "
+            f"{pairs.manifest['action_dim']}."
+        )
     source_rank_weight_values = np.ones(
         (len(pairs.sources) if isinstance(pairs, MultiCachedPairs) else 1,),
         dtype=np.float32,
@@ -813,7 +907,7 @@ def train_decoder(
             history_stride=history_stride,
             embedding_dim=tactile_embedding_dim,
             image_size=tactile_image_size,
-            build_episode_baselines=(loss_mode == "gated"),
+            build_episode_baselines=(loss_mode in ("gated", "bimanual_gated")),
             return_raw_images=train_tactile_encoder,
             image_cache_size=image_cache_size,
             load_threads=load_threads,
@@ -829,7 +923,7 @@ def train_decoder(
             dataset_repo_id=dataset_repo_id,
             dataset_root=dataset_root,
             history_stride=history_stride,
-            build_episode_baselines=(loss_mode == "gated"),
+            build_episode_baselines=(loss_mode in ("gated", "bimanual_gated")),
             num_workers=num_workers,
             prefetch_batches=prefetch_batches,
             load_threads=load_threads,
@@ -993,7 +1087,7 @@ def train_decoder(
         )
     elif loss_mode == "predicted":
         print("loss_mode=predicted (train/eval primary target=predicted_actions; also log vs gt; " "no aux decode MSE)")
-    else:
+    elif loss_mode == "gated":
         print(
             "loss_mode=gated w_eff=clip((w-low)/(high-low),0,1) "
             "L=w_eff*FM(gt)+lambda*(1-w_eff)*FM(pred) "
@@ -1011,6 +1105,15 @@ def train_decoder(
             f"rank_regions=low<={rank_low_gate_threshold:g},"
             f"mid,high>={rank_high_gate_threshold:g} "
             f"(primary eval=gt; also log vs predicted)"
+        )
+    else:
+        print(
+            "loss_mode=bimanual_gated L=FM(per-wrist composite endpoint)+per-wrist auxiliaries "
+            f"tau={gate_tau:g} T={gate_temperature:g} "
+            f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
+            f"decode_solver={aux_decode_solver} "
+            f"rank_regions=low<={rank_low_gate_threshold:g},"
+            f"mid,high>={rank_high_gate_threshold:g}"
         )
     if cosine_decay:
         print(
@@ -1065,6 +1168,11 @@ def train_decoder(
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0
     history_mode = "a" if resume_dir is not None and history_exists else "w"
+    history_writer_fields = _history_fieldnames_for_write(
+        history_path,
+        default_fields=history_fields,
+        append=history_mode == "a",
+    )
 
     def _refresh_training_plot(*, announce: bool = False) -> None:
         if not write_plots:
@@ -1079,7 +1187,11 @@ def train_decoder(
 
     try:
         with history_path.open(history_mode, newline="", encoding="utf-8") as history_file:
-            writer = csv.DictWriter(history_file, fieldnames=history_fields)
+            writer = csv.DictWriter(
+                history_file,
+                fieldnames=history_writer_fields,
+                extrasaction="ignore",
+            )
             if history_mode == "w":
                 writer.writeheader()
 
@@ -1087,8 +1199,18 @@ def train_decoder(
                 losses: list[float] = []
                 component_losses: dict[str, list[float]] = {
                     name: []
-                    for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+                    for name in (
+                        "gt_fm",
+                        "vla_fm",
+                        "composite_fm",
+                        "low_safety",
+                        "decode",
+                        "rank",
+                        "repair",
+                    )
                 }
+                gate_w_left_values: list[float] = []
+                gate_w_right_values: list[float] = []
                 weights: list[int] = []
                 if dataset_balanced_sampling:
                     training_batches = conditioner.batches(
@@ -1115,7 +1237,7 @@ def train_decoder(
                 ) in enumerate(training_batches):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
                     batch_n = len(x_base_np)
-                    if loss_mode == "gated":
+                    if loss_mode in ("gated", "bimanual_gated"):
                         gate_token_fn = getattr(
                             conditioner,
                             "gate_current_tokens",
@@ -1129,12 +1251,33 @@ def train_decoder(
                                 dtype=np.float32,
                             )
                         )
-                        change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
+                    if loss_mode == "gated":
+                        change = conditioner.tactile_change_for_cache_indices(
+                            indices,
+                            current_tokens,
+                        )
                         gate_w = gate_weights_from_change(change, tau=gate_tau, temperature=gate_temperature)
                         batch_gate_w = float(np.mean(gate_w))
+                        batch_gate_w_left = 0.0
+                        batch_gate_w_right = 0.0
+                    elif loss_mode == "bimanual_gated":
+                        change_per_wrist = conditioner.tactile_change_per_wrist_for_cache_indices(
+                            indices,
+                            current_tokens,
+                        )
+                        gate_w = gate_weights_from_change(
+                            change_per_wrist,
+                            tau=gate_tau,
+                            temperature=gate_temperature,
+                        )
+                        batch_gate_w_left = float(np.mean(gate_w[:, 0]))
+                        batch_gate_w_right = float(np.mean(gate_w[:, 1]))
+                        batch_gate_w = 0.5 * (batch_gate_w_left + batch_gate_w_right)
                     else:
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
+                        batch_gate_w_left = 0.0
+                        batch_gate_w_right = 0.0
                     if isinstance(pairs, MultiCachedPairs):
                         batch_source_indices, _ = pairs.source_and_local_indices(indices)
                     else:
@@ -1175,13 +1318,24 @@ def train_decoder(
                     for name in component_losses:
                         component_losses[name].append(float(jax.device_get(loss_components[name])))
                     weights.append(batch_n)
+                    gate_w_left_values.append(batch_gate_w_left)
+                    gate_w_right_values.append(batch_gate_w_right)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
-                        extra = f" gate_w={batch_gate_w:.4f}" if loss_mode == "gated" else ""
+                        if loss_mode == "gated":
+                            extra = f" gate_w={batch_gate_w:.4f}"
+                        elif loss_mode == "bimanual_gated":
+                            extra = (
+                                f" gate_w_left={batch_gate_w_left:.4f}"
+                                f" gate_w_right={batch_gate_w_right:.4f}"
+                            )
+                        else:
+                            extra = ""
                         print(
                             f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
                             f"loss_total={losses[-1]:.6f} "
                             f"gt_fm={component_losses['gt_fm'][-1]:.6f} "
                             f"vla_fm={component_losses['vla_fm'][-1]:.6f} "
+                            f"composite_fm={component_losses['composite_fm'][-1]:.6f} "
                             f"low_safety={component_losses['low_safety'][-1]:.6f} "
                             f"decode={component_losses['decode'][-1]:.6f} "
                             f"rank={component_losses['rank'][-1]:.6f} "
@@ -1196,12 +1350,24 @@ def train_decoder(
                     "train_loss_total": train_loss,
                     "train_loss_gt_fm": train_components["gt_fm"],
                     "train_loss_vla_fm": train_components["vla_fm"],
+                    "train_loss_composite_fm": train_components["composite_fm"],
                     "train_loss_low_safety": train_components["low_safety"],
                     "train_loss_decode": train_components["decode"],
                     "train_loss_rank": train_components["rank"],
                     "train_loss_repair": train_components["repair"],
                     "train_flow_loss": train_loss,
                 }
+                if loss_mode == "bimanual_gated":
+                    train_metrics.update(
+                        {
+                            "train_gate_w_left": float(
+                                np.average(gate_w_left_values, weights=weights)
+                            ),
+                            "train_gate_w_right": float(
+                                np.average(gate_w_right_values, weights=weights)
+                            ),
+                        }
+                    )
                 run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
@@ -1264,6 +1430,21 @@ def train_decoder(
                     "early_stop_no_improve_evals": early_stop_no_improve,
                     "eval_every": eval_every,
                 }
+                if loss_mode == "bimanual_gated":
+                    checkpoint_extra.pop("gate_lambda")
+                    checkpoint_extra.update(
+                        {
+                            "loss_objective_version": BIMANUAL_OBJECTIVE_VERSION,
+                            "action_slices": {
+                                "left": [LEFT_ACTION_SLICE.start, LEFT_ACTION_SLICE.stop],
+                                "right": [RIGHT_ACTION_SLICE.start, RIGHT_ACTION_SLICE.stop],
+                            },
+                            "wrist_token_indices": {
+                                "left": list(LEFT_WRIST_TOKEN_INDICES),
+                                "right": list(RIGHT_WRIST_TOKEN_INDICES),
+                            },
+                        }
+                    )
                 if init_metadata is not None and init_from is not None:
                     checkpoint_extra["initialized_from"] = str(init_from.resolve())
                     checkpoint_extra["initialized_from_epoch"] = int(init_metadata["epoch"])
@@ -1618,7 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Train tactile/state cross-attention flow decoder "
-            "(frozen tactile ResNet features; loss-mode gt / predicted / gated)."
+            "(frozen tactile ResNet features; loss-mode gt / predicted / gated / bimanual_gated)."
         )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
@@ -1650,13 +1831,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loss-mode",
-        choices=("gt", "predicted", "gated"),
+        choices=("gt", "predicted", "gated", "bimanual_gated"),
         default="gt",
         help=(
             "gt: FM(gt)+aux*MSE(decode,gt) (primary eval vs GT). "
             "predicted: FM vs VLA predicted_actions only (no aux; sanity check). "
             "gated: w*FM(gt)+lambda*(1-w)*FM(pred), plus a weak low-gate "
             "nearest-endpoint safety hinge and high-gate GT decode/rank/repair terms. "
+            "bimanual_gated: one per-wrist composite-endpoint FM plus per-wrist auxiliaries. "
             "All modes always log both val_mse_gt and val_mse_pred."
         ),
     )
@@ -2046,6 +2228,7 @@ def save_run_config(config: Mapping[str, Any], *, output_dir: Path) -> Path:
 
 
 def train_from_config(config: Mapping[str, Any]) -> None:
+    loss_settings = parse_loss_settings(config)
     datasets = config.get("datasets") or []
     if not isinstance(datasets, list) or not datasets:
         raise ValueError("config.datasets must be a non-empty list")
@@ -2100,10 +2283,10 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         dataset_root=None,
         tactile_window_divisor=_positive_int(training, "tactile_window_divisor", 1),
         history_stride=_positive_int(training, "history_stride", 3),
-        loss_mode=str(training.get("loss_mode", "gated")),  # type: ignore[arg-type]
-        gate_tau=float(training.get("gate_tau", 0.5)),
-        gate_temperature=float(training.get("gate_temperature", 0.1)),
-        gate_lambda=float(training.get("gate_lambda", 1.0)),
+        loss_mode=loss_settings.loss_mode,
+        gate_tau=loss_settings.gate_tau,
+        gate_temperature=loss_settings.gate_temperature,
+        gate_lambda=loss_settings.gate_lambda,
         aux_decode_weight=resolve_optional_loss_weight(
             training.get("aux_decode"),
             float(training.get("aux_decode_weight", 1.0)),

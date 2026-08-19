@@ -11,10 +11,20 @@ from train_smolvla_frs.utils.history_plot import HISTORY_FIELDS, plot_training_h
 
 
 class HistoryPlotTest(unittest.TestCase):
-    def test_keeps_five_panels_before_first_validation_epoch(self):
+    def test_legacy_history_without_bimanual_fields_still_plots(self):
         with tempfile.TemporaryDirectory() as directory:
             history = pathlib.Path(directory) / "history.csv"
-            row = dict.fromkeys(HISTORY_FIELDS, "")
+            legacy_fields = tuple(
+                field
+                for field in HISTORY_FIELDS
+                if field
+                not in {
+                    "train_loss_composite_fm",
+                    "train_gate_w_left",
+                    "train_gate_w_right",
+                }
+            )
+            row = dict.fromkeys(legacy_fields, "")
             row.update(
                 {
                     "epoch": 1,
@@ -28,7 +38,7 @@ class HistoryPlotTest(unittest.TestCase):
                 }
             )
             with history.open("w", newline="", encoding="utf-8") as file:
-                writer = csv.DictWriter(file, fieldnames=HISTORY_FIELDS)
+                writer = csv.DictWriter(file, fieldnames=legacy_fields)
                 writer.writeheader()
                 writer.writerow(row)
 
@@ -41,6 +51,39 @@ class HistoryPlotTest(unittest.TestCase):
 
             self.assertEqual(subplots.call_args.args[:2], (5, 1))
             self.assertTrue(output.is_file())
+
+    def test_bimanual_history_with_composite_and_per_wrist_gates_plots(self):
+        expected_fields = {
+            "train_loss_composite_fm",
+            "train_gate_w_left",
+            "train_gate_w_right",
+        }
+        self.assertTrue(expected_fields <= set(HISTORY_FIELDS))
+        with tempfile.TemporaryDirectory() as directory:
+            history = pathlib.Path(directory) / "history.csv"
+            row = dict.fromkeys(HISTORY_FIELDS, "")
+            row.update(
+                {
+                    "epoch": 1,
+                    "train_loss_total": 0.3,
+                    "train_loss_composite_fm": 0.2,
+                    "train_gate_w_left": 0.8,
+                    "train_gate_w_right": 0.1,
+                }
+            )
+            with history.open("w", newline="", encoding="utf-8") as file:
+                writer = csv.DictWriter(file, fieldnames=HISTORY_FIELDS)
+                writer.writeheader()
+                writer.writerow(row)
+
+            output = plot_training_history(history)
+            parsed = history_plot_module._read_history_rows(history)
+
+            self.assertTrue(output.is_file())
+            self.assertGreater(output.stat().st_size, 0)
+            self.assertEqual(parsed[0]["train_loss_composite_fm"], 0.2)
+            self.assertEqual(parsed[0]["train_gate_w_left"], 0.8)
+            self.assertEqual(parsed[0]["train_gate_w_right"], 0.1)
 
     def test_plots_vla_baseline_repair_and_gate_quantiles(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -52,6 +52,20 @@ For gated training, confident high-gate samples receive direct GT decode, GT-ove
 and absolute repair constraints. Confident low-gate samples use only the weaker
 nearest-endpoint safety hinge, so either a GT-like or VLA-like action remains acceptable.
 
+Choose the objective explicitly in `frs_training`:
+
+```yaml
+loss_mode: gated           # 旧 scalar-gate 双 FM
+loss_mode: bimanual_gated  # 新 per-wrist composite endpoint FM
+```
+
+`bimanual_gated` fixes the left/right action slices to `[0, 10)` and `[10, 20)`, and
+computes their gates from tactile-token groups `[0, 1]` and `[2, 3]`. It performs one
+flow-matching call toward the per-wrist composite endpoint and does not accept
+`gate_lambda`. Its checkpoints record objective version 2 and these fixed mappings;
+resume rejects missing or mismatched bimanual objective metadata. Legacy `gated`
+configuration and resume validation retain their scalar-gate behavior.
+
 ## Multi-dataset evaluation
 
 Evaluate the configured validation splits with the same combined action-cache digest,
@@ -67,7 +81,9 @@ The default checkpoint is `<frs_training.output>/best`; results are written to
 `<frs_training.output>/evaluation`. `metrics.json` includes aggregate and per-dataset metrics,
 while `per_sample.csv` records the source and source-local cache index.
 
-`history.csv` records the complete objective as `train_loss_total` and its six weighted terms:
-`train_loss_gt_fm`, `train_loss_vla_fm`, `train_loss_low_safety`, `train_loss_decode`,
-`train_loss_rank`, and `train_loss_repair`. `train_flow_loss` remains as a
-backward-compatible alias for the total.
+`history.csv` records the complete objective as `train_loss_total` and its seven weighted
+terms: `train_loss_gt_fm`, `train_loss_vla_fm`, `train_loss_composite_fm`,
+`train_loss_low_safety`, `train_loss_decode`, `train_loss_rank`, and `train_loss_repair`.
+The bimanual objective also records `train_gate_w_left` and `train_gate_w_right`.
+`train_flow_loss` remains as a backward-compatible alias for the total, and the history
+plotter continues to accept older CSV files without the new columns.

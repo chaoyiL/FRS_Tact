@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import dataclasses
 import inspect
 import json
@@ -41,6 +42,157 @@ from train_smolvla_frs.utils.model import (
     three_region_effective_gate_weights,
     train_step,
 )
+
+
+def test_bimanual_mode_rejects_gate_lambda() -> None:
+    import train_smolvla_frs.train_frs as train_module
+
+    with pytest.raises(ValueError, match="gate_lambda.*bimanual_gated"):
+        train_module.train_from_config(
+            {
+                "frs_training": {
+                    "loss_mode": "bimanual_gated",
+                    "gate_lambda": 0.25,
+                }
+            }
+        )
+
+
+def test_legacy_gated_mode_still_accepts_gate_lambda() -> None:
+    import train_smolvla_frs.train_frs as train_module
+
+    parser = getattr(train_module, "parse_loss_settings", None)
+    assert parser is not None
+    settings = parser(
+        {
+            "frs_training": {
+                "loss_mode": "gated",
+                "gate_lambda": 0.25,
+            }
+        }
+    )
+    assert settings.loss_mode == "gated"
+    assert settings.gate_lambda == 0.25
+
+
+def test_bimanual_resume_metadata_is_strict_without_changing_legacy_validation() -> None:
+    import train_smolvla_frs.train_frs as train_module
+
+    validator = getattr(train_module, "_validate_resume_loss_objective", None)
+    assert validator is not None
+    valid = {
+        "extra_metadata": {
+            "loss_mode": "bimanual_gated",
+            "loss_objective_version": 2,
+            "action_slices": {"left": [0, 10], "right": [10, 20]},
+            "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
+        }
+    }
+    validator(valid, loss_mode="bimanual_gated")
+
+    for field, invalid_value in (
+        ("loss_objective_version", 1),
+        ("action_slices", {"left": [0, 9], "right": [9, 20]}),
+        ("wrist_token_indices", {"left": [0, 2], "right": [1, 3]}),
+    ):
+        invalid = json.loads(json.dumps(valid))
+        invalid["extra_metadata"][field] = invalid_value
+        with pytest.raises(ValueError, match=field):
+            validator(invalid, loss_mode="bimanual_gated")
+
+    with pytest.raises(ValueError, match="loss_mode"):
+        validator(
+            {"extra_metadata": {"loss_mode": "gated"}},
+            loss_mode="bimanual_gated",
+        )
+    validator(
+        {"extra_metadata": {"loss_mode": "gated"}},
+        loss_mode="gated",
+    )
+
+
+def test_resume_preserves_legacy_history_header(tmp_path) -> None:
+    import train_smolvla_frs.train_frs as train_module
+
+    resolver = getattr(train_module, "_history_fieldnames_for_write", None)
+    assert resolver is not None
+    history = tmp_path / "history.csv"
+    legacy_fields = ["epoch", "train_loss_total", "train_flow_loss"]
+    with history.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.DictWriter(file, fieldnames=legacy_fields)
+        writer.writeheader()
+        writer.writerow({"epoch": 1, "train_loss_total": 0.2, "train_flow_loss": 0.2})
+
+    assert resolver(
+        history,
+        default_fields=[*legacy_fields, "train_loss_composite_fm"],
+        append=True,
+    ) == legacy_fields
+    assert resolver(
+        history,
+        default_fields=[*legacy_fields, "train_loss_composite_fm"],
+        append=False,
+    ) == [*legacy_fields, "train_loss_composite_fm"]
+
+
+@pytest.mark.parametrize(
+    ("loss_mode", "extra_training", "expected_gate_lambda"),
+    (
+        ("gated", {"gate_lambda": 0.25}, 0.25),
+        ("bimanual_gated", {}, 1.0),
+    ),
+)
+def test_yaml_training_entry_routes_legacy_and_bimanual_modes(
+    tmp_path,
+    monkeypatch,
+    loss_mode,
+    extra_training,
+    expected_gate_lambda,
+) -> None:
+    import train_smolvla_frs.prepare_frs_caches as prepare_module
+    import train_smolvla_frs.train_frs as train_module
+
+    encoder_dir = tmp_path / "encoder"
+    encoder_dir.mkdir()
+    cache_dir = tmp_path / "action-cache"
+    cache_dir.mkdir()
+    (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    captured = {}
+    monkeypatch.setattr(
+        prepare_module,
+        "prepare_tactile_embeddings_from_config",
+        lambda config: None,
+    )
+    monkeypatch.setattr(train_module, "source_cache_dir", lambda root, repo_id: cache_dir)
+    monkeypatch.setattr(
+        train_module,
+        "train_decoder",
+        lambda **kwargs: captured.update(kwargs),
+    )
+    config = {
+        "datasets": [{"repo_id": "owner/data"}],
+        "action_cache": {"root": str(tmp_path / "action-cache-root")},
+        "tactile_embedding_cache": {"root": str(tmp_path / "tactile-cache-root")},
+        "model": {
+            "tactile_encoder_path": str(encoder_dir),
+            "tactile_keys": [
+                "observation.images.tactile_left_0",
+                "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1",
+                "observation.images.tactile_right_1",
+            ],
+        },
+        "frs_training": {
+            "output": str(tmp_path / f"output-{loss_mode}"),
+            "loss_mode": loss_mode,
+            **extra_training,
+        },
+    }
+
+    train_module.train_from_config(config)
+
+    assert captured["loss_mode"] == loss_mode
+    assert captured["gate_lambda"] == expected_gate_lambda
 
 
 def test_bimanual_composite_endpoint_selects_each_hand_independently() -> None:
@@ -422,7 +574,26 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
         load_checkpoint(tmp_path)
 
 
-def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("loss_mode", "action_dim", "tactile_num_tokens", "expected_gate"),
+    (
+        ("gated", 1, 1, np.asarray([0.98201376], dtype=np.float32)),
+        (
+            "bimanual_gated",
+            20,
+            4,
+            np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
+        ),
+    ),
+)
+def test_gated_training_entry_records_loss_contract_and_gate_shape(
+    tmp_path,
+    monkeypatch,
+    loss_mode,
+    action_dim,
+    tactile_num_tokens,
+    expected_gate,
+):
     import train_smolvla_frs.train_frs as train_module
     import train_smolvla_frs.utils.data as data_module
     import train_smolvla_frs.utils.metrics as metrics_module
@@ -432,7 +603,7 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
     class FakePairs:
         manifest = {
             "action_horizon": 2,
-            "action_dim": 1,
+            "action_dim": action_dim,
             "state_dim": 0,
             "records_sha256": "test-digest",
             "configuration": {"dataset_repo_id": "owner/data"},
@@ -457,16 +628,20 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
             assert split == "train"
             yield (
                 np.asarray([0], dtype=np.int64),
-                np.zeros((1, 2, 1), dtype=np.float32),
-                np.zeros((1, 2, 1), dtype=np.float32),
-                np.ones((1, 2, 1), dtype=np.float32),
+                np.zeros((1, 2, action_dim), dtype=np.float32),
+                np.zeros((1, 2, action_dim), dtype=np.float32),
+                np.ones((1, 2, action_dim), dtype=np.float32),
                 np.zeros((1, 0), dtype=np.float32),
-                jnp.ones((1, 2, 1, 4), dtype=jnp.float32),
+                jnp.ones((1, 2, tactile_num_tokens, 4), dtype=jnp.float32),
             )
 
         def tactile_change_for_cache_indices(self, indices, current_tokens):
             del indices, current_tokens
             return np.asarray([0.9], dtype=np.float32)
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([[0.9, 0.1]], dtype=np.float32)
 
         def gate_current_tokens(self, indices, tactile_input):
             del indices
@@ -502,17 +677,28 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
 
     monkeypatch.setattr(cache_module, "CachedPairs", FakePairs)
     monkeypatch.setattr(data_module, "TactileConditionedBatches", FakeConditioner)
-    monkeypatch.setattr(
-        model_module,
-        "train_step",
-        lambda *args, **kwargs: (
+    seen_gates = []
+
+    def fake_train_step(*args, **kwargs):
+        del kwargs
+        seen_gates.append(np.asarray(args[6]))
+        return (
             jnp.asarray(0.0),
             {
                 name: jnp.asarray(0.0)
-                for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+                for name in (
+                    "gt_fm",
+                    "vla_fm",
+                    "composite_fm",
+                    "low_safety",
+                    "decode",
+                    "rank",
+                    "repair",
+                )
             },
-        ),
-    )
+        )
+
+    monkeypatch.setattr(model_module, "train_step", fake_train_step)
     monkeypatch.setattr(metrics_module, "evaluate_split", lambda *args, **kwargs: validation)
 
     train_module.train_decoder(
@@ -523,7 +709,7 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
         dataset_root=None,
         tactile_window_divisor=1,
         history_stride=1,
-        loss_mode="gated",
+        loss_mode=loss_mode,
         gate_tau=0.5,
         gate_temperature=0.1,
         gate_lambda=1.0,
@@ -563,14 +749,41 @@ def test_gated_training_checkpoint_metadata_declares_gate_training_only(tmp_path
         pipeline_prefetch=1,
         image_cache_size=0,
         encode_batch_size=1,
-        tactile_num_tokens=1,
+        tactile_num_tokens=tactile_num_tokens,
     )
 
+    assert len(seen_gates) == 1
+    np.testing.assert_allclose(seen_gates[0], expected_gate)
+    with (tmp_path / "output" / "history.csv").open(
+        newline="",
+        encoding="utf-8",
+    ) as file:
+        history_row = next(csv.DictReader(file))
+    assert float(history_row["train_loss_composite_fm"]) == 0.0
+    if loss_mode == "bimanual_gated":
+        assert float(history_row["train_gate_w_left"]) == pytest.approx(
+            expected_gate[0, 0]
+        )
+        assert float(history_row["train_gate_w_right"]) == pytest.approx(
+            expected_gate[0, 1]
+        )
+    else:
+        assert history_row["train_gate_w_left"] == ""
+        assert history_row["train_gate_w_right"] == ""
     metadata = json.loads((tmp_path / "output" / "last" / "checkpoint.json").read_text())
     extra_metadata = metadata["extra_metadata"]
     assert extra_metadata["decoder_input_version"] == 2
     assert extra_metadata["loss_weighting_version"] == 7
     assert "gate_conditioning" not in extra_metadata
+    if loss_mode == "bimanual_gated":
+        assert extra_metadata["loss_objective_version"] == 2
+        assert extra_metadata["action_slices"] == {"left": [0, 10], "right": [10, 20]}
+        assert extra_metadata["wrist_token_indices"] == {
+            "left": [0, 1],
+            "right": [2, 3],
+        }
+    else:
+        assert "loss_objective_version" not in extra_metadata
 
 
 @pytest.mark.parametrize("sequence_length", [1, 3, 6])

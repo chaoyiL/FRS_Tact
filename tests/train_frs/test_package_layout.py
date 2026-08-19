@@ -1,22 +1,26 @@
 from __future__ import annotations
 
+import copy
 import importlib.util
 import os
-from pathlib import Path
 import stat
 import subprocess
 import sys
 import tomllib
 import zipfile
+from pathlib import Path
 
-from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
-from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_OBJECTIVE_VERSION
-from train_smolvla_frs.utils.bimanual_schema import LEFT_ACTION_SLICE
-from train_smolvla_frs.utils.bimanual_schema import LEFT_WRIST_TOKEN_INDICES
-from train_smolvla_frs.utils.bimanual_schema import RIGHT_ACTION_SLICE
-from train_smolvla_frs.utils.bimanual_schema import RIGHT_WRIST_TOKEN_INDICES
-from train_smolvla_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
+import yaml
 
+from train_smolvla_frs.utils.bimanual_schema import (
+    BIMANUAL_LOSS_MODE,
+    BIMANUAL_OBJECTIVE_VERSION,
+    LEFT_ACTION_SLICE,
+    LEFT_WRIST_TOKEN_INDICES,
+    RIGHT_ACTION_SLICE,
+    RIGHT_WRIST_TOKEN_INDICES,
+    validate_bimanual_objective_metadata,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -24,8 +28,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_bimanual_schema_has_fixed_contract_and_validates_metadata() -> None:
     assert BIMANUAL_LOSS_MODE == "bimanual_gated"
     assert BIMANUAL_OBJECTIVE_VERSION == 2
-    assert LEFT_ACTION_SLICE == slice(0, 10)
-    assert RIGHT_ACTION_SLICE == slice(10, 20)
+    assert slice(0, 10) == LEFT_ACTION_SLICE
+    assert slice(10, 20) == RIGHT_ACTION_SLICE
     assert LEFT_WRIST_TOKEN_INDICES == (0, 1)
     assert RIGHT_WRIST_TOKEN_INDICES == (2, 3)
     validate_bimanual_objective_metadata(
@@ -102,11 +106,52 @@ def test_train_smolvla_frs_module_help() -> None:
     assert "--config" in completed.stdout
 
 
+def test_train_smolvla_frs_direct_script_help_without_pythonpath() -> None:
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        [sys.executable, str(ROOT / "train_smolvla_frs" / "train_frs.py"), "--help"],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "--config" in completed.stdout
+
+
 def test_config_and_launcher_live_in_train_smolvla_frs() -> None:
     assert (ROOT / "train_smolvla_frs" / "configs" / "train_frs.yaml").is_file()
+    assert (
+        ROOT / "train_smolvla_frs" / "configs" / "train_frs_bimanual_gated.yaml"
+    ).is_file()
     assert (ROOT / "train_smolvla_frs" / "scripts" / "start_frs_train.sh").is_file()
     assert not (ROOT / "configs" / "train_frs.yaml").exists()
     assert not (ROOT / "scripts" / "start_frs_train.sh").exists()
+
+
+def test_bimanual_config_only_changes_objective_and_output() -> None:
+    config_dir = ROOT / "train_smolvla_frs" / "configs"
+    legacy = yaml.safe_load((config_dir / "train_frs.yaml").read_text(encoding="utf-8"))
+    bimanual = yaml.safe_load(
+        (config_dir / "train_frs_bimanual_gated.yaml").read_text(encoding="utf-8")
+    )
+    expected = copy.deepcopy(legacy)
+    expected["frs_training"]["loss_mode"] = "bimanual_gated"
+    expected["frs_training"].pop("gate_lambda")
+    expected["frs_training"]["output"] = (
+        "/workspace/frs_pick_tube_05/frs_0815_03_all_encoders_bimanual_gated"
+    )
+    assert bimanual == expected
+
+
+def test_readme_distinguishes_legacy_and_bimanual_loss_modes() -> None:
+    readme = (ROOT / "train_smolvla_frs" / "README.md").read_text(encoding="utf-8")
+    assert "loss_mode: gated           # 旧 scalar-gate 双 FM" in readme
+    assert (
+        "loss_mode: bimanual_gated  # 新 per-wrist composite endpoint FM" in readme
+    )
 
 
 def test_train_smolvla_frs_is_discovered_by_setuptools() -> None:
@@ -146,6 +191,7 @@ def test_wheel_contains_train_smolvla_frs_runtime_resources(tmp_path: Path) -> N
         "modalities_eval/utils.py",
         "train_smolvla_frs/README.md",
         "train_smolvla_frs/configs/train_frs.yaml",
+        "train_smolvla_frs/configs/train_frs_bimanual_gated.yaml",
         "train_smolvla_frs/scripts/start_frs_train.sh",
     } <= contents
 

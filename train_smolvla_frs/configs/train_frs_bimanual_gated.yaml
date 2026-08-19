@@ -1,0 +1,190 @@
+# 用冻结的 pick_tube_01 VLA，在未参与其训练的 pick_tube_05 上训练 FRS。
+# 完整管线：
+#   1) uv run --no-sync python tools/merge_smolvla_peft_to_jax.py \
+#        --adapter KaiyueChen/pick_tube_01 \
+#        --base lerobot/smolvla_base \
+#        --output /workspace/checkpoints/model/pick_tube_01_jax
+#   2) uv run --no-sync python -m train_smolvla_frs.compare_frs_reverse_solvers \
+#        --config train_smolvla_frs/configs/train_frs.yaml
+#   3) uv run --no-sync python -m train_smolvla_frs.prepare_frs_caches \
+#        --config train_smolvla_frs/configs/train_frs.yaml
+#   4) uv run --no-sync python -m train_smolvla_frs.train_frs \
+#        --config train_smolvla_frs/configs/train_frs.yaml
+
+# 合并 PEFT adapter 后的完整 JAX SmolVLA checkpoint。
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax
+# checkpoint 本身是本地目录；true 只允许首次补齐 tokenizer 等公共资源。
+allow_download: true
+
+#自动下载冻结的smovla ckpt
+checkpoint_merge:
+  adapter: KaiyueChen/pick_tube_01
+  base: lerobot/smolvla_base
+  output: /workspace/checkpoints/model/pick_tube_01_jax
+  allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /home/typhon/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+# SmolVLA 预测、反向积分 latent 和 GT action。每个数据集写独立子目录。
+action_cache:
+  # cache v3 additionally stores the normalized current observation.state.
+  root: ~/FRS_Tact/cache/pick_tube_05/action_cache
+  model_sample_steps: 10
+  reverse_steps: 20
+  reverse_solver: slerpflow
+  # H100 aggressive cache pipeline: 8 spawn workers decode/prefetch RGB while
+  # the GPU processes a 64-sample SmolVLA + SlerpFlow batch.
+  batch_size: 64
+  num_workers: 8
+  prefetch_factor: 2
+  video_backend: torchcodec
+  worker_timeout_seconds: 300
+  # Keep the durable resume interval at 128 samples (2 * batch_size).
+  flush_every: 2
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  # 30Hz 数据相邻帧高度相关；stride=5 降低重复帧对训练的支配。
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+# 在生成完整 action cache 前，用相同样本和 seed 比较 FireFlow/SlerpFlow。
+reverse_solver_ab:
+  enabled: false
+  root: ~/FRS_Tact/cache/pick_tube_05/reverse_solver_ab_k20
+  max_samples_per_dataset: 512
+  max_episodes: null
+  # SlerpFlow 全局 mean inversion MSE 不得高于 FireFlow。
+  max_mean_ratio: 1.0
+
+# 每帧保存四路初始 ResNet embedding [4, 512]，仅用于生成稳定的 Gate 标签。
+# FRS 前向会重新解码原始触觉图像，并端到端微调 checkpoint 内的 ResNet。
+tactile_embedding_cache:
+  enabled: true
+  # Encoder-specific cache root: do not reuse embeddings produced by encoder_ckpt_06.
+  root: ~/FRS_Tact/cache/pick_tube_05/tactile_embeddings
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+# ResNet 从该 checkpoint 初始化，随后作为 FRS 参数参与训练并写入 FRS checkpoint。
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
+  freeze_tactile_encoder: false
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+  # 第一版 state conditioning：当前时刻 normalized observation.state → 1 个 token。
+  state_conditioning: true
+  # 仅训练时整 token 随机屏蔽；验证和部署始终使用 state。
+  state_dropout_rate: 0.1
+
+frs_training:
+  # Explicit gate_w conditioning changes the decoder parameter tree; keep this
+  # experiment separate from checkpoints trained with the hidden gate label.
+  output: /workspace/frs_pick_tube_05/frs_0815_03_all_encoders_bimanual_gated
+  # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
+  tactile_window_divisor: 4
+  # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。
+  history_stride: 3
+
+  # 正式目标：接触变化明显时向 GT steering，未接触时保持 SmolVLA。
+  loss_mode: bimanual_gated
+  # 上一轮 val change 中位数约 0.43；tau=0.4 避免半数以上样本都被饱和到 w≈1。
+  gate_tau: 0.4
+  gate_temperature: 0.1
+  # lambda 只缩放低/中 Gate 的 VLA flow matching；0.25 保留弱锚点但让高 Gate GT 主导。
+  # 关掉则不计算该项，weight 被忽略。
+  aux_decode: true
+  aux_decode_weight: 4.0
+  aux_decode_steps: 10
+  # 训练/验证动作 MSE 的正向积分器；与 action_cache.reverse_solver 无关。
+  aux_decode_solver: fireflow
+  # 低 Gate 不偏好 GT 或 VLA；只有同时远离两个可接受端点时才产生弱安全 hinge。
+  low_gate_safety: true
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  # 三段式 Gate：低区只做安全约束，高区做 GT decode/rank/repair，中间区只保留 FM 过渡。
+  # v7: FM 使用 w_eff=clip((w-0.3)/(0.7-0.3),0,1)：低区弱 VLA、高区纯 GT，
+  # 中间区连续过渡；原始 w 仍作为 decoder conditioning，不会丢掉 Gate 强度信息。
+  # 各约束在自己的活跃 Gate 组内归一化，不被其他 Gate 区域的样本数稀释。
+  rank_low_gate_threshold: 0.3
+  rank_high_gate_threshold: 0.7
+  # rank 仅作用于高 Gate，要求 MSE(FRS,GT) < MSE(FRS,VLA)。关掉则不计算该项，weight 被忽略。
+  rank: true
+  rank_weight: 2.0
+  rank_margin: 0.0
+  # 关闭 stage2 的 hard-CVaR；所有有效高 Gate 样本使用普通均值，避免困难/异常样本主导梯度。
+  high_gate_rank_aggregation: balanced_mean
+  # 以下两个值仅供 worst_source_cvar 使用；balanced_mean 下不会参与损失计算。
+  high_gate_rank_hard_fraction: 1.0
+  high_gate_rank_worst_beta: 20.0
+  high_gate_rank_source_weights: {}
+  # 高 Gate FRS 还必须比原始 VLA 更接近 GT，防止只靠远离 VLA 满足 rank。关掉则不计算该项，weight 被忽略。
+  repair: true
+  repair_weight: 0.0
+  repair_margin: 0.0
+  # best checkpoint：低区只检查安全，高区严格检查 GT gain/rank。
+  # 中间区 0.3<w<0.7 只报告，不参与可行性门槛；六档评估边界固定为 0/.1/.3/.5/.7/.9/1。
+  # 低 Gate 中最多允许 10% 样本同时远离 GT/VLA（nearest endpoint MSE > 0.03）。
+  best_max_low_gate_unsafe_frac: 0.1
+  best_min_high_gate_gain: 0.0
+  # 每个数据集的高 Gate 样本中，至少 80% 要满足 MSE(FRS,GT)+margin <= MSE(FRS,VLA)。
+  best_min_high_gate_rank_satisfied: 0.8
+
+  # 只有 pick_tube_05，不需要跨数据集均衡采样或均衡损失。
+  dataset_balanced_sampling: false
+  dataset_balanced_loss: false
+
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  # state token 改变参数树并从头训练；恢复冷启动使用的学习率。
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 1
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+
+  # 原始图像端到端反传显存开销远高于 embedding cache。
+  batch_size: 64
+  # ResNet 分块前向并重计算激活，控制 B*T*4 张 224x224 图像的峰值显存。
+  tactile_encode_microbatch_size: 8
+  # Spawn workers decode tactile video while the GPU trains the previous batch.
+  num_workers: 8
+  prefetch_batches: 8
+  pipeline_prefetch: 4
+  load_threads: 8
+  image_cache_size: 8192
+  epochs: 30
+  validation_steps: 10
+  eval_every: 2
+  # 连续 5 次评估综合 checkpoint key 未改善则停止；至少先完成 5 次评估。
+  early_stop_patience: 5
+  early_stop_min_evals: 5
+  seed: 42
+  write_plots: true
+  # state token 改变参数树；必须冷启动，不能加载旧 tactile-only FRS。
+  init_from: null
+  resume: false
+  resume_from: null

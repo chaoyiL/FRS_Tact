@@ -29,10 +29,13 @@ HISTORY_FIELDS = (
     "train_loss_total",
     "train_loss_gt_fm",
     "train_loss_vla_fm",
+    "train_loss_composite_fm",
     "train_loss_low_safety",
     "train_loss_decode",
     "train_loss_rank",
     "train_loss_repair",
+    "train_gate_w_left",
+    "train_gate_w_right",
     "train_flow_loss",
     "val_flow_loss",
     "val_mse",
@@ -192,8 +195,18 @@ def plot_training_history(
         train_epochs, train_total_loss = _finite_series(rows, "train_flow_loss")
     train_component_series = {
         name: _finite_series(rows, f"train_loss_{name}")
-        for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+        for name in (
+            "gt_fm",
+            "vla_fm",
+            "composite_fm",
+            "low_safety",
+            "decode",
+            "rank",
+            "repair",
+        )
     }
+    train_gate_left_epochs, train_gate_left = _finite_series(rows, "train_gate_w_left")
+    train_gate_right_epochs, train_gate_right = _finite_series(rows, "train_gate_w_right")
     val_loss_epochs, val_flow_loss = _finite_series(rows, "val_flow_loss")
     high_gt_epochs, mse_gt_high = _finite_series(rows, "val_mse_gt_high_w")
     low_gt_epochs, mse_gt_low = _finite_series(rows, "val_mse_gt_low_w")
@@ -296,6 +309,7 @@ def plot_training_history(
     component_colors = {
         "gt_fm": "#8172B2",
         "vla_fm": "#CCB974",
+        "composite_fm": "#4C72B0",
         "low_safety": "#55A868",
         "decode": "#64B5CD",
         "rank": "#C44E52",
@@ -557,6 +571,18 @@ def plot_training_history(
 
     if has_gate_stats:
         gate_axis = axes[row]
+        for epochs, values, label, color in (
+            (train_gate_left_epochs, train_gate_left, "train gate left", "#C44E52"),
+            (train_gate_right_epochs, train_gate_right, "train gate right", "#4C72B0"),
+        ):
+            if epochs:
+                gate_axis.plot(
+                    epochs,
+                    values,
+                    label=label,
+                    color=color,
+                    linewidth=1.8,
+                )
         for epochs, values, label, style in (
             (gate_p10_epochs, gate_p10, "gate w p10", ":"),
             (gate_p50_epochs, gate_p50, "gate w p50", "-"),
