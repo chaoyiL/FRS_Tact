@@ -177,6 +177,27 @@ def test_setup_check_is_dependency_free_and_reports_boundary(tmp_path: Path) -> 
     assert "entrypoints:" in result.stdout
 
 
+def test_training_environment_imports_checkpoint_with_private_lerobot() -> None:
+    """Integration coverage for the Task 3 checkpoint module and Task 2 private runtime."""
+    result = subprocess.run(
+        [
+            str(TRAIN_ROOT / ".venv" / "bin" / "python"),
+            "-c",
+            "from train_pi05_frs.utils.checkpoint import load_checkpoint",
+        ],
+        text=True,
+        capture_output=True,
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "PYTHONPATH": f"{TRAIN_ROOT / 'src'}:{ROOT}",
+        },
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_standalone_metadata_and_ignore_rules_define_a_private_boundary() -> None:
     metadata = tomllib.loads((TRAIN_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     assert (TRAIN_ROOT / "uv.lock").is_file()
