@@ -9,8 +9,33 @@ import sys
 import tomllib
 import zipfile
 
+from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_OBJECTIVE_VERSION
+from train_smolvla_frs.utils.bimanual_schema import LEFT_ACTION_SLICE
+from train_smolvla_frs.utils.bimanual_schema import LEFT_WRIST_TOKEN_INDICES
+from train_smolvla_frs.utils.bimanual_schema import RIGHT_ACTION_SLICE
+from train_smolvla_frs.utils.bimanual_schema import RIGHT_WRIST_TOKEN_INDICES
+from train_smolvla_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
+
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_bimanual_schema_has_fixed_contract_and_validates_metadata() -> None:
+    assert BIMANUAL_LOSS_MODE == "bimanual_gated"
+    assert BIMANUAL_OBJECTIVE_VERSION == 2
+    assert LEFT_ACTION_SLICE == slice(0, 10)
+    assert RIGHT_ACTION_SLICE == slice(10, 20)
+    assert LEFT_WRIST_TOKEN_INDICES == (0, 1)
+    assert RIGHT_WRIST_TOKEN_INDICES == (2, 3)
+    validate_bimanual_objective_metadata(
+        {
+            "loss_mode": "bimanual_gated",
+            "loss_objective_version": 2,
+            "action_slices": {"left": [0, 10], "right": [10, 20]},
+            "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
+        }
+    )
 
 
 def test_core_frs_files_live_in_train_smolvla_frs() -> None:
@@ -19,6 +44,7 @@ def test_core_frs_files_live_in_train_smolvla_frs() -> None:
         "evaluate.py",
         "plot_history.py",
         "utils/checkpoint.py",
+        "utils/bimanual_schema.py",
         "utils/data.py",
         "utils/history_plot.py",
         "utils/integration.py",

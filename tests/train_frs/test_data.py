@@ -7,7 +7,7 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 import numpy as np
-
+import pytest
 from train_smolvla_frs.utils.data import CachedTactileEmbeddingBatches
 from train_smolvla_frs.utils.data import NUM_TACTILE_STREAMS
 from train_smolvla_frs.utils.data import TACTILE_KEYS
@@ -17,9 +17,28 @@ from train_smolvla_frs.utils.data import resolve_dataset_repo_id
 from train_smolvla_frs.utils.data import resolve_tactile_window
 from train_smolvla_frs.utils.data import resnet_embedding_dim_from_encoder
 from train_smolvla_frs.utils.data import tactile_change_from_tokens
+from train_smolvla_frs.utils.data import tactile_change_per_wrist_from_tokens
 from train_smolvla_frs.utils.mp_batches import decode_tactile_window_batch
 from train_smolvla_frs.utils.window_io import load_tactile_windows
 from train_smolvla_frs.utils.window_io import window_frame_indices
+
+
+def test_tactile_change_per_wrist_keeps_zero_and_one_groups_separate():
+    baseline = np.zeros((1, 4, 2), dtype=np.float32)
+    baseline[..., 0] = 1.0
+    current = baseline.copy()
+    current[:, 2:, 0] = -1.0
+
+    change = tactile_change_per_wrist_from_tokens(current, baseline)
+
+    np.testing.assert_allclose(change, [[0.0, 2.0]])
+
+
+def test_tactile_change_per_wrist_rejects_non_four_token_input():
+    with pytest.raises(ValueError, match="four tactile tokens"):
+        tactile_change_per_wrist_from_tokens(
+            np.zeros((1, 3, 2), np.float32), np.zeros((1, 3, 2), np.float32)
+        )
 
 
 class FakePairs:
@@ -50,6 +69,18 @@ class FakePairs:
                 self.arrays["gt_action"][batch],
                 self.arrays["state"][batch],
             )
+
+
+def test_tactile_conditioner_returns_per_wrist_change_for_episode_baselines():
+    conditioner = TactileConditionedBatches.__new__(TactileConditionedBatches)
+    conditioner.pairs = FakePairs()
+    conditioner.episode_baselines = {0: np.ones((4, 2), dtype=np.float32)}
+    current = np.ones((2, 4, 2), dtype=np.float32)
+    current[:, 2:] = -1.0
+
+    change = conditioner.tactile_change_per_wrist_for_cache_indices([0, 1], current)
+
+    np.testing.assert_allclose(change, [[0.0, 2.0], [0.0, 2.0]], atol=1e-6)
 
 
 class DataHelpersTest(unittest.TestCase):
@@ -237,6 +268,12 @@ class FakeMultiPairs:
         local = np.where(source == 0, indices, indices - 2)
         return source, local
 
+    def metadata_values(self, indices, key):
+        source, local = self.source_and_local_indices(indices)
+        return np.asarray(
+            [self.sources[int(source_index)].arrays[key][int(local_index)] for source_index, local_index in zip(source, local, strict=True)]
+        )
+
     def batches(self, split, *, batch_size, shuffle, seed, source_balanced=False):
         del shuffle, seed, source_balanced, batch_size
         indices = np.asarray([0, 2] if split == "train" else [1], dtype=np.int64)
@@ -247,6 +284,21 @@ class FakeMultiPairs:
             self.arrays["gt_action"][indices],
             self.arrays["state"][indices],
         )
+
+
+def test_cached_conditioner_returns_per_wrist_change_for_source_episode_baselines():
+    conditioner = CachedTactileEmbeddingBatches.__new__(CachedTactileEmbeddingBatches)
+    conditioner.pairs = FakeMultiPairs()
+    conditioner.episode_baselines = {
+        (0, 0): np.ones((4, 2), dtype=np.float32),
+        (1, 1): np.ones((4, 2), dtype=np.float32),
+    }
+    current = np.ones((2, 4, 2), dtype=np.float32)
+    current[:, 2:] = -1.0
+
+    change = conditioner.tactile_change_per_wrist_for_cache_indices([0, 2], current)
+
+    np.testing.assert_allclose(change, [[0.0, 2.0], [0.0, 2.0]], atol=1e-6)
 
 
 class CachedRawImageLoaderTest(unittest.TestCase):
