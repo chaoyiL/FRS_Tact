@@ -23,6 +23,8 @@ from train_smolvla_frs.utils.metrics import (
 )
 from train_smolvla_frs.utils.integration import euler_integrate_velocity, fireflow_integrate_velocity
 from train_smolvla_frs.utils.model import (
+    bimanual_composite_endpoint,
+    bimanual_loss_components_per_sample,
     DecoderConfig,
     TactileConditionedFlowDecoder,
     decode_actions,
@@ -40,6 +42,91 @@ from train_smolvla_frs.utils.model import (
     three_region_effective_gate_weights,
     train_step,
 )
+
+
+def test_bimanual_composite_endpoint_selects_each_hand_independently() -> None:
+    gt = jnp.arange(40, dtype=jnp.float32).reshape(1, 2, 20)
+    vla = -gt
+
+    target, effective = bimanual_composite_endpoint(
+        gt,
+        vla,
+        jnp.asarray([[1.0, 0.0]]),
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+    )
+
+    np.testing.assert_allclose(target[..., :10], gt[..., :10])
+    np.testing.assert_allclose(target[..., 10:], vla[..., 10:])
+    np.testing.assert_allclose(effective, [[1.0, 0.0]])
+
+
+def test_bimanual_composite_endpoint_rejects_nonfinite_gate() -> None:
+    actions = jnp.zeros((1, 2, 20), dtype=jnp.float32)
+
+    with pytest.raises(ValueError, match="finite"):
+        bimanual_composite_endpoint(
+            actions,
+            actions,
+            jnp.asarray([[jnp.nan, 0.0]]),
+            low_gate_threshold=0.3,
+            high_gate_threshold=0.7,
+        )
+
+
+def test_bimanual_loss_components_uses_one_composite_fm_call() -> None:
+    class ZeroVelocityModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def __call__(self, x_t, t, tactile_seq, *, state=None, state_keep_mask=None):
+            del t, tactile_seq, state, state_keep_mask
+            self.calls += 1
+            return jnp.zeros_like(x_t)
+
+    model = ZeroVelocityModel()
+    x_base = jnp.full((2, 2, 20), 2.0, dtype=jnp.float32)
+    gt = jnp.full_like(x_base, 6.0)
+    predicted = jnp.full_like(x_base, 4.0)
+    gate = jnp.asarray([[1.0, 0.0], [0.5, 0.5]], dtype=jnp.float32)
+    target, _ = bimanual_composite_endpoint(
+        gt,
+        predicted,
+        gate,
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+    )
+
+    components = bimanual_loss_components_per_sample(
+        model,
+        x_base,
+        gt,
+        predicted,
+        jnp.asarray([0.25, 0.75], dtype=jnp.float32),
+        jnp.zeros((2, 3, 4, 4), dtype=jnp.float32),
+        gate,
+        gate_lambda=5.0,
+        aux_decode_weight=7.0,
+        low_gate_safety_weight=11.0,
+        rank_weight=13.0,
+        repair_weight=17.0,
+    )
+
+    expected = jnp.mean(jnp.square(target - x_base), axis=(1, 2))
+    assert model.calls == 1
+    assert set(components) == {
+        "gt_fm",
+        "vla_fm",
+        "composite_fm",
+        "low_safety",
+        "decode",
+        "rank",
+        "repair",
+    }
+    np.testing.assert_allclose(components["composite_fm"], expected)
+    np.testing.assert_allclose(components["gt_fm"], jnp.zeros_like(expected))
+    np.testing.assert_allclose(components["vla_fm"], jnp.zeros_like(expected))
+    np.testing.assert_allclose(sum(components.values()), expected)
 
 
 def test_high_gate_worst_source_cvar_downweights_easy_source_prior() -> None:
@@ -558,6 +645,57 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
         self.assertTrue(bool(jnp.allclose(pred_step_loss, sum(pred_components.values()))))
         self.assertTrue(bool(jnp.isfinite(pred_step_loss)))
+
+    def test_train_step_bimanual_gated_consumes_per_hand_gates(self):
+        model = TactileConditionedFlowDecoder(
+            DecoderConfig(
+                action_dim=20,
+                action_horizon=2,
+                tactile_window=3,
+                gru_hidden_dim=8,
+                resnet_embedding_dim=4,
+                model_dim=8,
+                depth=1,
+                num_heads=2,
+            ),
+            rngs=nnx.Rngs(90),
+        )
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+        x_base = jax.random.normal(jax.random.key(91), (2, 2, 20))
+        gt = x_base + 1.0
+        predicted = x_base - 1.0
+        tactile = self._tactile_seq(jax.random.key(92), 2)
+        gate = jnp.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32)
+
+        loss, components = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            gate,
+            jax.random.key(93),
+            loss_mode="bimanual_gated",
+            aux_decode_weight=1.0,
+            low_gate_safety_weight=1.0,
+            rank_weight=1.0,
+            repair_weight=1.0,
+        )
+
+        self.assertEqual(
+            set(components),
+            {"gt_fm", "vla_fm", "composite_fm", "low_safety", "decode", "rank", "repair"},
+        )
+        self.assertTrue(bool(jnp.isfinite(loss)))
+        self.assertTrue(bool(jnp.allclose(loss, sum(components.values()))))
+        self.assertGreater(float(components["composite_fm"]), 0.0)
+        self.assertEqual(float(components["gt_fm"]), 0.0)
+        self.assertEqual(float(components["vla_fm"]), 0.0)
+        self.assertEqual(float(components["decode"]), 0.0)
+        self.assertEqual(float(components["low_safety"]), 0.0)
+        self.assertEqual(float(components["rank"]), 0.0)
+        self.assertEqual(float(components["repair"]), 0.0)
 
     def test_gate_stratified_decode_metrics(self):
         out = gate_stratified_decode_metrics(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import math
 from functools import partial
-from typing import Literal
+from typing import Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -14,6 +14,11 @@ from flax import nnx
 from flax.core import FrozenDict
 
 from train_encoder.utils.resnet import encode_resnet18, init_resnet18_params
+from train_smolvla_frs.utils.bimanual_schema import (
+    BIMANUAL_ACTION_DIM,
+    LEFT_ACTION_SLICE,
+    RIGHT_ACTION_SLICE,
+)
 from train_smolvla_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
@@ -22,6 +27,15 @@ HighGateRankAggregation = Literal["balanced_mean", "worst_source_cvar"]
 LOSS_COMPONENT_NAMES = (
     "gt_fm",
     "vla_fm",
+    "low_safety",
+    "decode",
+    "rank",
+    "repair",
+)
+TRAIN_LOSS_COMPONENT_NAMES = (
+    "gt_fm",
+    "vla_fm",
+    "composite_fm",
     "low_safety",
     "decode",
     "rank",
@@ -560,6 +574,45 @@ def three_region_effective_gate_weights(
     )
 
 
+def bimanual_composite_endpoint(
+    gt_action: Array,
+    predicted_action: Array,
+    gate_weights: Array,
+    *,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> tuple[Array, Array]:
+    """Select GT or VLA independently for the fixed left and right action blocks."""
+
+    if (
+        gt_action.ndim != 3
+        or gt_action.shape != predicted_action.shape
+        or gt_action.shape[-1] != BIMANUAL_ACTION_DIM
+    ):
+        raise ValueError("bimanual composite endpoint requires matching 20D actions")
+    expected_gate_shape = (gt_action.shape[0], 2)
+    if gate_weights.shape != expected_gate_shape:
+        raise ValueError(
+            f"bimanual gate_weights must have shape {expected_gate_shape}, got {gate_weights.shape}"
+        )
+    if not isinstance(gate_weights, jax.core.Tracer) and not bool(jnp.all(jnp.isfinite(gate_weights))):
+        raise ValueError("bimanual gate_weights must be finite")
+
+    effective = three_region_effective_gate_weights(
+        gate_weights,
+        low_gate_threshold=low_gate_threshold,
+        high_gate_threshold=high_gate_threshold,
+    )
+    per_dim = jnp.concatenate(
+        [
+            jnp.repeat(effective[:, :1], LEFT_ACTION_SLICE.stop - LEFT_ACTION_SLICE.start, axis=1),
+            jnp.repeat(effective[:, 1:], RIGHT_ACTION_SLICE.stop - RIGHT_ACTION_SLICE.start, axis=1),
+        ],
+        axis=1,
+    )[:, None, :]
+    return per_dim * gt_action + (1.0 - per_dim) * predicted_action, effective
+
+
 def _active_group_normalized_per_sample(penalty: Array, strength: Array) -> tuple[Array, Array]:
     """Return a vector whose batch mean is the active group's weighted mean."""
 
@@ -1015,6 +1068,46 @@ def gated_loss_components_per_sample(
     }
 
 
+def bimanual_loss_components_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    t: Array,
+    tactile_seq: Array,
+    gate_weights: Array,
+    **loss_options: object,
+) -> dict[str, Array]:
+    """Return the one-FM bimanual composite objective and zeroed auxiliary terms."""
+
+    target, _ = bimanual_composite_endpoint(
+        gt_action,
+        predicted_action,
+        gate_weights,
+        low_gate_threshold=float(loss_options.get("rank_low_gate_threshold", 0.3)),
+        high_gate_threshold=float(loss_options.get("rank_high_gate_threshold", 0.7)),
+    )
+    flow = flow_matching_loss_per_sample(
+        model,
+        x_base,
+        target,
+        t,
+        tactile_seq,
+        state=cast(Array | None, loss_options.get("state")),
+        state_keep_mask=cast(Array | None, loss_options.get("state_keep_mask")),
+    )
+    zeros = jnp.zeros_like(flow)
+    return {
+        "gt_fm": zeros,
+        "vla_fm": zeros,
+        "composite_fm": flow,
+        "low_safety": zeros,
+        "decode": zeros,
+        "rank": zeros,
+        "repair": zeros,
+    }
+
+
 def gated_flow_matching_loss_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -1194,6 +1287,7 @@ def train_step(
             components = {
                 "gt_fm": reduce_component(flow),
                 "vla_fm": jnp.asarray(0.0, dtype=flow.dtype),
+                "composite_fm": jnp.asarray(0.0, dtype=flow.dtype),
                 "low_safety": jnp.asarray(0.0, dtype=flow.dtype),
                 "decode": reduce_component(decode),
                 "rank": jnp.asarray(0.0, dtype=flow.dtype),
@@ -1212,6 +1306,7 @@ def train_step(
             components = {
                 "gt_fm": jnp.asarray(0.0, dtype=flow.dtype),
                 "vla_fm": reduce_component(flow),
+                "composite_fm": jnp.asarray(0.0, dtype=flow.dtype),
                 "low_safety": jnp.asarray(0.0, dtype=flow.dtype),
                 "decode": jnp.asarray(0.0, dtype=flow.dtype),
                 "rank": jnp.asarray(0.0, dtype=flow.dtype),
@@ -1254,8 +1349,45 @@ def train_step(
             components = {
                 name: reduce_component(per_sample[name]) for name in LOSS_COMPONENT_NAMES
             }
+            components["composite_fm"] = jnp.asarray(0.0, dtype=per_sample["gt_fm"].dtype)
+        elif loss_mode == "bimanual_gated":
+            per_sample = bimanual_loss_components_per_sample(
+                candidate,
+                x_base,
+                gt_action,
+                predicted_action,
+                t,
+                tactile_embeddings,
+                gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
+                gate_lambda=gate_lambda,
+                aux_decode_weight=aux_decode_weight,
+                aux_decode_steps=aux_decode_steps,
+                aux_decode_solver=aux_decode_solver,
+                low_gate_safety_weight=low_gate_safety_weight,
+                low_gate_safety_margin=low_gate_safety_margin,
+                rank_weight=rank_weight,
+                rank_margin=rank_margin,
+                repair_weight=repair_weight,
+                repair_margin=repair_margin,
+                rank_low_gate_threshold=rank_low_gate_threshold,
+                rank_high_gate_threshold=rank_high_gate_threshold,
+                source_indices=source_indices,
+                source_rank_weights=source_rank_weights,
+                num_sources=num_sources,
+                high_gate_rank_aggregation=high_gate_rank_aggregation,
+                high_gate_rank_hard_fraction=high_gate_rank_hard_fraction,
+                high_gate_rank_worst_beta=high_gate_rank_worst_beta,
+            )
+            components = {
+                name: reduce_component(per_sample[name]) for name in TRAIN_LOSS_COMPONENT_NAMES
+            }
         else:
-            raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
+            raise ValueError(
+                "loss_mode must be 'gt', 'predicted', 'gated', or 'bimanual_gated', "
+                f"got {loss_mode!r}."
+            )
         total = sum(components.values())
         return total, components
 
