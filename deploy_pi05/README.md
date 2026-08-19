@@ -2,7 +2,8 @@
 
 `/home/typhon/FRS_Tact/deploy_pi05` 是一个自包含的 Pi0.5 部署目录：它同时
 提供纯视觉和 Pi0.5 + FRS 两种客户端，但它们使用不同的配置和一键启动脚本。
-其中私有的 Pi0.5 JAX、FRS 与触觉依赖都位于本目录；不要使用
+其中只保留部署客户端、Pi0.5 JAX 推理代码和 FRS/触觉最小推理运行时；不包含
+FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使用
 `/home/typhon/FRS_Tact` 根目录为 SmolVLA 准备的 Python 环境。
 
 本迁移**不修改** `vb3_robot_server`，也不会复制 checkpoint、token、tokenizer
@@ -29,11 +30,8 @@ cd /home/typhon/FRS_Tact/deploy_pi05 && uv sync --frozen
 ```
 
 这会创建/更新 `deploy_pi05/.venv`，并依据本目录的 `pyproject.toml` 和
-`uv.lock` 安装 Pi0.5 所需的固定 JAX 依赖，同时以 editable 方式安装本目录私有的
-`src/lerobot`、`utils`、`train_pi05_frs` 和 `tactile_encoder`。不要在
-`FRS_Tact` 根目录运行该命令或将这些依赖合并到根目录的 `.venv`。用于完整训练机
-初始化时，也可以在本目录运行
-`bash scripts/setup_env.sh`；该脚本可能安装系统依赖并检查 GPU，不是部署 dry-run。
+`uv.lock` 安装 Pi0.5 所需的固定 JAX 依赖，同时安装本目录私有的最小推理包。
+不要在 `FRS_Tact` 根目录运行该命令或将这些依赖合并到根目录的 `.venv`。
 
 ## 启动顺序
 
@@ -90,11 +88,8 @@ bash deploy_pi05/scripts/start_pi05_frs.sh --max-iterations 2
 - `vb3_robot_server` 的 token 与已启动服务。
 
 当前示例路径可在两个 `configs/deploy_pi05*.yaml` 中查看并按实际部署环境改写。
-训练与 cache 准备工具所引用的默认配置也随目录迁移：
-`configs/train_pi05_frs.yaml` 与 `configs/train_tactile_encoder.yaml`。
-其中 FRS 的三阶段训练链路（tactile embedding、action cache、FRS training）可用
-`bash scripts/start_frs_pi05_train.sh configs/train_pi05_frs.yaml` 从本目录启动；它会
-检查实际数据集、encoder、checkpoint 与 GPU，不能当作部署客户端或 dry-run 使用。
+本目录不提供训练、cache 准备、encoder 训练或模态分析入口；这些工作应使用
+`FRS_Tact` 根目录对应的独立工程与工作流。
 
 ## 协议与 dry-run 边界
 

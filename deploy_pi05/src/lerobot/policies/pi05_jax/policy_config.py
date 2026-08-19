@@ -85,8 +85,8 @@ def load_pi0(
             understands (e.g. `gs://openpi-assets/checkpoints/pi05_base`). Must contain a
             `params/` orbax checkpoint directory (i.e. pass the checkpoint root, not
             `.../params` itself -- this appends "params" the same way upstream's
-            `create_trained_policy` does). A checkpoint written by `tools/train_pi05_jax.py`
-            works too: pass `<checkpoint_base_dir>/<config>/<exp>/<step>`.
+            `create_trained_policy` does). OpenPI-compatible native JAX fine-tune checkpoints
+            use the same layout.
         config: model architecture config. Defaults to `Pi0Config(pi05=True)`, matching the
             official `pi05_base` checkpoint. **Loading your own fine-tune requires passing the
             same config it was trained with** -- in particular the LoRA variants, or the LoRA
@@ -114,7 +114,7 @@ def load_norm_stats(assets_dir: str | pathlib.Path, asset_id: str) -> dict[str, 
     `assets_dir` may be a local path or a URL `download.maybe_download` understands (e.g.
     `gs://openpi-assets/checkpoints/pi05_base/assets`, to reuse an official checkpoint's stats).
     The join happens on plain strings, not `pathlib.Path`: `Path("gs://x") / "y"` collapses the
-    `//` and corrupts the URL -- the same trap `prepare_pi05.py:_is_local_path` documents.
+    `//` and corrupts the URL.
     """
     joined = f"{str(assets_dir).rstrip('/')}/{asset_id}"
     return _normalize.load(download.maybe_download(joined))
@@ -122,7 +122,7 @@ def load_norm_stats(assets_dir: str | pathlib.Path, asset_id: str) -> dict[str, 
 
 @dataclasses.dataclass(frozen=True)
 class Pi05CheckpointInfo:
-    """Where the official checkpoints live, for reference (see pi05_frs_plan.md)."""
+    """Official Pi0.5 checkpoint locations."""
 
     base: str = "gs://openpi-assets/checkpoints/pi05_base"
     droid: str = "gs://openpi-assets/checkpoints/pi05_droid"

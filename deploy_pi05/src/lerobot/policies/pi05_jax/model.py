@@ -293,7 +293,7 @@ def restore_params(
 ) -> at.Params:
     """Restores unstructured params PyTree from a checkpoint.
 
-    This works with checkpoints saved with `save_state` during openpi training (see `training/checkpoints.py`) as
+    This works with checkpoints saved with OpenPI's `save_state` as
     well as pre-trained checkpoints released for openpi.
 
     Args:

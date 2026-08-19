@@ -16,15 +16,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tactile_encoder.utils.checkpoint import load_tactile_encoder
-from tactile_encoder.utils.image_dataset import parse_image_to_unit
-from tactile_encoder.utils.model import tactile_clip_config_from_dict
-from tactile_encoder.utils.resnet import encode_resnet18
-from train_pi05_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
-from train_pi05_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
-from train_pi05_frs.utils.model import DECODER_INPUT_VERSION, decode_actions
-
 from .frs_config import validate_frs_config_section
+from .frs_inference.decoder import DECODER_INPUT_VERSION, decode_actions
+from .frs_inference.decoder_checkpoint import load_checkpoint as load_frs_checkpoint
+from .frs_inference.encoder_checkpoint import load_tactile_encoder
+from .frs_inference.encoder_config import tactile_clip_config_from_dict
+from .frs_inference.preprocess import parse_image_to_unit
+from .frs_inference.resnet import encode_resnet18
+from .frs_inference.tactile import resolve_tactile_window, tactile_change_from_tokens
 from .policy import Pi05RemotePolicy
 
 

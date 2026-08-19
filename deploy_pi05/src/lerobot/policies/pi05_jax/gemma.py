@@ -40,7 +40,7 @@ import jax.numpy as jnp
 
 from . import array_typing as at
 from . import lora
-from .training import sharding
+from . import sharding
 
 PALIGEMMA_VOCAB_SIZE = 257_152
 

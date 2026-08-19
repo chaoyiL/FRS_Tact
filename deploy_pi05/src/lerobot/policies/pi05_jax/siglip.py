@@ -23,7 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .training import sharding
+from . import sharding
 
 
 def posemb_sincos_2d(h, w, width, temperature=10_000.0, dtype=jnp.float32):

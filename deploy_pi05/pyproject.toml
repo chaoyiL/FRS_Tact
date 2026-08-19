@@ -1,112 +1,28 @@
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
-[project.urls]
-homepage = "https://huggingface.co/lerobot"
-documentation = "https://huggingface.co/docs/lerobot/index"
-source = "https://github.com/huggingface/lerobot"
-issues = "https://github.com/huggingface/lerobot/issues"
-discord = "https://discord.gg/s3KuuzsPFb"
-
 [project]
 name = "lerobot"
 version = "0.6.1"
-description = "pi0.5 (openpi/JAX) LeRobot subset with tactile flow-steering training"
+description = "Self-contained Pi0.5 visual and tactile-FRS deployment runtime"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
-authors = [
-    { name = "Rémi Cadène", email = "re.cadene@gmail.com" },
-    { name = "Simon Alibert", email = "alibert.sim@gmail.com" },
-    { name = "Alexander Soare", email = "alexander.soare159@gmail.com" },
-    { name = "Quentin Gallouédec", email = "quentin.gallouedec@ec-lyon.fr" },
-    { name = "Steven Palma", email = "imstevenpmwork@ieee.org" },
-    { name = "Pepijn Kooijmans", email = "pepijnkooijmans@outlook.com"},
-    { name = "Michel Aractingi", email = "michel.aractingi@gmail.com"},
-    { name = "Adil Zouitine", email = "adilzouitinegm@gmail.com" },
-    { name = "Dana Aubakirova", email = "danaaubakirova17@gmail.com"},
-    { name = "Caroline Pascal", email = "caroline8.pascal@gmail.com"},
-    { name = "Martino Russi", email = "nopyeps@gmail.com"},
-    { name = "Thomas Wolf", email = "thomaswolfcontact@gmail.com" },
-]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Education",
-    "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Topic :: Software Development :: Build Tools",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
-keywords = ["lerobot", "huggingface", "robotics",  "machine learning", "artificial intelligence"]
-
 dependencies = [
-    # Core ML (torch is retained only as the LeRobot dataset / DataLoader backend)
     "torch>=2.7,<2.12.0",
-    "torchvision>=0.22.0,<0.27.0",
-    "numpy>=2.0.0,<2.3.0", # NOTE: Explicitly listing numpy helps the resolver converge faster. Upper bound imposed by opencv-python-headless.
+    "numpy>=2.0.0,<2.3.0",
     "opencv-python-headless>=4.9.0,<4.14.0",
-    "Pillow>=10.0.0,<13.0.0",
     "einops>=0.8.0,<0.9.0",
-    # Config & Hub
-    "draccus==0.10.0", # TODO: Relax version constraint
-    "huggingface-hub>=0.34.0,<1.0.0",
-    "requests>=2.32.0,<3.0.0",
     "PyYAML>=6.0.0,<7.0.0",
     "msgpack>=1.0.0,<2.0.0",
     "websockets>=13.0,<16.0",
-    # Serialization & checkpointing
-    "safetensors>=0.4.3,<1.0.0",
-    # Lightweight utilities
-    "packaging>=24.2,<26.0",
-    "termcolor>=2.4.0,<4.0.0",
-    "tqdm>=4.66.0,<5.0.0",
-    # Build tools (required by opencv-python-headless on some platforms)
-    "cmake>=3.29.0.1,<4.2.0",
     "setuptools>=71.0.0,<81.0.0",
-    # Dataset (former extras: dataset / infer / av-dep)
-    "datasets>=4.7.0,<5.0.0",
-    "pandas>=2.0.0,<3.0.0",
-    "pyarrow>=21.0.0,<30.0.0",
-    "av>=15.0.0,<16.0.0",
-    "jsonlines>=4.0.0,<5.0.0",
-    # NOTE: torchcodec wheel availability matrix (PyPI):
-    #   - linux x86_64/amd64 + macOS arm64 : wheels since 0.3.0
-    #   - win32 x86_64                     : wheels since 0.7.0 (needs torch>=2.8)
-    #   - linux aarch64/arm64              : wheels since 0.11.0 (needs torch>=2.11)
-    "torchcodec>=0.3.0,<0.12.0; (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'AMD64')) or (sys_platform == 'darwin' and platform_machine == 'arm64')",
-    "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
-    "torchcodec>=0.11.0,<0.12.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')",
-    # Pinned to match pi0.5 (openpi) exactly, not a range: this branch's FRS base model is pi0.5
-    # (vendored under src/lerobot/policies/pi05_jax/, see its README.md), and openpi pins these
-    # tightly (openpi commit 15a9616, main, 2026-06-16). Verified on the training server:
-    # `uv sync --frozen` resolves and installs this set with NumPy 2.2.6.
     "transformers==4.53.2",
     "jax[cuda12-local]==0.5.3",
-    # Provides ptxas/nvlink for XLA GPU JIT (jax[cuda12-local] does not pull these)
     "nvidia-cuda-nvcc-cu12>=12.8,<13; sys_platform == 'linux'",
     "flax==0.10.2",
-    "optax>=0.2.5,<0.3.0",
     "orbax-checkpoint==0.11.13",
     "ml-dtypes==0.4.1",
-    # pi0.5 model deps (src/lerobot/policies/pi05_jax/): image aug, runtime array typing, and the
-    # PaliGemma tokenizer + checkpoint download helper it vendors from openpi.
     "augmax>=0.3.4",
     "beartype==0.19.0",
     "jaxtyping==0.2.36",
@@ -115,28 +31,11 @@ dependencies = [
     "fsspec[gcs]>=2024.6.0",
     "tqdm-loggable>=0.2",
     "chex==0.1.90",
-    # pi0.5 training-stack deps, matching openpi's own pyproject: `numpydantic`/`pydantic` back
-    # `shared/normalize.py`'s NormStats (de)serialization, `etils[epath]` is the path abstraction
-    # `training/checkpoints.py` and `training/config.py` use, and `tyro` is the CLI that turns a
-    # registered `TrainConfig` into command-line flags (`tools/train_pi05_jax.py`).
     "numpydantic>=1.6.6",
     "pydantic>=2.0.0",
-    "etils[epath]>=1.11.0",
-    "tyro>=0.9.5",
-    # Plots / eval / tests
-    "matplotlib>=3.10.3,<4.0.0",
-    "pytest>=8.0.0,<10.0.0",
-    "wandb>=0.28.1",
+    "typing-extensions>=4.12.0",
 ]
 
-
-
-# ---------------- Tool Configurations ----------------
-
-# cu128 wheels keep broad hardware reach; the driver floor is 570.86.
-# To use a different CUDA variant, reinstall torch with an explicit index, e.g.:
-#   uv pip install --force-reinstall torch torchvision \
-#       --index-url https://download.pytorch.org/whl/cu130
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
@@ -144,203 +43,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["lerobot*", "tactile_encoder*", "train_pi05_frs*", "utils*", "deploy_pi05*"]
-
-[tool.setuptools.package-data]
-deploy_pi05 = ["configs/*.yaml"]
-
-[tool.ruff]
-target-version = "py312"
-line-length = 110
-exclude = ["tests/artifacts/**/*.safetensors", "*_pb2.py", "*_pb2_grpc.py"]
-
-[tool.ruff.lint]
-# E, W: pycodestyle errors and warnings
-# F: PyFlakes
-# I: isort
-# UP: pyupgrade
-# B: flake8-bugbear (good practices, potential bugs)
-# C4: flake8-comprehensions (more concise comprehensions)
-# A: flake8-builtins (shadowing builtins)
-# SIM: flake8-simplify
-# RUF: Ruff-specific rules
-# D: pydocstyle (for docstring style/formatting)
-# S: flake8-bandit (some security checks, complements Bandit)
-# T20: flake8-print (discourage print statements in production code)
-# N: pep8-naming
-# TODO: Uncomment rules when ready to use
-select = [
-    "E", "W", "F", "I", "B", "C4", "T20", "N", "UP", "SIM" #, "A", "S", "D", "RUF"
-]
-ignore = [
-    "E501", # Line too long
-    "T201", # Print statement found
-    "T203", # Pprint statement found
-    "B008", # Perform function call in argument defaults
-]
-
-[tool.ruff.lint.per-file-ignores]
-"__init__.py" = ["F401", "F403", "E402"]
-# `src/lerobot/policies/pi05_jax/` is openpi's JAX source copied in verbatim (see its README.md
-# for the file-by-file mapping). Reformatting it would destroy the byte-for-byte correspondence
-# with upstream that makes re-syncing cheap, so the rules that only disagree with openpi's own
-# ruff config are disabled there. F722 is openpi's own ignore, for the same reason it gives:
-# "Conflicts with array typing" -- jaxtyping shape strings like `Float[Array, "b s"]` are not
-# valid Python annotations. Everything else (F401 unused imports, F821 undefined names, B, SIM,
-# ...) still applies.
-"src/lerobot/policies/pi05_jax/**" = ["F722", "I001", "UP035", "UP040", "UP046", "UP047"]
-
-[tool.ruff.lint.isort]
-combine-as-imports = true
-known-first-party = ["lerobot"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = false
-line-ending = "auto"
-docstring-code-format = true
-
-[tool.bandit]
-exclude_dirs = [
-    "tests",
-    "benchmarks",
-    "src/lerobot/datasets/push_dataset_to_hub",
-]
-skips = ["B101", "B311", "B404", "B603", "B615"]
-
-[tool.typos]
-default.extend-ignore-re = [
-    "(?Rm)^.*(#|//)\\s*spellchecker:disable-line$",                      # spellchecker:disable-line
-    "(?s)(#|//)\\s*spellchecker:off.*?\\n\\s*(#|//)\\s*spellchecker:on", # spellchecker:<on|off>
-]
-default.extend-ignore-identifiers-re = [
-    # Add individual words here to ignore them
-    "2nd",
-    "pn",
-    "ser",
-    "ein",
-    "thw",
-    "inpt",
-    "arange",
-    "is_compileable",
-    "ROBOTIS",
-    "OT_VALUE",
-    "VanderBilt",
-    "seperated_timestep",
-]
-
-# TODO: Uncomment when ready to use
-# [tool.interrogate]
-# ignore-init-module = true
-# ignore-init-method = true
-# ignore-nested-functions = false
-# ignore-magic = false
-# ignore-semiprivate = false
-# ignore-private = false
-# ignore-property-decorators = false
-# ignore-module = false
-# ignore-setters = false
-# fail-under = 80
-# output-format = "term-missing"
-# color = true
-# paths = ["src/lerobot"]
-
-[tool.pytest.ini_options]
-pythonpath = ["."]
-
-# TODO: Enable mypy gradually module by module across multiple PRs
-# Uncomment [tool.mypy] first, then uncomment individual module overrides as they get proper type annotations
-
-[tool.mypy]
-python_version = "3.12"
-ignore_missing_imports = true
-follow_imports = "skip"
-# warn_return_any = true
-# warn_unused_configs = true
-# strict = true
-# disallow_untyped_defs = true
-# disallow_incomplete_defs = true
-# check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = "lerobot.*"
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = "lerobot.envs.*"
-ignore_errors = false
-
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.utils.*"
-# ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = "lerobot.configs.*"
-ignore_errors = false
-
-# extra strictness for configs
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-
-[[tool.mypy.overrides]]
-module = "lerobot.optim.*"
-ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = "lerobot.model.*"
-ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.processor.*"
-# ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.datasets.*"
-# ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = "lerobot.cameras.*"
-ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = "lerobot.motors.*"
-ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.robots.*"
-# ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.teleoperators.*"
-# ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.policies.*"
-# ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.rl.*"
-# ignore_errors = false
-
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.async_inference.*"
-# ignore_errors = false
-
-[[tool.mypy.overrides]]
-module = "lerobot.transport.*"
-ignore_errors = false
-
-# [[tool.mypy.overrides]]
-# module = "lerobot.scripts.*"
-# ignore_errors = false
+include = ["lerobot*", "utils*"]

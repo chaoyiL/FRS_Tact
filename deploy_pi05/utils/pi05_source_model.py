@@ -2,13 +2,11 @@
 sample forward (t:1->0, like `Pi0.sample_actions`) and reverse-integrate (t:0->1, for FRS's
 action_cache) through the same flow-matching velocity field.
 
-Kept separate from utils/source_model.py (SmolVLA) rather than branching that file, because
-importing it would pull in `modalities_eval.utils`/`lerobot.policies.smolvla_jax` -- exactly the
-coupling pi0.5's own code avoids (see src/lerobot/policies/pi05_jax/README.md). The two share
-only the base-model-agnostic pieces: `utils/integration.py`'s reverse ODE solvers and
-`utils/flow_matching.py`'s deterministic_noise/inversion_mse.
+Kept separate from the repository's SmolVLA source-model adapter so this deployment runtime
+does not import the SmolVLA model stack. It only shares the base-model-agnostic reverse ODE
+solvers in `utils/integration.py`.
 
-UNTESTED, like the rest of pi05_jax (see its README.md): the caching/jit pattern below follows
+The caching/jit pattern below follows
 `lerobot.policies.pi05_jax.nnx_utils.module_jit`'s documented technique (split state outside jit,
 merge inside), but has not been run.
 """
@@ -41,12 +39,9 @@ _REVERSE_CACHE: dict[tuple, Any] = {}
 def _cache_key(model: Pi0, *extra: Any) -> tuple:
     """Cache key for the jitted wrappers below.
 
-    `id(model)` alone would NOT be safe. `tools/prepare_frs_pi05_cache.py` calls
-    `prepare_pi05.prepare_cache()` once per dataset, and each call builds its own `Pi0` and drops
-    it on return -- so CPython can hand the next model the freed one's address, making `id()`
-    collide across distinct models. (`utils/source_model.py` gets away with a bare `id()` because
-    its jitted functions take `params` as a runtime argument, so a collision only reuses a
-    compiled trace, never stale weights.)
+    `id(model)` alone would NOT be safe across multiple sequentially created `Pi0` instances:
+    CPython can hand a new model a freed object's address, making `id()` collide across distinct
+    models.
 
     Two things together make collisions harmless here:
       * the architecture fields below, so two *differently shaped* models can't share an entry;
