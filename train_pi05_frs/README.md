@@ -84,11 +84,14 @@ export PYTHONPATH="$PWD/src:$(dirname "$PWD")${PYTHONPATH:+:$PYTHONPATH}"
 
 Evaluate one configured dataset/cache against a saved decoder checkpoint:
 
+Evaluation resolves images from the dataset repository ID recorded in the action-cache manifest
+(or the explicit `--dataset-repo-id` override) through the inherited dataset loader. The current
+loader does not accept a local dataset-root override.
+
 ```bash
 .venv/bin/python -m train_pi05_frs.evaluate \
   --cache-dir /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3/KaiyueChen/pick_tube_05 \
   --dataset-repo-id KaiyueChen/pick_tube_05 \
-  --dataset-root /workspace/lerobot_v30/KaiyueChen/pick_tube_05 \
   --tactile-encoder-dir /workspace/checkpoints/encoder_ckpt_0809 \
   --checkpoint-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/best \
   --output-dir /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/evaluation

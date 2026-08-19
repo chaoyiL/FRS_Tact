@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from typing import Any
@@ -263,6 +264,56 @@ def test_schema_rejects_wrong_mapping_and_list_types(
         validate_config(config, check_paths=False)
 
 
+@pytest.mark.parametrize("key", ["episodes", "weight"])
+def test_schema_rejects_dataset_controls_that_pipeline_would_ignore(
+    tmp_path: Path, key: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    config["datasets"][0][key] = [0] if key == "episodes" else 2.0
+
+    with pytest.raises(
+        ValueError,
+        match=rf"config\.datasets\[0\]\.{key}.*not supported.*ignored",
+    ):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("section", "unknown_key", "qualified_key"),
+    [
+        (None, "epohcs", "config.epohcs"),
+        ("action_cache", "batch_szie", "config.action_cache.batch_szie"),
+        (
+            "tactile_embedding_cache",
+            "precompute_batch_szie",
+            "config.tactile_embedding_cache.precompute_batch_szie",
+        ),
+        ("model", "action_horizn", "config.model.action_horizn"),
+        ("norm_stats", "asset", "config.norm_stats.asset"),
+        ("frs_training", "epohcs", "config.frs_training.epohcs"),
+        ("datasets.0", "repo", "config.datasets[0].repo"),
+    ],
+)
+def test_schema_rejects_unknown_keys_with_qualified_diagnostic(
+    tmp_path: Path, section: str | None, unknown_key: str, qualified_key: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    if section is None:
+        target = config
+    elif section == "datasets.0":
+        target = config["datasets"][0]
+    else:
+        target = config[section]
+    target[unknown_key] = 1
+
+    with pytest.raises(ValueError, match=rf"{re.escape(qualified_key)}.*unknown"):
+        validate_config(config, check_paths=False)
+
+
 @pytest.mark.parametrize(
     ("section", "key", "bad_value"),
     [
@@ -321,7 +372,7 @@ def test_schema_rejects_url_output_paths(tmp_path: Path, section: str, key: str)
         ),
         (
             lambda cfg: cfg["datasets"][0].update(episodes="0,1"),
-            "episodes.*list",
+            "episodes.*not supported",
         ),
         (
             lambda cfg: cfg["datasets"][0].update(weight=float("nan")),
@@ -336,6 +387,45 @@ def test_schema_rejects_model_contract_drift(
 
     config = _valid_config(tmp_path)
     mutate(config)
+    with pytest.raises(ValueError, match=message):
+        validate_config(config, check_paths=False)
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda cfg: cfg["model"].update(action_horizon=51),
+            "action_horizon.*tactile_window_divisor",
+        ),
+        (
+            lambda cfg: cfg["frs_training"].update(model_dim=255),
+            "model_dim.*num_heads",
+        ),
+        (
+            lambda cfg: cfg["model"].update(
+                tactile_keys=cfg["model"]["tactile_keys"][:3],
+                tactile_num_tokens=3,
+            ),
+            "tactile_keys.*exactly 4",
+        ),
+        (
+            lambda cfg: cfg["model"].update(
+                tactile_keys=cfg["model"]["tactile_keys"] + ["observation.images.extra"],
+                tactile_num_tokens=5,
+            ),
+            "tactile_num_tokens.*exactly 4",
+        ),
+    ],
+)
+def test_schema_rejects_early_shape_invariant_mismatches(
+    tmp_path: Path, mutate: Any, message: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    mutate(config)
+
     with pytest.raises(ValueError, match=message):
         validate_config(config, check_paths=False)
 
@@ -383,6 +473,28 @@ def test_path_preflight_validates_encoder_and_local_norm_stats_files(tmp_path: P
     )
     stats_file.unlink()
     with pytest.raises(FileNotFoundError, match="norm stats"):
+        validate_config(config, check_paths=True)
+
+
+@pytest.mark.parametrize(
+    ("metadata_key", "bad_value", "message"),
+    [
+        ("embedding_dim", 256, "embedding_dim.*tactile_embedding_dim"),
+        ("tactile_image_size", 112, "tactile_image_size"),
+    ],
+)
+def test_path_preflight_rejects_encoder_config_mismatch(
+    tmp_path: Path, metadata_key: str, bad_value: int, message: str
+) -> None:
+    from train_pi05_frs.tools.train_frs import validate_config
+
+    config = _valid_config(tmp_path)
+    metadata_path = Path(config["model"]["tactile_encoder_path"]) / "checkpoint.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["tactile_clip_config"][metadata_key] = bad_value
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
         validate_config(config, check_paths=True)
 
 
@@ -769,3 +881,5 @@ def test_readme_documents_training_boundary_and_operational_handoff() -> None:
     ):
         assert phrase in readme
     assert "/home/typhon/FRS_Tact-pi05-frs-jax" not in readme
+    assert "--dataset-root" not in readme
+    assert "dataset repository ID recorded in the action-cache manifest" in readme

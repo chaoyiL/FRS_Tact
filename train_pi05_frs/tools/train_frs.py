@@ -22,6 +22,103 @@ TRAIN_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = TRAIN_ROOT.parent
 DEFAULT_CONFIG = TRAIN_ROOT / "configs" / "train_pi05_frs.yaml"
 
+ROOT_KEYS = {
+    "checkpoint",
+    "allow_download",
+    "datasets",
+    "action_cache",
+    "tactile_embedding_cache",
+    "model",
+    "norm_stats",
+    "frs_training",
+}
+DATASET_KEYS = {"repo_id", "root", "revision", "action_key", "rename_map"}
+ACTION_CACHE_KEYS = {
+    "root",
+    "model_sample_steps",
+    "reverse_steps",
+    "reverse_solver",
+    "batch_size",
+    "load_workers",
+    "flush_every",
+    "inference_seed",
+    "split_seed",
+    "val_fraction",
+    "frame_stride",
+    "drop_tail_action_chunks",
+    "max_episodes",
+    "max_samples",
+}
+TACTILE_CACHE_KEYS = {
+    "enabled",
+    "root",
+    "dtype",
+    "precompute_batch_size",
+    "precompute_num_workers",
+    "precompute_prefetch_factor",
+    "precompute_video_backend",
+    "precompute_flush_every",
+}
+MODEL_KEYS = {
+    "use_tactile_encoder",
+    "tactile_encoder_path",
+    "freeze_tactile_encoder",
+    "tactile_keys",
+    "tactile_embedding_dim",
+    "tactile_num_tokens",
+    "tactile_image_size",
+    "state_conditioning",
+    "state_dropout_rate",
+    "camera_map",
+    "action_dim",
+    "action_horizon",
+    "paligemma_variant",
+    "action_expert_variant",
+}
+NORM_STATS_KEYS = {"dir", "asset_id", "use_quantile_norm"}
+TRAINING_KEYS = {
+    "output",
+    "tactile_window_divisor",
+    "history_stride",
+    "loss_mode",
+    "gate_tau",
+    "gate_temperature",
+    "gate_lambda",
+    "aux_decode_weight",
+    "aux_decode_steps",
+    "aux_decode_solver",
+    "low_gate_safety_weight",
+    "low_gate_safety_margin",
+    "rank_low_gate_threshold",
+    "rank_high_gate_threshold",
+    "rank_weight",
+    "rank_margin",
+    "repair_weight",
+    "repair_margin",
+    "best_max_low_gate_unsafe_frac",
+    "best_min_high_gate_gain",
+    "best_min_high_gate_rank_satisfied_frac",
+    "model_dim",
+    "depth",
+    "num_heads",
+    "mlp_ratio",
+    "learning_rate",
+    "weight_decay",
+    "grad_clip_norm",
+    "warmup_epochs",
+    "lr_reference_dim",
+    "min_lr_ratio",
+    "lr_schedule",
+    "batch_size",
+    "epochs",
+    "validation_steps",
+    "eval_every",
+    "seed",
+    "write_plots",
+    "resume",
+    "resume_from",
+}
+
 
 def load_config(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as file:
@@ -35,6 +132,14 @@ def _mapping(value: object, field: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"config.{field} must be a mapping")
     return value
+
+
+def _reject_unknown_keys(
+    value: Mapping[str, Any], allowed: set[str], *, prefix: str
+) -> None:
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise ValueError(f"{prefix}.{unknown[0]} is an unknown configuration key")
 
 
 def _nonempty_string(value: object, field: str) -> str:
@@ -126,7 +231,9 @@ def _json_mapping(path: Path, label: str) -> Mapping[str, Any]:
     return value
 
 
-def _validate_encoder_checkpoint(path: Path) -> None:
+def _validate_encoder_checkpoint(
+    path: Path, *, expected_embedding_dim: int, expected_image_size: int
+) -> None:
     metadata = _json_mapping(path / "checkpoint.json", "tactile encoder checkpoint metadata")
     params_name = _nonempty_string(
         metadata.get("params_file", "params.npz"), "model.tactile_encoder params_file"
@@ -139,8 +246,21 @@ def _validate_encoder_checkpoint(path: Path) -> None:
         raise ValueError("tactile encoder checkpoint parameter_paths must be a non-empty list")
     if not any(str(value).startswith("tactile_resnet/") for value in parameter_paths):
         raise ValueError("tactile encoder checkpoint is missing tactile_resnet parameters")
-    if not isinstance(metadata.get("tactile_clip_config"), Mapping):
+    clip_config = metadata.get("tactile_clip_config")
+    if not isinstance(clip_config, Mapping):
         raise ValueError("tactile encoder checkpoint is missing tactile_clip_config")
+    embedding_dim = clip_config.get("embedding_dim")
+    if type(embedding_dim) is not int or embedding_dim != expected_embedding_dim:
+        raise ValueError(
+            "tactile encoder embedding_dim does not match "
+            f"config.model.tactile_embedding_dim: {embedding_dim!r} != {expected_embedding_dim}"
+        )
+    image_size = clip_config.get("tactile_image_size")
+    if type(image_size) is not int or image_size != expected_image_size:
+        raise ValueError(
+            "tactile encoder tactile_image_size does not match "
+            f"config.model.tactile_image_size: {image_size!r} != {expected_image_size}"
+        )
 
 
 def _validate_norm_stats(path: Path, *, use_quantile_norm: bool) -> None:
@@ -179,6 +299,7 @@ def resolved_dataset_sources(
 def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[str, Any]:
     if not isinstance(config, Mapping):
         raise ValueError("config root must be a mapping")
+    _reject_unknown_keys(config, ROOT_KEYS, prefix="config")
 
     checkpoint = _nonempty_string(config.get("checkpoint"), "checkpoint")
     allow_download = _boolean(config, "allow_download", prefix="", default=True)
@@ -190,6 +311,13 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         if not isinstance(source_value, Mapping):
             raise ValueError(f"config.datasets[{index}] must be a mapping")
         source = source_value
+        for ignored_key in ("episodes", "weight"):
+            if ignored_key in source:
+                raise ValueError(
+                    f"config.datasets[{index}].{ignored_key} is not supported by the "
+                    "complete pipeline and would be ignored"
+                )
+        _reject_unknown_keys(source, DATASET_KEYS, prefix=f"config.datasets[{index}]")
         _nonempty_string(source.get("repo_id"), f"datasets[{index}].repo_id")
         _nonempty_string(source.get("root"), f"datasets[{index}].root")
         if source.get("revision") is not None:
@@ -197,22 +325,6 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         if source.get("action_key") is not None:
             _nonempty_string(source["action_key"], f"datasets[{index}].action_key")
         _string_mapping(source.get("rename_map", {}), f"datasets[{index}].rename_map", nonempty=False)
-        episodes = source.get("episodes")
-        if episodes is not None:
-            if not isinstance(episodes, list):
-                raise ValueError(f"config.datasets[{index}].episodes must be a list")
-            if any(type(episode) is not int or episode < 0 for episode in episodes):
-                raise ValueError(
-                    f"config.datasets[{index}].episodes must contain non-negative integers"
-                )
-        weight = source.get("weight", 1.0)
-        if (
-            isinstance(weight, bool)
-            or not isinstance(weight, (int, float))
-            or not math.isfinite(float(weight))
-            or weight <= 0
-        ):
-            raise ValueError(f"config.datasets[{index}].weight must be a positive number")
         datasets.append(source)
 
     action_cache = _mapping(config.get("action_cache"), "action_cache")
@@ -220,6 +332,14 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     model = _mapping(config.get("model"), "model")
     norm_stats = _mapping(config.get("norm_stats"), "norm_stats")
     training = _mapping(config.get("frs_training"), "frs_training")
+    for section, allowed, prefix in (
+        (action_cache, ACTION_CACHE_KEYS, "config.action_cache"),
+        (tactile_cache, TACTILE_CACHE_KEYS, "config.tactile_embedding_cache"),
+        (model, MODEL_KEYS, "config.model"),
+        (norm_stats, NORM_STATS_KEYS, "config.norm_stats"),
+        (training, TRAINING_KEYS, "config.frs_training"),
+    ):
+        _reject_unknown_keys(section, allowed, prefix=prefix)
 
     sanitized_cache_dirs = [
         source_cache_dir(str(action_cache.get("root", "")), str(source["repo_id"]))
@@ -309,17 +429,19 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
             "tactile_embedding_cache.precompute_video_backend",
         )
 
-    for key, default in (
+    model_integers = {
+        key: _integer(model, key, prefix="model.", default=default)
+        for key, default in (
         ("tactile_embedding_dim", 512),
         ("tactile_num_tokens", 4),
         ("tactile_image_size", 224),
         ("action_dim", 32),
         ("action_horizon", 50),
-    ):
-        _integer(model, key, prefix="model.", default=default)
-    if int(model.get("tactile_num_tokens", 4)) != len(tactile_keys):
+        )
+    }
+    if len(tactile_keys) != 4 or model_integers["tactile_num_tokens"] != 4:
         raise ValueError(
-            "config.model.tactile_num_tokens must equal the number of tactile_keys"
+            "config.model.tactile_keys and tactile_num_tokens must each be exactly 4"
         )
     state_dropout_rate = _number(
         model, "state_dropout_rate", prefix="model.", default=0.0
@@ -341,7 +463,9 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         if variant not in allowed_variants:
             raise ValueError(f"config.model.{key} is not a supported Gemma variant")
 
-    for key, default in (
+    training_integers = {
+        key: _integer(training, key, prefix="frs_training.", default=default)
+        for key, default in (
         ("tactile_window_divisor", 1),
         ("history_stride", 3),
         ("aux_decode_steps", 10),
@@ -353,11 +477,25 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         ("epochs", 300),
         ("validation_steps", 10),
         ("eval_every", 5),
-    ):
-        _integer(training, key, prefix="frs_training.", default=default)
+        )
+    }
     _integer(training, "warmup_epochs", prefix="frs_training.", default=5, minimum=0)
     _integer(training, "lr_reference_dim", prefix="frs_training.", default=256)
     _integer(training, "seed", prefix="frs_training.", default=42, minimum=0)
+    if (
+        model_integers["action_horizon"]
+        % training_integers["tactile_window_divisor"]
+        != 0
+    ):
+        raise ValueError(
+            "config.model.action_horizon must be divisible by "
+            "config.frs_training.tactile_window_divisor"
+        )
+    if training_integers["model_dim"] % training_integers["num_heads"] != 0:
+        raise ValueError(
+            "config.frs_training.model_dim must be divisible by "
+            "config.frs_training.num_heads"
+        )
     numeric_defaults = {
         "gate_tau": 0.5,
         "gate_temperature": 0.1,
@@ -450,7 +588,11 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     encoder = _local_path(model["tactile_encoder_path"], "model.tactile_encoder_path")
     if not encoder.is_dir():
         raise FileNotFoundError(f"tactile encoder does not exist: {encoder}")
-    _validate_encoder_checkpoint(encoder)
+    _validate_encoder_checkpoint(
+        encoder,
+        expected_embedding_dim=model_integers["tactile_embedding_dim"],
+        expected_image_size=model_integers["tactile_image_size"],
+    )
     for index, source in enumerate(datasets):
         dataset_root = _local_path(source["root"], f"datasets[{index}].root")
         if not dataset_root.is_dir():
