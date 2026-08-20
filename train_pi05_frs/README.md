@@ -48,7 +48,8 @@ bash train_pi05_frs/scripts/start_frs_pi05_train.sh \
 
 This configuration keeps the Pi0.5 model action width at 32 dimensions, but optimizes the first
 20 physical dimensions independently per wrist: left `0:10` and right `10:20`. The remaining 12D
-padded tail is retained for Pi0.5 compatibility and is excluded from bimanual loss and metrics.
+padded tail uses the frozen Pi0.5/VLA endpoint for 32D compatibility and is masked from bimanual
+loss and metrics.
 Per-wrist Gate values choose loss targets and auxiliary weighting only; Gate is not a decoder
 input. The existing `configs/train_pi05_frs.yaml` scalar configuration remains available for
 legacy `gt`, `predicted`, and `gated` training.
