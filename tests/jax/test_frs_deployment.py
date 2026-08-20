@@ -1559,6 +1559,7 @@ def test_legacy_server_config_omits_all_frs_protocol_fields() -> None:
         "no_state_obs_mode": False,
         "steps_per_inference": 5,
         "action_horizon": 10,
+        "observation_profile": "smolvla_vision_256",
     }
     assert "execution_protocol" not in config
     assert "steering_protection_interval_s" not in config

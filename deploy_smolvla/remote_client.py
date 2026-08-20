@@ -44,6 +44,7 @@ from .frs_runtime import (
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_smolvla_jax.yaml"
 SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
+SMOLVLA_OBSERVATION_PROFILE = "smolvla_vision_256"
 DIRECT_DECODER_BACKEND = "direct_tactile_decoder"
 Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
 LOGGER = logging.getLogger(__name__)
@@ -1098,8 +1099,9 @@ def _build_server_config(
     frs_policy: FRSRuntime | None,
     direct_steering: DirectDecoderSteeringRuntime | None = None,
 ) -> dict[str, Any]:
+    data_type = observation_config["data_type"]
     server_config = {
-        "data_type": observation_config["data_type"],
+        "data_type": data_type,
         "language_prompt": observation_config["language_prompt"],
         "control_frequency": float(control["control_frequency"]),
         "controller_frequency": float(control["controller_frequency"]),
@@ -1108,6 +1110,8 @@ def _build_server_config(
         "steps_per_inference": int(control["steps_per_inference"]),
         "action_horizon": int(control["action_horizon"]),
     }
+    if data_type == "vision":
+        server_config["observation_profile"] = SMOLVLA_OBSERVATION_PROFILE
     steering_policy = frs_policy if frs_policy is not None else direct_steering
     if steering_policy is not None:
         server_config.update(
