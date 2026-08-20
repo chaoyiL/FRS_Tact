@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
@@ -24,7 +24,9 @@ from .frs_inference.encoder_config import tactile_clip_config_from_dict
 from .frs_inference.preprocess import parse_image_to_unit
 from .frs_inference.resnet import encode_resnet18
 from .frs_inference.tactile import resolve_tactile_window, tactile_change_from_tokens
-from .policy import Pi05RemotePolicy
+
+if TYPE_CHECKING:
+    from .policy import Pi05RemotePolicy
 
 
 @dataclass(frozen=True)
@@ -229,6 +231,25 @@ def _require_equal(actual: Any, expected: Any, name: str) -> None:
         raise ValueError(f"FRS checkpoint mismatch for {name}: {actual!r} != {expected!r}")
 
 
+def _validate_loss_contract(extra: Mapping[str, Any], *, action_dim: int) -> None:
+    loss_mode = extra.get("loss_mode")
+    if loss_mode == "gated":
+        return
+    if loss_mode != "bimanual_gated":
+        raise ValueError(f"unsupported FRS loss_mode: {loss_mode!r}")
+    expected = {
+        "loss_objective_version": 2,
+        "loss_weighting_version": 7,
+        "action_dim": action_dim,
+        "steered_action_dim": 20,
+        "action_slices": {"left": [0, 10], "right": [10, 20]},
+        "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
+        "padded_tail_policy": "vla_endpoint_masked",
+    }
+    for field, value in expected.items():
+        _require_equal(extra.get(field), value, field)
+
+
 class TactileHistory:
     """Fixed-size, training-equivalent tactile history with clamped early frames."""
 
@@ -325,7 +346,7 @@ class FRSRuntime:
         extra = self.metadata.get("extra_metadata")
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
-        _require_equal(extra.get("loss_mode"), "gated", "loss_mode")
+        _validate_loss_contract(extra, action_dim=int(decoder.action_dim))
         _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
         _require_equal(str(extra.get("aux_decode_solver")), self.config.decode_solver, "decode_solver")
         _require_equal(int(extra.get("aux_decode_steps", 0)), self.config.decode_steps, "decode_steps")

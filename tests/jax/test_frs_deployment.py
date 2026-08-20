@@ -18,6 +18,7 @@ from deploy_smolvla.frs_runtime import (
     FRSSteerResult,
     TactileHistory,
 )
+from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
 
 ROOT = Path(__file__).resolve().parents[2]
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
@@ -2328,61 +2329,100 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
     return runtime, policy
 
 
+def _pi05_contract_runtime() -> object:
+    from deploy_pi05.frs_runtime import FRSRuntime as Pi05FRSRuntime
+
+    runtime = object.__new__(Pi05FRSRuntime)
+    runtime.config = SimpleNamespace(
+        tactile_keys=("left", "right", "left_1", "right_1"),
+        tactile_window_divisor=1,
+        history_stride=3,
+        decode_steps=10,
+        decode_solver="euler",
+        reverse_steps=20,
+        reverse_solver="slerpflow",
+        verify_source_checkpoint_fingerprint=False,
+    )
+    runtime.embedding_dim = 512
+    runtime.model = SimpleNamespace(
+        config=SimpleNamespace(
+            action_dim=32,
+            action_horizon=10,
+            num_tactile_tokens=4,
+            resnet_embedding_dim=512,
+            tactile_window=10,
+            decoder_input_version=2,
+            state_conditioning=False,
+        )
+    )
+    runtime.metadata = {
+        "extra_metadata": {
+            "loss_mode": "gated",
+            "history_stride": 3,
+            "aux_decode_steps": 10,
+            "aux_decode_solver": "euler",
+            "cache_configuration": {
+                "base_model": "pi0.5",
+                "model_sample_steps": 10,
+                "reverse_steps": 20,
+                "reverse_solver": "slerpflow",
+                "norm_stats_asset_id": "physical_bimanual",
+                "use_quantile_norm": True,
+            },
+        }
+    }
+    runtime.policy = SimpleNamespace(
+        config=SimpleNamespace(
+            action_dim=32,
+            action_horizon=10,
+            state_dim=20,
+            asset_id="physical_bimanual",
+            use_quantile_norm=True,
+        ),
+        checkpoint=Path("unused"),
+    )
+    return runtime
+
+
 @pytest.mark.parametrize(
     "objective_metadata",
     [
         {"loss_mode": "gated"},
-        {
-            "loss_mode": "bimanual_gated",
-            "loss_objective_version": 2,
-            "action_slices": {"left": [0, 10], "right": [10, 20]},
-            "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
-        },
+        bimanual_objective_metadata(action_dim=32),
     ],
     ids=("legacy-gated", "bimanual-gated"),
 )
 def test_frs_contract_accepts_matching_training_metadata(
     objective_metadata: dict[str, object],
 ) -> None:
-    runtime, policy = _contract_runtime()
+    runtime = _pi05_contract_runtime()
     runtime.metadata["extra_metadata"].update(objective_metadata)
 
-    runtime._validate_contract(policy, source_sample_steps=10)
+    runtime._validate_contract(source_sample_steps=10)
 
 
 @pytest.mark.parametrize(
-    ("field_name", "invalid_value", "expected_error"),
+    ("field_name", "invalid_value"),
     [
-        (
-            "action_slices",
-            {"left": [0, 9], "right": [10, 20]},
-            r"action_slices\.left",
-        ),
-        (
-            "wrist_token_indices",
-            {"left": [0, 1], "right": [1, 3]},
-            r"wrist_token_indices\.right",
-        ),
+        ("loss_objective_version", 1),
+        ("loss_weighting_version", 6),
+        ("action_dim", 20),
+        ("steered_action_dim", 19),
+        ("action_slices", {"left": [0, 9], "right": [10, 20]}),
+        ("wrist_token_indices", {"left": [0, 1], "right": [1, 3]}),
+        ("padded_tail_policy", "train_gt"),
     ],
 )
 def test_frs_contract_rejects_invalid_bimanual_objective_metadata(
     field_name: str,
     invalid_value: object,
-    expected_error: str,
 ) -> None:
-    runtime, policy = _contract_runtime()
-    runtime.metadata["extra_metadata"].update(
-        {
-            "loss_mode": "bimanual_gated",
-            "loss_objective_version": 2,
-            "action_slices": {"left": [0, 10], "right": [10, 20]},
-            "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
-        }
-    )
+    runtime = _pi05_contract_runtime()
+    runtime.metadata["extra_metadata"].update(bimanual_objective_metadata(action_dim=32))
     runtime.metadata["extra_metadata"][field_name] = invalid_value
 
-    with pytest.raises(ValueError, match=expected_error):
-        runtime._validate_contract(policy, source_sample_steps=10)
+    with pytest.raises(ValueError, match=field_name):
+        runtime._validate_contract(source_sample_steps=10)
 
 
 def test_frs_contract_allows_deployment_solver_to_differ_from_validation_solver() -> None:
