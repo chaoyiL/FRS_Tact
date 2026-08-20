@@ -87,3 +87,23 @@ terms: `train_loss_gt_fm`, `train_loss_vla_fm`, `train_loss_composite_fm`,
 The bimanual objective also records `train_gate_w_left` and `train_gate_w_right`.
 `train_flow_loss` remains as a backward-compatible alias for the total, and the history
 plotter continues to accept older CSV files without the new columns.
+
+## 双手训练可视化
+
+当 `loss_mode: bimanual_gated` 时，训练输出目录会在保留 legacy
+`training_curves.png` 的同时，写入以下四张稳定文件名的图。旧 loss mode 和旧
+`history.csv` 仍可由绘图器处理；新图仅用于解释双手训练和验证行为。
+These files require `write_plots: true`, at least one validation event, and
+successful plotting; a missing prerequisite leaves the corresponding file absent.
+
+| 图 | 要回答的问题 |
+| --- | --- |
+| `training_overview.png` | 优化与验证是否正在收敛？ |
+| `bimanual_behavior.png` | 高 Gate 手腕是否趋近 GT，同时低 Gate 手腕是否保持 VLA？ |
+| `gate_diagnostics.png` | 左右 Gate 的所有组合是否都有样本表示？ |
+| `bimanual_action_examples.png` | 在混合 Gate 案例中，哪些关节或夹爪发生漂移？ |
+
+`relative_gt_error < 1` 表示 FRS 比冻结的 VLA 更接近 GT。`vla_preserve_ratio -> 0`
+表示低 Gate 手腕保持了冻结 VLA 的动作。`bimanual_behavior.png` 以
+`low_low`、`high_low`、`low_high` 和 `high_high` 四个左右手 Gate 象限分别展示
+两只手；样本数不足或为空的象限会在图内标记，不能据此作可靠结论。

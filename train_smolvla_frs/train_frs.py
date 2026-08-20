@@ -531,6 +531,17 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
+    from train_smolvla_frs.utils.bimanual_metrics import (
+        BIMANUAL_QUADRANTS,
+        BIMANUAL_WRISTS,
+        flatten_bimanual_quadrant_metrics,
+    )
+    from train_smolvla_frs.utils.bimanual_visualize import (
+        plot_bimanual_action_examples,
+        plot_bimanual_behavior,
+        plot_bimanual_training_overview,
+        plot_gate_diagnostics,
+    )
     from train_smolvla_frs.utils.checkpoint import (
         CHECKPOINT_NAME,
         load_checkpoint,
@@ -560,6 +571,15 @@ def train_decoder(
     )
     from utils.cache import CachedPairs, MultiCachedPairs
 
+    quadrant_history_metrics = (
+        "mse_gt",
+        "mse_vla",
+        "mse_vla_gt",
+        "gt_gain",
+        "relative_gt_error",
+        "vla_preserve_ratio",
+        "rank_satisfied_frac",
+    )
     history_fields = [
         "epoch",
         "train_loss_total",
@@ -681,6 +701,15 @@ def train_decoder(
             f"val_{metric_name}_{wrist}"
             for metric_name in bimanual_distribution_metric_names
         )
+    history_fields.extend(
+        f"val_quadrant_{quadrant}_n" for quadrant in BIMANUAL_QUADRANTS
+    )
+    history_fields.extend(
+        f"val_quadrant_{quadrant}_{metric}_{wrist}"
+        for quadrant in BIMANUAL_QUADRANTS
+        for wrist in BIMANUAL_WRISTS
+        for metric in quadrant_history_metrics
+    )
     gate_bin_metric_names = (
         "n",
         "mse_gt",
@@ -759,6 +788,9 @@ def train_decoder(
             f"'bimanual_gated', got {loss_mode!r}."
         )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
+    keep_validation_actions = bool(
+        write_plots and loss_mode == BIMANUAL_LOSS_MODE
+    )
     if gate_temperature <= 0:
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
     if gate_lambda < 0:
@@ -1312,11 +1344,35 @@ def train_decoder(
             return
         try:
             written = plot_training_history(history_path, output_path=plot_path)
-        except (FileNotFoundError, ValueError) as exc:
+        except Exception as exc:
             print(f"warning: could not refresh training plot: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"plot={written}", flush=True)
+        if loss_mode != BIMANUAL_LOSS_MODE:
             return
-        if announce:
-            print(f"plot={written}", flush=True)
+        try:
+            overview = plot_bimanual_training_overview(
+                history_path,
+                output_path=output_dir / "training_overview.png",
+                min_rank_satisfied=best_min_high_gate_rank_satisfied,
+                min_low_safe=1.0 - best_max_low_gate_unsafe_frac,
+            )
+        except Exception as exc:
+            print(f"warning: could not refresh bimanual training overview: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"bimanual_training_overview={overview}", flush=True)
+        try:
+            behavior = plot_bimanual_behavior(
+                history_path,
+                output_path=output_dir / "bimanual_behavior.png",
+            )
+        except Exception as exc:
+            print(f"warning: could not refresh bimanual behavior plot: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"bimanual_behavior={behavior}", flush=True)
 
     try:
         with history_path.open(history_mode, newline="", encoding="utf-8") as history_file:
@@ -1588,7 +1644,7 @@ def train_decoder(
                         split="val",
                         batch_size=batch_size,
                         num_steps=validation_steps,
-                        keep_predictions=False,
+                        keep_predictions=keep_validation_actions,
                         solver=aux_decode_solver,
                         target=eval_target,
                         loss_mode=loss_mode,
@@ -1641,6 +1697,12 @@ def train_decoder(
                     if validation_composite_fm is not None:
                         metrics["val_composite_fm"] = float(
                             validation_composite_fm
+                        )
+                    if validation.bimanual_quadrants is not None:
+                        metrics.update(
+                            flatten_bimanual_quadrant_metrics(
+                                validation.bimanual_quadrants
+                            )
                         )
                     if validation.n_high_w is not None:
                         metrics.update(
@@ -1853,6 +1915,33 @@ def train_decoder(
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
+                    if loss_mode == BIMANUAL_LOSS_MODE and write_plots:
+                        try:
+                            gate_plot = plot_gate_diagnostics(
+                                history_path,
+                                result=validation,
+                                output_path=output_dir / "gate_diagnostics.png",
+                            )
+                        except Exception as exc:
+                            print(
+                                f"warning: could not refresh bimanual Gate diagnostics: {exc}",
+                                flush=True,
+                            )
+                        else:
+                            print(f"bimanual_gate_diagnostics={gate_plot}", flush=True)
+                        try:
+                            action_plot = plot_bimanual_action_examples(
+                                validation,
+                                pairs,
+                                output_path=output_dir / "bimanual_action_examples.png",
+                            )
+                        except Exception as exc:
+                            print(
+                                f"warning: could not refresh bimanual action examples: {exc}",
+                                flush=True,
+                            )
+                        else:
+                            print(f"bimanual_action_examples={action_plot}", flush=True)
                     save_checkpoint(
                         output_dir / "last",
                         model,

@@ -12,11 +12,8 @@ import numpy as np
 
 from train_smolvla_frs.utils.data import TactileConditionedBatches
 from train_smolvla_frs.utils.metrics import EvaluationResult
-from train_smolvla_frs.utils.model import FlowSolver
-from train_smolvla_frs.utils.model import TactileConditionedFlowDecoder
-from train_smolvla_frs.utils.model import decode_actions
-from utils.cache import CachedPairs
-from utils.cache import MultiCachedPairs
+from train_smolvla_frs.utils.model import FlowSolver, TactileConditionedFlowDecoder, decode_actions
+from utils.cache import CachedPairs, MultiCachedPairs
 
 
 def _select_ranked_positions(values: np.ndarray, count: int) -> list[int]:
@@ -91,7 +88,7 @@ def _plot_metric_histograms(path: pathlib.Path, result: EvaluationResult) -> pat
         ("mse_pred", result.sample_mse_pred, "MSE vs predicted", "#4C72B0"),
         ("mae", result.sample_mae, f"MAE (primary={result.target})", "#DD8452"),
     ]
-    for axis, (_, values, title, color) in zip(axes.flat, metrics):
+    for axis, (_, values, title, color) in zip(axes.flat, metrics, strict=False):
         axis.hist(values, bins=bins, color=color, edgecolor="white")
         axis.axvline(float(np.mean(values)), color="#333333", linestyle="--", linewidth=1.5, label="mean")
         axis.set_title(title)
@@ -152,7 +149,10 @@ def _plot_per_episode_mse(
     grouped_gt: dict[int, list[float]] = defaultdict(list)
     grouped_pred: dict[int, list[float]] = defaultdict(list)
     for cache_index, mse_gt, mse_pred in zip(
-        result.cache_indices, result.sample_mse_gt, result.sample_mse_pred
+        result.cache_indices,
+        result.sample_mse_gt,
+        result.sample_mse_pred,
+        strict=False,
     ):
         episode = int(episode_indices[cache_index])
         grouped_gt[episode].append(float(mse_gt))
@@ -231,6 +231,64 @@ def _decode_with_tactile(
     return gt_action, predicted_action, decoded
 
 
+def _retained_actions_for_cache_indices(
+    result: EvaluationResult,
+    cache_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Select retained GT/VLA/FRS actions in requested cache-index order."""
+
+    if result.gt_actions is None or result.vla_actions is None or result.predictions is None:
+        return None
+    retained_indices = np.asarray(result.cache_indices, dtype=np.int64)
+    requested_indices = np.asarray(cache_indices, dtype=np.int64)
+    retained_actions = tuple(
+        np.asarray(actions, dtype=np.float32)
+        for actions in (result.gt_actions, result.vla_actions, result.predictions)
+    )
+    if (
+        retained_indices.ndim != 1
+        or requested_indices.ndim != 1
+        or any(actions.ndim != 3 for actions in retained_actions)
+        or any(actions.shape[0] != len(retained_indices) for actions in retained_actions)
+        or len({actions.shape for actions in retained_actions}) != 1
+    ):
+        return None
+    positions_by_index = {
+        int(cache_index): position
+        for position, cache_index in enumerate(retained_indices)
+    }
+    if len(positions_by_index) != len(retained_indices):
+        return None
+    try:
+        positions = [positions_by_index[int(cache_index)] for cache_index in requested_indices]
+    except KeyError:
+        return None
+    return tuple(actions[positions] for actions in retained_actions)
+
+
+def _actions_for_cache_indices(
+    result: EvaluationResult,
+    model: TactileConditionedFlowDecoder,
+    pairs: CachedPairs,
+    conditioner: TactileConditionedBatches,
+    cache_indices: np.ndarray,
+    *,
+    num_steps: int,
+    solver: FlowSolver,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    retained = _retained_actions_for_cache_indices(result, cache_indices)
+    if retained is not None:
+        return retained
+    return _decode_with_tactile(
+        model,
+        pairs,
+        conditioner,
+        cache_indices,
+        num_steps=num_steps,
+        solver=solver,
+    )
+
+
 def _plot_action_trajectories(
     *,
     path: pathlib.Path,
@@ -247,7 +305,8 @@ def _plot_action_trajectories(
         return path
 
     cache_indices = result.cache_indices[positions]
-    gt_action, predicted_action, decoded = _decode_with_tactile(
+    gt_action, predicted_action, decoded = _actions_for_cache_indices(
+        result,
         model,
         pairs,
         conditioner,
@@ -343,7 +402,7 @@ def _plot_episode_action_strips(
 ) -> pathlib.Path:
     episode_indices = pairs.arrays["episode_index"]
     grouped: dict[int, list[float]] = defaultdict(list)
-    for cache_index, mse in zip(result.cache_indices, result.sample_mse):
+    for cache_index, mse in zip(result.cache_indices, result.sample_mse, strict=False):
         grouped[int(episode_indices[cache_index])].append(float(mse))
     if not grouped:
         return path
@@ -365,7 +424,8 @@ def _plot_episode_action_strips(
     for row, episode_index in enumerate(selected_episodes):
         axis = axes[row, 0]
         cache_indices = _validation_episode_cache_indices(pairs, episode_index)
-        gt_action, predicted_action, decoded = _decode_with_tactile(
+        gt_action, predicted_action, decoded = _actions_for_cache_indices(
+            result,
             model,
             pairs,
             conditioner,
@@ -420,4 +480,6 @@ def _plot_episode_action_strips(
 
 
 # Re-export for train.py callers.
-from train_smolvla_frs.utils.history_plot import plot_training_history as plot_training_history
+from train_smolvla_frs.utils.history_plot import (  # noqa: E402
+    plot_training_history as plot_training_history,
+)

@@ -10,6 +10,7 @@ from flax import nnx
 
 import train_smolvla_frs.evaluate as evaluate_module
 import train_smolvla_frs.utils.metrics as metrics_module
+import train_smolvla_frs.utils.visualize as visualize_module
 from train_smolvla_frs.utils.metrics import bimanual_source_decode_metrics, evaluate_split
 from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
@@ -74,6 +75,8 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
         loss_mode="bimanual_gated",
         gate_tau=0.5,
         gate_temperature=0.1,
+        rank_low_gate_threshold=0.2,
+        rank_high_gate_threshold=0.8,
     )
 
     np.testing.assert_allclose(result.sample_gate_w_left, [1.0, 0.0], atol=0.01)
@@ -104,6 +107,28 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
     assert result.rank_satisfied_high_frac_right == pytest.approx(0.0)
     assert result.low_unsafe_frac_left == pytest.approx(0.0)
     assert result.low_unsafe_frac_right == pytest.approx(0.0)
+    assert result.bimanual_quadrants["high_low"]["n"] == 1
+    assert result.bimanual_gate_region_counts.shape == (3, 3)
+    assert result.gate_low_threshold == pytest.approx(0.2)
+    assert result.gate_high_threshold == pytest.approx(0.8)
+
+    result_with_actions = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="bimanual_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+        rank_low_gate_threshold=0.2,
+        rank_high_gate_threshold=0.8,
+    )
+
+    np.testing.assert_allclose(result_with_actions.gt_actions, gt_action)
+    np.testing.assert_allclose(result_with_actions.vla_actions, predicted_action)
+    np.testing.assert_allclose(result_with_actions.predictions, prediction)
 
 
 def test_bimanual_source_metrics_keep_a_bad_dataset_from_being_pooled_away() -> None:
@@ -199,10 +224,19 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         arrays = {
             "dataset_index": np.asarray([0, 1], dtype=np.int64),
             "episode_index": np.asarray([0, 0], dtype=np.int64),
+            "split": np.asarray(["val", "val"]),
+            "x_base": np.zeros((2, 2, action_dim), dtype=np.float32),
+            "target": np.zeros((2, 2, action_dim), dtype=np.float32),
+            "gt_action": np.ones((2, 2, action_dim), dtype=np.float32),
+            "state": np.zeros((2, 0), dtype=np.float32),
         }
 
         def __init__(self, cache_dir):
             del cache_dir
+
+        def indices(self, split):
+            assert split == "val"
+            return np.asarray([0, 1], dtype=np.int64)
 
     class FakeConditioner:
         resnet_embedding_dim = 4
@@ -234,6 +268,9 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             del indices, current_tokens
             return np.asarray([[0.1, 0.9], [0.7, 0.2]], dtype=np.float32)
 
+        def encode_cache_indices(self, indices):
+            return jnp.ones((len(indices), 2, 1, 4), dtype=jnp.float32)
+
         def close(self):
             return None
 
@@ -254,6 +291,23 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             },
         ),
     )
+    metrics_decode_calls = 0
+    visualize_decode_calls = 0
+    real_metrics_decode_actions = metrics_module.decode_actions
+    real_visualize_decode_actions = visualize_module.decode_actions
+
+    def counted_metrics_decode_actions(*args, **kwargs):
+        nonlocal metrics_decode_calls
+        metrics_decode_calls += 1
+        return real_metrics_decode_actions(*args, **kwargs)
+
+    def counted_visualize_decode_actions(*args, **kwargs):
+        nonlocal visualize_decode_calls
+        visualize_decode_calls += 1
+        return real_visualize_decode_actions(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "decode_actions", counted_metrics_decode_actions)
+    monkeypatch.setattr(visualize_module, "decode_actions", counted_visualize_decode_actions)
 
     metrics = evaluate_module.evaluate_decoder(
         cache_dir=tmp_path / "cache",
@@ -269,9 +323,9 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         solver="euler",
         target=None,
         save_predictions=False,
-        write_plots=False,
-        num_trajectory_samples=0,
-        num_episode_strips=0,
+        write_plots=gate_kind in {"bimanual", "none"},
+        num_trajectory_samples=6,
+        num_episode_strips=6,
         num_workers=0,
         prefetch_batches=1,
         load_threads=1,
@@ -280,6 +334,17 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     )
 
     written_metrics = json.loads((tmp_path / "output" / "metrics.json").read_text())
+    assert metrics_decode_calls == 1
+    if gate_kind == "bimanual":
+        assert visualize_decode_calls == 0
+    elif gate_kind == "none":
+        assert visualize_decode_calls == 2
+    else:
+        assert visualize_decode_calls == 0
+    if gate_kind in {"bimanual", "none"}:
+        for filename in ("action_trajectories.png", "episode_action_strips.png"):
+            artifact = tmp_path / "output" / filename
+            assert artifact.is_file() and artifact.stat().st_size > 0
     if gate_kind == "scalar":
         assert metrics["n_high_w"] == 1
         assert metrics["n_low_w"] == 1
@@ -300,6 +365,8 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert written_metrics["gate_w_p90_left"] != pytest.approx(
             written_metrics["gate_w_p90_right"]
         )
+        assert "bimanual_quadrants" in written_metrics
+        assert np.asarray(written_metrics["bimanual_gate_region_counts"]).shape == (3, 3)
         with (tmp_path / "output" / "per_sample.csv").open(newline="", encoding="utf-8") as file:
             rows = list(csv.DictReader(file))
         assert float(rows[0]["gate_w_left"]) == pytest.approx(1.0 / (1.0 + np.exp(4.0)))
@@ -309,6 +376,16 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert float(rows[0]["composite_fm"]) >= 0.0
         assert float(rows[0]["mse_gt_left"]) >= 0.0
         assert float(rows[0]["mse_vla_right"]) >= 0.0
+        assert rows[0]["mse_vla_gt_left"] != ""
+        assert rows[0]["gate_region_left"] in {"low", "mid", "high"}
+        assert rows[0]["gate_region_right"] in {"low", "mid", "high"}
+        assert rows[0]["bimanual_quadrant"] in {"", "low_low", "high_low", "low_high", "high_high"}
+        assert rows[0]["gate_region"] == ""
+        assert rows[0]["gate_bin"] == ""
+        for filename in ("gate_diagnostics.png", "bimanual_action_examples.png"):
+            artifact = tmp_path / "output" / filename
+            assert artifact.is_file() and artifact.stat().st_size > 0
+        assert not (tmp_path / "output" / "predictions.npz").exists()
     else:
         assert "n_high_w" not in metrics
         assert "n_low_w" not in metrics

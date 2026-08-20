@@ -7,6 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from train_smolvla_frs.utils.bimanual_metrics import (
+    bimanual_gate_region_counts,
+    bimanual_quadrant_metrics,
+)
 from train_smolvla_frs.utils.bimanual_schema import (
     BIMANUAL_LOSS_MODE,
     LEFT_ACTION_SLICE,
@@ -172,6 +176,13 @@ class EvaluationResult:
     n_low_w_right: int | None = None
     n_mid_w_left: int | None = None
     n_mid_w_right: int | None = None
+    bimanual_quadrants: dict[str, dict[str, object]] | None = None
+    bimanual_gate_region_counts: np.ndarray | None = None
+    # Effective rank-region boundaries for consumers of retained bimanual data.
+    gate_low_threshold: float = 0.3
+    gate_high_threshold: float = 0.7
+    gt_actions: np.ndarray | None = None
+    vla_actions: np.ndarray | None = None
 
 
 def _per_sample_errors(prediction: jax.Array, reference: jax.Array) -> tuple[jax.Array, jax.Array]:
@@ -511,6 +522,8 @@ def evaluate_split(
     mse_vla_wrist_parts: list[np.ndarray] = []
     mse_vla_gt_wrist_parts: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
+    gt_actions: list[np.ndarray] = []
+    vla_actions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
     track_tactile = gate_tau is not None and gate_temperature is not None and bool(conditioner.episode_baselines)
@@ -640,6 +653,9 @@ def evaluate_split(
         mse_vla_gt_parts.append(np.asarray(jax.device_get(mse_vla_gt)))
         if keep_predictions:
             predictions.append(np.asarray(jax.device_get(prediction), dtype=np.float32))
+        if keep_predictions and loss_mode == BIMANUAL_LOSS_MODE:
+            gt_actions.append(np.asarray(jax.device_get(gt_action), dtype=np.float32))
+            vla_actions.append(np.asarray(jax.device_get(predicted_action), dtype=np.float32))
         if change is not None and gate_w is not None:
             tactile_changes.append(change)
             gate_weights.append(gate_w)
@@ -684,6 +700,8 @@ def evaluate_split(
     wrist_change_quantiles: tuple[
         tuple[float | None, ...], tuple[float | None, ...]
     ] = ((None,) * 5, (None,) * 5)
+    quadrant_metrics: dict[str, dict[str, object]] | None = None
+    joint_gate_region_counts: np.ndarray | None = None
     if tactile_changes:
         all_change = np.concatenate(tactile_changes)
         all_gate = np.concatenate(gate_weights)
@@ -711,6 +729,20 @@ def evaluate_split(
             wrist_change_quantiles = (
                 _quantiles(all_change[:, 0]),
                 _quantiles(all_change[:, 1]),
+            )
+            quadrant_metrics = bimanual_quadrant_metrics(
+                mse_gt=all_mse_gt_wrist,
+                mse_vla=all_mse_vla_wrist,
+                mse_vla_gt=all_mse_vla_gt_wrist,
+                gate_weights=all_gate,
+                low_threshold=rank_low_gate_threshold,
+                high_threshold=rank_high_gate_threshold,
+                ranking_margin=rank_margin,
+            )
+            joint_gate_region_counts = bimanual_gate_region_counts(
+                all_gate,
+                low_threshold=rank_low_gate_threshold,
+                high_threshold=rank_high_gate_threshold,
             )
             for wrist_index, wrist_name in enumerate(("left", "right")):
                 wrist_stratified[wrist_name] = gate_stratified_decode_metrics(
@@ -960,4 +992,10 @@ def evaluate_split(
         n_low_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_low_w"]),  # type: ignore[arg-type]
         n_mid_w_left=(None if wrist_stratified is None else wrist_stratified["left"]["n_mid_w"]),  # type: ignore[arg-type]
         n_mid_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_mid_w"]),  # type: ignore[arg-type]
+        bimanual_quadrants=quadrant_metrics,
+        bimanual_gate_region_counts=joint_gate_region_counts,
+        gate_low_threshold=rank_low_gate_threshold,
+        gate_high_threshold=rank_high_gate_threshold,
+        gt_actions=np.concatenate(gt_actions) if gt_actions else None,
+        vla_actions=np.concatenate(vla_actions) if vla_actions else None,
     )

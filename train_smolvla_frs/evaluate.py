@@ -9,6 +9,11 @@ from typing import Any
 import numpy as np
 
 from train_smolvla_frs.train_frs import resolve_decode_solver
+from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_smolvla_frs.utils.bimanual_visualize import (
+    plot_bimanual_action_examples,
+    plot_gate_diagnostics,
+)
 from train_smolvla_frs.utils.checkpoint import load_checkpoint
 from train_smolvla_frs.utils.data import (
     CachedTactileEmbeddingBatches,
@@ -25,6 +30,22 @@ from train_smolvla_frs.utils.metrics import (
 from train_smolvla_frs.utils.model import FlowSolver
 from train_smolvla_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs, MultiCachedPairs, atomic_write_json
+
+
+def _bimanual_gate_region(
+    weight: float, *, low_threshold: float, high_threshold: float
+) -> str:
+    if weight <= low_threshold:
+        return "low"
+    if weight >= high_threshold:
+        return "high"
+    return "mid"
+
+
+def _bimanual_quadrant(left_region: str, right_region: str) -> str:
+    if left_region == "mid" or right_region == "mid":
+        return ""
+    return f"{left_region}_{right_region}"
 
 
 def evaluate_decoder(
@@ -104,6 +125,7 @@ def evaluate_decoder(
     rank_low_gate_threshold = float(extra.get("rank_low_gate_threshold", 0.3))
     rank_high_gate_threshold = float(extra.get("rank_high_gate_threshold", 0.7))
     action_horizon = int(pairs.manifest["action_horizon"])
+    keep_actions = bool(save_predictions or (write_plots and loss_mode == BIMANUAL_LOSS_MODE))
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
         window_divisor=tactile_window_divisor,
@@ -169,7 +191,7 @@ def evaluate_decoder(
             batch_size=batch_size,
             num_steps=num_steps,
             solver=solver,
-            keep_predictions=save_predictions,
+            keep_predictions=keep_actions,
             target=target,
             loss_mode=loss_mode,
             gate_tau=gate_tau,
@@ -206,6 +228,9 @@ def evaluate_decoder(
             "gt_gain": result.gt_gain,
             "relative_gt_error": result.relative_gt_error,
         }
+        if result.bimanual_quadrants is not None:
+            metrics["bimanual_quadrants"] = result.bimanual_quadrants
+            metrics["bimanual_gate_region_counts"] = result.bimanual_gate_region_counts.tolist()
         if result.composite_fm is not None:
             metrics["composite_fm"] = float(result.composite_fm)
         if result.n_high_w is not None:
@@ -406,12 +431,35 @@ def evaluate_decoder(
                     "mse_gt_right",
                     "mse_vla_left",
                     "mse_vla_right",
+                    "mse_vla_gt_left",
+                    "mse_vla_gt_right",
+                    "gate_region_left",
+                    "gate_region_right",
+                    "bimanual_quadrant",
                     "gate_region",
                     "gate_bin",
                 ],
             )
             writer.writeheader()
             for position, cache_index in enumerate(result.cache_indices):
+                left_gate_region = (
+                    None
+                    if result.sample_gate_w_left is None
+                    else _bimanual_gate_region(
+                        float(result.sample_gate_w_left[position]),
+                        low_threshold=rank_low_gate_threshold,
+                        high_threshold=rank_high_gate_threshold,
+                    )
+                )
+                right_gate_region = (
+                    None
+                    if result.sample_gate_w_right is None
+                    else _bimanual_gate_region(
+                        float(result.sample_gate_w_right[position]),
+                        low_threshold=rank_low_gate_threshold,
+                        high_threshold=rank_high_gate_threshold,
+                    )
+                )
                 writer.writerow(
                     {
                         "cache_index": int(cache_index),
@@ -485,6 +533,23 @@ def evaluate_decoder(
                             if result.sample_mse_vla_right is None
                             else float(result.sample_mse_vla_right[position])
                         ),
+                        "mse_vla_gt_left": (
+                            ""
+                            if result.sample_mse_vla_gt_left is None
+                            else float(result.sample_mse_vla_gt_left[position])
+                        ),
+                        "mse_vla_gt_right": (
+                            ""
+                            if result.sample_mse_vla_gt_right is None
+                            else float(result.sample_mse_vla_gt_right[position])
+                        ),
+                        "gate_region_left": left_gate_region or "",
+                        "gate_region_right": right_gate_region or "",
+                        "bimanual_quadrant": (
+                            ""
+                            if left_gate_region is None or right_gate_region is None
+                            else _bimanual_quadrant(left_gate_region, right_gate_region)
+                        ),
                         "gate_region": (
                             ""
                             if result.sample_gate_w is None
@@ -515,7 +580,7 @@ def evaluate_decoder(
                         ),
                     }
                 )
-        if result.predictions is not None:
+        if save_predictions and result.predictions is not None:
             np.savez(
                 output_dir / "predictions.npz",
                 cache_indices=result.cache_indices,
@@ -536,6 +601,19 @@ def evaluate_decoder(
             )
             for plot_path in plot_paths:
                 print(f"plot={plot_path}")
+            if loss_mode == BIMANUAL_LOSS_MODE:
+                gate_plot = plot_gate_diagnostics(
+                    output_dir / "history.csv",
+                    result=result,
+                    output_path=output_dir / "gate_diagnostics.png",
+                )
+                action_plot = plot_bimanual_action_examples(
+                    result,
+                    pairs,
+                    output_path=output_dir / "bimanual_action_examples.png",
+                )
+                print(f"plot={gate_plot}")
+                print(f"plot={action_plot}")
 
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
