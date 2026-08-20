@@ -21,8 +21,8 @@ ENCODER_DIR = Path("checkpoints/encoder/encoder_ckpt_0809")
 PROVENANCE_FILE = ".download-provenance.json"
 BASE_REPO = "lerobot/smolvla_base"
 BASE_REVISION = "c83c3163b8ca9b7e67c509fffd9121e66cb96205"
-ADAPTER_REPO = "KaiyueChen/pick_tube_01"
-ADAPTER_REVISION = "31d819d8844de98174ede123f894adbf7b4372ef"
+SMOLVLA_REPO = "KaiyueChen/pick_tube_01"
+SMOLVLA_REVISION = "31d819d8844de98174ede123f894adbf7b4372ef"
 FRS_REPO = "KaiyueChen/frs_0809_02"
 FRS_REVISION = "7e23f3e8c308dc5ba3a4df7634c68dac28572897"
 ENCODER_REPO = "KaiyueChen/encoder_ckpt_0809"
@@ -110,6 +110,59 @@ class AutoTokenizer:
         if tokenizer_json.read_text(encoding="utf-8") == "broken":
             raise OSError("invalid tokenizer")
         return cls()
+''',
+        encoding="utf-8",
+    )
+    huggingface_hub = project / "huggingface_hub"
+    huggingface_hub.mkdir()
+    (huggingface_hub / "__init__.py").write_text(
+        '''from __future__ import annotations
+
+import os
+
+
+class ModelInfo:
+    def __init__(self, sha: str) -> None:
+        self.sha = sha
+
+
+class HfApi:
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    def model_info(self, repo_id: str, **_kwargs: object) -> ModelInfo:
+        if repo_id == os.environ.get("FRS_TEST_HF_FAIL_REPO"):
+            raise OSError(f"simulated model-info failure: {repo_id}")
+        revisions = {
+            "KaiyueChen/pick_tube_01": os.environ["FRS_TEST_HF_SMOLVLA_REVISION"],
+            "KaiyueChen/frs_0809_02": os.environ["FRS_TEST_HF_FRS_REVISION"],
+            "KaiyueChen/encoder_ckpt_0809": os.environ["FRS_TEST_HF_ENCODER_REVISION"],
+        }
+        return ModelInfo(revisions[repo_id])
+
+
+def snapshot_download(**_kwargs: object) -> None:
+    raise AssertionError("fake snapshot_download must not run in downloader tests")
+''',
+        encoding="utf-8",
+    )
+    (huggingface_hub / "errors.py").write_text(
+        '''class HfHubHTTPError(Exception):
+    pass
+''',
+        encoding="utf-8",
+    )
+    (huggingface_hub / "utils.py").write_text(
+        '''from __future__ import annotations
+
+import re
+
+
+def validate_repo_id(repo_id: str) -> None:
+    if not isinstance(repo_id, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", repo_id
+    ):
+        raise ValueError(f"invalid repo ID: {repo_id}")
 ''',
         encoding="utf-8",
     )
@@ -205,9 +258,9 @@ fi
         "TRANSFORMERS_CACHE": str(project / "decoy/transformers"),
         "PYTORCH_TRANSFORMERS_CACHE": str(project / "decoy/pytorch-transformers"),
         "PYTORCH_PRETRAINED_BERT_CACHE": str(project / "decoy/pytorch-bert"),
-        "FRS_TEST_SMOLVLA_REVISION": ADAPTER_REVISION,
-        "FRS_TEST_FRS_REVISION": FRS_REVISION,
-        "FRS_TEST_ENCODER_REVISION": ENCODER_REVISION,
+        "FRS_TEST_HF_SMOLVLA_REVISION": SMOLVLA_REVISION,
+        "FRS_TEST_HF_FRS_REVISION": FRS_REVISION,
+        "FRS_TEST_HF_ENCODER_REVISION": ENCODER_REVISION,
     }
     return project, log_path, env
 
@@ -234,7 +287,7 @@ def read_calls(log_path: Path) -> list[list[str]]:
 def expected_calls(
     project: Path,
     *,
-    adapter_revision: str = ADAPTER_REVISION,
+    smolvla_revision: str = SMOLVLA_REVISION,
     frs_revision: str = FRS_REVISION,
     encoder_revision: str = ENCODER_REVISION,
 ) -> list[list[str]]:
@@ -245,9 +298,9 @@ def expected_calls(
             "python",
             str(project / "tools/merge_smolvla_peft_to_jax.py"),
             "--adapter",
-            ADAPTER_REPO,
+            SMOLVLA_REPO,
             "--adapter-revision",
-            adapter_revision,
+            smolvla_revision,
             "--base",
             BASE_REPO,
             "--base-revision",
@@ -309,7 +362,7 @@ def write_provenance(directory: Path, repo_id: str, revision: str) -> None:
 
 
 def write_complete_base(
-    project: Path, *, adapter_revision: str = ADAPTER_REVISION
+    project: Path, *, smolvla_revision: str = SMOLVLA_REVISION
 ) -> None:
     directory = project / BASE_DIR
     directory.mkdir(parents=True)
@@ -320,8 +373,8 @@ def write_complete_base(
         json.dumps(
             {
                 "source_base": BASE_REPO,
-                "source_adapter": ADAPTER_REPO,
-                "adapter_revision": adapter_revision,
+                "source_adapter": SMOLVLA_REPO,
+                "adapter_revision": smolvla_revision,
                 "base_revision": BASE_REVISION,
             }
         ),
@@ -396,7 +449,9 @@ def write_incomplete_frs(project: Path) -> None:
     write_provenance(directory, FRS_REPO, FRS_REVISION)
 
 
-def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path) -> None:
+def test_downloads_all_missing_assets_with_resolved_revision_commands(
+    tmp_path: Path,
+) -> None:
     project, log_path, env = make_project(tmp_path)
     result = run_download(project, env)
 
@@ -435,7 +490,7 @@ def test_resolved_revision_change_refreshes_complete_frs_asset(tmp_path: Path) -
     write_complete_frs(project)
     write_complete_encoder(project)
     refreshed_revision = "1" * 40
-    env["FRS_TEST_FRS_REVISION"] = refreshed_revision
+    env["FRS_TEST_HF_FRS_REVISION"] = refreshed_revision
 
     result = run_download(project, env)
 
@@ -454,13 +509,26 @@ def test_failed_repository_resolution_stops_before_checkpoint_download(
     tmp_path: Path,
 ) -> None:
     project, log_path, env = make_project(tmp_path)
-    env["FRS_TEST_FRS_REVISION"] = ""
+    env["FRS_TEST_HF_FAIL_REPO"] = FRS_REPO
 
     result = run_download(project, env)
 
     assert result.returncode != 0
     assert f"could not resolve revision for {FRS_REPO}" in result.stderr
     assert read_calls(log_path) == []
+    assert not (project / "checkpoints").exists()
+
+
+def test_legacy_test_revision_environment_cannot_override_hf_api(
+    tmp_path: Path,
+) -> None:
+    project, log_path, env = make_project(tmp_path)
+    env["FRS_TEST_FRS_REVISION"] = "1" * 40
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == expected_calls(project)
 
 
 def test_writes_tokenizer_ref_as_exact_revision_bytes(tmp_path: Path) -> None:
@@ -709,8 +777,48 @@ def test_refuses_unguarded_base_overwrite(tmp_path: Path) -> None:
     result = run_download(project, env)
 
     assert result.returncode != 0
-    assert "refusing to overwrite base directory outside" in result.stderr
+    assert "refusing checkpoint target outside its allowed root" in result.stderr
     assert read_calls(log_path) == []
+
+
+@pytest.mark.parametrize(
+    ("directory", "label"),
+    [
+        (BASE_DIR, "base"),
+        (FRS_DIR, "FRS"),
+        (ENCODER_DIR, "encoder"),
+    ],
+)
+def test_symlinked_checkpoint_target_outside_root_is_refused_before_writes(
+    tmp_path: Path, directory: Path, label: str
+) -> None:
+    project, log_path, env = make_project(tmp_path)
+    outside = tmp_path / f"outside-{label}"
+    outside.mkdir()
+    target = project / directory
+    target.parent.mkdir(parents=True)
+    target.symlink_to(outside, target_is_directory=True)
+
+    result = run_download(project, env)
+
+    assert result.returncode != 0
+    assert "refusing checkpoint target outside its allowed root" in result.stderr
+    assert read_calls(log_path) == []
+    assert list(outside.iterdir()) == []
+
+
+def test_allows_symlinked_checkpoint_root(tmp_path: Path) -> None:
+    project, _log_path, env = make_project(tmp_path)
+    canonical_root = project / "canonical checkpoints"
+    canonical_root.mkdir()
+    checkpoint_root = project / "checkpoint root"
+    checkpoint_root.symlink_to(canonical_root, target_is_directory=True)
+    env["FRS_CHECKPOINT_ROOT"] = str(checkpoint_root)
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert (canonical_root / "model/pick_tube_01_jax/model.safetensors").is_file()
 
 
 def test_is_executable_and_supports_checkpoint_roots_with_spaces(tmp_path: Path) -> None:

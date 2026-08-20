@@ -43,28 +43,43 @@ else
 fi
 
 validate_repo_id() {
-    [[ "$1" =~ ^[[:alnum:]][[:alnum:]._-]*/[[:alnum:]][[:alnum:]._-]*$ ]]
+    "${PYTHON_CMD[@]}" - "$1" <<'PY'
+from huggingface_hub.utils import validate_repo_id
+import sys
+
+try:
+    validate_repo_id(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+PY
+}
+
+derive_repo_basename() {
+    local repo_id="$1"
+    local basename="${repo_id##*/}"
+
+    case "${basename}" in
+        ''|.|..|*/*|*\\*)
+            return 1
+            ;;
+    esac
+    printf '%s\n' "${basename}"
 }
 
 resolve_revision() {
     local repo_id="$1"
-    local test_variable="$2"
     local revision
 
-    if [[ -v "${test_variable}" ]]; then
-        revision="${!test_variable}"
-    else
-        revision="$("${PYTHON_CMD[@]}" - "${repo_id}" <<'PY'
+    revision="$("${PYTHON_CMD[@]}" - "${repo_id}" <<'PY'
 from huggingface_hub import HfApi
 import sys
 
 print(HfApi().model_info(sys.argv[1]).sha)
 PY
 )" || {
-            echo "could not resolve revision for ${repo_id}" >&2
-            return 1
-        }
-    fi
+        echo "could not resolve revision for ${repo_id}" >&2
+        return 1
+    }
 
     if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
         echo "could not resolve revision for ${repo_id}: invalid revision" >&2
@@ -80,26 +95,56 @@ for repo_id in "${SMOLVLA_REPO}" "${FRS_REPO}" "${ENCODER_REPO}"; do
     fi
 done
 
-SMOLVLA_BASENAME="${SMOLVLA_REPO##*/}"
-FRS_BASENAME="${FRS_REPO##*/}"
-ENCODER_BASENAME="${ENCODER_REPO##*/}"
+if ! SMOLVLA_BASENAME="$(derive_repo_basename "${SMOLVLA_REPO}")" || \
+    ! FRS_BASENAME="$(derive_repo_basename "${FRS_REPO}")" || \
+    ! ENCODER_BASENAME="$(derive_repo_basename "${ENCODER_REPO}")"; then
+    echo "invalid Hugging Face repository basename" >&2
+    exit 1
+fi
 BASE_DIR="${CHECKPOINT_ROOT}/model/${SMOLVLA_BASENAME}_jax"
 FRS_DIR="${CHECKPOINT_ROOT}/frs/${FRS_BASENAME}"
 ENCODER_DIR="${CHECKPOINT_ROOT}/encoder/${ENCODER_BASENAME}"
 
-if ! SMOLVLA_REVISION="$(resolve_revision "${SMOLVLA_REPO}" FRS_TEST_SMOLVLA_REVISION)"; then
+if ! SMOLVLA_REVISION="$(resolve_revision "${SMOLVLA_REPO}")"; then
     exit 1
 fi
-if ! FRS_REVISION="$(resolve_revision "${FRS_REPO}" FRS_TEST_FRS_REVISION)"; then
+if ! FRS_REVISION="$(resolve_revision "${FRS_REPO}")"; then
     exit 1
 fi
-if ! ENCODER_REVISION="$(resolve_revision "${ENCODER_REPO}" FRS_TEST_ENCODER_REVISION)"; then
+if ! ENCODER_REVISION="$(resolve_revision "${ENCODER_REPO}")"; then
     exit 1
 fi
 
 echo "resolved: ${SMOLVLA_REPO} @ ${SMOLVLA_REVISION} -> ${BASE_DIR}"
 echo "resolved: ${FRS_REPO} @ ${FRS_REVISION} -> ${FRS_DIR}"
 echo "resolved: ${ENCODER_REPO} @ ${ENCODER_REVISION} -> ${ENCODER_DIR}"
+
+validate_checkpoint_targets() {
+    "${PYTHON_CMD[@]}" - "${CHECKPOINT_ROOT}" \
+        "${BASE_DIR}" "${FRS_DIR}" "${ENCODER_DIR}" <<'PY'
+from pathlib import Path
+import sys
+
+checkpoint_root = Path(sys.argv[1]).resolve(strict=False)
+targets = (
+    ("base", Path(sys.argv[2]), checkpoint_root / "model"),
+    ("FRS", Path(sys.argv[3]), checkpoint_root / "frs"),
+    ("encoder", Path(sys.argv[4]), checkpoint_root / "encoder"),
+)
+for label, target, allowed_root in targets:
+    canonical_target = target.resolve(strict=False)
+    canonical_root = allowed_root.resolve(strict=False)
+    if not canonical_target.is_relative_to(canonical_root):
+        print(
+            f"refusing checkpoint target outside its allowed root: "
+            f"{label}: {canonical_target} (allowed: {canonical_root})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+PY
+}
+
+validate_checkpoint_targets
 
 base_complete() {
     "${PYTHON_CMD[@]}" - "${BASE_DIR}" "${BASE_REPO}" "${BASE_REVISION}" \
