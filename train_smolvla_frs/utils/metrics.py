@@ -178,6 +178,9 @@ class EvaluationResult:
     n_mid_w_right: int | None = None
     bimanual_quadrants: dict[str, dict[str, object]] | None = None
     bimanual_gate_region_counts: np.ndarray | None = None
+    # Effective rank-region boundaries for consumers of retained bimanual data.
+    gate_low_threshold: float = 0.3
+    gate_high_threshold: float = 0.7
     gt_actions: np.ndarray | None = None
     vla_actions: np.ndarray | None = None
 
@@ -991,6 +994,8 @@ def evaluate_split(
         n_mid_w_right=(None if wrist_stratified is None else wrist_stratified["right"]["n_mid_w"]),  # type: ignore[arg-type]
         bimanual_quadrants=quadrant_metrics,
         bimanual_gate_region_counts=joint_gate_region_counts,
+        gate_low_threshold=rank_low_gate_threshold,
+        gate_high_threshold=rank_high_gate_threshold,
         gt_actions=np.concatenate(gt_actions) if gt_actions else None,
         vla_actions=np.concatenate(vla_actions) if vla_actions else None,
     )

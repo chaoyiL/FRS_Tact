@@ -354,6 +354,9 @@ def plot_gate_diagnostics(
     right_gate = result.sample_gate_w_right
     if left_gate is None or right_gate is None or result.bimanual_gate_region_counts is None:
         raise ValueError("bimanual Gate diagnostics require per-wrist retained Gate values")
+    counts = np.asarray(result.bimanual_gate_region_counts, dtype=np.int64)
+    if counts.shape != (3, 3):
+        raise ValueError(f"bimanual Gate region counts must have shape (3, 3), got {counts.shape}")
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.subplots_adjust(left=0.08, right=0.96, top=0.91, bottom=0.09, hspace=0.38, wspace=0.28)
@@ -380,23 +383,24 @@ def plot_gate_diagnostics(
     count_axis = axes[1, 0]
     region_labels = ("low", "mid", "high")
     offsets = (-0.18, 0.18)
-    for offset, (wrist, values, color) in zip(offsets, wrist_values, strict=True):
-        values = np.asarray(values, dtype=np.float64)
-        counts = np.asarray(
-            (
-                np.sum(values <= 0.3),
-                np.sum((values > 0.3) & (values < 0.7)),
-                np.sum(values >= 0.7),
-            )
+    marginal_counts = (counts.sum(axis=1), counts.sum(axis=0))
+    for offset, (wrist, _, color), wrist_counts in zip(
+        offsets,
+        wrist_values,
+        marginal_counts,
+        strict=True,
+    ):
+        count_axis.bar(
+            np.arange(3) + offset,
+            wrist_counts,
+            width=0.36,
+            label=wrist,
+            color=color,
         )
-        count_axis.bar(np.arange(3) + offset, counts, width=0.36, label=wrist, color=color)
     count_axis.set_xticks(np.arange(3), region_labels)
     _finish_axis(count_axis, title="Per-wrist Gate region counts", ylabel="samples")
 
     heatmap_axis = axes[1, 1]
-    counts = np.asarray(result.bimanual_gate_region_counts, dtype=np.int64)
-    if counts.shape != (3, 3):
-        raise ValueError(f"bimanual Gate region counts must have shape (3, 3), got {counts.shape}")
     image = heatmap_axis.imshow(counts, cmap="Blues")
     total = int(np.sum(counts))
     for row, column in np.ndindex(counts.shape):
@@ -421,10 +425,14 @@ def _mixed_quadrant_examples(
     if left_gate is None or right_gate is None:
         return None, None
     if quadrant == "high_low":
-        mask = (left_gate >= 0.7) & (right_gate <= 0.3)
+        mask = (left_gate >= result.gate_high_threshold) & (
+            right_gate <= result.gate_low_threshold
+        )
         preservation = result.sample_mse_vla_right
     elif quadrant == "low_high":
-        mask = (left_gate <= 0.3) & (right_gate >= 0.7)
+        mask = (left_gate <= result.gate_low_threshold) & (
+            right_gate >= result.gate_high_threshold
+        )
         preservation = result.sample_mse_vla_left
     else:
         raise ValueError(f"unsupported mixed quadrant {quadrant!r}")

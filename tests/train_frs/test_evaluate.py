@@ -74,6 +74,8 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
         loss_mode="bimanual_gated",
         gate_tau=0.5,
         gate_temperature=0.1,
+        rank_low_gate_threshold=0.2,
+        rank_high_gate_threshold=0.8,
     )
 
     np.testing.assert_allclose(result.sample_gate_w_left, [1.0, 0.0], atol=0.01)
@@ -106,6 +108,8 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
     assert result.low_unsafe_frac_right == pytest.approx(0.0)
     assert result.bimanual_quadrants["high_low"]["n"] == 1
     assert result.bimanual_gate_region_counts.shape == (3, 3)
+    assert result.gate_low_threshold == pytest.approx(0.2)
+    assert result.gate_high_threshold == pytest.approx(0.8)
 
     result_with_actions = evaluate_split(
         object(),  # type: ignore[arg-type]
@@ -117,6 +121,8 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
         loss_mode="bimanual_gated",
         gate_tau=0.5,
         gate_temperature=0.1,
+        rank_low_gate_threshold=0.2,
+        rank_high_gate_threshold=0.8,
     )
 
     np.testing.assert_allclose(result_with_actions.gt_actions, gt_action)

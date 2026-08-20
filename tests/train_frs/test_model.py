@@ -754,15 +754,23 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
 
 
 @pytest.mark.parametrize(
-    ("loss_mode", "action_dim", "tactile_num_tokens", "expected_gate", "break_overview"),
     (
-        ("gated", 1, 1, np.asarray([0.98201376], dtype=np.float32), False),
+        "loss_mode",
+        "action_dim",
+        "tactile_num_tokens",
+        "expected_gate",
+        "break_overview",
+        "diagnostic_failure",
+    ),
+    (
+        ("gated", 1, 1, np.asarray([0.98201376], dtype=np.float32), False, None),
         (
             "bimanual_gated",
             20,
             4,
             np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
-            False,
+            None,
+            None,
         ),
         (
             "bimanual_gated",
@@ -770,6 +778,23 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
             4,
             np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
             True,
+            None,
+        ),
+        (
+            "bimanual_gated",
+            20,
+            4,
+            np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
+            False,
+            "gate",
+        ),
+        (
+            "bimanual_gated",
+            20,
+            4,
+            np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
+            False,
+            "action",
         ),
     ),
 )
@@ -781,6 +806,7 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
     tactile_num_tokens,
     expected_gate,
     break_overview,
+    diagnostic_failure,
 ):
     import train_smolvla_frs.train_frs as train_module
     import train_smolvla_frs.utils.data as data_module
@@ -958,7 +984,35 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         return validation
 
     monkeypatch.setattr(metrics_module, "evaluate_split", fake_evaluate_split)
+    diagnostic_calls = []
+    if diagnostic_failure is not None:
+
+        def record_gate_diagnostics(*args, **kwargs):
+            del args, kwargs
+            diagnostic_calls.append("gate")
+            if diagnostic_failure == "gate":
+                raise RuntimeError("diagnostic failure")
+            return tmp_path / "gate.png"
+
+        def record_action_examples(*args, **kwargs):
+            del args, kwargs
+            diagnostic_calls.append("action")
+            if diagnostic_failure == "action":
+                raise IndexError("action diagnostic failure")
+            return tmp_path / "action.png"
+
+        monkeypatch.setattr(
+            bimanual_visualize_module,
+            "plot_gate_diagnostics",
+            record_gate_diagnostics,
+        )
+        monkeypatch.setattr(
+            bimanual_visualize_module,
+            "plot_bimanual_action_examples",
+            record_action_examples,
+        )
     if break_overview:
+
         def raise_legacy_history_error(*args, **kwargs):
             del args, kwargs
             raise ValueError("bimanual history fields are absent")
@@ -1024,6 +1078,8 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
     assert len(evaluation_kwargs) == 1
     if loss_mode == "bimanual_gated":
         assert evaluation_kwargs[0]["keep_predictions"] is True
+        if diagnostic_failure is not None:
+            assert diagnostic_calls == ["gate", "action"]
     else:
         assert evaluation_kwargs[0]["keep_predictions"] is False
     np.testing.assert_allclose(seen_gates[0], expected_gate)

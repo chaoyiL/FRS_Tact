@@ -182,7 +182,7 @@ def test_overview_requires_per_wrist_feasibility_history_fields(tmp_path: Path) 
 
 
 def _bimanual_result_with_mixed_quadrants() -> EvaluationResult:
-    cache_indices = np.asarray([10, 11, 12, 13, 14, 15], dtype=np.int64)
+    cache_indices = np.asarray([10, 11, 12, 13, 14, 15, 16], dtype=np.int64)
     actions = np.zeros((len(cache_indices), 3, 20), dtype=np.float32)
     for position in range(len(cache_indices)):
         actions[position, :, 9] = position + 1
@@ -190,10 +190,10 @@ def _bimanual_result_with_mixed_quadrants() -> EvaluationResult:
     prediction = actions + 0.25
     gt_action = actions + 0.5
     vla_action = actions
-    left_gate = np.asarray([0.9, 0.9, 0.9, 0.1, 0.1, 0.1])
-    right_gate = np.asarray([0.1, 0.1, 0.1, 0.9, 0.9, 0.9])
-    left_mse_vla = np.asarray([0.2, 0.5, 0.9, 0.1, 0.4, 0.8])
-    right_mse_vla = np.asarray([0.2, 0.5, 0.9, 0.1, 0.4, 0.8])
+    left_gate = np.asarray([0.85, 0.85, 0.85, 0.15, 0.15, 0.15, 0.75])
+    right_gate = np.asarray([0.15, 0.15, 0.15, 0.85, 0.85, 0.85, 0.25])
+    left_mse_vla = np.asarray([0.9, 0.5, 0.2, 0.9, 0.4, 0.1, 99.0])
+    right_mse_vla = np.asarray([0.2, 0.5, 0.9, 0.8, 0.4, 0.1, 99.0])
     zeros = np.zeros(len(cache_indices), dtype=np.float64)
     return EvaluationResult(
         target="gt",
@@ -227,13 +227,15 @@ def _bimanual_result_with_mixed_quadrants() -> EvaluationResult:
         predictions=prediction,
         sample_gate_w_left=left_gate,
         sample_gate_w_right=right_gate,
-        sample_tactile_change_left=np.asarray([0.9, 0.8, 0.7, 0.1, 0.2, 0.3]),
-        sample_tactile_change_right=np.asarray([0.1, 0.2, 0.3, 0.9, 0.8, 0.7]),
+        sample_tactile_change_left=np.asarray([0.9, 0.8, 0.7, 0.1, 0.2, 0.3, 0.5]),
+        sample_tactile_change_right=np.asarray([0.1, 0.2, 0.3, 0.9, 0.8, 0.7, 0.5]),
         sample_mse_vla_left=left_mse_vla,
         sample_mse_vla_right=right_mse_vla,
-        bimanual_gate_region_counts=np.arange(9, dtype=np.int64).reshape(3, 3),
+        bimanual_gate_region_counts=np.asarray([[0, 0, 3], [0, 1, 0], [3, 0, 0]]),
         gt_actions=gt_action,
         vla_actions=vla_action,
+        gate_low_threshold=0.2,
+        gate_high_threshold=0.8,
     )
 
 
@@ -269,6 +271,8 @@ def test_gate_diagnostics_and_action_examples_render_retained_bimanual_actions(t
     gate_figure, action_figure = figures.values()
     heatmap = next(image for axis in gate_figure.axes for image in axis.images)
     assert heatmap.get_array().shape == (3, 3)
+    count_axis = gate_figure.axes[2]
+    assert [patch.get_height() for patch in count_axis.patches] == [3, 1, 3, 3, 1, 3]
     action_heatmaps = [
         image
         for axis in action_figure.axes
@@ -287,6 +291,6 @@ def test_gate_diagnostics_and_action_examples_render_retained_bimanual_actions(t
     assert "high/low median cache=11" in titles
     assert "high/low worst cache=12" in titles
     assert "low/high median cache=14" in titles
-    assert "low/high worst cache=15" in titles
+    assert "low/high worst cache=13" in titles
     assert "model" not in inspect.signature(bimanual_visualize.plot_gate_diagnostics).parameters
     assert "model" not in inspect.signature(bimanual_visualize.plot_bimanual_action_examples).parameters

@@ -1922,15 +1922,25 @@ def train_decoder(
                                 result=validation,
                                 output_path=output_dir / "gate_diagnostics.png",
                             )
+                        except Exception as exc:
+                            print(
+                                f"warning: could not refresh bimanual Gate diagnostics: {exc}",
+                                flush=True,
+                            )
+                        else:
+                            print(f"bimanual_gate_diagnostics={gate_plot}", flush=True)
+                        try:
                             action_plot = plot_bimanual_action_examples(
                                 validation,
                                 pairs,
                                 output_path=output_dir / "bimanual_action_examples.png",
                             )
-                        except (OSError, ValueError) as exc:
-                            print(f"warning: could not refresh bimanual diagnostics: {exc}", flush=True)
+                        except Exception as exc:
+                            print(
+                                f"warning: could not refresh bimanual action examples: {exc}",
+                                flush=True,
+                            )
                         else:
-                            print(f"bimanual_gate_diagnostics={gate_plot}", flush=True)
                             print(f"bimanual_action_examples={action_plot}", flush=True)
                     save_checkpoint(
                         output_dir / "last",
