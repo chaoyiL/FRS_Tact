@@ -46,18 +46,26 @@ bash train_pi05_frs/scripts/start_frs_pi05_train.sh \
   train_pi05_frs/configs/train_pi05_frs_bimanual_gated.yaml
 ```
 
-This configuration keeps the Pi0.5 model action width at 32 dimensions, but optimizes the first
-20 physical dimensions independently per wrist: left `0:10` and right `10:20`. The remaining 12D
-padded tail uses the frozen Pi0.5/VLA endpoint for 32D compatibility and is masked from bimanual
-loss and metrics.
+This configuration keeps the Pi0.5 model action width at 32 dimensions, but the bimanual contract
+also supports a native 20-dimensional model. No other action width is valid. It optimizes the
+first 20 physical dimensions independently per wrist: left `0:10` and right `10:20`. For a 32D
+model, the remaining 12D padded tail uses the frozen Pi0.5/VLA endpoint and is excluded from every
+bimanual loss, aggregate metric, checkpoint tie-break, visualization, and deployment safety
+decision.
 Per-wrist Gate values choose loss targets and auxiliary weighting only; Gate is not a decoder
 input. The existing `configs/train_pi05_frs.yaml` scalar configuration remains available for
 legacy `gt`, `predicted`, and `gated` training.
 
+The tactile streams have a fixed semantic basename order: `tactile_left_0`,
+`tactile_right_0`, `tactile_left_1`, `tactile_right_1`. Training, resume, standalone evaluation,
+and deployment validate this order, and bimanual checkpoints record it in objective metadata.
+
 For a bimanual run, the stable diagnostic artifact names are `training_overview.png`,
-`bimanual_behavior.png`, `gate_diagnostics.png`, and `bimanual_action_examples.png`. Training
-writes the complete set when plotting is enabled; evaluation writes the gate and action-example
-diagnostics for its selected output.
+`bimanual_behavior.png`, `gate_diagnostics.png`, and `bimanual_action_examples.png`. Training and
+standalone evaluation independently attempt the complete set when plotting is enabled. Evaluation
+of `<run>/best` or `<run>/last` prefers `<run>/history.csv`; when no run history is available it
+writes `evaluation_snapshot_history.csv` so overview and behavior plots are still generated from
+the evaluation result.
 
 ## Configuration paths
 
@@ -93,9 +101,10 @@ the loader pins the immutable generation currently referenced by `<output>/last`
 For a checkpoint from another run, copy or pin it outside every writable output/cache root and set
 `frs_training.resume_from` to that directory. Completed cache stages remain skip/resume safe and
 the decoder restores compatible parameters and optimizer state.
-The bimanual objective additionally requires the exact 32D/20D objective metadata, including its
-per-wrist slices, Gate semantics, and padded-tail policy. Scalar/legacy checkpoints do not contain
-that contract and cannot resume as bimanual; start a new bimanual output directory instead.
+The bimanual objective additionally requires the exact 20D-or-32D objective metadata, including
+its per-wrist slices, fixed tactile-key basename order, Gate semantics, and padded-tail policy.
+Scalar/legacy checkpoints do not contain that contract and cannot resume as bimanual; start a new
+bimanual output directory instead.
 Each save first writes and verifies an immutable generation under
 `<output>/.checkpoint-generations/`, then atomically switches the `last` or `best` symlink. Tools
 may consume those aliases directly. When copying a checkpoint outside its output directory,
@@ -146,8 +155,8 @@ After evaluation, point `deploy_pi05/configs/deploy_pi05_frs.yaml` at the select
 the same tactile encoder, Pi0.5 checkpoint, norm stats, dimensions, camera map, and decoder solver.
 Then follow `deploy_pi05/README.md`; training does not start or modify a robot client.
 For bimanual deployment, hand off a pinned bimanual checkpoint generation together with the
-matching 32D configuration and assets; the deployment runtime validates the checkpoint's fixed
-20D physical-action metadata before loading it.
+matching 20D or 32D configuration and assets; the deployment runtime validates the checkpoint's
+fixed 20D physical-action and tactile-order metadata before loading it.
 
 Encoder training remains in `train_encoder`, and modality analysis remains outside this project.
 This package consumes their stable outputs only. It does not contain deployment clients, encoder

@@ -16,9 +16,46 @@ from typing import Any, Literal
 
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_action_dim
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 
 LossMode = Literal["gt", "predicted", "gated", "bimanual_gated"]
+
+
+def _validate_bimanual_training_contract(
+    *,
+    loss_mode: LossMode,
+    action_dim: int,
+    tactile_keys: Sequence[object] | None,
+) -> None:
+    """Validate the fixed bimanual cache/key contract at the core API boundary."""
+
+    if loss_mode != BIMANUAL_LOSS_MODE:
+        return
+    validate_bimanual_action_dim(
+        action_dim, field_name="training action_dim"
+    )
+    if tactile_keys is None:
+        raise ValueError("training tactile_keys are required for bimanual_gated")
+    validate_bimanual_tactile_keys(tactile_keys, field_name="training tactile_keys")
+
+
+def _validate_history_csv_header(
+    history_path: pathlib.Path, expected_fields: Sequence[str]
+) -> None:
+    """Reject resume append when the existing CSV schema or order differs."""
+
+    import csv
+
+    with history_path.open(encoding="utf-8", newline="") as history_file:
+        actual = next(csv.reader(history_file), None)
+    expected = list(expected_fields)
+    if actual != expected:
+        raise ValueError(
+            "existing history.csv header does not match the current training schema: "
+            f"{actual!r} != {expected!r}"
+        )
 
 
 def _resolve_resume_dir(
@@ -342,6 +379,7 @@ def train_decoder(
         resolve_peak_learning_rate,
         train_step,
     )
+    from train_pi05_frs.utils.window_io import TACTILE_KEYS
     from train_pi05_frs.pi05_cache.cache import CachedPairs, MultiCachedPairs
 
     history_fields = [
@@ -544,6 +582,11 @@ def train_decoder(
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
         pairs = CachedPairs(cache_dir)
+    _validate_bimanual_training_contract(
+        loss_mode=loss_mode,
+        action_dim=int(pairs.manifest["action_dim"]),
+        tactile_keys=tactile_keys if use_cached_embeddings else TACTILE_KEYS,
+    )
     if resume_dir is not None:
         model, resume_metadata = load_checkpoint(resume_dir)
         _validate_resume_cache_provenance(resume_metadata, pairs.manifest)
@@ -765,6 +808,8 @@ def train_decoder(
     base_key = jax.random.key(seed)
     history_exists = history_path.exists() and history_path.stat().st_size > 0
     history_mode = "a" if resume_dir is not None and history_exists else "w"
+    if history_mode == "a":
+        _validate_history_csv_header(history_path, history_fields)
 
     def _refresh_training_plot(*, announce: bool = False) -> None:
         if not write_plots:
@@ -1234,7 +1279,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Train tactile GRU + cross-attn flow decoder "
-            "(frozen ResNet features; loss-mode gt / predicted / gated)."
+            "(frozen ResNet features; loss-mode gt / predicted / gated / "
+            "bimanual_gated)."
         )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
@@ -1266,12 +1312,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loss-mode",
-        choices=("gt", "predicted", "gated"),
+        choices=("gt", "predicted", "gated", BIMANUAL_LOSS_MODE),
         default="gt",
         help=(
             "gt: FM(gt)+aux*MSE(decode,gt) (primary eval vs GT). "
             "predicted: FM vs VLA predicted_actions only (no aux; sanity check). "
             "gated: FRS_Tact three-region six-term Gate objective. "
+            "bimanual_gated: fixed per-wrist 20D objective (gate-lambda ignored). "
             "All modes always log both val_mse_gt and val_mse_pred."
         ),
     )
@@ -1414,7 +1461,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         loss_mode=args.loss_mode,
         gate_tau=args.gate_tau,
         gate_temperature=args.gate_temperature,
-        gate_lambda=args.gate_lambda,
+        gate_lambda=(
+            0.0 if args.loss_mode == BIMANUAL_LOSS_MODE else args.gate_lambda
+        ),
         aux_decode_weight=args.aux_decode_weight,
         aux_decode_steps=(
             args.validation_steps if args.aux_decode_steps is None else args.aux_decode_steps

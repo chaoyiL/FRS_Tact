@@ -330,6 +330,71 @@ def test_bimanual_metadata_supports_native_and_padded_action_widths():
         assert metadata["padded_tail_policy"] == "vla_endpoint_masked"
 
 
+@pytest.mark.parametrize(
+    ("action_dim", "supported"),
+    ((19, False), (20, True), (21, False), (24, False), (32, True), (33, False)),
+)
+def test_bimanual_action_width_contract_matches_schema_and_config(
+    tmp_path: Path, action_dim: int, supported: bool
+) -> None:
+    config = copy.deepcopy(_valid_config(tmp_path))
+    config["frs_training"].pop("gate_lambda")
+    config["frs_training"]["loss_mode"] = BIMANUAL_LOSS_MODE
+    config["model"]["action_dim"] = action_dim
+
+    if supported:
+        metadata = bimanual_objective_metadata(action_dim=action_dim)
+        validate_bimanual_objective_metadata(metadata, action_dim=action_dim)
+        validate_config(config, check_paths=False)
+        return
+
+    with pytest.raises(ValueError, match="action_dim"):
+        bimanual_objective_metadata(action_dim=action_dim)
+    with pytest.raises(ValueError, match="action_dim"):
+        validate_config(config, check_paths=False)
+
+
+def test_bimanual_metadata_records_and_validates_tactile_semantic_order() -> None:
+    expected = [
+        "tactile_left_0",
+        "tactile_right_0",
+        "tactile_left_1",
+        "tactile_right_1",
+    ]
+    metadata = bimanual_objective_metadata(action_dim=32)
+
+    assert metadata["tactile_key_basenames"] == expected
+    metadata["tactile_key_basenames"] = [
+        "tactile_right_0",
+        "tactile_left_0",
+        "tactile_left_1",
+        "tactile_right_1",
+    ]
+    with pytest.raises(ValueError, match="tactile_key_basenames"):
+        validate_bimanual_objective_metadata(metadata, action_dim=32)
+
+
+@pytest.mark.parametrize(
+    "permutation",
+    (
+        ("tactile_right_0", "tactile_left_0", "tactile_left_1", "tactile_right_1"),
+        ("tactile_left_0", "tactile_left_1", "tactile_right_0", "tactile_right_1"),
+    ),
+)
+def test_bimanual_config_rejects_representative_tactile_permutations(
+    tmp_path: Path, permutation: tuple[str, ...]
+) -> None:
+    config = copy.deepcopy(_valid_config(tmp_path))
+    config["frs_training"].pop("gate_lambda")
+    config["frs_training"]["loss_mode"] = BIMANUAL_LOSS_MODE
+    config["model"]["tactile_keys"] = [
+        f"observation.images.{basename}" for basename in permutation
+    ]
+
+    with pytest.raises(ValueError, match="fixed bimanual tactile key order"):
+        validate_config(config, check_paths=False)
+
+
 def test_bimanual_metadata_rejects_wrong_tail_policy():
     metadata = bimanual_objective_metadata(action_dim=32)
     metadata["padded_tail_policy"] = "train_gt"

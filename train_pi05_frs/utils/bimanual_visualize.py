@@ -95,6 +95,121 @@ def _save_figure(fig: Any, output_path: pathlib.Path) -> pathlib.Path:
     return output_path
 
 
+def write_bimanual_evaluation_snapshot(
+    output_path: pathlib.Path,
+    result: EvaluationResult,
+    *,
+    epoch: int,
+) -> pathlib.Path:
+    """Write a one-row history-compatible snapshot for standalone diagnostics."""
+
+    output_path = pathlib.Path(output_path)
+    extra_fields = {
+        *(f"val_tactile_change_{wrist}" for wrist in BIMANUAL_WRISTS),
+        *(f"val_tactile_change_{quantile}_{wrist}" for wrist in BIMANUAL_WRISTS
+          for quantile in ("p10", "p50", "p90")),
+    }
+    fields = [
+        "epoch",
+        *sorted(_REQUIRED_BIMANUAL_FIELDS | _OVERVIEW_REQUIRED_FIELDS | extra_fields),
+    ]
+    row: dict[str, float | int] = dict.fromkeys(fields, math.nan)
+    row["epoch"] = int(epoch)
+
+    def scalar(name: str) -> float:
+        value = getattr(result, name, None)
+        return math.nan if value is None else float(value)
+
+    row.update(
+        {
+            "train_gate_w_left": scalar("gate_w_left"),
+            "train_gate_w_right": scalar("gate_w_right"),
+            "val_composite_fm": scalar("composite_fm"),
+            "val_mse_gt": float(result.mse_gt),
+            "val_mse_pred": float(result.mse_pred),
+            "val_mse_vla_gt": scalar("mse_vla_gt"),
+            "val_gt_gain": scalar("gt_gain"),
+            "val_relative_gt_error": scalar("relative_gt_error"),
+        }
+    )
+    low_threshold = float(result.gate_low_threshold)
+    high_threshold = float(result.gate_high_threshold)
+    for wrist in BIMANUAL_WRISTS:
+        gates_value = getattr(result, f"sample_gate_w_{wrist}")
+        changes_value = getattr(result, f"sample_tactile_change_{wrist}")
+        gates = (
+            np.asarray(gates_value, dtype=np.float64)
+            if gates_value is not None
+            else np.asarray([], dtype=np.float64)
+        )
+        changes = (
+            np.asarray(changes_value, dtype=np.float64)
+            if changes_value is not None
+            else np.asarray([], dtype=np.float64)
+        )
+        gate_mean = scalar(f"gate_w_{wrist}")
+        change_mean = scalar(f"tactile_change_{wrist}")
+        row[f"val_gate_w_{wrist}"] = (
+            float(np.mean(gates)) if math.isnan(gate_mean) and gates.size else gate_mean
+        )
+        row[f"val_tactile_change_{wrist}"] = (
+            float(np.mean(changes))
+            if math.isnan(change_mean) and changes.size
+            else change_mean
+        )
+        for quantile, fraction in (("p10", 0.1), ("p50", 0.5), ("p90", 0.9)):
+            gate_quantile = scalar(f"gate_w_{quantile}_{wrist}")
+            change_quantile = scalar(f"tactile_change_{quantile}_{wrist}")
+            row[f"val_gate_w_{quantile}_{wrist}"] = (
+                float(np.quantile(gates, fraction))
+                if math.isnan(gate_quantile) and gates.size
+                else gate_quantile
+            )
+            row[f"val_tactile_change_{quantile}_{wrist}"] = (
+                float(np.quantile(changes, fraction))
+                if math.isnan(change_quantile) and changes.size
+                else change_quantile
+            )
+        for region, mask in (
+            ("low", gates <= low_threshold),
+            ("mid", (gates > low_threshold) & (gates < high_threshold)),
+            ("high", gates >= high_threshold),
+        ):
+            count = getattr(result, f"n_{region}_w_{wrist}", None)
+            row[f"val_n_{region}_w_{wrist}"] = (
+                int(np.count_nonzero(mask)) if count is None else int(count)
+            )
+        row[f"val_low_safe_frac_{wrist}"] = scalar(f"low_safe_frac_{wrist}")
+        row[f"val_rank_satisfied_high_frac_{wrist}"] = scalar(
+            f"rank_satisfied_high_frac_{wrist}"
+        )
+
+    quadrants = result.bimanual_quadrants or {}
+    for quadrant in BIMANUAL_QUADRANTS:
+        quadrant_values = quadrants.get(quadrant, {})
+        row[f"val_quadrant_{quadrant}_n"] = int(
+            quadrant_values.get("n", 0)
+        )
+        for wrist in BIMANUAL_WRISTS:
+            wrist_values = quadrant_values.get(wrist, {})
+            for metric in _QUADRANT_METRICS:
+                value = wrist_values.get(metric, math.nan)
+                row[f"val_quadrant_{quadrant}_{metric}_{wrist}"] = float(value)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output_path.with_suffix(f"{output_path.suffix}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="") as file:
+            writer = csv.DictWriter(file, fieldnames=fields)
+            writer.writeheader()
+            writer.writerow(row)
+        os.replace(temporary, output_path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return output_path
+
+
 def _plot_series(axis: Any, rows: list[dict[str, Any]], field: str, *, label: str,
                  color: str, alpha: float = 1.0, linestyle: str = "-") -> bool:
     epochs, values = _finite_series(rows, field)
@@ -138,7 +253,7 @@ def plot_bimanual_training_overview(history_path: pathlib.Path, *, output_path: 
                                 ("val_mse_pred", "MSE(FRS, VLA)", "#4C72B0"),
                                 ("val_mse_vla_gt", "MSE(VLA, GT) frozen baseline", "#555555")):
         _plot_series(axes[2], rows, field, label=label, color=color)
-    _finish_axis(axes[2], title="Full-20D validation decode errors", ylabel="MSE")
+    _finish_axis(axes[2], title="Physical-20D validation decode errors", ylabel="MSE")
     for field, label, color in (("val_gt_gain", "GT gain", "#55A868"),
                                 ("val_relative_gt_error", "relative GT error", "#8172B2")):
         _plot_series(axes[3], rows, field, label=label, color=color)
@@ -407,6 +522,7 @@ def plot_bimanual_diagnostics(
     result: EvaluationResult,
     *,
     output_dir: pathlib.Path,
+    pairs: Any | None = None,
     min_rank_satisfied: float = 0.8,
     min_low_safe: float = 0.9,
 ) -> tuple[pathlib.Path, ...]:
@@ -442,6 +558,7 @@ def plot_bimanual_diagnostics(
             "action examples",
             lambda: plot_bimanual_action_examples(
                 result,
+                pairs,
                 output_path=output_dir / "bimanual_action_examples.png",
             ),
         ),

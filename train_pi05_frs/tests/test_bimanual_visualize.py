@@ -174,3 +174,29 @@ def test_diagnostic_bundle_attempts_other_plots_after_one_plot_fails(
         "gate_diagnostics.png",
         "bimanual_action_examples.png",
     }
+
+
+def test_evaluation_snapshot_fallback_writes_all_four_diagnostics(
+    tmp_path: Path,
+) -> None:
+    from train_pi05_frs.utils.bimanual_visualize import (
+        plot_bimanual_diagnostics,
+        write_bimanual_evaluation_snapshot,
+    )
+
+    result = make_bimanual_evaluation_result(action_dim=32)
+    snapshot = write_bimanual_evaluation_snapshot(
+        tmp_path / "evaluation_snapshot_history.csv",
+        result,
+        epoch=7,
+    )
+    paths = plot_bimanual_diagnostics(snapshot, result, output_dir=tmp_path)
+
+    assert snapshot.name == "evaluation_snapshot_history.csv"
+    assert {path.name for path in paths} == {
+        "training_overview.png",
+        "bimanual_behavior.png",
+        "gate_diagnostics.png",
+        "bimanual_action_examples.png",
+    }
+    assert all(path.stat().st_size > 0 for path in paths)

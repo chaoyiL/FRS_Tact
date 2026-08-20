@@ -29,6 +29,15 @@ if TYPE_CHECKING:
     from .policy import Pi05RemotePolicy
 
 
+_BIMANUAL_STEERED_ACTION_DIM = 20
+_BIMANUAL_TACTILE_KEY_BASENAMES = (
+    "tactile_left_0",
+    "tactile_right_0",
+    "tactile_left_1",
+    "tactile_right_1",
+)
+
+
 @dataclass(frozen=True)
 class FRSDiagnostics:
     tactile_change: float
@@ -231,7 +240,12 @@ def _require_equal(actual: Any, expected: Any, name: str) -> None:
         raise ValueError(f"FRS checkpoint mismatch for {name}: {actual!r} != {expected!r}")
 
 
-def _validate_loss_contract(extra: Mapping[str, Any], *, action_dim: int) -> None:
+def _validate_loss_contract(
+    extra: Mapping[str, Any],
+    *,
+    action_dim: int,
+    tactile_keys: Sequence[str],
+) -> None:
     loss_mode = extra.get("loss_mode")
     if loss_mode == "gated":
         return
@@ -246,10 +260,17 @@ def _validate_loss_contract(extra: Mapping[str, Any], *, action_dim: int) -> Non
         "steered_action_dim": 20,
         "action_slices": {"left": [0, 10], "right": [10, 20]},
         "wrist_token_indices": {"left": [0, 1], "right": [2, 3]},
+        "tactile_key_basenames": list(_BIMANUAL_TACTILE_KEY_BASENAMES),
         "padded_tail_policy": "vla_endpoint_masked",
     }
     for field, value in expected.items():
         _require_equal(extra.get(field), value, field)
+    basenames = tuple(str(key).rsplit(".", 1)[-1] for key in tactile_keys)
+    if basenames != _BIMANUAL_TACTILE_KEY_BASENAMES:
+        raise ValueError(
+            "frs.tactile_keys must contain the fixed bimanual tactile key order "
+            f"{_BIMANUAL_TACTILE_KEY_BASENAMES!r}, got {basenames!r}"
+        )
 
 
 class TactileHistory:
@@ -348,7 +369,11 @@ class FRSRuntime:
         extra = self.metadata.get("extra_metadata")
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
-        _validate_loss_contract(extra, action_dim=decoder.action_dim)
+        _validate_loss_contract(
+            extra,
+            action_dim=decoder.action_dim,
+            tactile_keys=self.config.tactile_keys,
+        )
         _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
         _require_equal(str(extra.get("aux_decode_solver")), self.config.decode_solver, "decode_solver")
         _require_equal(int(extra.get("aux_decode_steps", 0)), self.config.decode_steps, "decode_steps")
@@ -559,10 +584,25 @@ class FRSRuntime:
         assert self._action_vla_normalized is not None
         array = np.asarray(jax.device_get(decoded), dtype=np.float32)
         expected = (1, self.policy.config.action_horizon, self.policy.config.action_dim)
-        if array.shape != expected or not np.isfinite(array).all():
+        if array.shape != expected:
             raise ValueError(f"FRS output must be finite with shape {expected}, got {array.shape}")
-        delta = float(np.sqrt(np.mean(np.square(array - self._action_vla_normalized))))
-        max_abs = float(np.max(np.abs(array)))
+        extra = self.metadata.get("extra_metadata")
+        bimanual = (
+            isinstance(extra, Mapping)
+            and extra.get("loss_mode") == "bimanual_gated"
+        )
+        safety_width = (
+            _BIMANUAL_STEERED_ACTION_DIM if bimanual else int(array.shape[-1])
+        )
+        if bimanual and array.shape[-1] > safety_width:
+            array = np.array(array, copy=True)
+            array[..., safety_width:] = self._action_vla_normalized[..., safety_width:]
+        if not np.isfinite(array).all():
+            raise ValueError(f"FRS output must be finite with shape {expected}, got {array.shape}")
+        physical = array[..., :safety_width]
+        vla_physical = self._action_vla_normalized[..., :safety_width]
+        delta = float(np.sqrt(np.mean(np.square(physical - vla_physical))))
+        max_abs = float(np.max(np.abs(physical)))
         if max_abs > self.config.max_normalized_action_abs:
             raise ValueError(
                 f"FRS normalized action safety limit exceeded: {max_abs:.4f} > "

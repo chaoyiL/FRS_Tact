@@ -10,6 +10,7 @@ import numpy as np
 from train_pi05_frs.utils.bimanual_metrics import bimanual_gate_region_counts
 from train_pi05_frs.utils.bimanual_metrics import bimanual_quadrant_metrics
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_pi05_frs.utils.bimanual_schema import STEERED_ACTION_DIM
 from train_pi05_frs.utils.data import TactileConditionedBatches
 from train_pi05_frs.utils.model import FlowSolver
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
@@ -695,10 +696,10 @@ def evaluate_split(
                 "bimanual validation requires finite per-wrist gate weights"
             )
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
-        flow_gt = flow_matching_loss_per_sample(
+        flow_gt = masked_flow_matching_loss_per_sample(
             model, x_base, gt_action, t, tactile_seq, state=state
         )
-        flow_pred = flow_matching_loss_per_sample(
+        flow_pred = masked_flow_matching_loss_per_sample(
             model, x_base, vla_action, t, tactile_seq, state=state
         )
         composite_target, _ = bimanual_composite_endpoint(
@@ -719,9 +720,18 @@ def evaluate_split(
             solver=solver,
             state=state,
         )
-        mse_gt, mae_gt = _per_sample_errors(prediction, gt_action)
-        mse_pred, mae_pred = _per_sample_errors(prediction, vla_action)
-        mse_vla_gt, _ = _per_sample_errors(vla_action, gt_action)
+        mse_gt, mae_gt = _per_sample_errors(
+            prediction[..., :STEERED_ACTION_DIM],
+            gt_action[..., :STEERED_ACTION_DIM],
+        )
+        mse_pred, mae_pred = _per_sample_errors(
+            prediction[..., :STEERED_ACTION_DIM],
+            vla_action[..., :STEERED_ACTION_DIM],
+        )
+        mse_vla_gt, _ = _per_sample_errors(
+            vla_action[..., :STEERED_ACTION_DIM],
+            gt_action[..., :STEERED_ACTION_DIM],
+        )
 
         cache_index_parts.append(np.asarray(indices, dtype=np.int64))
         flow_gt_parts.append(np.asarray(jax.device_get(flow_gt)))

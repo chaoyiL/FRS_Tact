@@ -11,6 +11,7 @@ import numpy as np
 from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 from train_pi05_frs.utils.data import CachedTactileEmbeddingBatches
 from train_pi05_frs.utils.data import TactileConditionedBatches
 from train_pi05_frs.utils.data import resolve_tactile_window
@@ -19,10 +20,9 @@ from train_pi05_frs.utils.metrics import bimanual_source_decode_metrics
 from train_pi05_frs.utils.metrics import evaluate_split
 from train_pi05_frs.utils.model import FlowSolver
 from train_pi05_frs.utils.visualize import write_evaluation_plots
-from train_pi05_frs.utils.bimanual_visualize import (
-    plot_bimanual_action_examples,
-    plot_bimanual_gate_diagnostics,
-)
+from train_pi05_frs.utils.bimanual_visualize import plot_bimanual_diagnostics
+from train_pi05_frs.utils.bimanual_visualize import write_bimanual_evaluation_snapshot
+from train_pi05_frs.utils.window_io import TACTILE_KEYS
 from train_pi05_frs.pi05_cache.cache import CachedPairs, MultiCachedPairs, atomic_write_json
 
 
@@ -249,6 +249,45 @@ def _bimanual_quadrant(left_region: str, right_region: str) -> str:
     return f"{left_region}_{right_region}"
 
 
+def _validate_bimanual_evaluation_contract(
+    metadata: Mapping[str, Any],
+    *,
+    action_dim: int,
+    tactile_keys: Sequence[object],
+) -> None:
+    """Validate action and tactile semantics before standalone evaluation."""
+
+    validate_bimanual_objective_metadata(metadata, action_dim=action_dim)
+    validate_bimanual_tactile_keys(
+        tactile_keys, field_name="evaluation tactile_keys"
+    )
+
+
+def _bimanual_evaluation_history_path(
+    *,
+    checkpoint_dir: pathlib.Path,
+    output_dir: pathlib.Path,
+    result: Any,
+    epoch: int,
+) -> pathlib.Path:
+    """Prefer the run history for best/last aliases, otherwise write a snapshot."""
+
+    checkpoint_dir = pathlib.Path(checkpoint_dir)
+    if checkpoint_dir.name in {"best", "last"}:
+        run_history = checkpoint_dir.parent / "history.csv"
+        if run_history.is_file():
+            return run_history
+    snapshot = output_dir / "evaluation_snapshot_history.csv"
+    try:
+        return write_bimanual_evaluation_snapshot(snapshot, result, epoch=epoch)
+    except Exception as exc:
+        print(
+            f"warning: could not write bimanual evaluation snapshot: {exc}",
+            flush=True,
+        )
+        return snapshot
+
+
 def evaluate_decoder(
     *,
     cache_dir: pathlib.Path | None,
@@ -314,14 +353,21 @@ def evaluate_decoder(
     if loss_mode != BIMANUAL_LOSS_MODE:
         raise ValueError("multi-source evaluation currently requires bimanual_gated")
 
-    validate_bimanual_objective_metadata(
-        extra, action_dim=int(model.config.action_dim)
-    )
     if cache_dirs is not None:
         if not cache_dirs:
             raise ValueError("cache_dirs must be non-empty when provided")
         if dataset_sources is None or len(dataset_sources) != len(cache_dirs):
             raise ValueError("dataset_sources must have one entry per cache directory")
+        if not tactile_keys:
+            raise ValueError(
+                "multi-dataset evaluation requires tactile embedding cache root and tactile keys"
+            )
+        evaluation_tactile_keys: Sequence[object] = tactile_keys
+        _validate_bimanual_evaluation_contract(
+            extra,
+            action_dim=int(model.config.action_dim),
+            tactile_keys=evaluation_tactile_keys,
+        )
         source_names = [str(source["repo_id"]) for source in dataset_sources]
         pairs: CachedPairs | MultiCachedPairs = MultiCachedPairs(
             cache_dirs, source_names=source_names
@@ -329,6 +375,11 @@ def evaluate_decoder(
     else:
         if cache_dir is None:
             raise ValueError("cache_dir is required for single-dataset evaluation")
+        _validate_bimanual_evaluation_contract(
+            extra,
+            action_dim=int(model.config.action_dim),
+            tactile_keys=TACTILE_KEYS,
+        )
         pairs = CachedPairs(cache_dir)
 
     checkpoint_cache_digest = extra.get("cache_records_sha256")
@@ -378,7 +429,7 @@ def evaluate_decoder(
         )
 
     if isinstance(pairs, MultiCachedPairs):
-        if tactile_embedding_cache_root is None or not tactile_keys:
+        if tactile_embedding_cache_root is None:
             raise ValueError(
                 "multi-dataset evaluation requires tactile embedding cache root and tactile keys"
             )
@@ -683,32 +734,19 @@ def evaluate_decoder(
                 predicted_actions=result.predictions,
             )
         if write_plots:
-            try:
-                gate_plot = plot_bimanual_gate_diagnostics(
-                    output_dir / "history.csv",
-                    result=result,
-                    output_path=output_dir / "gate_diagnostics.png",
-                )
-            except Exception as exc:
-                print(
-                    f"warning: could not render bimanual Gate diagnostics: {exc}",
-                    flush=True,
-                )
-            else:
-                print(f"plot={gate_plot}")
-            try:
-                action_plot = plot_bimanual_action_examples(
-                    result,
-                    pairs,
-                    output_path=output_dir / "bimanual_action_examples.png",
-                )
-            except Exception as exc:
-                print(
-                    f"warning: could not render bimanual action examples: {exc}",
-                    flush=True,
-                )
-            else:
-                print(f"plot={action_plot}")
+            history_path = _bimanual_evaluation_history_path(
+                checkpoint_dir=checkpoint_dir,
+                output_dir=output_dir,
+                result=result,
+                epoch=int(checkpoint_metadata["epoch"]),
+            )
+            for plot_path in plot_bimanual_diagnostics(
+                history_path,
+                result,
+                output_dir=output_dir,
+                pairs=pairs,
+            ):
+                print(f"plot={plot_path}")
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
             f"target={result.target} flow_loss={result.flow_loss:.8f} "

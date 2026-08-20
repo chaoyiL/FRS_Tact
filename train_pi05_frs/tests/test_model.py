@@ -194,29 +194,42 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
         return result
 
     monkeypatch.setattr(evaluate_module, "evaluate_split", fake_evaluate_split)
-    action_plots = []
+    plot_calls = []
     monkeypatch.setattr(
         evaluate_module,
-        "plot_bimanual_gate_diagnostics",
-        lambda *args, **kwargs: tmp_path / "output" / "gate_diagnostics.png",
+        "plot_bimanual_diagnostics",
+        lambda *args, **kwargs: plot_calls.append((args, kwargs))
+        or tuple(
+            tmp_path / "output" / name
+            for name in (
+                "training_overview.png",
+                "bimanual_behavior.png",
+                "gate_diagnostics.png",
+                "bimanual_action_examples.png",
+            )
+        ),
     )
-    monkeypatch.setattr(
-        evaluate_module,
-        "plot_bimanual_action_examples",
-        lambda *args, **kwargs: action_plots.append((args, kwargs))
-        or tmp_path / "output" / "bimanual_action_examples.png",
-    )
+
+    run_dir = tmp_path / "run"
+    checkpoint_dir = run_dir / "best"
+    run_dir.mkdir()
+    (run_dir / "history.csv").write_text("epoch\n1\n", encoding="utf-8")
 
     metrics = evaluate_module.evaluate_decoder(
         cache_dir=None,
         cache_dirs=[tmp_path / "a", tmp_path / "b"],
         dataset_sources=[{"repo_id": "dataset-a"}, {"repo_id": "dataset-b"}],
         tactile_embedding_cache_root=tmp_path / "tactile-cache",
-        tactile_keys=["a", "b", "c", "d"],
+        tactile_keys=[
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
         tactile_embedding_dim=4,
         tactile_image_size=8,
         tactile_encoder_dir=tmp_path / "encoder",
-        checkpoint_dir=tmp_path / "checkpoint",
+        checkpoint_dir=checkpoint_dir,
         output_dir=tmp_path / "output",
         dataset_repo_id=None,
         dataset_root=None,
@@ -239,9 +252,11 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
 
     assert captured["loss_mode"] == "bimanual_gated"
     assert captured["keep_predictions"] is expected_keep_predictions
-    assert bool(action_plots) is write_plots
+    assert bool(plot_calls) is write_plots
     if write_plots:
-        assert action_plots[0][0][0].predictions is not None
+        assert plot_calls[0][0][0] == run_dir / "history.csv"
+        assert plot_calls[0][0][1].predictions is not None
+        assert plot_calls[0][1]["pairs"] is not None
     assert not (tmp_path / "output" / "predictions.npz").exists()
     assert metrics["gate_w_mean_left"] == pytest.approx(0.5)
     assert metrics["per_dataset"]["dataset-b"]["mse_gt"] == pytest.approx(1.0)
@@ -330,6 +345,224 @@ def test_bimanual_evaluation_uses_first_20_dims_and_keeps_wrists_separate(
     assert result.predictions.shape[-1] == 32
     np.testing.assert_allclose(result.gt_actions, gt_action)
     np.testing.assert_allclose(result.vla_actions, predicted_action)
+
+
+def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
+    monkeypatch,
+) -> None:
+    gt_action = np.zeros((2, 1, 32), dtype=np.float32)
+    physical_vla = np.ones((2, 1, 20), dtype=np.float32)
+    physical_prediction = np.ones((2, 1, 20), dtype=np.float32)
+    physical_prediction[0, :, :10] = 0.0
+    physical_prediction[1, :, 10:20] = 2.0
+    current: dict[str, np.ndarray] = {}
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((4, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1], dtype=np.int64),
+                np.zeros_like(gt_action),
+                current["vla"],
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 4, 4), dtype=np.float32),
+            )
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, tokens):
+            del indices, tokens
+            return np.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
+
+    def fake_full_width_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        return np.mean(np.square(np.asarray(target)), axis=(1, 2))
+
+    def fake_physical_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        return np.mean(np.square(np.asarray(target)[..., :20]), axis=(1, 2))
+
+    monkeypatch.setattr(
+        metrics_module, "flow_matching_loss_per_sample", fake_full_width_flow
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "masked_flow_matching_loss_per_sample",
+        fake_physical_flow,
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "decode_actions",
+        lambda *args, **kwargs: current["prediction"],
+    )
+
+    def evaluate_with_tail(*, prediction_tail: float, vla_tail: float):
+        current["prediction"] = np.concatenate(
+            (
+                physical_prediction,
+                np.full((2, 1, 12), prediction_tail, dtype=np.float32),
+            ),
+            axis=-1,
+        )
+        current["vla"] = np.concatenate(
+            (
+                physical_vla,
+                np.full((2, 1, 12), vla_tail, dtype=np.float32),
+            ),
+            axis=-1,
+        )
+        result = evaluate_split(
+            object(),  # type: ignore[arg-type]
+            FakeConditioner(),  # type: ignore[arg-type]
+            split="val",
+            batch_size=2,
+            num_steps=1,
+            keep_predictions=False,
+            loss_mode="bimanual_gated",
+            gate_tau=0.5,
+            gate_temperature=0.1,
+        )
+        selection = checkpoint_selection_key(
+            {
+                "val_mse_gt": result.mse_gt,
+                "val_low_unsafe_frac_left": 0.0,
+                "val_low_unsafe_frac_right": 0.0,
+                "val_gt_gain_high_w_left": 0.5,
+                "val_gt_gain_high_w_right": 0.5,
+                "val_rank_satisfied_high_frac_left": 1.0,
+                "val_rank_satisfied_high_frac_right": 1.0,
+            },
+            loss_mode="bimanual_gated",
+            max_low_gate_unsafe_frac=0.1,
+            min_high_gate_gain=0.0,
+            min_high_gate_rank_satisfied_frac=0.8,
+        )
+        return result, selection
+
+    baseline, baseline_key = evaluate_with_tail(prediction_tail=0.0, vla_tail=0.0)
+    perturbed, perturbed_key = evaluate_with_tail(
+        prediction_tail=100.0, vla_tail=-75.0
+    )
+
+    for field in (
+        "flow_loss",
+        "mse",
+        "rmse",
+        "mae",
+        "flow_loss_gt",
+        "mse_gt",
+        "rmse_gt",
+        "mae_gt",
+        "flow_loss_pred",
+        "mse_pred",
+        "rmse_pred",
+        "mae_pred",
+        "mse_vla_gt",
+        "gt_gain",
+        "relative_gt_error",
+        "composite_fm",
+    ):
+        assert getattr(perturbed, field) == pytest.approx(getattr(baseline, field))
+    for field in (
+        "sample_flow_loss",
+        "sample_mse",
+        "sample_rmse",
+        "sample_mae",
+        "sample_mse_gt",
+        "sample_mae_gt",
+        "sample_mse_pred",
+        "sample_mae_pred",
+        "sample_mse_vla_gt",
+        "sample_gt_gain",
+        "sample_relative_gt_error",
+    ):
+        np.testing.assert_allclose(getattr(perturbed, field), getattr(baseline, field))
+    assert perturbed_key == baseline_key
+
+
+@pytest.mark.parametrize("action_dim", (19, 21, 24, 33))
+def test_bimanual_model_core_rejects_unsupported_action_widths(
+    action_dim: int,
+) -> None:
+    actions = jnp.zeros((1, 2, action_dim), dtype=jnp.float32)
+    with pytest.raises(ValueError, match="action_dim"):
+        bimanual_composite_endpoint(
+            actions,
+            actions,
+            jnp.ones((1, 2), dtype=jnp.float32),
+        )
+
+
+def test_bimanual_training_and_evaluation_boundaries_reject_tactile_permutation() -> None:
+    metadata = bimanual_objective_metadata(action_dim=32)
+    permutation = (
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_0",
+        "observation.images.tactile_left_1",
+        "observation.images.tactile_right_1",
+    )
+
+    import train_pi05_frs.train as train_module
+
+    with pytest.raises(ValueError, match="fixed bimanual tactile key order"):
+        train_module._validate_bimanual_training_contract(
+            loss_mode="bimanual_gated",
+            action_dim=32,
+            tactile_keys=permutation,
+        )
+    with pytest.raises(ValueError, match="fixed bimanual tactile key order"):
+        evaluate_module._validate_bimanual_evaluation_contract(
+            metadata,
+            action_dim=32,
+            tactile_keys=permutation,
+        )
+
+
+def test_direct_cli_accepts_bimanual_without_applying_gate_lambda(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import train_pi05_frs.train as train_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        train_module, "train_decoder", lambda **kwargs: captured.update(kwargs)
+    )
+
+    train_module.main(
+        [
+            "--cache-dir",
+            str(tmp_path / "cache"),
+            "--tactile-encoder-dir",
+            str(tmp_path / "encoder"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--loss-mode",
+            "bimanual_gated",
+        ]
+    )
+
+    assert captured["loss_mode"] == "bimanual_gated"
+    assert captured["gate_lambda"] == 0.0
+
+
+def test_resume_history_header_must_match_exactly_before_append(
+    tmp_path: pathlib.Path,
+) -> None:
+    import train_pi05_frs.train as train_module
+
+    history = tmp_path / "history.csv"
+    history.write_text("epoch,val_mse,train_loss\n1,0.1,0.2\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="history.csv header"):
+        train_module._validate_history_csv_header(
+            history, ("epoch", "train_loss", "val_mse")
+        )
+
+    history.write_text("epoch,train_loss,val_mse\n1,0.2,0.1\n", encoding="utf-8")
+    train_module._validate_history_csv_header(
+        history, ("epoch", "train_loss", "val_mse")
+    )
 
 
 def test_bimanual_source_metrics_aggregate_before_worst_rollups():
@@ -561,7 +794,12 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
         cache_dirs=[tmp_path / "cache-a", tmp_path / "cache-b"],
         dataset_sources=[{"repo_id": "dataset-a"}, {"repo_id": "dataset-b"}],
         tactile_embedding_cache_root=tmp_path / "tactile-cache",
-        tactile_keys=["left-0", "right-0", "left-1", "right-1"],
+        tactile_keys=[
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
         tactile_embedding_dim=4,
         tactile_image_size=8,
         tactile_encoder_dir=tmp_path / "encoder",
@@ -709,14 +947,14 @@ def test_bimanual_mse_ignores_32d_padding_tail():
 
 
 def test_bimanual_mse_rejects_width_below_physical_action():
-    with pytest.raises(ValueError, match="at least 20"):
+    with pytest.raises(ValueError, match="action_dim"):
         bimanual_mse_per_sample(
             jnp.zeros((1, 2, 19)), jnp.zeros((1, 2, 19))
         )
 
 
 def test_bimanual_composite_rejects_width_below_physical_action():
-    with pytest.raises(ValueError, match="at least 20"):
+    with pytest.raises(ValueError, match="action_dim"):
         bimanual_composite_endpoint(
             jnp.zeros((1, 2, 19)), jnp.zeros((1, 2, 19)), jnp.ones((1, 2))
         )

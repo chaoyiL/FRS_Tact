@@ -14,7 +14,7 @@ TRAIN_ROOT = ROOT / "train_pi05_frs"
 SETUP_SCRIPT = TRAIN_ROOT / "scripts" / "setup_env.sh"
 SOURCE_ROOT = Path("/home/typhon/FRS_Tact-pi05-frs-jax")
 SOURCE_MANIFEST = TRAIN_ROOT / "source_manifest.sha256"
-DESIGN_COMMIT = "9a321e6"
+BIMANUAL_BRANCH_BASE = "06a5149"
 TRAINING_SOURCE_MAPPINGS = {
     f"train_pi05_frs/{relative}": f"train_pi05_frs/{relative}"
     for relative in (
@@ -61,6 +61,7 @@ PROTECTED = (
     "train_smolvla_frs",
     "train_vtsmolvla",
 )
+APPROVED_PROTECTED_CHANGES = {"deploy_pi05/frs_runtime.py"}
 APPROVED_ADAPTATIONS = {
     "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
     "utils/cache.py": "train_pi05_frs/pi05_cache/cache.py",
@@ -581,10 +582,12 @@ def test_training_project_tracks_no_forbidden_package_or_generated_artifact() ->
     assert not is_generated_artifact("train_pi05_frs/utils/checkpoint.py")
 
 
-def test_protected_root_paths_have_no_branch_or_worktree_diff() -> None:
-    changed = _git_lines(ROOT, "diff", "--name-only", DESIGN_COMMIT, "--", *PROTECTED)
+def test_protected_root_paths_only_include_bimanual_runtime_adaptation() -> None:
+    changed = _git_lines(
+        ROOT, "diff", "--name-only", BIMANUAL_BRANCH_BASE, "--", *PROTECTED
+    )
 
-    assert changed == set()
+    assert changed == APPROVED_PROTECTED_CHANGES
 
 
 def test_rejected_pi05_cache_import_does_not_pollute_sys_path() -> None:

@@ -2334,7 +2334,12 @@ def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
 
     runtime = object.__new__(Pi05FRSRuntime)
     runtime.config = SimpleNamespace(
-        tactile_keys=("left", "right", "left_1", "right_1"),
+        tactile_keys=(
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ),
         tactile_window_divisor=1,
         history_stride=3,
         decode_steps=10,
@@ -2403,12 +2408,12 @@ def test_frs_contract_accepts_matching_training_metadata(
     runtime._validate_contract(source_sample_steps=10)
 
 
-@pytest.mark.parametrize("action_dim", [19, 21, 33])
+@pytest.mark.parametrize("action_dim", [19, 21, 24, 33])
 def test_frs_bimanual_contract_rejects_unsupported_action_dimensions(
     action_dim: int,
 ) -> None:
     runtime = _pi05_contract_runtime(action_dim=action_dim)
-    metadata = bimanual_objective_metadata(action_dim=max(action_dim, 20))
+    metadata = bimanual_objective_metadata(action_dim=32)
     metadata["action_dim"] = action_dim
     runtime.metadata["extra_metadata"].update(metadata)
 
@@ -2425,6 +2430,15 @@ def test_frs_bimanual_contract_rejects_unsupported_action_dimensions(
         ("steered_action_dim", 19),
         ("action_slices", {"left": [0, 9], "right": [10, 20]}),
         ("wrist_token_indices", {"left": [0, 1], "right": [1, 3]}),
+        (
+            "tactile_key_basenames",
+            [
+                "tactile_right_0",
+                "tactile_left_0",
+                "tactile_left_1",
+                "tactile_right_1",
+            ],
+        ),
         ("padded_tail_policy", "train_gt"),
     ],
 )
@@ -2438,6 +2452,68 @@ def test_frs_contract_rejects_invalid_bimanual_objective_metadata(
 
     with pytest.raises(ValueError, match=field_name):
         runtime._validate_contract(source_sample_steps=10)
+
+
+@pytest.mark.parametrize(
+    "tactile_keys",
+    (
+        (
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_0",
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ),
+        (
+            "tactile_left_0",
+            "tactile_left_1",
+            "tactile_right_0",
+            "tactile_right_1",
+        ),
+    ),
+)
+def test_frs_bimanual_contract_rejects_tactile_config_permutations(
+    tactile_keys: tuple[str, ...],
+) -> None:
+    runtime = _pi05_contract_runtime()
+    runtime.config.tactile_keys = tactile_keys
+    runtime.metadata["extra_metadata"].update(
+        bimanual_objective_metadata(action_dim=32)
+    )
+
+    with pytest.raises(ValueError, match="tactile_keys"):
+        runtime._validate_contract(source_sample_steps=10)
+
+
+def test_frs_bimanual_runtime_safety_ignores_and_restores_padding_tail() -> None:
+    runtime = _pi05_contract_runtime()
+    runtime.metadata["extra_metadata"].update(
+        bimanual_objective_metadata(action_dim=32)
+    )
+    runtime.config.max_normalized_action_abs = 1.0
+    runtime.config.max_normalized_delta_rms = 0.5
+    runtime._action_vla_normalized = np.zeros((1, 10, 32), dtype=np.float32)
+    runtime._action_vla_normalized[..., 20:] = 0.25
+    decoded = np.zeros((1, 10, 32), dtype=np.float32)
+    decoded[..., 20:] = 100.0
+
+    validated, delta, max_abs = runtime._validated_decoded(decoded)
+
+    np.testing.assert_allclose(validated[..., :20], 0.0)
+    np.testing.assert_allclose(validated[..., 20:], 0.25)
+    assert delta == pytest.approx(0.0)
+    assert max_abs == pytest.approx(0.0)
+
+
+def test_frs_legacy_runtime_safety_remains_full_width() -> None:
+    runtime = _pi05_contract_runtime()
+    runtime.config.max_normalized_action_abs = 1.0
+    runtime.config.max_normalized_delta_rms = 0.5
+    runtime._action_vla_normalized = np.zeros((1, 10, 32), dtype=np.float32)
+    decoded = np.zeros((1, 10, 32), dtype=np.float32)
+    decoded[..., 20:] = 2.0
+
+    with pytest.raises(ValueError, match="action safety limit"):
+        runtime._validated_decoded(decoded)
 
 
 def test_frs_contract_allows_deployment_solver_to_differ_from_validation_solver() -> None:

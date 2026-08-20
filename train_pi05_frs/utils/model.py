@@ -17,6 +17,7 @@ from train_pi05_frs.utils.bimanual_schema import (
     LEFT_ACTION_SLICE,
     RIGHT_ACTION_SLICE,
     STEERED_ACTION_DIM,
+    validate_bimanual_action_dim,
 )
 from train_pi05_frs.utils.integration import fireflow_integrate_velocity
 
@@ -322,8 +323,11 @@ def masked_flow_matching_loss_per_sample(
 ) -> Array:
     """Flow-matching loss normalized over only the 20 physical action dimensions."""
 
-    if x_base.shape[-1] < STEERED_ACTION_DIM or target.shape[-1] < STEERED_ACTION_DIM:
-        raise ValueError("masked flow matching requires at least 20 action dimensions")
+    if x_base.shape != target.shape:
+        raise ValueError("masked flow matching requires matching actions")
+    validate_bimanual_action_dim(
+        x_base.shape[-1], field_name="masked flow matching action_dim"
+    )
     t_view = t[:, None, None]
     x_t = (1.0 - t_view) * x_base + t_view * target
     target_velocity = target - x_base
@@ -435,8 +439,9 @@ def bimanual_composite_endpoint(
 
     if gt_action.ndim != 3 or gt_action.shape != predicted_action.shape:
         raise ValueError("bimanual composite endpoint requires matching actions")
-    if gt_action.shape[-1] < STEERED_ACTION_DIM:
-        raise ValueError("bimanual composite endpoint requires at least 20 action dimensions")
+    validate_bimanual_action_dim(
+        gt_action.shape[-1], field_name="bimanual composite endpoint action_dim"
+    )
     if gate_weights.shape != (gt_action.shape[0], 2):
         raise ValueError("bimanual gate_weights must have shape [B, 2]")
     if not isinstance(gate_weights, jax.core.Tracer) and not bool(
@@ -473,8 +478,9 @@ def bimanual_mse_per_sample(left: Array, right: Array) -> Array:
 
     if left.ndim != 3 or left.shape != right.shape:
         raise ValueError("bimanual MSE requires matching actions")
-    if left.shape[-1] < STEERED_ACTION_DIM:
-        raise ValueError("bimanual MSE requires at least 20 action dimensions")
+    validate_bimanual_action_dim(
+        left.shape[-1], field_name="bimanual MSE action_dim"
+    )
     squared = jnp.square(
         left[..., :STEERED_ACTION_DIM] - right[..., :STEERED_ACTION_DIM]
     )

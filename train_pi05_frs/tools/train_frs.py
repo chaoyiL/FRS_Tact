@@ -25,7 +25,7 @@ from train_pi05_frs.utils.path_safety import validate_fresh_output_root
 from train_pi05_frs.utils.path_safety import validate_implicit_resume_root
 from train_pi05_frs.utils.path_safety import validate_output_roots
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
-from train_pi05_frs.utils.bimanual_schema import STEERED_ACTION_DIM
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_action_dim
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 
 
@@ -978,9 +978,9 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         ("action_horizon", 50),
         )
     }
-    if loss_mode == BIMANUAL_LOSS_MODE and model_integers["action_dim"] < STEERED_ACTION_DIM:
-        raise ValueError(
-            f"config.model.action_dim must be >= {STEERED_ACTION_DIM} for bimanual_gated"
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        validate_bimanual_action_dim(
+            model_integers["action_dim"], field_name="config.model.action_dim"
         )
     if len(tactile_keys) != 4 or model_integers["tactile_num_tokens"] != 4:
         raise ValueError(
@@ -1253,7 +1253,11 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         loss_mode=str(training.get("loss_mode", "gated")),
         gate_tau=float(training.get("gate_tau", 0.5)),
         gate_temperature=float(training.get("gate_temperature", 0.1)),
-        gate_lambda=float(training.get("gate_lambda", 1.0)),
+        gate_lambda=(
+            0.0
+            if training.get("loss_mode", "gated") == BIMANUAL_LOSS_MODE
+            else float(training.get("gate_lambda", 1.0))
+        ),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
         aux_decode_steps=_positive_int(training, "aux_decode_steps", 10),
         aux_decode_solver=str(training.get("aux_decode_solver", "fireflow")),
