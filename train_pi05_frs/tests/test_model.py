@@ -57,6 +57,13 @@ def test_bimanual_mse_ignores_32d_padding_tail():
     np.testing.assert_allclose(bimanual_mse_per_sample(left, right), [[0.0, 0.0]])
 
 
+def test_bimanual_mse_rejects_width_below_physical_action():
+    with pytest.raises(ValueError, match="at least 20"):
+        bimanual_mse_per_sample(
+            jnp.zeros((1, 2, 19)), jnp.zeros((1, 2, 19))
+        )
+
+
 def test_bimanual_composite_rejects_width_below_physical_action():
     with pytest.raises(ValueError, match="at least 20"):
         bimanual_composite_endpoint(
@@ -137,6 +144,46 @@ def test_bimanual_single_active_wrist_rank_is_not_diluted():
         )
     np.testing.assert_allclose(components["rank"], jnp.full((2,), 6.1), atol=1e-6)
     decode.assert_called_once()
+
+
+def test_bimanual_source_normalization_ignores_appended_inactive_source():
+    def rank_mean(
+        decoded_values: jax.Array, gates: jax.Array, sources: jax.Array
+    ) -> jax.Array:
+        gt = jnp.zeros((decoded_values.shape[0], 1, 20))
+        vla = jnp.full_like(gt, 2.0)
+        decoded = vla.at[..., :10].set(decoded_values[:, None, None])
+        with mock.patch(
+            "train_pi05_frs.utils.model.decode_actions", return_value=decoded
+        ):
+            components = bimanual_loss_components_per_sample(
+                _ConstantVelocity(jnp.zeros((20,))),
+                jnp.zeros_like(gt),
+                gt,
+                vla,
+                jnp.full((decoded_values.shape[0],), 0.5),
+                jnp.zeros((decoded_values.shape[0], 1, 1)),
+                gates,
+                source_indices=sources,
+                aux_decode_weight=0.0,
+                low_gate_safety_weight=0.0,
+                rank_weight=1.0,
+                repair_weight=0.0,
+            )
+        return jnp.mean(components["rank"])
+
+    active_values = jnp.asarray([1.5, 2.5, 2.0])
+    active_gates = jnp.asarray([[1.0, 0.5], [1.0, 0.5], [1.0, 0.5]])
+    active_sources = jnp.asarray([0, 0, 1])
+    baseline = rank_mean(active_values, active_gates, active_sources)
+    with_inactive_source = rank_mean(
+        jnp.concatenate([active_values, jnp.asarray([2.0])]),
+        jnp.concatenate([active_gates, jnp.asarray([[0.5, 0.5]])]),
+        jnp.concatenate([active_sources, jnp.asarray([2])]),
+    )
+
+    np.testing.assert_allclose(baseline, 4.0, atol=1e-6)
+    np.testing.assert_allclose(with_inactive_source, baseline, atol=1e-6)
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
@@ -446,7 +493,10 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
 
         np.testing.assert_allclose(loss, expected, rtol=1e-3, atol=1e-5)
-        np.testing.assert_allclose(components["composite_fm"], 0.0)
+        self.assertEqual(
+            set(components),
+            {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"},
+        )
 
     def test_shape_finite_gradient_and_decode(self):
         model = self.make_model()
@@ -486,17 +536,9 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(step_loss)))
         self.assertEqual(
             set(components),
-            {
-                "gt_fm",
-                "vla_fm",
-                "composite_fm",
-                "low_safety",
-                "decode",
-                "rank",
-                "repair",
-            },
+            {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"},
         )
-        pred_step_loss, _ = train_step(
+        pred_step_loss, pred_components = train_step(
             model,
             optimizer,
             x_base,
@@ -511,6 +553,10 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             aux_decode_steps=4,
         )
         self.assertTrue(bool(jnp.isfinite(pred_step_loss)))
+        self.assertEqual(
+            set(pred_components),
+            {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"},
+        )
 
     def test_gate_stratified_decode_metrics(self):
         out = gate_stratified_decode_metrics(

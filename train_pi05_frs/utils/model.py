@@ -471,6 +471,10 @@ def bimanual_composite_endpoint(
 def bimanual_mse_per_sample(left: Array, right: Array) -> Array:
     """Return physical endpoint MSE independently for the fixed left and right wrists."""
 
+    if left.ndim != 3 or left.shape != right.shape:
+        raise ValueError("bimanual MSE requires matching actions")
+    if left.shape[-1] < STEERED_ACTION_DIM:
+        raise ValueError("bimanual MSE requires at least 20 action dimensions")
     squared = jnp.square(
         left[..., :STEERED_ACTION_DIM] - right[..., :STEERED_ACTION_DIM]
     )
@@ -529,7 +533,6 @@ def _bimanual_source_group_normalized_per_sample(
     if source_indices.shape != (penalty.shape[0],):
         raise ValueError("source_indices must have shape [B]")
     same_source = source_indices[:, None] == source_indices[None, :]
-    counts = jnp.sum(same_source, axis=1).astype(penalty.dtype)
     totals = jnp.sum(same_source * strength[None, :], axis=1)
     active_for_sample = totals > 0.0
 
@@ -538,17 +541,16 @@ def _bimanual_source_group_normalized_per_sample(
         jnp.where(same_source, positions[None, :], penalty.shape[0]), axis=1
     )
     first_in_source = positions == first_position
-    present_sources = jnp.sum(first_in_source.astype(penalty.dtype))
     active_sources = jnp.sum(
         (first_in_source & active_for_sample).astype(penalty.dtype)
     )
-    active_source_scale = present_sources / jnp.maximum(active_sources, 1.0)
+    batch_size = jnp.asarray(penalty.shape[0], dtype=penalty.dtype)
     normalized = (
         strength
         * penalty
-        * counts
+        * batch_size
         / jnp.maximum(totals, jnp.finfo(penalty.dtype).tiny)
-        * active_source_scale
+        / jnp.maximum(active_sources, 1.0)
     )
     return jnp.where(active_for_sample, normalized, 0.0), active_sources > 0.0
 
@@ -1103,12 +1105,6 @@ def _train_step_jit(
                 "loss_mode must be 'gt', 'predicted', 'gated', or 'bimanual_gated', "
                 f"got {loss_mode!r}."
             )
-        if loss_mode != "bimanual_gated":
-            zero = jnp.asarray(0.0, dtype=components["gt_fm"].dtype)
-            components = {
-                name: components.get(name, zero)
-                for name in TRAIN_LOSS_COMPONENT_NAMES
-            }
         loss = sum(components.values())
         return loss, components
 
