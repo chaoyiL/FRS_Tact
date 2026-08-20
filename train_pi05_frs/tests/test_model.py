@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import csv
 import hashlib
 import inspect
 import json
@@ -8,6 +9,7 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import jax
@@ -15,6 +17,8 @@ import jax.numpy as jnp
 from flax import nnx
 import pytest
 
+import train_pi05_frs.evaluate as evaluate_module
+import train_pi05_frs.utils.metrics as metrics_module
 from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
@@ -26,6 +30,9 @@ from train_pi05_frs.utils.model import bimanual_loss_components_per_sample
 from train_pi05_frs.utils.model import bimanual_mse_per_sample
 from train_pi05_frs.utils.model import decode_actions
 from train_pi05_frs.utils.model import decode_euler
+from train_pi05_frs.utils.metrics import bimanual_source_decode_metrics
+from train_pi05_frs.utils.metrics import EvaluationResult
+from train_pi05_frs.utils.metrics import evaluate_split
 from train_pi05_frs.utils.metrics import gate_stratified_decode_metrics
 from train_pi05_frs.utils.model import decode_mse_per_sample
 from train_pi05_frs.utils.model import flow_matching_loss_per_sample
@@ -42,6 +49,289 @@ from train_pi05_frs.train import (
     train_decoder,
 )
 import numpy as np
+
+
+def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
+    tmp_path, monkeypatch
+):
+    class FakePairs:
+        source_names = ("dataset-a", "dataset-b")
+        manifest = {
+            "action_horizon": 1,
+            "action_dim": 32,
+            "state_dim": 0,
+            "records_sha256": "records",
+        }
+
+        def __init__(self, cache_dirs, *, source_names):
+            assert len(cache_dirs) == 2
+            assert tuple(source_names) == self.source_names
+
+        def source_and_local_indices(self, indices):
+            np.testing.assert_array_equal(indices, [0, 1, 2, 3])
+            return np.asarray([0, 0, 1, 1]), np.asarray([0, 1, 0, 1])
+
+        def metadata_values(self, indices, key):
+            del indices
+            return {
+                "dataset_index": np.asarray([10, 11, 20, 21]),
+                "episode_index": np.asarray([1, 1, 2, 2]),
+            }[key]
+
+    class FakeConditioner:
+        resnet_embedding_dim = 4
+
+        def __init__(self, pairs, **kwargs):
+            del pairs
+            assert kwargs["build_episode_baselines"] is True
+
+        def close(self):
+            return None
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            action_horizon=1,
+            action_dim=32,
+            state_conditioning=False,
+            tactile_window=1,
+            resnet_embedding_dim=4,
+        )
+    )
+    gate_left = np.asarray([1.0, 0.0, 1.0, 0.0])
+    gate_right = np.asarray([0.0, 1.0, 0.0, 1.0])
+    sample_gt_left = np.asarray([0.0, 0.0, 4.0, 0.0])
+    sample_gt_right = np.zeros((4,))
+    sample_vla_left = np.asarray([1.0, 0.0, 1.0, 0.0])
+    sample_vla_right = np.asarray([0.0, 1.0, 0.0, 1.0])
+    result = EvaluationResult(
+        target="gt",
+        flow_loss=1.0,
+        mse=1.0,
+        rmse=1.0,
+        mae=1.0,
+        flow_loss_gt=1.0,
+        mse_gt=1.0,
+        rmse_gt=1.0,
+        mae_gt=1.0,
+        flow_loss_pred=2.0,
+        mse_pred=2.0,
+        rmse_pred=np.sqrt(2.0),
+        mae_pred=2.0,
+        cache_indices=np.arange(4),
+        sample_flow_loss=np.ones((4,)),
+        sample_mse=np.ones((4,)),
+        sample_rmse=np.ones((4,)),
+        sample_mae=np.ones((4,)),
+        sample_mse_gt=np.ones((4,)),
+        sample_mae_gt=np.ones((4,)),
+        sample_mse_pred=np.full((4,), 2.0),
+        sample_mae_pred=np.full((4,), 2.0),
+        predictions=None,
+        mse_vla_gt=1.0,
+        gt_gain=0.0,
+        relative_gt_error=1.0,
+        sample_mse_vla_gt=np.ones((4,)),
+        sample_gt_gain=np.zeros((4,)),
+        sample_relative_gt_error=np.ones((4,)),
+        sample_gate_w_left=gate_left,
+        sample_gate_w_right=gate_right,
+        sample_tactile_change_left=gate_left,
+        sample_tactile_change_right=gate_right,
+        sample_composite_fm=np.ones((4,)),
+        composite_fm=1.0,
+        sample_mse_gt_left=sample_gt_left,
+        sample_mse_gt_right=sample_gt_right,
+        sample_mse_vla_left=sample_vla_left,
+        sample_mse_vla_right=sample_vla_right,
+        sample_mse_vla_gt_left=np.ones((4,)),
+        sample_mse_vla_gt_right=np.ones((4,)),
+        n_high_w_left=2,
+        n_low_w_left=2,
+        n_mid_w_left=0,
+        n_high_w_right=2,
+        n_low_w_right=2,
+        n_mid_w_right=0,
+        gate_w_left=0.5,
+        gate_w_right=0.5,
+        tactile_change_left=0.5,
+        tactile_change_right=0.5,
+        bimanual_quadrants={},
+        bimanual_gate_region_counts=np.zeros((3, 3), dtype=np.int64),
+    )
+    monkeypatch.setattr(evaluate_module, "MultiCachedPairs", FakePairs, raising=False)
+    monkeypatch.setattr(
+        evaluate_module, "CachedTactileEmbeddingBatches", FakeConditioner, raising=False
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "load_checkpoint",
+        lambda path: (
+            model,
+            {
+                "epoch": 3,
+                "extra_metadata": {
+                    **bimanual_objective_metadata(action_dim=32),
+                    "cache_records_sha256": "records",
+                    "gate_tau": 0.4,
+                    "gate_temperature": 0.1,
+                    "low_gate_threshold": 0.3,
+                    "high_gate_threshold": 0.7,
+                },
+            },
+        ),
+    )
+    captured = {}
+
+    def fake_evaluate_split(*args, **kwargs):
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(evaluate_module, "evaluate_split", fake_evaluate_split)
+
+    metrics = evaluate_module.evaluate_decoder(
+        cache_dir=None,
+        cache_dirs=[tmp_path / "a", tmp_path / "b"],
+        dataset_sources=[{"repo_id": "dataset-a"}, {"repo_id": "dataset-b"}],
+        tactile_embedding_cache_root=tmp_path / "tactile-cache",
+        tactile_keys=["a", "b", "c", "d"],
+        tactile_embedding_dim=4,
+        tactile_image_size=8,
+        tactile_encoder_dir=tmp_path / "encoder",
+        checkpoint_dir=tmp_path / "checkpoint",
+        output_dir=tmp_path / "output",
+        dataset_repo_id=None,
+        dataset_root=None,
+        tactile_window_divisor=None,
+        history_stride=None,
+        batch_size=4,
+        num_steps=1,
+        solver="euler",
+        target=None,
+        save_predictions=False,
+        write_plots=False,
+        num_trajectory_samples=0,
+        num_episode_strips=0,
+        num_workers=0,
+        prefetch_batches=1,
+        load_threads=1,
+        pipeline_prefetch=1,
+        image_cache_size=0,
+    )
+
+    assert captured["loss_mode"] == "bimanual_gated"
+    assert metrics["gate_w_mean_left"] == pytest.approx(0.5)
+    assert metrics["per_dataset"]["dataset-b"]["mse_gt"] == pytest.approx(1.0)
+    assert metrics["per_dataset"]["dataset-b"]["gt_gain_high_w_left"] == pytest.approx(-3.0)
+    assert metrics["min_dataset_gt_gain_high_w_left"] == pytest.approx(-3.0)
+    with (tmp_path / "output" / "per_sample.csv").open(encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert rows[2]["source"] == "dataset-b"
+    assert rows[2]["source_cache_index"] == "0"
+    assert rows[2]["mse_gt_left"] == "4.0"
+
+
+def test_bimanual_evaluation_uses_first_20_dims_and_keeps_wrists_separate(
+    monkeypatch,
+):
+    gt_action = np.zeros((2, 1, 32), dtype=np.float32)
+    predicted_action = np.ones((2, 1, 32), dtype=np.float32)
+    predicted_action[..., 20:] = 9.0
+    prediction = np.ones((2, 1, 32), dtype=np.float32)
+    prediction[0, :, :10] = 0.0
+    prediction[1, :, 10:20] = 2.0
+    prediction[..., 20:] = 100.0
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((4, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1], dtype=np.int64),
+                np.zeros_like(gt_action),
+                predicted_action,
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 4, 4), dtype=np.float32),
+            )
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([[1.0, 0.0], [0.0, 0.8]], dtype=np.float32)
+
+    def fake_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        return np.mean(np.square(np.asarray(target)), axis=(1, 2))
+
+    def fake_masked_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        return np.mean(np.square(np.asarray(target)[..., :20]), axis=(1, 2))
+
+    monkeypatch.setattr(metrics_module, "flow_matching_loss_per_sample", fake_flow)
+    monkeypatch.setattr(
+        metrics_module,
+        "masked_flow_matching_loss_per_sample",
+        fake_masked_flow,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        metrics_module,
+        "decode_actions",
+        lambda model, x_base, tactile_input, num_steps, solver, state: prediction,
+    )
+
+    result = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="bimanual_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+        rank_low_gate_threshold=0.2,
+        rank_high_gate_threshold=0.8,
+    )
+
+    np.testing.assert_allclose(result.sample_composite_fm, [0.5, 0.5])
+    assert result.composite_fm == pytest.approx(0.5)
+    np.testing.assert_allclose(result.sample_mse_gt_left, [0.0, 1.0])
+    np.testing.assert_allclose(result.sample_mse_gt_right, [1.0, 4.0])
+    np.testing.assert_allclose(result.sample_mse_vla_left, [1.0, 0.0])
+    np.testing.assert_allclose(result.sample_mse_vla_right, [0.0, 1.0])
+    assert result.bimanual_quadrants["high_low"]["n"] == 1
+    assert result.bimanual_gate_region_counts.shape == (3, 3)
+    assert result.predictions.shape[-1] == 32
+    np.testing.assert_allclose(result.gt_actions, gt_action)
+    np.testing.assert_allclose(result.vla_actions, predicted_action)
+
+
+def test_bimanual_source_metrics_aggregate_before_worst_rollups():
+    per_source, rollups = bimanual_source_decode_metrics(
+        sample_mse_gt_left=np.asarray([0.0, 0.0, 4.0, 0.0]),
+        sample_mse_gt_right=np.asarray([0.0, 0.0, 0.0, 0.0]),
+        sample_mse_vla_left=np.asarray([1.0, 0.0, 1.0, 0.0]),
+        sample_mse_vla_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        sample_mse_vla_gt_left=np.ones((4,)),
+        sample_mse_vla_gt_right=np.ones((4,)),
+        sample_gate_w_left=np.asarray([1.0, 0.0, 1.0, 0.0]),
+        sample_gate_w_right=np.asarray([0.0, 1.0, 0.0, 1.0]),
+        source_indices=np.asarray([0, 0, 1, 1]),
+        num_sources=2,
+        low_w_threshold=0.3,
+        high_w_threshold=0.7,
+        ranking_margin=0.0,
+        repair_margin=0.0,
+        low_safety_margin=0.0,
+    )
+
+    assert per_source[0]["gt_gain_high_w_left"] == pytest.approx(1.0)
+    assert per_source[1]["gt_gain_high_w_left"] == pytest.approx(-3.0)
+    assert rollups["min_dataset_gt_gain_high_w_left"] == pytest.approx(-3.0)
+    assert rollups["min_dataset_rank_satisfied_high_frac_left"] == pytest.approx(0.0)
+    assert rollups["worst_dataset_low_unsafe_frac_left"] == pytest.approx(0.0)
 
 
 def test_bimanual_resume_requires_exact_objective_metadata():
