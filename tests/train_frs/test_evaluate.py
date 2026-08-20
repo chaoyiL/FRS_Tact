@@ -272,6 +272,15 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             },
         ),
     )
+    decode_calls = 0
+    real_decode_actions = metrics_module.decode_actions
+
+    def counted_decode_actions(*args, **kwargs):
+        nonlocal decode_calls
+        decode_calls += 1
+        return real_decode_actions(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "decode_actions", counted_decode_actions)
 
     metrics = evaluate_module.evaluate_decoder(
         cache_dir=tmp_path / "cache",
@@ -287,7 +296,7 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         solver="euler",
         target=None,
         save_predictions=False,
-        write_plots=False,
+        write_plots=gate_kind == "bimanual",
         num_trajectory_samples=0,
         num_episode_strips=0,
         num_workers=0,
@@ -298,6 +307,7 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     )
 
     written_metrics = json.loads((tmp_path / "output" / "metrics.json").read_text())
+    assert decode_calls == 1
     if gate_kind == "scalar":
         assert metrics["n_high_w"] == 1
         assert metrics["n_low_w"] == 1
@@ -335,6 +345,10 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert rows[0]["bimanual_quadrant"] in {"", "low_low", "high_low", "low_high", "high_high"}
         assert rows[0]["gate_region"] == ""
         assert rows[0]["gate_bin"] == ""
+        for filename in ("gate_diagnostics.png", "bimanual_action_examples.png"):
+            artifact = tmp_path / "output" / filename
+            assert artifact.is_file() and artifact.stat().st_size > 0
+        assert not (tmp_path / "output" / "predictions.npz").exists()
     else:
         assert "n_high_w" not in metrics
         assert "n_low_w" not in metrics

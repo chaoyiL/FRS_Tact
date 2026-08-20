@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import csv
+import inspect
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 import pytest
 
 import train_smolvla_frs.utils.bimanual_visualize as bimanual_visualize
 from train_smolvla_frs.utils.history_plot import HISTORY_FIELDS
+from train_smolvla_frs.utils.metrics import EvaluationResult
 
 
 def _write_bimanual_history(
@@ -176,3 +179,114 @@ def test_overview_requires_per_wrist_feasibility_history_fields(tmp_path: Path) 
         output_path=tmp_path / "bimanual_behavior.png",
     )
     assert output.is_file()
+
+
+def _bimanual_result_with_mixed_quadrants() -> EvaluationResult:
+    cache_indices = np.asarray([10, 11, 12, 13, 14, 15], dtype=np.int64)
+    actions = np.zeros((len(cache_indices), 3, 20), dtype=np.float32)
+    for position in range(len(cache_indices)):
+        actions[position, :, 9] = position + 1
+        actions[position, :, 19] = 10 + position
+    prediction = actions + 0.25
+    gt_action = actions + 0.5
+    vla_action = actions
+    left_gate = np.asarray([0.9, 0.9, 0.9, 0.1, 0.1, 0.1])
+    right_gate = np.asarray([0.1, 0.1, 0.1, 0.9, 0.9, 0.9])
+    left_mse_vla = np.asarray([0.2, 0.5, 0.9, 0.1, 0.4, 0.8])
+    right_mse_vla = np.asarray([0.2, 0.5, 0.9, 0.1, 0.4, 0.8])
+    zeros = np.zeros(len(cache_indices), dtype=np.float64)
+    return EvaluationResult(
+        target="gt",
+        flow_loss=0.0,
+        mse=0.0,
+        rmse=0.0,
+        mae=0.0,
+        flow_loss_gt=0.0,
+        mse_gt=0.0,
+        rmse_gt=0.0,
+        mae_gt=0.0,
+        flow_loss_pred=0.0,
+        mse_pred=0.0,
+        rmse_pred=0.0,
+        mae_pred=0.0,
+        mse_vla_gt=0.0,
+        gt_gain=0.0,
+        relative_gt_error=0.0,
+        cache_indices=cache_indices,
+        sample_flow_loss=zeros,
+        sample_mse=zeros,
+        sample_rmse=zeros,
+        sample_mae=zeros,
+        sample_mse_gt=zeros,
+        sample_mae_gt=zeros,
+        sample_mse_pred=zeros,
+        sample_mae_pred=zeros,
+        sample_mse_vla_gt=zeros,
+        sample_gt_gain=zeros,
+        sample_relative_gt_error=zeros,
+        predictions=prediction,
+        sample_gate_w_left=left_gate,
+        sample_gate_w_right=right_gate,
+        sample_tactile_change_left=np.asarray([0.9, 0.8, 0.7, 0.1, 0.2, 0.3]),
+        sample_tactile_change_right=np.asarray([0.1, 0.2, 0.3, 0.9, 0.8, 0.7]),
+        sample_mse_vla_left=left_mse_vla,
+        sample_mse_vla_right=right_mse_vla,
+        bimanual_gate_region_counts=np.arange(9, dtype=np.int64).reshape(3, 3),
+        gt_actions=gt_action,
+        vla_actions=vla_action,
+    )
+
+
+def test_gate_diagnostics_and_action_examples_render_retained_bimanual_actions(tmp_path: Path) -> None:
+    history = tmp_path / "history.csv"
+    _write_bimanual_history(history)
+    result = _bimanual_result_with_mixed_quadrants()
+    figures = {}
+    real_subplots = bimanual_visualize.plt.subplots
+
+    def capture_subplots(*args, **kwargs):
+        figure, axes = real_subplots(*args, **kwargs)
+        figures[len(figures)] = figure
+        return figure, axes
+
+    class Pairs:
+        manifest = {"action_horizon": 3, "action_dim": 20}
+
+    with mock.patch.object(bimanual_visualize.plt, "subplots", side_effect=capture_subplots):
+        gate_plot = bimanual_visualize.plot_gate_diagnostics(
+            history,
+            result=result,
+            output_path=tmp_path / "gate_diagnostics.png",
+        )
+        action_plot = bimanual_visualize.plot_bimanual_action_examples(
+            result,
+            Pairs(),  # type: ignore[arg-type]
+            output_path=tmp_path / "bimanual_action_examples.png",
+        )
+
+    assert gate_plot.is_file() and gate_plot.stat().st_size > 0
+    assert action_plot.is_file() and action_plot.stat().st_size > 0
+    gate_figure, action_figure = figures.values()
+    heatmap = next(image for axis in gate_figure.axes for image in axis.images)
+    assert heatmap.get_array().shape == (3, 3)
+    action_heatmaps = [
+        image
+        for axis in action_figure.axes
+        for image in axis.images
+    ]
+    assert all(image.get_array().shape == (3, 20) for image in action_heatmaps)
+    labels = "\n".join(
+        label.get_text()
+        for axis in action_figure.axes
+        if axis.get_legend() is not None
+        for label in axis.get_legend().get_texts()
+    )
+    assert "gripper 9" in labels
+    assert "gripper 19" in labels
+    titles = "\n".join(axis.get_title(loc="left") for axis in action_figure.axes)
+    assert "high/low median cache=11" in titles
+    assert "high/low worst cache=12" in titles
+    assert "low/high median cache=14" in titles
+    assert "low/high worst cache=15" in titles
+    assert "model" not in inspect.signature(bimanual_visualize.plot_gate_diagnostics).parameters
+    assert "model" not in inspect.signature(bimanual_visualize.plot_bimanual_action_examples).parameters

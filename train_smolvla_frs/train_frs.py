@@ -544,8 +544,10 @@ def train_decoder(
         flatten_bimanual_quadrant_metrics,
     )
     from train_smolvla_frs.utils.bimanual_visualize import (
+        plot_bimanual_action_examples,
         plot_bimanual_behavior,
         plot_bimanual_training_overview,
+        plot_gate_diagnostics,
     )
     from train_smolvla_frs.utils.data import (
         CachedTactileEmbeddingBatches,
@@ -1913,6 +1915,23 @@ def train_decoder(
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
+                    if loss_mode == BIMANUAL_LOSS_MODE and write_plots:
+                        try:
+                            gate_plot = plot_gate_diagnostics(
+                                history_path,
+                                result=validation,
+                                output_path=output_dir / "gate_diagnostics.png",
+                            )
+                            action_plot = plot_bimanual_action_examples(
+                                validation,
+                                pairs,
+                                output_path=output_dir / "bimanual_action_examples.png",
+                            )
+                        except (OSError, ValueError) as exc:
+                            print(f"warning: could not refresh bimanual diagnostics: {exc}", flush=True)
+                        else:
+                            print(f"bimanual_gate_diagnostics={gate_plot}", flush=True)
+                            print(f"bimanual_action_examples={action_plot}", flush=True)
                     save_checkpoint(
                         output_dir / "last",
                         model,

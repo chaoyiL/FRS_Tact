@@ -9,12 +9,15 @@ import pathlib
 from typing import Any
 
 import matplotlib
+import numpy as np
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from train_smolvla_frs.utils.bimanual_metrics import BIMANUAL_QUADRANTS, BIMANUAL_WRISTS
 from train_smolvla_frs.utils.history_plot import _finite_series
+from train_smolvla_frs.utils.metrics import EvaluationResult
+from utils.cache import CachedPairs, MultiCachedPairs
 
 
 _QUADRANT_METRICS = (
@@ -328,4 +331,228 @@ def plot_bimanual_behavior(
                 axis.set_xlabel("epoch")
 
     fig.suptitle("Bimanual FRS behavior by Gate quadrant", fontsize=15)
+    return _save_figure(fig, output_path)
+
+
+def _sample_percentiles(values: np.ndarray | None) -> np.ndarray:
+    if values is None or len(values) == 0:
+        return np.full(5, math.nan)
+    return np.quantile(np.asarray(values, dtype=np.float64), (0.1, 0.25, 0.5, 0.75, 0.9))
+
+
+def plot_gate_diagnostics(
+    history_path: pathlib.Path,
+    *,
+    result: EvaluationResult,
+    output_path: pathlib.Path,
+) -> pathlib.Path:
+    """Render latest per-wrist Gate distributions and the 3×3 joint region map."""
+
+    if history_path.exists():
+        _read_bimanual_rows(history_path)
+    left_gate = result.sample_gate_w_left
+    right_gate = result.sample_gate_w_right
+    if left_gate is None or right_gate is None or result.bimanual_gate_region_counts is None:
+        raise ValueError("bimanual Gate diagnostics require per-wrist retained Gate values")
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig.subplots_adjust(left=0.08, right=0.96, top=0.91, bottom=0.09, hspace=0.38, wspace=0.28)
+    percentile_labels = ("p10", "p25", "p50", "p75", "p90")
+    positions = np.arange(len(percentile_labels))
+    wrist_values = (("left", left_gate, "#4C72B0"), ("right", right_gate, "#DD8452"))
+
+    gate_axis = axes[0, 0]
+    for wrist, values, color in wrist_values:
+        gate_axis.plot(positions, _sample_percentiles(values), marker="o", label=wrist, color=color)
+    gate_axis.set_xticks(positions, percentile_labels)
+    gate_axis.set_ylim(-0.05, 1.05)
+    _finish_axis(gate_axis, title="Gate percentiles", ylabel="Gate weight")
+
+    tactile_axis = axes[0, 1]
+    for wrist, values, color in (
+        ("left", result.sample_tactile_change_left, "#4C72B0"),
+        ("right", result.sample_tactile_change_right, "#DD8452"),
+    ):
+        tactile_axis.plot(positions, _sample_percentiles(values), marker="o", label=wrist, color=color)
+    tactile_axis.set_xticks(positions, percentile_labels)
+    _finish_axis(tactile_axis, title="Tactile-change percentiles", ylabel="change")
+
+    count_axis = axes[1, 0]
+    region_labels = ("low", "mid", "high")
+    offsets = (-0.18, 0.18)
+    for offset, (wrist, values, color) in zip(offsets, wrist_values, strict=True):
+        values = np.asarray(values, dtype=np.float64)
+        counts = np.asarray(
+            (
+                np.sum(values <= 0.3),
+                np.sum((values > 0.3) & (values < 0.7)),
+                np.sum(values >= 0.7),
+            )
+        )
+        count_axis.bar(np.arange(3) + offset, counts, width=0.36, label=wrist, color=color)
+    count_axis.set_xticks(np.arange(3), region_labels)
+    _finish_axis(count_axis, title="Per-wrist Gate region counts", ylabel="samples")
+
+    heatmap_axis = axes[1, 1]
+    counts = np.asarray(result.bimanual_gate_region_counts, dtype=np.int64)
+    if counts.shape != (3, 3):
+        raise ValueError(f"bimanual Gate region counts must have shape (3, 3), got {counts.shape}")
+    image = heatmap_axis.imshow(counts, cmap="Blues")
+    total = int(np.sum(counts))
+    for row, column in np.ndindex(counts.shape):
+        percentage = 0.0 if total == 0 else 100.0 * float(counts[row, column]) / total
+        heatmap_axis.text(column, row, f"{counts[row, column]}\n{percentage:.1f}%", ha="center", va="center")
+    heatmap_axis.set_xticks(np.arange(3), ("right low", "right mid", "right high"))
+    heatmap_axis.set_yticks(np.arange(3), ("left low", "left mid", "left high"))
+    heatmap_axis.set_title("Latest Gate-region samples", loc="left", fontsize=10, pad=6)
+    fig.colorbar(image, ax=heatmap_axis, fraction=0.046, pad=0.04, label="samples")
+    fig.suptitle("Bimanual FRS Gate diagnostics", fontsize=15)
+    return _save_figure(fig, output_path)
+
+
+def _mixed_quadrant_examples(
+    result: EvaluationResult,
+    quadrant: str,
+) -> tuple[tuple[str, int] | None, tuple[str, int] | None]:
+    """Return median and worst low-wrist VLA-preservation examples for a quadrant."""
+
+    left_gate = result.sample_gate_w_left
+    right_gate = result.sample_gate_w_right
+    if left_gate is None or right_gate is None:
+        return None, None
+    if quadrant == "high_low":
+        mask = (left_gate >= 0.7) & (right_gate <= 0.3)
+        preservation = result.sample_mse_vla_right
+    elif quadrant == "low_high":
+        mask = (left_gate <= 0.3) & (right_gate >= 0.7)
+        preservation = result.sample_mse_vla_left
+    else:
+        raise ValueError(f"unsupported mixed quadrant {quadrant!r}")
+    if preservation is None:
+        raise ValueError("bimanual action examples require per-wrist VLA errors")
+    positions = np.flatnonzero(mask)
+    if len(positions) == 0:
+        return None, None
+    values = np.asarray(preservation, dtype=np.float64)[positions]
+    median_position = positions[int(np.argmin(np.abs(values - np.median(values))))]
+    worst_position = positions[int(np.argmax(values))]
+    return ("median", int(median_position)), ("worst", int(worst_position))
+
+
+def plot_bimanual_action_examples(
+    result: EvaluationResult,
+    pairs: CachedPairs | MultiCachedPairs,
+    *,
+    output_path: pathlib.Path,
+) -> pathlib.Path:
+    """Plot retained FRS/VLA/GT actions for representative mixed-Gate examples."""
+
+    if result.predictions is None or result.gt_actions is None or result.vla_actions is None:
+        raise ValueError("bimanual action examples require retained predictions, GT actions, and VLA actions")
+    prediction = np.asarray(result.predictions)
+    gt_action = np.asarray(result.gt_actions)
+    vla_action = np.asarray(result.vla_actions)
+    expected_shape = (
+        int(pairs.manifest["action_horizon"]),
+        int(pairs.manifest["action_dim"]),
+    )
+    if prediction.ndim != 3 or prediction.shape[1:] != expected_shape:
+        raise ValueError(
+            "retained prediction shape must be "
+            f"(samples, {expected_shape[0]}, {expected_shape[1]}), got {prediction.shape}"
+        )
+    if gt_action.shape != prediction.shape or vla_action.shape != prediction.shape:
+        raise ValueError("retained bimanual actions must share the prediction shape")
+
+    selected = [
+        (quadrant, choice)
+        for quadrant in ("high_low", "low_high")
+        for choice in _mixed_quadrant_examples(result, quadrant)
+    ]
+    fig, axes = plt.subplots(4, 4, figsize=(18, 16), squeeze=False)
+    fig.subplots_adjust(left=0.06, right=0.98, top=0.93, bottom=0.06, hspace=0.52, wspace=0.30)
+    steps = np.arange(expected_shape[0])
+    for row, (quadrant, choice) in enumerate(selected):
+        row_axes = axes[row]
+        if choice is None:
+            for axis in row_axes:
+                axis.set_axis_off()
+                axis.text(
+                    0.5,
+                    0.5,
+                    f"No {quadrant.replace('_', '/')} examples",
+                    ha="center",
+                    va="center",
+                    transform=axis.transAxes,
+                )
+            continue
+        selection, position = choice
+        cache_index = int(result.cache_indices[position])
+        display_quadrant = quadrant.replace("_", "/")
+        for axis, action_slice, wrist in zip(
+            row_axes[:2],
+            (slice(0, 10), slice(10, 20)),
+            ("left", "right"),
+            strict=True,
+        ):
+            axis.plot(
+                steps,
+                np.linalg.norm(
+                    prediction[position, :, action_slice] - gt_action[position, :, action_slice],
+                    axis=1,
+                ),
+                marker="o",
+                label="FRS−GT",
+            )
+            axis.plot(
+                steps,
+                np.linalg.norm(
+                    vla_action[position, :, action_slice] - gt_action[position, :, action_slice],
+                    axis=1,
+                ),
+                marker="o",
+                linestyle="--",
+                label="VLA−GT",
+            )
+            _finish_axis(
+                axis,
+                title=f"{display_quadrant} {selection} cache={cache_index} — {wrist}",
+                ylabel="per-step distance",
+            )
+            axis.set_xlabel("horizon step")
+        heatmap_axis = row_axes[2]
+        image = heatmap_axis.imshow(
+            prediction[position] - vla_action[position],
+            aspect="auto",
+            cmap="coolwarm",
+        )
+        heatmap_axis.set_title(f"FRS−VLA ({display_quadrant} {selection})", loc="left", fontsize=10, pad=6)
+        heatmap_axis.set_xlabel("action dimension")
+        heatmap_axis.set_ylabel("horizon step")
+        fig.colorbar(image, ax=heatmap_axis, fraction=0.046, pad=0.04)
+        gripper_axis = row_axes[3]
+        for action_index, color in ((9, "#4C72B0"), (19, "#DD8452")):
+            gripper_axis.plot(
+                steps,
+                prediction[position, :, action_index],
+                color=color,
+                label=f"FRS gripper {action_index}",
+            )
+            gripper_axis.plot(
+                steps,
+                gt_action[position, :, action_index],
+                color=color,
+                linestyle="--",
+                label=f"GT gripper {action_index}",
+            )
+            gripper_axis.plot(
+                steps,
+                vla_action[position, :, action_index],
+                color=color,
+                linestyle=":",
+                label=f"VLA gripper {action_index}",
+            )
+        _finish_axis(gripper_axis, title=f"Grippers — {display_quadrant} {selection}", ylabel="action")
+        gripper_axis.set_xlabel("horizon step")
+    fig.suptitle("Bimanual retained action examples", fontsize=15)
     return _save_figure(fig, output_path)

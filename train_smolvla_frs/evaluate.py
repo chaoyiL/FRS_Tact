@@ -9,6 +9,11 @@ from typing import Any
 import numpy as np
 
 from train_smolvla_frs.train_frs import resolve_decode_solver
+from train_smolvla_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_smolvla_frs.utils.bimanual_visualize import (
+    plot_bimanual_action_examples,
+    plot_gate_diagnostics,
+)
 from train_smolvla_frs.utils.checkpoint import load_checkpoint
 from train_smolvla_frs.utils.data import (
     CachedTactileEmbeddingBatches,
@@ -120,6 +125,7 @@ def evaluate_decoder(
     rank_low_gate_threshold = float(extra.get("rank_low_gate_threshold", 0.3))
     rank_high_gate_threshold = float(extra.get("rank_high_gate_threshold", 0.7))
     action_horizon = int(pairs.manifest["action_horizon"])
+    keep_actions = bool(save_predictions or (write_plots and loss_mode == BIMANUAL_LOSS_MODE))
     tactile_window = resolve_tactile_window(
         action_horizon=action_horizon,
         window_divisor=tactile_window_divisor,
@@ -185,7 +191,7 @@ def evaluate_decoder(
             batch_size=batch_size,
             num_steps=num_steps,
             solver=solver,
-            keep_predictions=save_predictions,
+            keep_predictions=keep_actions,
             target=target,
             loss_mode=loss_mode,
             gate_tau=gate_tau,
@@ -574,7 +580,7 @@ def evaluate_decoder(
                         ),
                     }
                 )
-        if result.predictions is not None:
+        if save_predictions and result.predictions is not None:
             np.savez(
                 output_dir / "predictions.npz",
                 cache_indices=result.cache_indices,
@@ -595,6 +601,19 @@ def evaluate_decoder(
             )
             for plot_path in plot_paths:
                 print(f"plot={plot_path}")
+            if loss_mode == BIMANUAL_LOSS_MODE:
+                gate_plot = plot_gate_diagnostics(
+                    output_dir / "history.csv",
+                    result=result,
+                    output_path=output_dir / "gate_diagnostics.png",
+                )
+                action_plot = plot_bimanual_action_examples(
+                    result,
+                    pairs,
+                    output_path=output_dir / "bimanual_action_examples.png",
+                )
+                print(f"plot={gate_plot}")
+                print(f"plot={action_plot}")
 
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
