@@ -98,7 +98,7 @@ model:
 
 frs_training:
   # 双手组合端点使用 objective-v2 metadata，与旧 scalar-gate 实验分目录保存。
-  output: /workspace/frs_pick_tube_05/frs_0815_03_all_encoders_bimanual_gated
+  output: /workspace/frs_pick_tube_05/frs_bimanual_gated_01
   # 冻结 VLA pick_tube_01 的 chunk_size=20，因此 tactile_window=20/4=5。
   tactile_window_divisor: 4
   # 5 个时间点每隔 3 帧回看一次，在 30Hz 下覆盖约 0.4 秒。

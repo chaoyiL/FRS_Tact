@@ -12,6 +12,24 @@ ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts/setup_env.sh"
 
 
+def test_setup_env_help_is_safe_to_execute_directly() -> None:
+    source = SETUP.read_text(encoding="utf-8")
+    assert "```" not in source, "shell 脚本不能包含 Markdown 代码围栏"
+
+    completed = subprocess.run(
+        ["bash", str(SETUP), "--help"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--root" in completed.stdout
+    assert "--pi05_deploy" in completed.stdout
+
+
 def test_setup_env_declares_two_distinct_environment_targets() -> None:
     source = SETUP.read_text(encoding="utf-8")
     assert 'PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"' in source
