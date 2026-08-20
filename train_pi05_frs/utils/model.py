@@ -9,9 +9,15 @@ from typing import Literal
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 from flax import nnx
 
+from train_pi05_frs.utils.bimanual_schema import (
+    LEFT_ACTION_SLICE,
+    RIGHT_ACTION_SLICE,
+    STEERED_ACTION_DIM,
+)
 from train_pi05_frs.utils.integration import fireflow_integrate_velocity
 
 Array = jax.Array
@@ -20,6 +26,15 @@ DEFAULT_GRU_HIDDEN_DIM = 256
 DEFAULT_RESNET_EMBEDDING_DIM = 512
 DECODER_INPUT_VERSION = 2
 LOSS_COMPONENT_NAMES = ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+TRAIN_LOSS_COMPONENT_NAMES = (
+    "gt_fm",
+    "vla_fm",
+    "composite_fm",
+    "low_safety",
+    "decode",
+    "rank",
+    "repair",
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -295,6 +310,34 @@ def flow_matching_loss_per_sample(
     return jnp.mean(jnp.square(predicted_velocity - target_velocity), axis=(1, 2))
 
 
+def masked_flow_matching_loss_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    target: Array,
+    t: Array,
+    tactile_seq: Array,
+    *,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
+) -> Array:
+    """Flow-matching loss normalized over only the 20 physical action dimensions."""
+
+    if x_base.shape[-1] < STEERED_ACTION_DIM or target.shape[-1] < STEERED_ACTION_DIM:
+        raise ValueError("masked flow matching requires at least 20 action dimensions")
+    t_view = t[:, None, None]
+    x_t = (1.0 - t_view) * x_base + t_view * target
+    target_velocity = target - x_base
+    predicted_velocity = model(
+        x_t,
+        t,
+        tactile_seq,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
+    residual = predicted_velocity - target_velocity
+    return jnp.mean(jnp.square(residual[..., :STEERED_ACTION_DIM]), axis=(1, 2))
+
+
 def decode_mse_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -378,6 +421,136 @@ def three_region_effective_gate_weights(
         0.0,
         1.0,
     )
+
+
+def bimanual_composite_endpoint(
+    gt_action: Array,
+    predicted_action: Array,
+    gate_weights: Array,
+    *,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> tuple[Array, Array]:
+    """Steer the two physical wrists independently and preserve the VLA padding tail."""
+
+    if gt_action.ndim != 3 or gt_action.shape != predicted_action.shape:
+        raise ValueError("bimanual composite endpoint requires matching actions")
+    if gt_action.shape[-1] < STEERED_ACTION_DIM:
+        raise ValueError("bimanual composite endpoint requires at least 20 action dimensions")
+    if gate_weights.shape != (gt_action.shape[0], 2):
+        raise ValueError("bimanual gate_weights must have shape [B, 2]")
+    if not isinstance(gate_weights, jax.core.Tracer) and not bool(
+        jnp.all(jnp.isfinite(gate_weights))
+    ):
+        raise ValueError("bimanual gate_weights must be finite")
+    effective = three_region_effective_gate_weights(
+        gate_weights,
+        low_gate_threshold=low_gate_threshold,
+        high_gate_threshold=high_gate_threshold,
+    )
+    physical_weights = jnp.concatenate(
+        [
+            jnp.repeat(effective[:, :1], LEFT_ACTION_SLICE.stop, axis=1),
+            jnp.repeat(
+                effective[:, 1:],
+                RIGHT_ACTION_SLICE.stop - RIGHT_ACTION_SLICE.start,
+                axis=1,
+            ),
+        ],
+        axis=1,
+    )[:, None, :]
+    physical = physical_weights * gt_action[..., :STEERED_ACTION_DIM] + (
+        1.0 - physical_weights
+    ) * predicted_action[..., :STEERED_ACTION_DIM]
+    target = jnp.concatenate(
+        [physical, predicted_action[..., STEERED_ACTION_DIM:]], axis=-1
+    )
+    return target, effective
+
+
+def bimanual_mse_per_sample(left: Array, right: Array) -> Array:
+    """Return physical endpoint MSE independently for the fixed left and right wrists."""
+
+    squared = jnp.square(
+        left[..., :STEERED_ACTION_DIM] - right[..., :STEERED_ACTION_DIM]
+    )
+    return jnp.stack(
+        [
+            jnp.mean(squared[..., LEFT_ACTION_SLICE], axis=(1, 2)),
+            jnp.mean(squared[..., RIGHT_ACTION_SLICE], axis=(1, 2)),
+        ],
+        axis=1,
+    )
+
+
+def _average_active_wrist_terms(
+    left_term: Array,
+    left_active: Array,
+    right_term: Array,
+    right_active: Array,
+) -> Array:
+    """Average wrist terms without counting a globally inactive wrist."""
+
+    left_active = jnp.asarray(left_active)
+    right_active = jnp.asarray(right_active)
+    active_count = left_active.astype(left_term.dtype) + right_active.astype(
+        left_term.dtype
+    )
+    total = jnp.where(left_active, left_term, 0.0) + jnp.where(
+        right_active, right_term, 0.0
+    )
+    return total / jnp.maximum(active_count, 1.0)
+
+
+def _bimanual_active_group_normalized_per_sample(
+    penalty: Array, strength: Array
+) -> tuple[Array, Array]:
+    """Return a vector whose batch mean is the active group's weighted mean."""
+
+    total_strength = jnp.sum(strength)
+    active = total_strength > 0.0
+    batch_size = jnp.asarray(penalty.shape[0], dtype=penalty.dtype)
+    scale = jnp.where(
+        active,
+        batch_size / jnp.maximum(total_strength, jnp.finfo(penalty.dtype).tiny),
+        0.0,
+    )
+    return strength * penalty * scale, active
+
+
+def _bimanual_source_group_normalized_per_sample(
+    penalty: Array,
+    strength: Array,
+    source_indices: Array,
+) -> tuple[Array, Array]:
+    """Normalize an active wrist group independently inside each present source."""
+
+    source_indices = jnp.asarray(source_indices, dtype=jnp.int32)
+    if source_indices.shape != (penalty.shape[0],):
+        raise ValueError("source_indices must have shape [B]")
+    same_source = source_indices[:, None] == source_indices[None, :]
+    counts = jnp.sum(same_source, axis=1).astype(penalty.dtype)
+    totals = jnp.sum(same_source * strength[None, :], axis=1)
+    active_for_sample = totals > 0.0
+
+    positions = jnp.arange(penalty.shape[0])
+    first_position = jnp.min(
+        jnp.where(same_source, positions[None, :], penalty.shape[0]), axis=1
+    )
+    first_in_source = positions == first_position
+    present_sources = jnp.sum(first_in_source.astype(penalty.dtype))
+    active_sources = jnp.sum(
+        (first_in_source & active_for_sample).astype(penalty.dtype)
+    )
+    active_source_scale = present_sources / jnp.maximum(active_sources, 1.0)
+    normalized = (
+        strength
+        * penalty
+        * counts
+        / jnp.maximum(totals, jnp.finfo(penalty.dtype).tiny)
+        * active_source_scale
+    )
+    return jnp.where(active_for_sample, normalized, 0.0), active_sources > 0.0
 
 
 def _active_group_normalized_per_sample(penalty: Array, strength: Array) -> Array:
@@ -583,6 +756,170 @@ def gated_loss_components_per_sample(
     return components
 
 
+def bimanual_loss_components_per_sample(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    t: Array,
+    tactile_seq: Array,
+    gate_weights: Array,
+    *,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
+    source_indices: Array | None = None,
+    gate_lambda: float = 1.0,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
+    low_gate_safety_weight: float = 0.0,
+    low_gate_safety_margin: float = 0.0,
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> dict[str, Array]:
+    """Return one masked composite FM call plus independently gated wrist auxiliaries."""
+
+    del gate_lambda
+    if low_gate_safety_weight < 0:
+        raise ValueError(
+            f"low-gate safety weight must be non-negative, got {low_gate_safety_weight}."
+        )
+    if low_gate_safety_margin < 0:
+        raise ValueError(
+            f"low-gate safety margin must be non-negative, got {low_gate_safety_margin}."
+        )
+    if rank_weight < 0:
+        raise ValueError(f"ranking weight must be non-negative, got {rank_weight}.")
+    if repair_weight < 0:
+        raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
+
+    target, effective = bimanual_composite_endpoint(
+        gt_action,
+        predicted_action,
+        gate_weights,
+        low_gate_threshold=low_gate_threshold,
+        high_gate_threshold=high_gate_threshold,
+    )
+    flow = masked_flow_matching_loss_per_sample(
+        model,
+        x_base,
+        target,
+        t,
+        tactile_seq,
+        state=state,
+        state_keep_mask=state_keep_mask,
+    )
+    zeros = jnp.zeros_like(flow)
+    low_safety_term = zeros
+    decode_term = zeros
+    rank_term = zeros
+    repair_term = zeros
+
+    needs_decode = any(
+        weight != 0.0
+        for weight in (
+            aux_decode_weight,
+            low_gate_safety_weight,
+            rank_weight,
+            repair_weight,
+        )
+    )
+    if needs_decode:
+        decoded = decode_actions(
+            model,
+            x_base,
+            tactile_seq,
+            num_steps=aux_decode_steps,
+            solver=aux_decode_solver,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+        mse_gt = bimanual_mse_per_sample(decoded, gt_action)
+        mse_vla = bimanual_mse_per_sample(decoded, predicted_action)
+        raw_gates = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
+
+        def normalize_wrist(
+            penalty: Array, strength: Array
+        ) -> tuple[Array, Array]:
+            if source_indices is None:
+                return _bimanual_active_group_normalized_per_sample(
+                    penalty, strength
+                )
+            return _bimanual_source_group_normalized_per_sample(
+                penalty, strength, source_indices
+            )
+
+        if aux_decode_weight != 0.0:
+            decode_term = float(aux_decode_weight) * jnp.mean(
+                effective * mse_gt + (1.0 - effective) * mse_vla,
+                axis=1,
+            )
+
+        low_strength = (1.0 - raw_gates) * (
+            raw_gates <= float(low_gate_threshold)
+        )
+        high_strength = raw_gates * (raw_gates >= float(high_gate_threshold))
+
+        if low_gate_safety_weight != 0.0:
+            low_penalty = jax.nn.relu(
+                jnp.minimum(mse_gt, mse_vla) - float(low_gate_safety_margin)
+            )
+            left_term, left_active = normalize_wrist(
+                low_penalty[:, 0], low_strength[:, 0]
+            )
+            right_term, right_active = normalize_wrist(
+                low_penalty[:, 1], low_strength[:, 1]
+            )
+            low_safety_term = float(
+                low_gate_safety_weight
+            ) * _average_active_wrist_terms(
+                left_term, left_active, right_term, right_active
+            )
+
+        if rank_weight != 0.0:
+            rank_penalty = jax.nn.relu(
+                mse_gt - mse_vla + float(rank_margin)
+            )
+            left_term, left_active = normalize_wrist(
+                rank_penalty[:, 0], high_strength[:, 0]
+            )
+            right_term, right_active = normalize_wrist(
+                rank_penalty[:, 1], high_strength[:, 1]
+            )
+            rank_term = float(rank_weight) * _average_active_wrist_terms(
+                left_term, left_active, right_term, right_active
+            )
+
+        if repair_weight != 0.0:
+            baseline = bimanual_mse_per_sample(predicted_action, gt_action)
+            repair_penalty = jax.nn.relu(
+                mse_gt - baseline + float(repair_margin)
+            )
+            left_term, left_active = normalize_wrist(
+                repair_penalty[:, 0], high_strength[:, 0]
+            )
+            right_term, right_active = normalize_wrist(
+                repair_penalty[:, 1], high_strength[:, 1]
+            )
+            repair_term = float(repair_weight) * _average_active_wrist_terms(
+                left_term, left_active, right_term, right_active
+            )
+
+    return {
+        "gt_fm": zeros,
+        "vla_fm": zeros,
+        "composite_fm": flow,
+        "low_safety": low_safety_term,
+        "decode": decode_term,
+        "rank": rank_term,
+        "repair": repair_term,
+    }
+
+
 def gated_flow_matching_loss_per_sample(
     model: TactileConditionedFlowDecoder,
     x_base: Array,
@@ -627,7 +964,7 @@ def gated_flow_matching_loss_per_sample(
         "state_dropout_rate",
     ),
 )
-def train_step(
+def _train_step_jit(
     model: TactileConditionedFlowDecoder,
     optimizer: nnx.Optimizer,
     x_base: Array,
@@ -636,6 +973,7 @@ def train_step(
     tactile_seq: Array,
     gate_weights: Array,
     key: Array,
+    source_indices: Array | None = None,
     *,
     state: Array | None = None,
     state_dropout_rate: float = 0.0,
@@ -732,14 +1070,116 @@ def train_step(
                 high_gate_threshold=high_gate_threshold,
             )
             components = {name: jnp.mean(per_sample[name]) for name in LOSS_COMPONENT_NAMES}
+        elif loss_mode == "bimanual_gated":
+            per_sample = bimanual_loss_components_per_sample(
+                candidate,
+                x_base,
+                gt_action,
+                predicted_action,
+                t,
+                tactile_seq,
+                gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
+                source_indices=source_indices,
+                aux_decode_weight=aux_decode_weight,
+                aux_decode_steps=aux_decode_steps,
+                aux_decode_solver=aux_decode_solver,
+                low_gate_safety_weight=low_gate_safety_weight,
+                low_gate_safety_margin=low_gate_safety_margin,
+                rank_weight=rank_weight,
+                rank_margin=rank_margin,
+                repair_weight=repair_weight,
+                repair_margin=repair_margin,
+                low_gate_threshold=low_gate_threshold,
+                high_gate_threshold=high_gate_threshold,
+            )
+            components = {
+                name: jnp.mean(per_sample[name])
+                for name in TRAIN_LOSS_COMPONENT_NAMES
+            }
         else:
-            raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
+            raise ValueError(
+                "loss_mode must be 'gt', 'predicted', 'gated', or 'bimanual_gated', "
+                f"got {loss_mode!r}."
+            )
+        if loss_mode != "bimanual_gated":
+            zero = jnp.asarray(0.0, dtype=components["gt_fm"].dtype)
+            components = {
+                name: components.get(name, zero)
+                for name in TRAIN_LOSS_COMPONENT_NAMES
+            }
         loss = sum(components.values())
         return loss, components
 
     (loss, components), gradients = nnx.value_and_grad(loss_fn, has_aux=True)(model)
     optimizer.update(gradients)
     return loss, components
+
+
+def train_step(
+    model: TactileConditionedFlowDecoder,
+    optimizer: nnx.Optimizer,
+    x_base: Array,
+    gt_action: Array,
+    predicted_action: Array,
+    tactile_seq: Array,
+    gate_weights: Array,
+    key: Array,
+    source_indices: Array | None = None,
+    *,
+    state: Array | None = None,
+    state_dropout_rate: float = 0.0,
+    loss_mode: str = "gt",
+    gate_lambda: float = 1.0,
+    aux_decode_weight: float = 1.0,
+    aux_decode_steps: int = 10,
+    aux_decode_solver: FlowSolver = "euler",
+    low_gate_safety_weight: float = 0.0,
+    low_gate_safety_margin: float = 0.0,
+    rank_weight: float = 0.0,
+    rank_margin: float = 0.0,
+    repair_weight: float = 0.0,
+    repair_margin: float = 0.0,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> tuple[Array, dict[str, Array]]:
+    """Validate the small bimanual label before the compiled optimizer update."""
+
+    if loss_mode == "bimanual_gated":
+        host_gates = np.asarray(jax.device_get(gate_weights))
+        if np.any(~np.isfinite(host_gates)):
+            raise ValueError(
+                "bimanual gate_weights must be finite before optimizer update"
+            )
+        if source_indices is not None and source_indices.shape != (x_base.shape[0],):
+            raise ValueError("source_indices must have shape [B]")
+    return _train_step_jit(
+        model,
+        optimizer,
+        x_base,
+        gt_action,
+        predicted_action,
+        tactile_seq,
+        gate_weights,
+        key,
+        source_indices,
+        state=state,
+        state_dropout_rate=state_dropout_rate,
+        loss_mode=loss_mode,
+        gate_lambda=gate_lambda,
+        aux_decode_weight=aux_decode_weight,
+        aux_decode_steps=aux_decode_steps,
+        aux_decode_solver=aux_decode_solver,
+        low_gate_safety_weight=low_gate_safety_weight,
+        low_gate_safety_margin=low_gate_safety_margin,
+        rank_weight=rank_weight,
+        rank_margin=rank_margin,
+        repair_weight=repair_weight,
+        repair_margin=repair_margin,
+        low_gate_threshold=low_gate_threshold,
+        high_gate_threshold=high_gate_threshold,
+    )
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))

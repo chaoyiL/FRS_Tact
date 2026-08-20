@@ -12,12 +12,16 @@ from unittest import mock
 import jax
 import jax.numpy as jnp
 from flax import nnx
+import pytest
 
 from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
 from train_pi05_frs.utils.model import DecoderConfig
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
+from train_pi05_frs.utils.model import bimanual_composite_endpoint
+from train_pi05_frs.utils.model import bimanual_loss_components_per_sample
+from train_pi05_frs.utils.model import bimanual_mse_per_sample
 from train_pi05_frs.utils.model import decode_actions
 from train_pi05_frs.utils.model import decode_euler
 from train_pi05_frs.utils.metrics import gate_stratified_decode_metrics
@@ -26,6 +30,7 @@ from train_pi05_frs.utils.model import flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import gated_flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import gt_supervised_loss_per_sample
 from train_pi05_frs.utils.model import make_optimizer
+from train_pi05_frs.utils.model import masked_flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import train_step
 from train_pi05_frs.train import (
     _validate_resume_cache_provenance,
@@ -33,6 +38,105 @@ from train_pi05_frs.train import (
     train_decoder,
 )
 import numpy as np
+
+
+def test_32d_composite_steers_first_20_and_preserves_vla_tail():
+    gt = jnp.ones((2, 3, 32))
+    vla = jnp.full((2, 3, 32), 2.0)
+    gates = jnp.asarray([[1.0, 0.0], [0.0, 1.0]])
+    target, effective = bimanual_composite_endpoint(gt, vla, gates)
+    np.testing.assert_allclose(target[0, :, :10], 1.0)
+    np.testing.assert_allclose(target[0, :, 10:20], 2.0)
+    np.testing.assert_allclose(target[..., 20:], 2.0)
+    assert effective.shape == (2, 2)
+
+
+def test_bimanual_mse_ignores_32d_padding_tail():
+    left = jnp.zeros((1, 2, 32))
+    right = left.at[..., 20:].set(100.0)
+    np.testing.assert_allclose(bimanual_mse_per_sample(left, right), [[0.0, 0.0]])
+
+
+def test_bimanual_composite_rejects_width_below_physical_action():
+    with pytest.raises(ValueError, match="at least 20"):
+        bimanual_composite_endpoint(
+            jnp.zeros((1, 2, 19)), jnp.zeros((1, 2, 19)), jnp.ones((1, 2))
+        )
+
+
+class _ConstantVelocity:
+    def __init__(self, velocity):
+        self.velocity = velocity
+
+    def __call__(self, x_t, t, tactile_seq, *, state=None, state_keep_mask=None):
+        del t, tactile_seq, state, state_keep_mask
+        return jnp.broadcast_to(self.velocity, x_t.shape)
+
+
+def test_masked_flow_matching_ignores_32d_tail_residual():
+    tail_only = jnp.concatenate([jnp.zeros((20,)), jnp.full((12,), 100.0)])
+    loss = masked_flow_matching_loss_per_sample(
+        _ConstantVelocity(tail_only),
+        jnp.zeros((1, 2, 32)),
+        jnp.zeros((1, 2, 32)),
+        jnp.asarray([0.5]),
+        jnp.zeros((1, 1, 1)),
+    )
+    np.testing.assert_allclose(loss, [0.0])
+
+
+def test_bimanual_composite_flow_gives_low_and_high_wrists_independent_gradients():
+    x_base = jnp.zeros((1, 1, 32))
+    gt = jnp.ones_like(x_base)
+    vla = -jnp.ones_like(x_base)
+    gate = jnp.asarray([[1.0, 0.0]])
+
+    def objective(velocity):
+        components = bimanual_loss_components_per_sample(
+            _ConstantVelocity(velocity),
+            x_base,
+            gt,
+            vla,
+            jnp.asarray([0.5]),
+            jnp.zeros((1, 1, 1)),
+            gate,
+            aux_decode_weight=0.0,
+            low_gate_safety_weight=0.0,
+            rank_weight=0.0,
+            repair_weight=0.0,
+        )
+        return jnp.mean(components["composite_fm"])
+
+    gradient = jax.grad(objective)(jnp.zeros((32,)))
+    assert bool(jnp.all(gradient[:10] < 0.0))
+    assert bool(jnp.all(gradient[10:20] > 0.0))
+    np.testing.assert_allclose(gradient[20:], 0.0)
+
+
+def test_bimanual_single_active_wrist_rank_is_not_diluted():
+    gt = jnp.zeros((2, 1, 20))
+    vla = jnp.full_like(gt, 2.0)
+    decoded = vla.at[..., :10].set(2.5)
+    with mock.patch(
+        "train_pi05_frs.utils.model.decode_actions", return_value=decoded
+    ) as decode:
+        components = bimanual_loss_components_per_sample(
+            _ConstantVelocity(jnp.zeros((20,))),
+            jnp.zeros_like(gt),
+            gt,
+            vla,
+            jnp.full((2,), 0.5),
+            jnp.zeros((2, 1, 1)),
+            jnp.asarray([[1.0, 0.5], [1.0, 0.5]]),
+            source_indices=jnp.asarray([0, 0]),
+            aux_decode_weight=0.0,
+            low_gate_safety_weight=0.0,
+            rank_weight=1.0,
+            rank_margin=0.1,
+            repair_weight=0.0,
+        )
+    np.testing.assert_allclose(components["rank"], jnp.full((2,), 6.1), atol=1e-6)
+    decode.assert_called_once()
 
 
 class ConditionedDecoderModelTest(unittest.TestCase):
@@ -214,6 +318,136 @@ class ConditionedDecoderModelTest(unittest.TestCase):
     def _tactile_seq(self, key, batch: int, window: int = 3):
         return jax.random.normal(key, (batch, window, 4, 4))
 
+    def test_public_bimanual_train_step_rejects_nonfinite_gate_before_jit(self):
+        model = TactileConditionedFlowDecoder(
+            DecoderConfig(
+                action_dim=20,
+                action_horizon=2,
+                tactile_window=3,
+                gru_hidden_dim=8,
+                resnet_embedding_dim=4,
+                model_dim=8,
+                depth=1,
+                num_heads=2,
+            ),
+            rngs=nnx.Rngs(220),
+        )
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+        zeros = jnp.zeros((1, 2, 20), dtype=jnp.float32)
+        with mock.patch(
+            "train_pi05_frs.utils.model._train_step_jit", create=True
+        ) as compiled:
+            with self.assertRaisesRegex(ValueError, "finite"):
+                train_step(
+                    model,
+                    optimizer,
+                    zeros,
+                    zeros,
+                    zeros,
+                    jnp.zeros((1, 3, 4, 4), dtype=jnp.float32),
+                    jnp.asarray([[jnp.nan, 0.5]], dtype=jnp.float32),
+                    jax.random.key(221),
+                    source_indices=jnp.asarray([0], dtype=jnp.int32),
+                    loss_mode="bimanual_gated",
+                    aux_decode_weight=0.0,
+                )
+        compiled.assert_not_called()
+
+    def test_train_step_bimanual_gated_uses_composite_component(self):
+        model = TactileConditionedFlowDecoder(
+            DecoderConfig(
+                action_dim=20,
+                action_horizon=2,
+                tactile_window=3,
+                gru_hidden_dim=8,
+                resnet_embedding_dim=4,
+                model_dim=8,
+                depth=1,
+                num_heads=2,
+            ),
+            rngs=nnx.Rngs(90),
+        )
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+        x_base = jax.random.normal(jax.random.key(91), (2, 2, 20))
+        gt = x_base + 1.0
+        predicted = x_base - 1.0
+        tactile = self._tactile_seq(jax.random.key(92), 2)
+
+        loss, components = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            jnp.asarray([[1.0, 0.0], [0.0, 1.0]], dtype=jnp.float32),
+            jax.random.key(93),
+            source_indices=jnp.asarray([0, 0], dtype=jnp.int32),
+            loss_mode="bimanual_gated",
+            aux_decode_weight=0.0,
+        )
+
+        self.assertEqual(
+            set(components),
+            {
+                "gt_fm",
+                "vla_fm",
+                "composite_fm",
+                "low_safety",
+                "decode",
+                "rank",
+                "repair",
+            },
+        )
+        self.assertTrue(bool(jnp.isfinite(loss)))
+        self.assertGreater(float(components["composite_fm"]), 0.0)
+        self.assertEqual(float(components["gt_fm"]), 0.0)
+        self.assertEqual(float(components["vla_fm"]), 0.0)
+
+    def test_scalar_gated_train_step_keeps_existing_objective_value(self):
+        model = self.make_model()
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+        x_base = jax.random.normal(jax.random.key(50), (2, 6, 3))
+        gt = x_base + 1.0
+        predicted = x_base - 0.25
+        tactile = self._tactile_seq(jax.random.key(51), 2)
+        gate = jnp.full((2,), 0.5, dtype=jnp.float32)
+        key = jax.random.key(52)
+        time_key, _ = jax.random.split(key)
+        t = jax.random.uniform(time_key, (2,), minval=0.0, maxval=1.0)
+        expected = float(
+            jnp.mean(
+                gated_flow_matching_loss_per_sample(
+                    model,
+                    x_base,
+                    gt,
+                    predicted,
+                    t,
+                    tactile,
+                    gate,
+                    gate_lambda=2.0,
+                    aux_decode_weight=0.0,
+                )
+            )
+        )
+
+        loss, components = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            gate,
+            key,
+            loss_mode="gated",
+            gate_lambda=2.0,
+            aux_decode_weight=0.0,
+        )
+
+        np.testing.assert_allclose(loss, expected, rtol=1e-3, atol=1e-5)
+        np.testing.assert_allclose(components["composite_fm"], 0.0)
+
     def test_shape_finite_gradient_and_decode(self):
         model = self.make_model()
         x_base = jax.random.normal(jax.random.key(1), (4, 6, 3))
@@ -251,7 +485,16 @@ class ConditionedDecoderModelTest(unittest.TestCase):
         )
         self.assertTrue(bool(jnp.isfinite(step_loss)))
         self.assertEqual(
-            set(components), {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"}
+            set(components),
+            {
+                "gt_fm",
+                "vla_fm",
+                "composite_fm",
+                "low_safety",
+                "decode",
+                "rank",
+                "repair",
+            },
         )
         pred_step_loss, _ = train_step(
             model,
