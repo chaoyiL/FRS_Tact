@@ -355,7 +355,16 @@ def plot_bimanual_behavior(
             axis = axes[row_index, column_index]
             relative_field = f"val_quadrant_{quadrant}_relative_gt_error_{wrist}"
             preserve_field = f"val_quadrant_{quadrant}_vla_preserve_ratio_{wrist}"
-            axis.axhline(1.0, color="#555555", linestyle=":", linewidth=1.2, label="GT baseline")
+            axis.axhline(
+                1.0,
+                color="#555555",
+                linestyle=":",
+                linewidth=1.2,
+                label=(
+                    "RGE=1: frozen VLA baseline; VLA preserve ratio=1: "
+                    "unit/baseline-scale reference"
+                ),
+            )
             sample_count = _latest_value(rows, f"val_quadrant_{quadrant}_n")
             if not math.isfinite(sample_count) or sample_count <= 0:
                 axis.text(

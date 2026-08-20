@@ -10,6 +10,7 @@ from flax import nnx
 
 import train_smolvla_frs.evaluate as evaluate_module
 import train_smolvla_frs.utils.metrics as metrics_module
+import train_smolvla_frs.utils.visualize as visualize_module
 from train_smolvla_frs.utils.metrics import bimanual_source_decode_metrics, evaluate_split
 from train_smolvla_frs.utils.model import DecoderConfig, TactileConditionedFlowDecoder
 
@@ -223,10 +224,19 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         arrays = {
             "dataset_index": np.asarray([0, 1], dtype=np.int64),
             "episode_index": np.asarray([0, 0], dtype=np.int64),
+            "split": np.asarray(["val", "val"]),
+            "x_base": np.zeros((2, 2, action_dim), dtype=np.float32),
+            "target": np.zeros((2, 2, action_dim), dtype=np.float32),
+            "gt_action": np.ones((2, 2, action_dim), dtype=np.float32),
+            "state": np.zeros((2, 0), dtype=np.float32),
         }
 
         def __init__(self, cache_dir):
             del cache_dir
+
+        def indices(self, split):
+            assert split == "val"
+            return np.asarray([0, 1], dtype=np.int64)
 
     class FakeConditioner:
         resnet_embedding_dim = 4
@@ -258,6 +268,9 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             del indices, current_tokens
             return np.asarray([[0.1, 0.9], [0.7, 0.2]], dtype=np.float32)
 
+        def encode_cache_indices(self, indices):
+            return jnp.ones((len(indices), 2, 1, 4), dtype=jnp.float32)
+
         def close(self):
             return None
 
@@ -278,15 +291,23 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
             },
         ),
     )
-    decode_calls = 0
-    real_decode_actions = metrics_module.decode_actions
+    metrics_decode_calls = 0
+    visualize_decode_calls = 0
+    real_metrics_decode_actions = metrics_module.decode_actions
+    real_visualize_decode_actions = visualize_module.decode_actions
 
-    def counted_decode_actions(*args, **kwargs):
-        nonlocal decode_calls
-        decode_calls += 1
-        return real_decode_actions(*args, **kwargs)
+    def counted_metrics_decode_actions(*args, **kwargs):
+        nonlocal metrics_decode_calls
+        metrics_decode_calls += 1
+        return real_metrics_decode_actions(*args, **kwargs)
 
-    monkeypatch.setattr(metrics_module, "decode_actions", counted_decode_actions)
+    def counted_visualize_decode_actions(*args, **kwargs):
+        nonlocal visualize_decode_calls
+        visualize_decode_calls += 1
+        return real_visualize_decode_actions(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_module, "decode_actions", counted_metrics_decode_actions)
+    monkeypatch.setattr(visualize_module, "decode_actions", counted_visualize_decode_actions)
 
     metrics = evaluate_module.evaluate_decoder(
         cache_dir=tmp_path / "cache",
@@ -302,9 +323,9 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         solver="euler",
         target=None,
         save_predictions=False,
-        write_plots=gate_kind == "bimanual",
-        num_trajectory_samples=0,
-        num_episode_strips=0,
+        write_plots=gate_kind in {"bimanual", "none"},
+        num_trajectory_samples=6,
+        num_episode_strips=6,
         num_workers=0,
         prefetch_batches=1,
         load_threads=1,
@@ -313,7 +334,17 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
     )
 
     written_metrics = json.loads((tmp_path / "output" / "metrics.json").read_text())
-    assert decode_calls == 1
+    assert metrics_decode_calls == 1
+    if gate_kind == "bimanual":
+        assert visualize_decode_calls == 0
+    elif gate_kind == "none":
+        assert visualize_decode_calls == 2
+    else:
+        assert visualize_decode_calls == 0
+    if gate_kind in {"bimanual", "none"}:
+        for filename in ("action_trajectories.png", "episode_action_strips.png"):
+            artifact = tmp_path / "output" / filename
+            assert artifact.is_file() and artifact.stat().st_size > 0
     if gate_kind == "scalar":
         assert metrics["n_high_w"] == 1
         assert metrics["n_low_w"] == 1

@@ -216,6 +216,16 @@ def test_overview_and_behavior_render_expected_panels_and_low_sample_notice(tmp_
     )
     high_low_right = figures["behavior"].axes[3]
     low_high_left = figures["behavior"].axes[4]
+    for axis in figures["behavior"].axes:
+        reference_labels = {
+            line.get_label()
+            for line in axis.lines
+            if np.allclose(line.get_ydata(), 1.0)
+        }
+        assert reference_labels == {
+            "RGE=1: frozen VLA baseline; VLA preserve ratio=1: "
+            "unit/baseline-scale reference"
+        }
     for axis in (high_low_right, low_high_left):
         lines = {line.get_label(): line for line in axis.lines}
         assert lines["VLA preserved (expected)"].get_alpha() == 1.0
@@ -308,13 +318,12 @@ def test_behavior_titles_state_expected_behavior_for_each_wrist(tmp_path: Path) 
 
 def _bimanual_result_with_mixed_quadrants() -> EvaluationResult:
     cache_indices = np.asarray([10, 11, 12, 13, 14, 15, 16], dtype=np.int64)
-    actions = np.zeros((len(cache_indices), 3, 20), dtype=np.float32)
-    for position in range(len(cache_indices)):
-        actions[position, :, 9] = position + 1
-        actions[position, :, 19] = 10 + position
-    prediction = actions + 0.25
-    gt_action = actions + 0.5
-    vla_action = actions
+    positions = np.arange(len(cache_indices), dtype=np.float32)[:, None, None]
+    steps = np.arange(3, dtype=np.float32)[None, :, None]
+    dimensions = np.arange(20, dtype=np.float32)[None, None, :]
+    vla_action = 1000.0 * positions + 100.0 * steps + dimensions
+    prediction = vla_action + 0.1 * (dimensions + 1.0) + 0.01 * steps
+    gt_action = vla_action - 0.2 * (dimensions + 1.0) - 0.02 * steps
     left_gate = np.asarray([0.85, 0.85, 0.85, 0.15, 0.15, 0.15, 0.75])
     right_gate = np.asarray([0.15, 0.15, 0.15, 0.85, 0.85, 0.85, 0.25])
     left_mse_vla = np.asarray([0.9, 0.5, 0.2, 0.9, 0.4, 0.1, 99.0])
@@ -587,10 +596,53 @@ def test_action_wrist_panels_include_direct_frs_vla_distance(tmp_path: Path) -> 
             output_path=tmp_path / "distances.png",
         )
 
-    for row in range(4):
+    selected_positions = (1, 2, 4, 3)
+    for row, position in enumerate(selected_positions):
         for column in range(2):
             axis = captured["figure"].axes[row * 4 + column]
-            assert "FRS−VLA" in {line.get_label() for line in axis.lines}
+            lines = {line.get_label(): line for line in axis.lines}
+            action_slice = slice(0, 10) if column == 0 else slice(10, 20)
+            np.testing.assert_allclose(
+                lines["FRS−GT"].get_ydata(),
+                np.linalg.norm(
+                    result.predictions[position, :, action_slice]
+                    - result.gt_actions[position, :, action_slice],
+                    axis=1,
+                ),
+            )
+            np.testing.assert_allclose(
+                lines["VLA−GT"].get_ydata(),
+                np.linalg.norm(
+                    result.vla_actions[position, :, action_slice]
+                    - result.gt_actions[position, :, action_slice],
+                    axis=1,
+                ),
+            )
+            np.testing.assert_allclose(
+                lines["FRS−VLA"].get_ydata(),
+                np.linalg.norm(
+                    result.predictions[position, :, action_slice]
+                    - result.vla_actions[position, :, action_slice],
+                    axis=1,
+                ),
+            )
+        gripper_lines = {
+            line.get_label(): line
+            for line in captured["figure"].axes[row * 4 + 3].lines
+        }
+        for action_index in (9, 19):
+            np.testing.assert_allclose(
+                gripper_lines[f"FRS gripper {action_index}"].get_ydata(),
+                result.predictions[position, :, action_index],
+            )
+            np.testing.assert_allclose(
+                gripper_lines[f"GT gripper {action_index}"].get_ydata(),
+                result.gt_actions[position, :, action_index],
+            )
+            np.testing.assert_allclose(
+                gripper_lines[f"VLA gripper {action_index}"].get_ydata(),
+                result.vla_actions[position, :, action_index],
+            )
 
 
 def test_action_heatmaps_mark_both_gripper_dimensions(tmp_path: Path) -> None:
