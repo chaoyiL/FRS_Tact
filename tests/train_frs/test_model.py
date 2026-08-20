@@ -809,8 +809,8 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
     diagnostic_failure,
 ):
     import train_smolvla_frs.train_frs as train_module
-    import train_smolvla_frs.utils.data as data_module
     import train_smolvla_frs.utils.bimanual_visualize as bimanual_visualize_module
+    import train_smolvla_frs.utils.data as data_module
     import train_smolvla_frs.utils.metrics as metrics_module
     import train_smolvla_frs.utils.model as model_module
     import utils.cache as cache_module

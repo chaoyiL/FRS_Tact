@@ -7,14 +7,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from train_smolvla_frs.utils.bimanual_metrics import (
+    bimanual_gate_region_counts,
+    bimanual_quadrant_metrics,
+)
 from train_smolvla_frs.utils.bimanual_schema import (
     BIMANUAL_LOSS_MODE,
     LEFT_ACTION_SLICE,
     RIGHT_ACTION_SLICE,
-)
-from train_smolvla_frs.utils.bimanual_metrics import (
-    bimanual_gate_region_counts,
-    bimanual_quadrant_metrics,
 )
 from train_smolvla_frs.utils.data import TactileConditionedBatches
 from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS

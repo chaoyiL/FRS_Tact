@@ -93,6 +93,8 @@ plotter continues to accept older CSV files without the new columns.
 当 `loss_mode: bimanual_gated` 时，训练输出目录会在保留 legacy
 `training_curves.png` 的同时，写入以下四张稳定文件名的图。旧 loss mode 和旧
 `history.csv` 仍可由绘图器处理；新图仅用于解释双手训练和验证行为。
+These files require `write_plots: true`, at least one validation event, and
+successful plotting; a missing prerequisite leaves the corresponding file absent.
 
 | 图 | 要回答的问题 |
 | --- | --- |

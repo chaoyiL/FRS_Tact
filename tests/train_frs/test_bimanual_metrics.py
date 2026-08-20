@@ -49,14 +49,14 @@ def test_quadrant_thresholds_are_inclusive_and_empty_values_are_nan():
 
 
 def test_quadrant_metrics_reject_shape_mismatch_and_nonfinite_inputs():
-    kwargs = dict(
-        mse_gt=np.ones((2, 2)),
-        mse_vla=np.ones((2, 2)),
-        mse_vla_gt=np.ones((2, 2)),
-        gate_weights=np.ones((2, 2)),
-        low_threshold=0.3,
-        high_threshold=0.7,
-    )
+    kwargs = {
+        "mse_gt": np.ones((2, 2)),
+        "mse_vla": np.ones((2, 2)),
+        "mse_vla_gt": np.ones((2, 2)),
+        "gate_weights": np.ones((2, 2)),
+        "low_threshold": 0.3,
+        "high_threshold": 0.7,
+    }
     kwargs["mse_vla"] = np.ones((2, 1))
     with pytest.raises(ValueError, match=r"shape \[N, 2\]"):
         bimanual_quadrant_metrics(**kwargs)
@@ -94,14 +94,14 @@ def test_flatten_quadrant_metrics_uses_stable_json_friendly_keys():
 def test_threshold_validation_is_shared_and_requires_strict_unit_interval(
     low_threshold, high_threshold
 ):
-    metric_kwargs = dict(
-        mse_gt=np.ones((1, 2)),
-        mse_vla=np.ones((1, 2)),
-        mse_vla_gt=np.ones((1, 2)),
-        gate_weights=np.ones((1, 2)),
-        low_threshold=low_threshold,
-        high_threshold=high_threshold,
-    )
+    metric_kwargs = {
+        "mse_gt": np.ones((1, 2)),
+        "mse_vla": np.ones((1, 2)),
+        "mse_vla_gt": np.ones((1, 2)),
+        "gate_weights": np.ones((1, 2)),
+        "low_threshold": low_threshold,
+        "high_threshold": high_threshold,
+    }
     with pytest.raises(ValueError, match="threshold"):
         bimanual_quadrant_metrics(**metric_kwargs)
     with pytest.raises(ValueError, match="threshold"):
@@ -113,14 +113,14 @@ def test_threshold_validation_is_shared_and_requires_strict_unit_interval(
 
 
 def test_ranking_margin_is_added_to_gt_error_before_satisfaction_check():
-    kwargs = dict(
-        mse_gt=np.asarray([[1.0, 1.0], [1.0, 1.0]]),
-        mse_vla=np.asarray([[1.05, 1.05], [1.2, 1.2]]),
-        mse_vla_gt=np.ones((2, 2)),
-        gate_weights=np.asarray([[0.1, 0.1], [0.2, 0.2]]),
-        low_threshold=0.3,
-        high_threshold=0.7,
-    )
+    kwargs = {
+        "mse_gt": np.asarray([[1.0, 1.0], [1.0, 1.0]]),
+        "mse_vla": np.asarray([[1.05, 1.05], [1.2, 1.2]]),
+        "mse_vla_gt": np.ones((2, 2)),
+        "gate_weights": np.asarray([[0.1, 0.1], [0.2, 0.2]]),
+        "low_threshold": 0.3,
+        "high_threshold": 0.7,
+    }
     no_margin = bimanual_quadrant_metrics(**kwargs, ranking_margin=0.0)
     margin = bimanual_quadrant_metrics(**kwargs, ranking_margin=0.1)
     assert no_margin["low_low"]["left"]["rank_satisfied_frac"] == pytest.approx(1.0)

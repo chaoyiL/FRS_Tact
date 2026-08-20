@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 
-
 BIMANUAL_QUADRANTS = ("low_low", "high_low", "low_high", "high_high")
 BIMANUAL_WRISTS = ("left", "right")
 _WRIST_METRICS = (

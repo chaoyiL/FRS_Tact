@@ -531,13 +531,6 @@ def train_decoder(
     import numpy as np
     from flax import nnx
 
-    from train_smolvla_frs.utils.checkpoint import (
-        CHECKPOINT_NAME,
-        load_checkpoint,
-        load_optimizer_state,
-        restore_optimizer_state,
-        save_checkpoint,
-    )
     from train_smolvla_frs.utils.bimanual_metrics import (
         BIMANUAL_QUADRANTS,
         BIMANUAL_WRISTS,
@@ -548,6 +541,13 @@ def train_decoder(
         plot_bimanual_behavior,
         plot_bimanual_training_overview,
         plot_gate_diagnostics,
+    )
+    from train_smolvla_frs.utils.checkpoint import (
+        CHECKPOINT_NAME,
+        load_checkpoint,
+        load_optimizer_state,
+        restore_optimizer_state,
+        save_checkpoint,
     )
     from train_smolvla_frs.utils.data import (
         CachedTactileEmbeddingBatches,
@@ -571,7 +571,7 @@ def train_decoder(
     )
     from utils.cache import CachedPairs, MultiCachedPairs
 
-    QUADRANT_HISTORY_METRICS = (
+    quadrant_history_metrics = (
         "mse_gt",
         "mse_vla",
         "mse_vla_gt",
@@ -708,7 +708,7 @@ def train_decoder(
         f"val_quadrant_{quadrant}_{metric}_{wrist}"
         for quadrant in BIMANUAL_QUADRANTS
         for wrist in BIMANUAL_WRISTS
-        for metric in QUADRANT_HISTORY_METRICS
+        for metric in quadrant_history_metrics
     )
     gate_bin_metric_names = (
         "n",
