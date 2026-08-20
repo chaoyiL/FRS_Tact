@@ -11,7 +11,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from lerobot.policies.pi05_jax import nnx_utils, transforms
-from lerobot.policies.pi05_jax.model import IMAGE_RESOLUTION, Observation
+from lerobot.policies.pi05_jax.model import Observation
 from lerobot.policies.pi05_jax.normalize import NormStats
 from lerobot.policies.pi05_jax.pi0_config import Pi0Config
 from lerobot.policies.pi05_jax.policies.pick_tube_policy import PickTubeInputs
@@ -104,7 +104,6 @@ class Pi05RemotePolicy:
                     use_quantiles=config.use_quantile_norm,
                     strict=True,
                 ),
-                transforms.ResizeImages(*IMAGE_RESOLUTION),
                 transforms.TokenizePrompt(
                     PaligemmaTokenizer(model_config.max_token_len),
                     discrete_state_input=model_config.discrete_state_input,
@@ -134,9 +133,15 @@ class Pi05RemotePolicy:
             raise ValueError(f"expected {self.config.state_dim}D state, got {state.shape}")
         if not np.isfinite(state).all():
             raise ValueError("robot state contains NaN or Inf")
-        images = {
-            slot: np.asarray(observation[robot_key]) for slot, robot_key in self.config.camera_map.items()
-        }
+        images = {}
+        for slot, robot_key in self.config.camera_map.items():
+            image = np.asarray(observation[robot_key])
+            if image.shape != (224, 224, 3) or image.dtype != np.uint8:
+                raise ValueError(
+                    f"{robot_key} must have shape (224, 224, 3) and dtype uint8, "
+                    f"got shape {image.shape} and dtype {image.dtype}"
+                )
+            images[slot] = image
         return {"image": images, "state": state, "prompt": str(task)}
 
     def prepare_observation(self, observation: Mapping[str, Any], task: str) -> Observation:

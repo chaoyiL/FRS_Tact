@@ -35,6 +35,7 @@ _CAMERA_MAP_CONTRACT = {
     "right_wrist_0_rgb": "observation.images.camera1",
 }
 _EMPTY_CAMERAS_CONTRACT: list[str] = []
+PI05_OBSERVATION_PROFILE = "pi05_vision_224"
 
 
 def configure_deployment_logging() -> None:
@@ -345,7 +346,7 @@ def prepare_observation(
 def make_server_config(
     config: Mapping[str, Any], *, mode: DeploymentMode, frs_runtime: Any | None = None
 ) -> dict[str, Any]:
-    """Build the robot-server config, adding wire fields only for FRS mode."""
+    """Build the robot-server config for the selected pi0.5 deployment mode."""
     expected_data_type = _mode_data_type(mode)
     observation = section(config, "observation")
     control = section(config, "control")
@@ -371,7 +372,9 @@ def make_server_config(
         ),
         "action_horizon": _as_int(control["action_horizon"], "control.action_horizon"),
     }
-    if mode == "frs":
+    if mode == "pi05":
+        result["observation_profile"] = PI05_OBSERVATION_PROFILE
+    else:
         if frs_runtime is None:
             raise ValueError("frs_runtime is required for FRS server config")
         result.update(

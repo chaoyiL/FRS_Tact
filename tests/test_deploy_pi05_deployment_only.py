@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import ast
+import inspect
 import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -241,3 +243,91 @@ def test_pi05_model_tree_is_inference_only() -> None:
     assert (DEPLOY / "src/lerobot/policies/pi05_jax/sharding.py").is_file()
     assert not (DEPLOY / "src/lerobot/datasets").exists()
     assert not (DEPLOY / "src/lerobot/processor").exists()
+
+
+def test_plain_pi05_server_config_requests_fixed_224_observation_profile() -> None:
+    from deploy_pi05.deployment import make_server_config
+
+    server_config = make_server_config(
+        {
+            "observation": {
+                "data_type": "vision",
+                "language_prompt": "pick up the tubes",
+                "single_arm_mode": False,
+                "no_state_obs_mode": False,
+            },
+            "control": {
+                "control_frequency": 10.0,
+                "controller_frequency": 80.0,
+                "steps_per_inference": 50,
+                "action_horizon": 50,
+            },
+        },
+        mode="pi05",
+    )
+
+    assert server_config["observation_profile"] == "pi05_vision_224"
+
+
+def _policy_for_model_input() -> object:
+    from deploy_pi05.policy import Pi05DeploymentConfig, Pi05RemotePolicy
+
+    policy = object.__new__(Pi05RemotePolicy)
+    policy.config = Pi05DeploymentConfig(
+        checkpoint="checkpoint",
+        assets_dir="assets",
+        asset_id="asset",
+        camera_map={
+            "left_wrist_0_rgb": "observation.images.camera0",
+            "right_wrist_0_rgb": "observation.images.camera1",
+        },
+        empty_cameras=(),
+    )
+    return policy
+
+
+def test_pi05_model_input_accepts_two_final_224_uint8_images() -> None:
+    policy = _policy_for_model_input()
+    image = np.zeros((224, 224, 3), dtype=np.uint8)
+
+    result = policy._model_input(
+        {
+            "observation.state": np.zeros(20, dtype=np.float32),
+            "observation.images.camera0": image,
+            "observation.images.camera1": image,
+        },
+        "pick up the tubes",
+    )
+
+    assert set(result["image"]) == {"left_wrist_0_rgb", "right_wrist_0_rgb"}
+    assert all(value.shape == (224, 224, 3) for value in result["image"].values())
+    assert all(value.dtype == np.uint8 for value in result["image"].values())
+
+
+@pytest.mark.parametrize(
+    "image",
+    [
+        np.zeros((256, 256, 3), dtype=np.uint8),
+        np.zeros((224, 224, 3), dtype=np.float32),
+    ],
+)
+@pytest.mark.parametrize("camera_key", ["observation.images.camera0", "observation.images.camera1"])
+def test_pi05_model_input_rejects_nonfinal_image_contract(
+    image: np.ndarray, camera_key: str
+) -> None:
+    policy = _policy_for_model_input()
+    observation = {
+        "observation.state": np.zeros(20, dtype=np.float32),
+        "observation.images.camera0": np.zeros((224, 224, 3), dtype=np.uint8),
+        "observation.images.camera1": np.zeros((224, 224, 3), dtype=np.uint8),
+    }
+    observation[camera_key] = image
+
+    with pytest.raises(ValueError, match=r"\(224, 224, 3\).*uint8"):
+        policy._model_input(observation, "pick up the tubes")
+
+
+def test_pi05_deployment_input_transform_does_not_resize_final_images() -> None:
+    from deploy_pi05.policy import Pi05RemotePolicy
+
+    assert "ResizeImages" not in inspect.getsource(Pi05RemotePolicy.__init__)
