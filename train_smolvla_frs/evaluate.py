@@ -27,6 +27,22 @@ from train_smolvla_frs.utils.visualize import write_evaluation_plots
 from utils.cache import CachedPairs, MultiCachedPairs, atomic_write_json
 
 
+def _bimanual_gate_region(
+    weight: float, *, low_threshold: float, high_threshold: float
+) -> str:
+    if weight <= low_threshold:
+        return "low"
+    if weight >= high_threshold:
+        return "high"
+    return "mid"
+
+
+def _bimanual_quadrant(left_region: str, right_region: str) -> str:
+    if left_region == "mid" or right_region == "mid":
+        return ""
+    return f"{left_region}_{right_region}"
+
+
 def evaluate_decoder(
     *,
     cache_dir: pathlib.Path | None,
@@ -206,6 +222,9 @@ def evaluate_decoder(
             "gt_gain": result.gt_gain,
             "relative_gt_error": result.relative_gt_error,
         }
+        if result.bimanual_quadrants is not None:
+            metrics["bimanual_quadrants"] = result.bimanual_quadrants
+            metrics["bimanual_gate_region_counts"] = result.bimanual_gate_region_counts.tolist()
         if result.composite_fm is not None:
             metrics["composite_fm"] = float(result.composite_fm)
         if result.n_high_w is not None:
@@ -406,12 +425,35 @@ def evaluate_decoder(
                     "mse_gt_right",
                     "mse_vla_left",
                     "mse_vla_right",
+                    "mse_vla_gt_left",
+                    "mse_vla_gt_right",
+                    "gate_region_left",
+                    "gate_region_right",
+                    "bimanual_quadrant",
                     "gate_region",
                     "gate_bin",
                 ],
             )
             writer.writeheader()
             for position, cache_index in enumerate(result.cache_indices):
+                left_gate_region = (
+                    None
+                    if result.sample_gate_w_left is None
+                    else _bimanual_gate_region(
+                        float(result.sample_gate_w_left[position]),
+                        low_threshold=rank_low_gate_threshold,
+                        high_threshold=rank_high_gate_threshold,
+                    )
+                )
+                right_gate_region = (
+                    None
+                    if result.sample_gate_w_right is None
+                    else _bimanual_gate_region(
+                        float(result.sample_gate_w_right[position]),
+                        low_threshold=rank_low_gate_threshold,
+                        high_threshold=rank_high_gate_threshold,
+                    )
+                )
                 writer.writerow(
                     {
                         "cache_index": int(cache_index),
@@ -484,6 +526,23 @@ def evaluate_decoder(
                             ""
                             if result.sample_mse_vla_right is None
                             else float(result.sample_mse_vla_right[position])
+                        ),
+                        "mse_vla_gt_left": (
+                            ""
+                            if result.sample_mse_vla_gt_left is None
+                            else float(result.sample_mse_vla_gt_left[position])
+                        ),
+                        "mse_vla_gt_right": (
+                            ""
+                            if result.sample_mse_vla_gt_right is None
+                            else float(result.sample_mse_vla_gt_right[position])
+                        ),
+                        "gate_region_left": left_gate_region or "",
+                        "gate_region_right": right_gate_region or "",
+                        "bimanual_quadrant": (
+                            ""
+                            if left_gate_region is None or right_gate_region is None
+                            else _bimanual_quadrant(left_gate_region, right_gate_region)
                         ),
                         "gate_region": (
                             ""

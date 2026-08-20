@@ -104,6 +104,24 @@ def test_bimanual_evaluation_keeps_wrist_metrics_separate(monkeypatch) -> None:
     assert result.rank_satisfied_high_frac_right == pytest.approx(0.0)
     assert result.low_unsafe_frac_left == pytest.approx(0.0)
     assert result.low_unsafe_frac_right == pytest.approx(0.0)
+    assert result.bimanual_quadrants["high_low"]["n"] == 1
+    assert result.bimanual_gate_region_counts.shape == (3, 3)
+
+    result_with_actions = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="bimanual_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+    )
+
+    np.testing.assert_allclose(result_with_actions.gt_actions, gt_action)
+    np.testing.assert_allclose(result_with_actions.vla_actions, predicted_action)
+    np.testing.assert_allclose(result_with_actions.predictions, prediction)
 
 
 def test_bimanual_source_metrics_keep_a_bad_dataset_from_being_pooled_away() -> None:
@@ -300,6 +318,8 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert written_metrics["gate_w_p90_left"] != pytest.approx(
             written_metrics["gate_w_p90_right"]
         )
+        assert "bimanual_quadrants" in written_metrics
+        assert np.asarray(written_metrics["bimanual_gate_region_counts"]).shape == (3, 3)
         with (tmp_path / "output" / "per_sample.csv").open(newline="", encoding="utf-8") as file:
             rows = list(csv.DictReader(file))
         assert float(rows[0]["gate_w_left"]) == pytest.approx(1.0 / (1.0 + np.exp(4.0)))
@@ -309,6 +329,12 @@ def test_checkpoint_evaluation_tracks_gate_only_for_gated_loss_mode(
         assert float(rows[0]["composite_fm"]) >= 0.0
         assert float(rows[0]["mse_gt_left"]) >= 0.0
         assert float(rows[0]["mse_vla_right"]) >= 0.0
+        assert rows[0]["mse_vla_gt_left"] != ""
+        assert rows[0]["gate_region_left"] in {"low", "mid", "high"}
+        assert rows[0]["gate_region_right"] in {"low", "mid", "high"}
+        assert rows[0]["bimanual_quadrant"] in {"", "low_low", "high_low", "low_high", "high_high"}
+        assert rows[0]["gate_region"] == ""
+        assert rows[0]["gate_bin"] == ""
     else:
         assert "n_high_w" not in metrics
         assert "n_low_w" not in metrics
