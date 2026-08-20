@@ -134,6 +134,13 @@ targets = (
 for label, target, allowed_root in targets:
     canonical_target = target.resolve(strict=False)
     canonical_root = allowed_root.resolve(strict=False)
+    if not canonical_root.is_relative_to(checkpoint_root):
+        print(
+            f"refusing checkpoint category root outside checkpoint root: "
+            f"{label}: {canonical_root} (checkpoint root: {checkpoint_root})",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
     if not canonical_target.is_relative_to(canonical_root):
         print(
             f"refusing checkpoint target outside its allowed root: "

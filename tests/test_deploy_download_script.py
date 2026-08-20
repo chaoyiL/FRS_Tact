@@ -807,6 +807,32 @@ def test_symlinked_checkpoint_target_outside_root_is_refused_before_writes(
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("category", "label"),
+    [
+        ("model", "base"),
+        ("frs", "FRS"),
+        ("encoder", "encoder"),
+    ],
+)
+def test_symlinked_checkpoint_category_root_outside_root_is_refused_before_writes(
+    tmp_path: Path, category: str, label: str
+) -> None:
+    project, log_path, env = make_project(tmp_path)
+    outside = tmp_path / f"outside-{label}"
+    outside.mkdir()
+    category_root = project / "checkpoints" / category
+    category_root.parent.mkdir(parents=True)
+    category_root.symlink_to(outside, target_is_directory=True)
+
+    result = run_download(project, env)
+
+    assert result.returncode != 0
+    assert "refusing checkpoint category root outside checkpoint root" in result.stderr
+    assert read_calls(log_path) == []
+    assert list(outside.iterdir()) == []
+
+
 def test_allows_symlinked_checkpoint_root(tmp_path: Path) -> None:
     project, _log_path, env = make_project(tmp_path)
     canonical_root = project / "canonical checkpoints"
