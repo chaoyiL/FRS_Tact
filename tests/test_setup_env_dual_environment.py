@@ -5,6 +5,8 @@ from pathlib import Path
 import shlex
 import subprocess
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts/setup_env.sh"
@@ -206,6 +208,32 @@ def test_help_has_no_side_effects(tmp_path: Path) -> None:
     assert completed.returncode == 0
     assert "--pi05_deploy" in completed.stdout
     assert read_events(tmp_path) == []
+
+
+@pytest.mark.parametrize(
+    ("args", "case_name"),
+    [
+        ((selector, help_flag), f"{selector.removeprefix('--')}_{help_flag.removeprefix('-')}")
+        for selector in ("--root", "--pi05_deploy")
+        for help_flag in ("-h", "--help")
+    ]
+    + [
+        ((help_flag, selector), f"{help_flag.removeprefix('-')}_{selector.removeprefix('--')}")
+        for selector in ("--root", "--pi05_deploy")
+        for help_flag in ("-h", "--help")
+    ],
+)
+def test_help_cannot_be_combined_with_a_selector_in_either_order(
+    tmp_path: Path, args: tuple[str, str], case_name: str
+) -> None:
+    case_dir = tmp_path / case_name
+    case_dir.mkdir()
+
+    completed = run_stubbed_main(case_dir, *args)
+
+    assert completed.returncode != 0
+    assert "用法" in completed.stderr
+    assert read_events(case_dir) == []
 
 
 def test_invalid_or_conflicting_selectors_fail_before_side_effects(tmp_path: Path) -> None:

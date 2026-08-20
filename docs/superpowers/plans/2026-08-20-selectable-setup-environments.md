@@ -468,20 +468,21 @@ Add this exact explanation below it:
 
 Keep the existing `PI05_VENV_DIR` override and `.env.frs` sourcing instructions.
 
-- [ ] **Step 3: Run focused and neighboring regression tests**
+- [ ] **Step 3: Run focused root-environment regression checks**
 
-Run:
+In the repository root environment, run the installer suite and root package-boundary checks:
 
 ```bash
-uv run --no-sync pytest \
+JAX_PLATFORMS=cpu uv run --no-sync pytest \
   tests/test_setup_env_dual_environment.py \
-  tests/test_deploy_pi05_deployment_only.py \
-  tests/test_train_pi05_frs_project_boundary.py \
   tests/train_smolvla/test_package_boundary.py \
   tests/train_vtsmolvla/test_package_boundary.py -v
 ```
 
-Expected: all selected tests PASS.
+Expected: all selected root-environment checks PASS. The isolated `deploy_pi05` and
+`train_pi05_frs` project tests require their owning environments and are not part of this root
+environment command. In particular, do not use the Pi0.5 protected-path test as an all-pass gate
+for this feature: it intentionally treats the documentation paths updated here as protected.
 
 - [ ] **Step 4: Check formatting, shell syntax, and worktree scope**
 

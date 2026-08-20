@@ -51,7 +51,7 @@ parse_args() {
     while (($#)); do
         case "$1" in
             -h|--help)
-                if (($# != 1)); then
+                if [[ -n "${selected}" ]] || (($# != 1)); then
                     usage_error "--help 不能与其他参数一起使用"
                     return $?
                 fi
