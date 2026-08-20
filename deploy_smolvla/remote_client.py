@@ -483,26 +483,27 @@ def _validate_observation(
 ) -> None:
     if "observation.state" not in observation:
         raise ValueError("Robot observation is missing keys: ['observation.state']")
+    # Preprocessing owns empty_cameras: it adds at most that many empty images.
+    del empty_cameras
     missing_required = [key for key in required_image_keys if key not in observation]
     if missing_required:
         raise ValueError(f"Robot observation is missing required tactile keys: {missing_required}")
     required = set(required_image_keys)
-    optional_image_keys = [key for key in image_keys if key not in required]
-    present = [key for key in image_keys if key in observation]
-    missing = [key for key in optional_image_keys if key not in observation]
-    if not present:
-        raise ValueError(f"Robot observation is missing all image keys: {list(image_keys)}")
-    if len(missing) > max(empty_cameras, 0):
+    visual_candidates = [key for key in image_keys if key not in required]
+    present_visual = [key for key in visual_candidates if key in observation]
+    if not present_visual:
         raise ValueError(
-            f"Robot observation is missing too many image keys: {missing} "
-            f"(empty_cameras={empty_cameras})"
+            "Robot observation is missing a real visual RGB image; "
+            f"expected one of: {visual_candidates}"
         )
     state = np.asarray(observation["observation.state"])
     if state.shape != (state_dim,):
         raise ValueError(f"Expected {state_dim}D state, got {state.shape}")
     if not np.isfinite(state).all():
         raise ValueError("Robot observation state contains NaN or Inf")
-    for key in present:
+    for key in image_keys:
+        if key not in observation:
+            continue
         image = np.asarray(observation[key])
         if image.ndim != 3 or image.shape[-1] != 3:
             raise ValueError(f"{key} must be HWC RGB, got {image.shape}")

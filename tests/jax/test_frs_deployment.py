@@ -93,6 +93,61 @@ def initial_observation(value: float = 1.0) -> dict[str, np.ndarray]:
     return {"encoded": np.full((1, 2), value, dtype=np.float32)}
 
 
+def _vitac_observation(*, include_rgb: bool = True) -> dict[str, np.ndarray]:
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    observation = {
+        "observation.state": np.zeros(20, dtype=np.float32),
+        "tactile_left": image,
+        "tactile_right": image,
+        "tactile_left_wrist": image,
+        "tactile_right_wrist": image,
+    }
+    if include_rgb:
+        observation.update({"camera0": image, "camera1": image})
+    return observation
+
+
+def _validate_vitac_observation(observation: dict[str, np.ndarray]) -> None:
+    remote_client._validate_observation(
+        observation,
+        state_dim=20,
+        image_keys=(
+            "camera0",
+            "camera1",
+            "camera3",
+            "empty_camera_0",
+            "tactile_left",
+            "tactile_right",
+            "tactile_left_wrist",
+            "tactile_right_wrist",
+        ),
+        empty_cameras=1,
+        required_image_keys=(
+            "tactile_left",
+            "tactile_right",
+            "tactile_left_wrist",
+            "tactile_right_wrist",
+        ),
+    )
+
+
+def test_validate_observation_allows_extra_missing_visual_declarations() -> None:
+    _validate_vitac_observation(_vitac_observation())
+
+
+def test_validate_observation_requires_a_real_visual_rgb_image() -> None:
+    with pytest.raises(ValueError, match="real visual.*RGB"):
+        _validate_vitac_observation(_vitac_observation(include_rgb=False))
+
+
+def test_validate_observation_requires_every_tactile_image() -> None:
+    observation = _vitac_observation()
+    del observation["tactile_right_wrist"]
+
+    with pytest.raises(ValueError, match="required tactile keys.*tactile_right_wrist"):
+        _validate_vitac_observation(observation)
+
+
 def test_frs_runtime_is_a_true_compatibility_alias() -> None:
     assert frs_runtime_module.FRSRuntime is frs_runtime_module.FRSSteeringPolicy
 
