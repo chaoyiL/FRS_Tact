@@ -1,0 +1,80 @@
+import numpy as np
+import pytest
+
+from train_smolvla_frs.utils.bimanual_metrics import (
+    bimanual_gate_region_counts,
+    bimanual_quadrant_metrics,
+    flatten_bimanual_quadrant_metrics,
+)
+
+
+def test_quadrants_keep_high_left_and_low_right_independent():
+    result = bimanual_quadrant_metrics(
+        mse_gt=np.asarray([[0.25, 4.0], [1.0, 1.0]]),
+        mse_vla=np.asarray([[1.0, 0.04], [0.5, 0.5]]),
+        mse_vla_gt=np.asarray([[1.0, 4.0], [1.0, 1.0]]),
+        gate_weights=np.asarray([[0.7, 0.3], [0.5, 0.5]]),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    assert result["high_low"]["n"] == 1
+    assert result["high_low"]["left"]["relative_gt_error"] == pytest.approx(0.25)
+    assert result["high_low"]["right"]["vla_preserve_ratio"] == pytest.approx(0.01)
+    assert result["low_high"]["n"] == 0
+
+
+def test_joint_region_counts_include_mid_without_forcing_a_quadrant():
+    counts = bimanual_gate_region_counts(
+        np.asarray([[0.0, 0.0], [0.8, 0.2], [0.5, 0.9]]),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    np.testing.assert_array_equal(counts, [[1, 0, 0], [0, 0, 1], [1, 0, 0]])
+
+
+def test_quadrant_thresholds_are_inclusive_and_empty_values_are_nan():
+    result = bimanual_quadrant_metrics(
+        mse_gt=np.ones((3, 2)),
+        mse_vla=np.ones((3, 2)),
+        mse_vla_gt=np.ones((3, 2)),
+        gate_weights=np.asarray([[0.3, 0.7], [0.7, 0.3], [0.5, 0.5]]),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    assert result["low_high"]["n"] == 1
+    assert result["high_low"]["n"] == 1
+    assert result["low_low"]["n"] == 0
+    assert np.isnan(result["low_low"]["left"]["mse_gt"])
+    assert np.isnan(result["high_high"]["right"]["rank_satisfied_frac"])
+
+
+def test_quadrant_metrics_reject_shape_mismatch_and_nonfinite_inputs():
+    kwargs = dict(
+        mse_gt=np.ones((2, 2)),
+        mse_vla=np.ones((2, 2)),
+        mse_vla_gt=np.ones((2, 2)),
+        gate_weights=np.ones((2, 2)),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    kwargs["mse_vla"] = np.ones((2, 1))
+    with pytest.raises(ValueError, match=r"shape \[N, 2\]"):
+        bimanual_quadrant_metrics(**kwargs)
+    kwargs["mse_vla"] = np.full((2, 2), np.nan)
+    with pytest.raises(ValueError, match="matching finite values"):
+        bimanual_quadrant_metrics(**kwargs)
+
+
+def test_flatten_quadrant_metrics_uses_stable_json_friendly_keys():
+    metrics = bimanual_quadrant_metrics(
+        mse_gt=np.asarray([[1.0, 2.0]]),
+        mse_vla=np.asarray([[3.0, 4.0]]),
+        mse_vla_gt=np.asarray([[2.0, 8.0]]),
+        gate_weights=np.asarray([[0.8, 0.2]]),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    flat = flatten_bimanual_quadrant_metrics(metrics, prefix="val_quadrant")
+    assert flat["val_quadrant_high_low_n"] == 1
+    assert flat["val_quadrant_high_low_vla_preserve_ratio_right"] == pytest.approx(0.5)
+    assert isinstance(flat["val_quadrant_low_high_n"], int)
