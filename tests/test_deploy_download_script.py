@@ -4,25 +4,24 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import shutil
 import stat
 import subprocess
 import sys
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "deploy_smolvla/scripts/download.sh"
-BASE_DIR = Path("checkpoints/model/pick_tube_02_3w_jax")
+BASE_DIR = Path("checkpoints/model/pick_tube_01_jax")
 FRS_DIR = Path("checkpoints/frs/frs_0809_02")
 ENCODER_DIR = Path("checkpoints/encoder/encoder_ckpt_0809")
 PROVENANCE_FILE = ".download-provenance.json"
 BASE_REPO = "lerobot/smolvla_base"
 BASE_REVISION = "c83c3163b8ca9b7e67c509fffd9121e66cb96205"
-ADAPTER_REPO = "KaiyueChen/pick_tube_02_3w"
+ADAPTER_REPO = "KaiyueChen/pick_tube_01"
 ADAPTER_REVISION = "31d819d8844de98174ede123f894adbf7b4372ef"
 FRS_REPO = "KaiyueChen/frs_0809_02"
 FRS_REVISION = "7e23f3e8c308dc5ba3a4df7634c68dac28572897"
@@ -168,7 +167,7 @@ if [[ "$asset" == "base" ]]; then
     for sidecar in config.json train_config.json policy_preprocessor.json policy_postprocessor.json policy_preprocessor_step_5_normalizer_processor.safetensors policy_postprocessor_step_0_unnormalizer_processor.safetensors; do
         printf '{}' > "$output/$sidecar"
     done
-    printf '%s' '{"source_base":"lerobot/smolvla_base","source_adapter":"KaiyueChen/pick_tube_02_3w","adapter_revision":"31d819d8844de98174ede123f894adbf7b4372ef","base_revision":"c83c3163b8ca9b7e67c509fffd9121e66cb96205"}' > "$output/conversion_manifest.json"
+    printf '%s' '{"source_base":"lerobot/smolvla_base","source_adapter":"KaiyueChen/pick_tube_01","adapter_revision":"31d819d8844de98174ede123f894adbf7b4372ef","base_revision":"c83c3163b8ca9b7e67c509fffd9121e66cb96205"}' > "$output/conversion_manifest.json"
 elif [[ "$asset" == "frs" ]]; then
     mkdir -p "$output"
     printf '%s' '{"params_file":"params.npz"}' > "$output/checkpoint.json"
@@ -206,6 +205,9 @@ fi
         "TRANSFORMERS_CACHE": str(project / "decoy/transformers"),
         "PYTORCH_TRANSFORMERS_CACHE": str(project / "decoy/pytorch-transformers"),
         "PYTORCH_PRETRAINED_BERT_CACHE": str(project / "decoy/pytorch-bert"),
+        "FRS_TEST_SMOLVLA_REVISION": ADAPTER_REVISION,
+        "FRS_TEST_FRS_REVISION": FRS_REVISION,
+        "FRS_TEST_ENCODER_REVISION": ENCODER_REVISION,
     }
     return project, log_path, env
 
@@ -229,7 +231,13 @@ def read_calls(log_path: Path) -> list[list[str]]:
     ]
 
 
-def expected_calls(project: Path) -> list[list[str]]:
+def expected_calls(
+    project: Path,
+    *,
+    adapter_revision: str = ADAPTER_REVISION,
+    frs_revision: str = FRS_REVISION,
+    encoder_revision: str = ENCODER_REVISION,
+) -> list[list[str]]:
     return [
         [
             "run",
@@ -239,7 +247,7 @@ def expected_calls(project: Path) -> list[list[str]]:
             "--adapter",
             ADAPTER_REPO,
             "--adapter-revision",
-            ADAPTER_REVISION,
+            adapter_revision,
             "--base",
             BASE_REPO,
             "--base-revision",
@@ -270,7 +278,7 @@ def expected_calls(project: Path) -> list[list[str]]:
             "download",
             FRS_REPO,
             "--revision",
-            FRS_REVISION,
+            frs_revision,
             "--include",
             "checkpoint.json",
             "params-*.npz",
@@ -286,7 +294,7 @@ def expected_calls(project: Path) -> list[list[str]]:
             "--repo-id",
             ENCODER_REPO,
             "--revision",
-            ENCODER_REVISION,
+            encoder_revision,
             "--output-dir",
             str(project / ENCODER_DIR),
         ],
@@ -300,7 +308,9 @@ def write_provenance(directory: Path, repo_id: str, revision: str) -> None:
     )
 
 
-def write_complete_base(project: Path) -> None:
+def write_complete_base(
+    project: Path, *, adapter_revision: str = ADAPTER_REVISION
+) -> None:
     directory = project / BASE_DIR
     directory.mkdir(parents=True)
     (directory / "model.safetensors").write_bytes(b"model")
@@ -311,7 +321,7 @@ def write_complete_base(project: Path) -> None:
             {
                 "source_base": BASE_REPO,
                 "source_adapter": ADAPTER_REPO,
-                "adapter_revision": ADAPTER_REVISION,
+                "adapter_revision": adapter_revision,
                 "base_revision": BASE_REVISION,
             }
         ),
@@ -338,7 +348,12 @@ def write_complete_tokenizer(
     (refs / "main").write_text(revision, encoding="utf-8")
 
 
-def write_complete_frs(project: Path, *, provenance: bool = True) -> None:
+def write_complete_frs(
+    project: Path,
+    *,
+    provenance: bool = True,
+    revision: str = FRS_REVISION,
+) -> None:
     directory = project / FRS_DIR
     directory.mkdir(parents=True)
     (directory / "checkpoint.json").write_text(
@@ -346,10 +361,15 @@ def write_complete_frs(project: Path, *, provenance: bool = True) -> None:
     )
     np.savez(directory / "params.npz", value=np.array([1]))
     if provenance:
-        write_provenance(directory, FRS_REPO, FRS_REVISION)
+        write_provenance(directory, FRS_REPO, revision)
 
 
-def write_complete_encoder(project: Path, *, provenance: bool = True) -> None:
+def write_complete_encoder(
+    project: Path,
+    *,
+    provenance: bool = True,
+    revision: str = ENCODER_REVISION,
+) -> None:
     directory = project / ENCODER_DIR
     directory.mkdir(parents=True)
     metadata = {
@@ -364,7 +384,7 @@ def write_complete_encoder(project: Path, *, provenance: bool = True) -> None:
     (directory / "checkpoint.json").write_text(json.dumps(metadata), encoding="utf-8")
     np.savez(directory / "params.npz", **{"tactile_resnet/kernel": np.array([1.0])})
     if provenance:
-        write_provenance(directory, ENCODER_REPO, ENCODER_REVISION)
+        write_provenance(directory, ENCODER_REPO, revision)
 
 
 def write_incomplete_frs(project: Path) -> None:
@@ -406,6 +426,41 @@ def test_downloads_all_missing_assets_with_exact_pinned_commands(tmp_path: Path)
         "repo_id": ENCODER_REPO,
         "revision": ENCODER_REVISION,
     }
+
+
+def test_resolved_revision_change_refreshes_complete_frs_asset(tmp_path: Path) -> None:
+    project, log_path, env = make_project(tmp_path)
+    write_complete_base(project)
+    write_complete_tokenizer(project)
+    write_complete_frs(project)
+    write_complete_encoder(project)
+    refreshed_revision = "1" * 40
+    env["FRS_TEST_FRS_REVISION"] = refreshed_revision
+
+    result = run_download(project, env)
+
+    assert result.returncode == 0, result.stderr
+    assert read_calls(log_path) == [
+        expected_calls(project, frs_revision=refreshed_revision)[2]
+    ]
+    assert json.loads((project / FRS_DIR / PROVENANCE_FILE).read_text()) == {
+        "format_version": 1,
+        "repo_id": FRS_REPO,
+        "revision": refreshed_revision,
+    }
+
+
+def test_failed_repository_resolution_stops_before_checkpoint_download(
+    tmp_path: Path,
+) -> None:
+    project, log_path, env = make_project(tmp_path)
+    env["FRS_TEST_FRS_REVISION"] = ""
+
+    result = run_download(project, env)
+
+    assert result.returncode != 0
+    assert f"could not resolve revision for {FRS_REPO}" in result.stderr
+    assert read_calls(log_path) == []
 
 
 def test_writes_tokenizer_ref_as_exact_revision_bytes(tmp_path: Path) -> None:
@@ -646,7 +701,7 @@ def test_refuses_unguarded_base_overwrite(tmp_path: Path) -> None:
     script = project / "deploy_smolvla/scripts/download.sh"
     content = script.read_text(encoding="utf-8")
     content = content.replace(
-        'BASE_DIR="${CHECKPOINT_ROOT}/model/pick_tube_02_3w_jax"',
+        'BASE_DIR="${CHECKPOINT_ROOT}/model/${SMOLVLA_BASENAME}_jax"',
         'BASE_DIR="${CHECKPOINT_ROOT}/../outside"',
     )
     script.write_text(content, encoding="utf-8")
@@ -666,7 +721,7 @@ def test_is_executable_and_supports_checkpoint_roots_with_spaces(tmp_path: Path)
 
     assert SCRIPT.stat().st_mode & stat.S_IXUSR
     assert result.returncode == 0, result.stderr
-    assert (checkpoint_root / "model/pick_tube_02_3w_jax/model.safetensors").is_file()
+    assert (checkpoint_root / "model/pick_tube_01_jax/model.safetensors").is_file()
     tokenizer_repo_cache = (
         checkpoint_root
         / "model/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"

@@ -3,16 +3,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Edit these pinned deployment inputs deliberately when updating the asset set.
+# Edit only these Hugging Face repository IDs when updating the asset set.
 CHECKPOINT_ROOT="${FRS_CHECKPOINT_ROOT:-${ROOT}/checkpoints}"
 BASE_REPO="lerobot/smolvla_base"
 BASE_REVISION="c83c3163b8ca9b7e67c509fffd9121e66cb96205"
-ADAPTER_REPO="KaiyueChen/pick_tube_02_3w"
-ADAPTER_REVISION="31d819d8844de98174ede123f894adbf7b4372ef"
+SMOLVLA_REPO="KaiyueChen/pick_tube_01"
 FRS_REPO="KaiyueChen/frs_0809_02"
-FRS_REVISION="7e23f3e8c308dc5ba3a4df7634c68dac28572897"
 ENCODER_REPO="KaiyueChen/encoder_ckpt_0809"
-ENCODER_REVISION="450aa60963cde9540bd6c8047bf2529eff1def37"
 TOKENIZER_REPO="HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
 TOKENIZER_REVISION="7b375e1b73b11138ff12fe22c8f2822d8fe03467"
 TOKENIZER_FILES=(
@@ -25,9 +22,6 @@ TOKENIZER_FILES=(
     merges.txt
     vocab.json
 )
-BASE_DIR="${CHECKPOINT_ROOT}/model/pick_tube_02_3w_jax"
-FRS_DIR="${CHECKPOINT_ROOT}/frs/frs_0809_02"
-ENCODER_DIR="${CHECKPOINT_ROOT}/encoder/encoder_ckpt_0809"
 TOKENIZER_CACHE_ROOT="${CHECKPOINT_ROOT}/model"
 TOKENIZER_REPO_CACHE="${TOKENIZER_CACHE_ROOT}/models--HuggingFaceTB--SmolVLM2-500M-Video-Instruct"
 
@@ -48,9 +42,68 @@ else
     PYTHON_CMD=("${UV_BIN}" run --no-sync python)
 fi
 
+validate_repo_id() {
+    [[ "$1" =~ ^[[:alnum:]][[:alnum:]._-]*/[[:alnum:]][[:alnum:]._-]*$ ]]
+}
+
+resolve_revision() {
+    local repo_id="$1"
+    local test_variable="$2"
+    local revision
+
+    if [[ -v "${test_variable}" ]]; then
+        revision="${!test_variable}"
+    else
+        revision="$("${PYTHON_CMD[@]}" - "${repo_id}" <<'PY'
+from huggingface_hub import HfApi
+import sys
+
+print(HfApi().model_info(sys.argv[1]).sha)
+PY
+)" || {
+            echo "could not resolve revision for ${repo_id}" >&2
+            return 1
+        }
+    fi
+
+    if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "could not resolve revision for ${repo_id}: invalid revision" >&2
+        return 1
+    fi
+    printf '%s\n' "${revision}"
+}
+
+for repo_id in "${SMOLVLA_REPO}" "${FRS_REPO}" "${ENCODER_REPO}"; do
+    if ! validate_repo_id "${repo_id}"; then
+        echo "invalid Hugging Face repository ID: ${repo_id}" >&2
+        exit 1
+    fi
+done
+
+SMOLVLA_BASENAME="${SMOLVLA_REPO##*/}"
+FRS_BASENAME="${FRS_REPO##*/}"
+ENCODER_BASENAME="${ENCODER_REPO##*/}"
+BASE_DIR="${CHECKPOINT_ROOT}/model/${SMOLVLA_BASENAME}_jax"
+FRS_DIR="${CHECKPOINT_ROOT}/frs/${FRS_BASENAME}"
+ENCODER_DIR="${CHECKPOINT_ROOT}/encoder/${ENCODER_BASENAME}"
+
+if ! SMOLVLA_REVISION="$(resolve_revision "${SMOLVLA_REPO}" FRS_TEST_SMOLVLA_REVISION)"; then
+    exit 1
+fi
+if ! FRS_REVISION="$(resolve_revision "${FRS_REPO}" FRS_TEST_FRS_REVISION)"; then
+    exit 1
+fi
+if ! ENCODER_REVISION="$(resolve_revision "${ENCODER_REPO}" FRS_TEST_ENCODER_REVISION)"; then
+    exit 1
+fi
+
+echo "resolved: ${SMOLVLA_REPO} @ ${SMOLVLA_REVISION} -> ${BASE_DIR}"
+echo "resolved: ${FRS_REPO} @ ${FRS_REVISION} -> ${FRS_DIR}"
+echo "resolved: ${ENCODER_REPO} @ ${ENCODER_REVISION} -> ${ENCODER_DIR}"
+
 base_complete() {
     "${PYTHON_CMD[@]}" - "${BASE_DIR}" "${BASE_REPO}" "${BASE_REVISION}" \
-        "${ADAPTER_REPO}" "${ADAPTER_REVISION}" <<'PY'
+        "${SMOLVLA_REPO}" "${SMOLVLA_REVISION}" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -229,7 +282,7 @@ else
             ;;
     esac
     if ! "${UV_BIN}" run --no-sync python "${ROOT}/tools/merge_smolvla_peft_to_jax.py" \
-        --adapter "${ADAPTER_REPO}" --adapter-revision "${ADAPTER_REVISION}" \
+        --adapter "${SMOLVLA_REPO}" --adapter-revision "${SMOLVLA_REVISION}" \
         --base "${BASE_REPO}" --base-revision "${BASE_REVISION}" \
         --output "${BASE_DIR}" --allow-download --overwrite; then
         echo "base checkpoint merge failed: ${BASE_DIR}" >&2
