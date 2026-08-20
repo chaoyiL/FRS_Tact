@@ -1,4 +1,17 @@
 #!/usr/bin/env bash
+```
+# 同时安装两套环境
+bash scripts/setup_env.sh
+
+# 只安装根 SmolVLA/FRS 环境
+bash scripts/setup_env.sh --root
+
+# 只安装 Pi0.5 部署环境
+bash scripts/setup_env.sh --pi05_deploy
+
+# 帮助
+bash scripts/setup_env.sh --help
+```
 
 set -Eeuo pipefail
 
