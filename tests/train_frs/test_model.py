@@ -754,14 +754,22 @@ def test_legacy_gate_conditioned_checkpoint_is_rejected(tmp_path, decoder):
 
 
 @pytest.mark.parametrize(
-    ("loss_mode", "action_dim", "tactile_num_tokens", "expected_gate"),
+    ("loss_mode", "action_dim", "tactile_num_tokens", "expected_gate", "break_overview"),
     (
-        ("gated", 1, 1, np.asarray([0.98201376], dtype=np.float32)),
+        ("gated", 1, 1, np.asarray([0.98201376], dtype=np.float32), False),
         (
             "bimanual_gated",
             20,
             4,
             np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
+            False,
+        ),
+        (
+            "bimanual_gated",
+            20,
+            4,
+            np.asarray([[0.98201376, 0.01798621]], dtype=np.float32),
+            True,
         ),
     ),
 )
@@ -772,9 +780,11 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
     action_dim,
     tactile_num_tokens,
     expected_gate,
+    break_overview,
 ):
     import train_smolvla_frs.train_frs as train_module
     import train_smolvla_frs.utils.data as data_module
+    import train_smolvla_frs.utils.bimanual_visualize as bimanual_visualize_module
     import train_smolvla_frs.utils.metrics as metrics_module
     import train_smolvla_frs.utils.model as model_module
     import utils.cache as cache_module
@@ -948,6 +958,16 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         return validation
 
     monkeypatch.setattr(metrics_module, "evaluate_split", fake_evaluate_split)
+    if break_overview:
+        def raise_legacy_history_error(*args, **kwargs):
+            del args, kwargs
+            raise ValueError("bimanual history fields are absent")
+
+        monkeypatch.setattr(
+            bimanual_visualize_module,
+            "plot_bimanual_training_overview",
+            raise_legacy_history_error,
+        )
 
     train_module.train_decoder(
         cache_dir=tmp_path / "cache",
@@ -1034,6 +1054,16 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         assert float(
             history_row["val_quadrant_high_low_vla_preserve_ratio_right"]
         ) == pytest.approx(0.1)
+        for filename in (
+            "training_curves.png",
+            "bimanual_behavior.png",
+        ):
+            image = tmp_path / "output" / filename
+            assert image.is_file(), filename
+            assert image.stat().st_size > 0, filename
+        overview = tmp_path / "output" / "training_overview.png"
+        assert overview.is_file() is (not break_overview)
+        assert (tmp_path / "output" / "last" / "checkpoint.json").is_file()
     else:
         assert history_row["train_gate_w_left"] == ""
         assert history_row["train_gate_w_right"] == ""

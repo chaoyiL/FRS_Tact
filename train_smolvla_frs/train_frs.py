@@ -543,6 +543,10 @@ def train_decoder(
         BIMANUAL_WRISTS,
         flatten_bimanual_quadrant_metrics,
     )
+    from train_smolvla_frs.utils.bimanual_visualize import (
+        plot_bimanual_behavior,
+        plot_bimanual_training_overview,
+    )
     from train_smolvla_frs.utils.data import (
         CachedTactileEmbeddingBatches,
         TactileConditionedBatches,
@@ -1338,11 +1342,35 @@ def train_decoder(
             return
         try:
             written = plot_training_history(history_path, output_path=plot_path)
-        except (FileNotFoundError, ValueError) as exc:
+        except Exception as exc:
             print(f"warning: could not refresh training plot: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"plot={written}", flush=True)
+        if loss_mode != BIMANUAL_LOSS_MODE:
             return
-        if announce:
-            print(f"plot={written}", flush=True)
+        try:
+            overview = plot_bimanual_training_overview(
+                history_path,
+                output_path=output_dir / "training_overview.png",
+                min_rank_satisfied=best_min_high_gate_rank_satisfied,
+                min_low_safe=1.0 - best_max_low_gate_unsafe_frac,
+            )
+        except Exception as exc:
+            print(f"warning: could not refresh bimanual training overview: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"bimanual_training_overview={overview}", flush=True)
+        try:
+            behavior = plot_bimanual_behavior(
+                history_path,
+                output_path=output_dir / "bimanual_behavior.png",
+            )
+        except Exception as exc:
+            print(f"warning: could not refresh bimanual behavior plot: {exc}", flush=True)
+        else:
+            if announce:
+                print(f"bimanual_behavior={behavior}", flush=True)
 
     try:
         with history_path.open(history_mode, newline="", encoding="utf-8") as history_file:
