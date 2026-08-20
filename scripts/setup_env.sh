@@ -25,6 +25,70 @@ HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
 HF_LEROBOT_HOME_VALUE="${HF_HOME_VALUE}/lerobot"
 TMPDIR_VALUE="${STORAGE_ROOT}/tmp"
 UV_BIN=""
+SETUP_MODE="all"
+SHOW_HELP=0
+
+usage() {
+    cat <<'EOF'
+用法: bash scripts/setup_env.sh [--root | --pi05_deploy]
+
+不传参数       安装根环境和 Pi0.5 部署环境
+--root         只安装根 SmolVLA/FRS 环境
+--pi05_deploy  只安装 Pi0.5 部署环境
+-h, --help     显示帮助
+EOF
+}
+
+usage_error() {
+    echo "[setup] 错误：$*" >&2
+    usage >&2
+    return 2
+}
+
+parse_args() {
+    local selected=""
+    SHOW_HELP=0
+    while (($#)); do
+        case "$1" in
+            -h|--help)
+                if (($# != 1)); then
+                    usage_error "--help 不能与其他参数一起使用"
+                    return $?
+                fi
+                SHOW_HELP=1
+                return 0
+                ;;
+            --root)
+                if [[ -n "${selected}" ]]; then
+                    usage_error "一次只能选择一个安装环境"
+                    return $?
+                fi
+                selected="root"
+                ;;
+            --pi05_deploy)
+                if [[ -n "${selected}" ]]; then
+                    usage_error "一次只能选择一个安装环境"
+                    return $?
+                fi
+                selected="pi05_deploy"
+                ;;
+            *)
+                usage_error "未知参数：$1"
+                return $?
+                ;;
+        esac
+        shift
+    done
+    SETUP_MODE="${selected:-all}"
+}
+
+should_setup_root() {
+    [[ "${SETUP_MODE}" == "all" || "${SETUP_MODE}" == "root" ]]
+}
+
+should_setup_pi05() {
+    [[ "${SETUP_MODE}" == "all" || "${SETUP_MODE}" == "pi05_deploy" ]]
+}
 
 log() {
     echo "[setup] $*"
@@ -174,27 +238,50 @@ write_environment_file() {
     chmod 600 "${ENV_FILE}"
 }
 
-sync_environments() {
-    validate_environment_targets
+validate_selected_projects() {
+    if should_setup_root; then
+        [[ -f "${PROJECT_ROOT}/pyproject.toml" ]] || fail "缺少根项目：${PROJECT_ROOT}/pyproject.toml"
+        [[ -f "${PROJECT_ROOT}/uv.lock" ]] || fail "缺少根项目锁文件：${PROJECT_ROOT}/uv.lock"
+    fi
+    if should_setup_pi05; then
+        [[ -f "${PI05_PROJECT_ROOT}/pyproject.toml" ]] || \
+            fail "缺少 Pi0.5 部署项目：${PI05_PROJECT_ROOT}/pyproject.toml"
+        [[ -f "${PI05_PROJECT_ROOT}/uv.lock" ]] || \
+            fail "缺少 Pi0.5 部署锁文件：${PI05_PROJECT_ROOT}/uv.lock"
+    fi
+}
+
+install_python() {
     cd "${PROJECT_ROOT}"
     check_existing_uv_processes
     log "安装 Python ${PYTHON_VERSION}"
     "${UV_BIN}" python install "${PYTHON_VERSION}"
+}
+
+sync_root_environment() {
+    cd "${PROJECT_ROOT}"
     log "根项目环境目录：${VENV_DIR}"
     log "uv cache：${UV_CACHE_DIR}"
     log "按照根目录 uv.lock 同步 SmolVLA/训练环境"
     UV_PROJECT_ENVIRONMENT="${VENV_DIR}" \
         "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}"
+}
 
-    [[ -f "${PI05_PROJECT_ROOT}/pyproject.toml" ]] || \
-        fail "缺少 Pi0.5 部署项目：${PI05_PROJECT_ROOT}/pyproject.toml"
-    [[ -f "${PI05_PROJECT_ROOT}/uv.lock" ]] || \
-        fail "缺少 Pi0.5 部署锁文件：${PI05_PROJECT_ROOT}/uv.lock"
+sync_pi05_environment() {
     log "Pi0.5 部署环境目录：${PI05_VENV_DIR}"
     log "按照 deploy_pi05/uv.lock 同步独立 Pi0.5 环境"
     UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}" \
         "${UV_BIN}" sync --frozen --python "${PYTHON_VERSION}" \
         --project "${PI05_PROJECT_ROOT}"
+}
+
+# Preserve the source-level helper used by existing tests and shell consumers.
+sync_environments() {
+    validate_environment_targets
+    validate_selected_projects
+    install_python
+    sync_root_environment
+    sync_pi05_environment
     write_environment_file
 }
 
@@ -257,9 +344,9 @@ PY
     )
 }
 
-check_gpu() {
+check_root_gpu() {
     cd "${PROJECT_ROOT}"
-    log "检查 NVIDIA、PyTorch 和 JAX 设备"
+    log "检查根环境 NVIDIA、PyTorch 和 JAX 设备"
     local expect_gpu=0
     if command -v nvidia-smi >/dev/null 2>&1; then
         expect_gpu=1
@@ -267,7 +354,8 @@ check_gpu() {
     else
         warn "没有找到 nvidia-smi；本机只能做 CPU 开发，不能用于正式训练"
     fi
-    FRS_EXPECT_GPU="${expect_gpu}" "${UV_BIN}" run --no-sync python - <<'PY'
+    FRS_EXPECT_GPU="${expect_gpu}" UV_PROJECT_ENVIRONMENT="${VENV_DIR}" \
+        "${UV_BIN}" run --no-sync python - <<'PY'
 import os
 
 import jax
@@ -282,6 +370,17 @@ if os.environ.get("FRS_EXPECT_GPU") == "1":
     if not any(device.platform == "gpu" for device in devices):
         raise RuntimeError("nvidia-smi 可用，但 JAX 没有识别到 GPU")
 PY
+}
+
+check_pi05_gpu() {
+    log "检查 Pi0.5 环境 NVIDIA 和 JAX 设备"
+    local expect_gpu=0
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        expect_gpu=1
+        nvidia-smi --query-gpu=index,name,driver_version,memory.total --format=csv,noheader
+    else
+        warn "没有找到 nvidia-smi；本机只能做 CPU 开发，不能用于正式训练"
+    fi
     (
         cd "${PI05_PROJECT_ROOT}"
         FRS_EXPECT_GPU="${expect_gpu}" \
@@ -302,21 +401,19 @@ PY
     )
 }
 
-main() {
-    install_system_dependencies
-    install_uv
-    persist_uv_path
-    configure_uv_storage
-    configure_runtime_storage
-    sync_environments
-    verify_python_environment
-    verify_pi05_environment
-    check_gpu
-
-    log "环境安装完成"
+print_summary() {
+    log "环境安装完成：${SETUP_MODE}"
     echo
-    echo "根项目环境：${VENV_DIR}"
-    echo "Pi0.5 部署环境：${PI05_VENV_DIR}"
+    if should_setup_root; then
+        echo "根项目环境（已安装）：${VENV_DIR}"
+    else
+        echo "根项目环境（本次未安装）：${VENV_DIR}"
+    fi
+    if should_setup_pi05; then
+        echo "Pi0.5 部署环境（已安装）：${PI05_VENV_DIR}"
+    else
+        echo "Pi0.5 部署环境（本次未安装）：${PI05_VENV_DIR}"
+    fi
     echo "环境变量：${ENV_FILE}"
     echo "Hugging Face 缓存：${HF_HOME}"
     echo "Arrow 数据缓存：${HF_DATASETS_CACHE}"
@@ -335,6 +432,31 @@ main() {
     echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05.sh"
     echo "一键启动 Pi0.5 + FRS："
     echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05_frs.sh"
+}
+
+main() {
+    parse_args "$@" || return $?
+    if ((SHOW_HELP)); then
+        usage
+        return 0
+    fi
+
+    validate_environment_targets
+    validate_selected_projects
+    install_system_dependencies
+    install_uv
+    persist_uv_path
+    configure_uv_storage
+    configure_runtime_storage
+    install_python
+    should_setup_root && sync_root_environment
+    should_setup_pi05 && sync_pi05_environment
+    write_environment_file
+    should_setup_root && verify_python_environment
+    should_setup_pi05 && verify_pi05_environment
+    should_setup_root && check_root_gpu
+    should_setup_pi05 && check_pi05_gpu
+    print_summary
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

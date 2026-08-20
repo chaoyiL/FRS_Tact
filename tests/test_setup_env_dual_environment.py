@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import shlex
 import subprocess
 
 
@@ -125,3 +126,93 @@ printf '%s\\n%s\\n' "$VENV_DIR" "$PI05_VENV_DIR"
         str(ROOT / ".venv-root-custom"),
         str(ROOT / "deploy_pi05/.venv-custom"),
     ]
+
+
+def run_stubbed_main(tmp_path: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    events = tmp_path / "events.log"
+    quoted_args = " ".join(shlex.quote(arg) for arg in args)
+    command = f"""
+set -euo pipefail
+source {SETUP}
+EVENTS={events}
+record() {{ printf '%s\\n' "$1" >>"$EVENTS"; }}
+install_system_dependencies() {{ record system; }}
+install_uv() {{ UV_BIN=uv; record uv; }}
+persist_uv_path() {{ record path; }}
+validate_environment_targets() {{ record validate-targets; }}
+validate_selected_projects() {{ record validate-projects; }}
+configure_uv_storage() {{ export UV_PROJECT_ENVIRONMENT="$VENV_DIR"; export UV_CACHE_DIR=/tmp/uv; record uv-storage; }}
+configure_runtime_storage() {{ export HF_HOME=/tmp/hf; export HF_HUB_CACHE=/tmp/hf/hub; export HF_DATASETS_CACHE=/tmp/hf/data; export HF_LEROBOT_HOME=/tmp/hf/lerobot; export TMPDIR=/tmp/frs; record runtime-storage; }}
+install_python() {{ record python; }}
+sync_root_environment() {{ record sync-root; }}
+sync_pi05_environment() {{ record sync-pi05; }}
+write_environment_file() {{ record env-file; }}
+verify_python_environment() {{ record verify-root; }}
+verify_pi05_environment() {{ record verify-pi05; }}
+check_root_gpu() {{ record gpu-root; }}
+check_pi05_gpu() {{ record gpu-pi05; }}
+print_summary() {{ record summary; }}
+main {quoted_args}
+"""
+    return subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def read_events(tmp_path: Path) -> list[str]:
+    events = tmp_path / "events.log"
+    return events.read_text(encoding="utf-8").splitlines() if events.exists() else []
+
+
+def test_main_without_selector_preserves_dual_environment_setup(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    events = read_events(tmp_path)
+    assert "sync-root" in events
+    assert "sync-pi05" in events
+    assert "verify-root" in events
+    assert "verify-pi05" in events
+    assert "gpu-root" in events
+    assert "gpu-pi05" in events
+
+
+def test_root_selector_skips_pi05_setup(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path, "--root")
+    assert completed.returncode == 0, completed.stderr
+    events = read_events(tmp_path)
+    assert "sync-root" in events
+    assert "verify-root" in events
+    assert "gpu-root" in events
+    assert not any("pi05" in event for event in events)
+
+
+def test_pi05_deploy_selector_skips_root_setup(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path, "--pi05_deploy")
+    assert completed.returncode == 0, completed.stderr
+    events = read_events(tmp_path)
+    assert "sync-pi05" in events
+    assert "verify-pi05" in events
+    assert "gpu-pi05" in events
+    assert not any(event.endswith("root") for event in events)
+
+
+def test_help_has_no_side_effects(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path, "--help")
+    assert completed.returncode == 0
+    assert "--pi05_deploy" in completed.stdout
+    assert read_events(tmp_path) == []
+
+
+def test_invalid_or_conflicting_selectors_fail_before_side_effects(tmp_path: Path) -> None:
+    for args in [("--unknown",), ("--root", "--pi05_deploy")]:
+        case_dir = tmp_path / args[0].removeprefix("-").replace("-", "_")
+        case_dir.mkdir(exist_ok=True)
+        completed = run_stubbed_main(case_dir, *args)
+        assert completed.returncode != 0
+        assert "用法" in completed.stderr
+        assert read_events(case_dir) == []
