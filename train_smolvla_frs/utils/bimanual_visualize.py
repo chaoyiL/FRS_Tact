@@ -39,15 +39,33 @@ _REQUIRED_BIMANUAL_FIELDS = frozenset(
         ),
     }
 )
+_OVERVIEW_REQUIRED_FIELDS = frozenset(
+    f"val_{metric}_{wrist}"
+    for wrist in BIMANUAL_WRISTS
+    for metric in ("low_safe_frac", "rank_satisfied_high_frac")
+)
+_HIGH_WRISTS_BY_QUADRANT = {
+    "low_low": frozenset(),
+    "high_low": frozenset({"left"}),
+    "low_high": frozenset({"right"}),
+    "high_high": frozenset(BIMANUAL_WRISTS),
+}
 
 
-def _read_bimanual_rows(history_path: pathlib.Path) -> list[dict[str, Any]]:
+def _read_bimanual_rows(
+    history_path: pathlib.Path,
+    *,
+    require_overview_fields: bool = False,
+) -> list[dict[str, Any]]:
     """Return parsed history after checking the CSV was written in bimanual mode."""
 
     by_epoch: dict[int, dict[str, Any]] = {}
     with history_path.open(encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
-        if reader.fieldnames is None or not _REQUIRED_BIMANUAL_FIELDS.issubset(reader.fieldnames):
+        required_fields = _REQUIRED_BIMANUAL_FIELDS
+        if require_overview_fields:
+            required_fields |= _OVERVIEW_REQUIRED_FIELDS
+        if reader.fieldnames is None or not required_fields.issubset(reader.fieldnames):
             raise ValueError("bimanual history fields are absent")
         for raw in reader:
             epoch_text = (raw.get("epoch") or "").strip()
@@ -128,7 +146,7 @@ def plot_bimanual_training_overview(
 ) -> pathlib.Path:
     """Render a six-panel convergence dashboard for a bimanual training run."""
 
-    rows = _read_bimanual_rows(history_path)
+    rows = _read_bimanual_rows(history_path, require_overview_fields=True)
     fig, axes = plt.subplots(6, 1, figsize=(11, 20), sharex=True)
     fig.subplots_adjust(left=0.10, right=0.97, top=0.97, bottom=0.06, hspace=0.45)
 
@@ -227,48 +245,73 @@ def plot_bimanual_behavior(
             axis = axes[row_index, column_index]
             relative_field = f"val_quadrant_{quadrant}_relative_gt_error_{wrist}"
             preserve_field = f"val_quadrant_{quadrant}_vla_preserve_ratio_{wrist}"
-            _plot_series(
-                axis,
-                rows,
-                relative_field,
-                label="FRS vs GT (expected)",
-                color="#C44E52",
-            )
-            _plot_series(
-                axis,
-                rows,
-                preserve_field,
-                label="VLA preserved (reference)",
-                color="#4C72B0",
-                alpha=0.38,
-                linestyle="--",
-            )
             axis.axhline(1.0, color="#555555", linestyle=":", linewidth=1.2, label="GT baseline")
-
             sample_count = _latest_value(rows, f"val_quadrant_{quadrant}_n")
-            mse_gt = _latest_value(rows, f"val_quadrant_{quadrant}_mse_gt_{wrist}")
-            gain = _latest_value(rows, f"val_quadrant_{quadrant}_gt_gain_{wrist}")
-            rank = _latest_value(rows, f"val_quadrant_{quadrant}_rank_satisfied_frac_{wrist}")
-            annotation = (
-                f"latest n={sample_count:.0f}\n"
-                f"MSE(GT)={mse_gt:.3g}  gain={gain:.3g}\n"
-                f"rank satisfied={rank:.1%}"
-            )
-            axis.text(
-                0.02,
-                0.97,
-                annotation,
-                transform=axis.transAxes,
-                va="top",
-                ha="left",
-                fontsize=8,
-                bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.82, "edgecolor": "#cccccc"},
-            )
-            if not math.isfinite(sample_count) or sample_count < min_reliable_samples:
+            if not math.isfinite(sample_count) or sample_count <= 0:
+                axis.text(
+                    0.5,
+                    0.5,
+                    "No validation samples",
+                    transform=axis.transAxes,
+                    va="center",
+                    ha="center",
+                    fontsize=10,
+                    color="#666666",
+                )
+            else:
+                high_wrist = wrist in _HIGH_WRISTS_BY_QUADRANT[quadrant]
+                expected_field, expected_label, expected_color = (
+                    (relative_field, "FRS vs GT (expected)", "#C44E52")
+                    if high_wrist
+                    else (preserve_field, "VLA preserved (expected)", "#4C72B0")
+                )
+                reference_field, reference_label, reference_color = (
+                    (preserve_field, "VLA preserved (reference)", "#4C72B0")
+                    if high_wrist
+                    else (relative_field, "FRS vs GT (reference)", "#C44E52")
+                )
+                _plot_series(
+                    axis,
+                    rows,
+                    expected_field,
+                    label=expected_label,
+                    color=expected_color,
+                )
+                _plot_series(
+                    axis,
+                    rows,
+                    reference_field,
+                    label=reference_label,
+                    color=reference_color,
+                    alpha=0.38,
+                    linestyle="--",
+                )
+                mse_gt = _latest_value(rows, f"val_quadrant_{quadrant}_mse_gt_{wrist}")
+                mse_vla = _latest_value(rows, f"val_quadrant_{quadrant}_mse_vla_{wrist}")
+                mse_vla_gt = _latest_value(rows, f"val_quadrant_{quadrant}_mse_vla_gt_{wrist}")
+                gain = _latest_value(rows, f"val_quadrant_{quadrant}_gt_gain_{wrist}")
+                rank = _latest_value(rows, f"val_quadrant_{quadrant}_rank_satisfied_frac_{wrist}")
+                annotation = (
+                    f"latest n={sample_count:.0f}\n"
+                    f"MSE(FRS,GT)={mse_gt:.3g}  MSE(FRS,VLA)={mse_vla:.3g}\n"
+                    f"MSE(VLA,GT)={mse_vla_gt:.3g}  gain={gain:.3g}\n"
+                    f"rank satisfied={rank:.1%}"
+                )
+                axis.text(
+                    0.02,
+                    0.97,
+                    annotation,
+                    transform=axis.transAxes,
+                    va="top",
+                    ha="left",
+                    fontsize=8,
+                    bbox={"boxstyle": "round,pad=0.25", "facecolor": "white", "alpha": 0.82, "edgecolor": "#cccccc"},
+                )
+            if math.isfinite(sample_count) and 0 < sample_count < min_reliable_samples:
                 axis.text(
                     0.98,
                     0.97,
-                    f"LOW SAMPLE COUNT: n={sample_count:.0f} < {min_reliable_samples}",
+                    f"Insufficient samples: n={sample_count:.0f} < {min_reliable_samples}",
                     transform=axis.transAxes,
                     va="top",
                     ha="right",
