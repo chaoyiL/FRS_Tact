@@ -327,6 +327,9 @@ def train_decoder(
     )
     from train_pi05_frs.utils.history_plot import plot_training_history
     from train_pi05_frs.utils.bimanual_visualize import plot_bimanual_diagnostics
+    from train_pi05_frs.utils.bimanual_metrics import (
+        flatten_bimanual_quadrant_metrics,
+    )
     from train_pi05_frs.utils.metrics import (
         bimanual_source_decode_metrics,
         evaluate_split,
@@ -450,6 +453,25 @@ def train_decoder(
                     f"val_source_{source_index}_{metric_name}_{wrist}"
                     for metric_name in bimanual_source_metric_names
                 )
+        history_fields.append("checkpoint_selection_feasible")
+        history_fields.extend(
+            f"val_quadrant_{quadrant}_n"
+            for quadrant in ("low_low", "high_low", "low_high", "high_high")
+        )
+        history_fields.extend(
+            f"val_quadrant_{quadrant}_{metric_name}_{wrist}"
+            for quadrant in ("low_low", "high_low", "low_high", "high_high")
+            for wrist in ("left", "right")
+            for metric_name in (
+                "mse_gt",
+                "mse_vla",
+                "mse_vla_gt",
+                "gt_gain",
+                "relative_gt_error",
+                "vla_preserve_ratio",
+                "rank_satisfied_frac",
+            )
+        )
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
         row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
@@ -955,7 +977,9 @@ def train_decoder(
                         split="val",
                         batch_size=batch_size,
                         num_steps=validation_steps,
-                        keep_predictions=False,
+                        keep_predictions=(
+                            loss_mode == BIMANUAL_LOSS_MODE and write_plots
+                        ),
                         solver=aux_decode_solver,
                         target=eval_target,
                         loss_mode=loss_mode,
@@ -1083,6 +1107,20 @@ def train_decoder(
                                 ] = value
                         for metric_name, value in wrist_rollups.items():
                             metrics[f"val_{metric_name}"] = value
+                    if loss_mode == BIMANUAL_LOSS_MODE:
+                        if validation.bimanual_quadrants is None:
+                            raise ValueError(
+                                "bimanual validation is missing quadrant metrics"
+                            )
+                        metrics.update(
+                            flatten_bimanual_quadrant_metrics(
+                                validation.bimanual_quadrants
+                            )
+                        )
+                        candidate_key = _best_key(metrics)
+                        metrics["checkpoint_selection_feasible"] = int(
+                            candidate_key[0] == 0.0
+                        )
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
@@ -1092,7 +1130,9 @@ def train_decoder(
                                 history_path,
                                 validation,
                                 output_dir=output_dir,
-                                min_rank_satisfied=best_min_high_gate_rank_satisfied,
+                                min_rank_satisfied=(
+                                    best_min_high_gate_rank_satisfied_frac
+                                ),
                                 min_low_safe=1.0 - best_max_low_gate_unsafe_frac,
                             )
                         except Exception as exc:

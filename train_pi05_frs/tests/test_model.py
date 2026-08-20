@@ -34,6 +34,7 @@ from train_pi05_frs.utils.metrics import bimanual_source_decode_metrics
 from train_pi05_frs.utils.metrics import EvaluationResult
 from train_pi05_frs.utils.metrics import evaluate_split
 from train_pi05_frs.utils.metrics import gate_stratified_decode_metrics
+from train_pi05_frs.utils.bimanual_visualize import plot_bimanual_training_overview
 from train_pi05_frs.utils.model import decode_mse_per_sample
 from train_pi05_frs.utils.model import flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import gated_flow_matching_loss_per_sample
@@ -51,8 +52,12 @@ from train_pi05_frs.train import (
 import numpy as np
 
 
+@pytest.mark.parametrize(
+    ("write_plots", "expected_keep_predictions"),
+    ((False, False), (True, True)),
+)
 def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, write_plots, expected_keep_predictions
 ):
     class FakePairs:
         source_names = ("dataset-a", "dataset-b")
@@ -126,7 +131,7 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
         sample_mae_gt=np.ones((4,)),
         sample_mse_pred=np.full((4,), 2.0),
         sample_mae_pred=np.full((4,), 2.0),
-        predictions=None,
+        predictions=np.zeros((4, 1, 32), dtype=np.float32),
         mse_vla_gt=1.0,
         gt_gain=0.0,
         relative_gt_error=1.0,
@@ -157,6 +162,8 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
         tactile_change_right=0.5,
         bimanual_quadrants={},
         bimanual_gate_region_counts=np.zeros((3, 3), dtype=np.int64),
+        gt_actions=np.zeros((4, 1, 32), dtype=np.float32),
+        vla_actions=np.zeros((4, 1, 32), dtype=np.float32),
     )
     monkeypatch.setattr(evaluate_module, "MultiCachedPairs", FakePairs, raising=False)
     monkeypatch.setattr(
@@ -187,6 +194,18 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
         return result
 
     monkeypatch.setattr(evaluate_module, "evaluate_split", fake_evaluate_split)
+    action_plots = []
+    monkeypatch.setattr(
+        evaluate_module,
+        "plot_bimanual_gate_diagnostics",
+        lambda *args, **kwargs: tmp_path / "output" / "gate_diagnostics.png",
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "plot_bimanual_action_examples",
+        lambda *args, **kwargs: action_plots.append((args, kwargs))
+        or tmp_path / "output" / "bimanual_action_examples.png",
+    )
 
     metrics = evaluate_module.evaluate_decoder(
         cache_dir=None,
@@ -208,7 +227,7 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
         solver="euler",
         target=None,
         save_predictions=False,
-        write_plots=False,
+        write_plots=write_plots,
         num_trajectory_samples=0,
         num_episode_strips=0,
         num_workers=0,
@@ -219,6 +238,11 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
     )
 
     assert captured["loss_mode"] == "bimanual_gated"
+    assert captured["keep_predictions"] is expected_keep_predictions
+    assert bool(action_plots) is write_plots
+    if write_plots:
+        assert action_plots[0][0][0].predictions is not None
+    assert not (tmp_path / "output" / "predictions.npz").exists()
     assert metrics["gate_w_mean_left"] == pytest.approx(0.5)
     assert metrics["per_dataset"]["dataset-b"]["mse_gt"] == pytest.approx(1.0)
     assert metrics["per_dataset"]["dataset-b"]["gt_gain_high_w_left"] == pytest.approx(-3.0)
@@ -334,8 +358,12 @@ def test_bimanual_source_metrics_aggregate_before_worst_rollups():
     assert rollups["worst_dataset_low_unsafe_frac_left"] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize(
+    ("write_plots", "expected_keep_predictions"),
+    ((False, False), (True, True)),
+)
 def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, write_plots, expected_keep_predictions
 ):
     import train_pi05_frs.pi05_cache.cache as cache_module
     import train_pi05_frs.utils.checkpoint as checkpoint_module
@@ -450,6 +478,24 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
         "sample_mse_vla_gt_right": np.ones((4,)),
         "sample_gate_w_left": gate_left,
         "sample_gate_w_right": gate_right,
+        "bimanual_quadrants": {
+            quadrant: {
+                "n": 1,
+                **{
+                    wrist: {
+                        "mse_gt": 0.1,
+                        "mse_vla": 0.2,
+                        "mse_vla_gt": 0.3,
+                        "gt_gain": 0.2,
+                        "relative_gt_error": 1 / 3,
+                        "vla_preserve_ratio": 2 / 3,
+                        "rank_satisfied_frac": 1.0,
+                    }
+                    for wrist in ("left", "right")
+                },
+            }
+            for quadrant in ("low_low", "high_low", "low_high", "high_high")
+        },
     }
     for wrist, gate, change in (
         ("left", 0.5, 0.6),
@@ -501,6 +547,14 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
         checkpoint_metrics.append(dict(metrics))
 
     monkeypatch.setattr(checkpoint_module, "save_checkpoint", fake_save_checkpoint)
+    import train_pi05_frs.utils.bimanual_visualize as visualize_module
+
+    rendered_diagnostics = []
+    monkeypatch.setattr(
+        visualize_module,
+        "plot_bimanual_diagnostics",
+        lambda *args, **kwargs: rendered_diagnostics.append((args, kwargs)) or (),
+    )
 
     train_decoder(
         cache_dir=None,
@@ -552,7 +606,7 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
         validation_steps=1,
         eval_every=1,
         seed=0,
-        write_plots=False,
+        write_plots=write_plots,
         num_workers=0,
         prefetch_batches=1,
         load_threads=1,
@@ -569,6 +623,8 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
     assert evaluation_kwargs["low_gate_safety_margin"] == pytest.approx(0.03)
     assert evaluation_kwargs["rank_margin"] == pytest.approx(0.0)
     assert evaluation_kwargs["repair_margin"] == pytest.approx(0.0)
+    assert evaluation_kwargs["keep_predictions"] is expected_keep_predictions
+    assert bool(rendered_diagnostics) is write_plots
     assert len(source_calls) == 2
     with (tmp_path / "output" / "history.csv").open(
         newline="", encoding="utf-8"
@@ -576,6 +632,14 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
         history_row = next(csv.DictReader(file))
     assert float(history_row["val_composite_fm"]) == pytest.approx(0.375)
     assert float(history_row["val_gate_w_left"]) == pytest.approx(0.5)
+    assert int(history_row["checkpoint_selection_feasible"]) == 0
+    assert int(history_row["val_quadrant_high_low_n"]) == 1
+    assert float(history_row["val_quadrant_high_low_mse_gt_left"]) == pytest.approx(0.1)
+    overview = plot_bimanual_training_overview(
+        tmp_path / "output" / "history.csv",
+        output_path=tmp_path / "output" / "training_overview.png",
+    )
+    assert overview.is_file()
     assert float(history_row["val_worst_dataset_low_unsafe_frac_left"]) == 0.0
     assert float(history_row["val_min_dataset_gt_gain_high_w_left"]) == -3.0
     assert float(history_row["val_source_1_gt_gain_high_w_left"]) == -3.0

@@ -4,6 +4,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from train_pi05_frs.utils.history_plot import HISTORY_FIELDS
 from train_pi05_frs.utils.metrics import EvaluationResult
@@ -135,3 +136,41 @@ def test_legacy_history_still_writes_training_curves(tmp_path: Path) -> None:
     output = plot_training_history(history)
     assert output.name == "training_curves.png"
     assert output.stat().st_size > 0
+
+
+def test_diagnostic_bundle_attempts_other_plots_after_one_plot_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import train_pi05_frs.utils.bimanual_visualize as visualize
+
+    history = write_bimanual_history_fixture(tmp_path / "history.csv")
+    result = make_bimanual_evaluation_result(action_dim=32)
+    attempted: list[str] = []
+
+    def write(name: str):
+        def plot(*args, **kwargs):
+            del args
+            attempted.append(name)
+            return kwargs["output_path"]
+
+        return plot
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        attempted.append("behavior")
+        raise ValueError("intentional test failure")
+
+    monkeypatch.setattr(visualize, "plot_bimanual_training_overview", write("overview"))
+    monkeypatch.setattr(visualize, "plot_bimanual_behavior", fail)
+    monkeypatch.setattr(visualize, "plot_bimanual_gate_diagnostics", write("gate"))
+    monkeypatch.setattr(visualize, "plot_bimanual_action_examples", write("actions"))
+
+    with pytest.warns(RuntimeWarning, match="could not render bimanual behavior"):
+        paths = visualize.plot_bimanual_diagnostics(history, result, output_dir=tmp_path)
+
+    assert attempted == ["overview", "behavior", "gate", "actions"]
+    assert {path.name for path in paths} == {
+        "training_overview.png",
+        "gate_diagnostics.png",
+        "bimanual_action_examples.png",
+    }

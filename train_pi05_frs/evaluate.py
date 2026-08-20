@@ -417,6 +417,9 @@ def evaluate_decoder(
                 f"Encoder resnet_embedding_dim={conditioner.resnet_embedding_dim} does not match "
                 f"checkpoint resnet_embedding_dim={model.config.resnet_embedding_dim}."
             )
+        keep_actions = save_predictions or (
+            write_plots and loss_mode == BIMANUAL_LOSS_MODE
+        )
         result = evaluate_split(
             model,
             conditioner,
@@ -424,7 +427,7 @@ def evaluate_decoder(
             batch_size=batch_size,
             num_steps=num_steps,
             solver=solver,
-            keep_predictions=save_predictions,
+            keep_predictions=keep_actions,
             target=target,
             loss_mode=loss_mode,
             gate_tau=float(extra["gate_tau"]),

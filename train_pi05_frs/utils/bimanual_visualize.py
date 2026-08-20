@@ -402,14 +402,58 @@ def plot_bimanual_action_examples(result: EvaluationResult, pairs: Any | None = 
     return _save_figure(fig, output_path)
 
 
-def plot_bimanual_diagnostics(history_path: pathlib.Path, result: EvaluationResult, *,
-                              output_dir: pathlib.Path, min_rank_satisfied: float = .8,
-                              min_low_safe: float = .9) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path, pathlib.Path]:
-    """Write the complete stable-name bimanual dashboard bundle."""
+def plot_bimanual_diagnostics(
+    history_path: pathlib.Path,
+    result: EvaluationResult,
+    *,
+    output_dir: pathlib.Path,
+    min_rank_satisfied: float = 0.8,
+    min_low_safe: float = 0.9,
+) -> tuple[pathlib.Path, ...]:
+    """Attempt every stable-name dashboard, preserving valid sibling plots."""
+
     output_dir = pathlib.Path(output_dir)
-    return (
-        plot_bimanual_training_overview(history_path, output_path=output_dir / "training_overview.png", min_rank_satisfied=min_rank_satisfied, min_low_safe=min_low_safe),
-        plot_bimanual_behavior(history_path, output_path=output_dir / "bimanual_behavior.png"),
-        plot_bimanual_gate_diagnostics(history_path, result=result, output_path=output_dir / "gate_diagnostics.png"),
-        plot_bimanual_action_examples(result, output_path=output_dir / "bimanual_action_examples.png"),
+    plotters = (
+        (
+            "training overview",
+            lambda: plot_bimanual_training_overview(
+                history_path,
+                output_path=output_dir / "training_overview.png",
+                min_rank_satisfied=min_rank_satisfied,
+                min_low_safe=min_low_safe,
+            ),
+        ),
+        (
+            "behavior",
+            lambda: plot_bimanual_behavior(
+                history_path,
+                output_path=output_dir / "bimanual_behavior.png",
+            ),
+        ),
+        (
+            "Gate diagnostics",
+            lambda: plot_bimanual_gate_diagnostics(
+                history_path,
+                result=result,
+                output_path=output_dir / "gate_diagnostics.png",
+            ),
+        ),
+        (
+            "action examples",
+            lambda: plot_bimanual_action_examples(
+                result,
+                output_path=output_dir / "bimanual_action_examples.png",
+            ),
+        ),
     )
+    paths: list[pathlib.Path] = []
+    for label, plot in plotters:
+        try:
+            paths.append(plot())
+        except Exception as exc:
+            warnings.warn(
+                f"could not render bimanual {label}: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+    return tuple(paths)
