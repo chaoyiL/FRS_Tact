@@ -326,7 +326,10 @@ def train_decoder(
         resolve_tactile_window,
     )
     from train_pi05_frs.utils.history_plot import plot_training_history
-    from train_pi05_frs.utils.metrics import evaluate_split
+    from train_pi05_frs.utils.metrics import (
+        bimanual_source_decode_metrics,
+        evaluate_split,
+    )
     from train_pi05_frs.utils.model import (
         DEFAULT_GRU_HIDDEN_DIM,
         DecoderConfig,
@@ -371,6 +374,51 @@ def train_decoder(
         "val_high_gate_rank_satisfied_frac",
         "val_high_gate_repair_satisfied_frac",
     ]
+    bimanual_validation_metric_names = (
+        "mse_gt_high_w",
+        "mse_vla_high_w",
+        "mse_vla_gt_high_w",
+        "gt_gain_high_w",
+        "rank_penalty_high_w",
+        "rank_satisfied_high_frac",
+        "repair_penalty_high_w",
+        "repair_satisfied_high_frac",
+        "low_nearest_endpoint_mse",
+        "low_safety_penalty",
+        "low_safe_frac",
+        "low_unsafe_frac",
+        "n_high_w",
+        "n_low_w",
+        "n_mid_w",
+    )
+    bimanual_distribution_metric_names = (
+        "gate_w",
+        "gate_w_p10",
+        "gate_w_p25",
+        "gate_w_p50",
+        "gate_w_p75",
+        "gate_w_p90",
+        "tactile_change",
+        "tactile_change_p10",
+        "tactile_change_p25",
+        "tactile_change_p50",
+        "tactile_change_p75",
+        "tactile_change_p90",
+    )
+    bimanual_source_metric_names = (
+        *bimanual_validation_metric_names,
+        "rank_gap_high_w",
+    )
+    bimanual_rollup_metric_names = (
+        "worst_dataset_low_safety_penalty",
+        "worst_dataset_low_unsafe_frac",
+        "min_dataset_gt_gain_high_w",
+        "worst_dataset_rank_violation_high_w",
+        "worst_dataset_rank_gap_high_w",
+        "min_dataset_rank_satisfied_high_frac",
+        "worst_dataset_repair_penalty_high_w",
+        "min_dataset_repair_satisfied_high_frac",
+    )
     if loss_mode == BIMANUAL_LOSS_MODE:
         history_fields.insert(4, "train_loss_composite_fm")
         gate_history_at = history_fields.index("train_flow_loss")
@@ -378,6 +426,29 @@ def train_decoder(
             "train_gate_w_left",
             "train_gate_w_right",
         ]
+        history_fields.extend(
+            ("val_composite_fm", "val_mse_vla_gt", "val_gt_gain", "val_relative_gt_error")
+        )
+        for wrist in ("left", "right"):
+            history_fields.extend(
+                f"val_{metric_name}_{wrist}"
+                for metric_name in bimanual_validation_metric_names
+            )
+            history_fields.extend(
+                f"val_{metric_name}_{wrist}"
+                for metric_name in bimanual_distribution_metric_names
+            )
+            history_fields.extend(
+                f"val_{metric_name}_{wrist}"
+                for metric_name in bimanual_rollup_metric_names
+            )
+        validation_source_count = len(dataset_sources or ()) if cache_dirs is not None else 1
+        for source_index in range(validation_source_count):
+            for wrist in ("left", "right"):
+                history_fields.extend(
+                    f"val_source_{source_index}_{metric_name}_{wrist}"
+                    for metric_name in bimanual_source_metric_names
+                )
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
         row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
@@ -886,8 +957,17 @@ def train_decoder(
                         keep_predictions=False,
                         solver=aux_decode_solver,
                         target=eval_target,
-                        gate_tau=gate_tau if loss_mode == "gated" else None,
-                        gate_temperature=gate_temperature if loss_mode == "gated" else None,
+                        loss_mode=loss_mode,
+                        gate_tau=(
+                            gate_tau
+                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            else None
+                        ),
+                        gate_temperature=(
+                            gate_temperature
+                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            else None
+                        ),
                         low_gate_threshold=low_gate_threshold,
                         high_gate_threshold=high_gate_threshold,
                         low_gate_safety_margin=low_gate_safety_margin,
@@ -937,6 +1017,71 @@ def train_decoder(
                                 ),
                             }
                         )
+                    if validation.n_high_w_left is not None:
+                        metrics.update(
+                            {
+                                "val_composite_fm": float(validation.composite_fm),
+                                "val_mse_vla_gt": float(validation.mse_vla_gt),
+                                "val_gt_gain": float(validation.gt_gain),
+                                "val_relative_gt_error": float(
+                                    validation.relative_gt_error
+                                ),
+                            }
+                        )
+                        for wrist in ("left", "right"):
+                            for metric_name in bimanual_distribution_metric_names:
+                                metrics[f"val_{metric_name}_{wrist}"] = float(
+                                    getattr(validation, f"{metric_name}_{wrist}")
+                                )
+                            for metric_name in bimanual_validation_metric_names:
+                                value = getattr(validation, f"{metric_name}_{wrist}")
+                                metrics[f"val_{metric_name}_{wrist}"] = (
+                                    int(value)
+                                    if metric_name.startswith("n_")
+                                    else float(value)
+                                )
+                        if isinstance(pairs, MultiCachedPairs):
+                            validation_source_indices, _ = (
+                                pairs.source_and_local_indices(
+                                    validation.cache_indices
+                                )
+                            )
+                            validation_num_sources = len(pairs.sources)
+                        else:
+                            validation_source_indices = np.zeros(
+                                len(validation.cache_indices), dtype=np.int32
+                            )
+                            validation_num_sources = 1
+                        per_source_wrist, wrist_rollups = (
+                            bimanual_source_decode_metrics(
+                                sample_mse_gt_left=validation.sample_mse_gt_left,
+                                sample_mse_gt_right=validation.sample_mse_gt_right,
+                                sample_mse_vla_left=validation.sample_mse_vla_left,
+                                sample_mse_vla_right=validation.sample_mse_vla_right,
+                                sample_mse_vla_gt_left=(
+                                    validation.sample_mse_vla_gt_left
+                                ),
+                                sample_mse_vla_gt_right=(
+                                    validation.sample_mse_vla_gt_right
+                                ),
+                                sample_gate_w_left=validation.sample_gate_w_left,
+                                sample_gate_w_right=validation.sample_gate_w_right,
+                                source_indices=validation_source_indices,
+                                num_sources=validation_num_sources,
+                                low_w_threshold=low_gate_threshold,
+                                high_w_threshold=high_gate_threshold,
+                                ranking_margin=rank_margin,
+                                repair_margin=repair_margin,
+                                low_safety_margin=low_gate_safety_margin,
+                            )
+                        )
+                        for source_index, source_metrics in per_source_wrist.items():
+                            for metric_name, value in source_metrics.items():
+                                metrics[
+                                    f"val_source_{source_index}_{metric_name}"
+                                ] = value
+                        for metric_name, value in wrist_rollups.items():
+                            metrics[f"val_{metric_name}"] = value
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()

@@ -334,6 +334,264 @@ def test_bimanual_source_metrics_aggregate_before_worst_rollups():
     assert rollups["worst_dataset_low_unsafe_frac_left"] == pytest.approx(0.0)
 
 
+def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
+    tmp_path, monkeypatch
+):
+    import train_pi05_frs.pi05_cache.cache as cache_module
+    import train_pi05_frs.utils.checkpoint as checkpoint_module
+    import train_pi05_frs.utils.data as data_module
+    import train_pi05_frs.utils.model as model_module
+
+    source_calls = []
+
+    class FakeMultiPairs:
+        source_names = ("dataset-a", "dataset-b")
+        sources = (object(), object())
+        manifest = {
+            "sample_count": 4,
+            "train_sample_count": 4,
+            "val_sample_count": 4,
+            "action_horizon": 1,
+            "action_dim": 32,
+            "state_dim": 0,
+            "records_sha256": "records",
+            "configuration": {"sources": ["dataset-a", "dataset-b"]},
+        }
+
+        def __init__(self, cache_dirs, *, source_names):
+            assert len(cache_dirs) == 2
+            assert tuple(source_names) == self.source_names
+
+        def indices(self, split):
+            assert split in ("train", "val")
+            return np.arange(4, dtype=np.int64)
+
+        def source_and_local_indices(self, indices):
+            indices = np.asarray(indices)
+            source_calls.append(indices.copy())
+            np.testing.assert_array_equal(indices, np.arange(4))
+            return np.asarray([0, 0, 1, 1]), np.asarray([0, 1, 0, 1])
+
+    class FakeConditioner:
+        resnet_embedding_dim = 4
+        episode_baselines = {(0, 0): np.zeros((4, 4), dtype=np.float32)}
+
+        def __init__(self, pairs, **kwargs):
+            del pairs
+            assert kwargs["build_episode_baselines"] is True
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "train"
+            shape = (4, 1, 32)
+            yield (
+                np.arange(4, dtype=np.int64),
+                np.zeros(shape, dtype=np.float32),
+                np.ones(shape, dtype=np.float32),
+                np.zeros(shape, dtype=np.float32),
+                np.zeros((4, 0), dtype=np.float32),
+                jnp.zeros((4, 1, 4, 4), dtype=jnp.float32),
+            )
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, tokens):
+            del indices, tokens
+            return np.asarray(
+                [[1.0, 0.0], [0.0, 1.0], [1.0, 0.0], [0.0, 1.0]],
+                dtype=np.float32,
+            )
+
+        def close(self):
+            return None
+
+    gate_left = np.asarray([1.0, 0.0, 1.0, 0.0])
+    gate_right = np.asarray([0.0, 1.0, 0.0, 1.0])
+    wrist_metrics = {
+        "mse_gt_high_w": 0.1,
+        "mse_vla_high_w": 0.2,
+        "mse_vla_gt_high_w": 1.0,
+        "gt_gain_high_w": 0.9,
+        "rank_penalty_high_w": 0.0,
+        "rank_satisfied_high_frac": 1.0,
+        "repair_penalty_high_w": 0.0,
+        "repair_satisfied_high_frac": 1.0,
+        "low_nearest_endpoint_mse": 0.0,
+        "low_safety_penalty": 0.0,
+        "low_safe_frac": 1.0,
+        "low_unsafe_frac": 0.0,
+        "n_high_w": 2,
+        "n_low_w": 2,
+        "n_mid_w": 0,
+    }
+    validation_values = {
+        "target": "gt",
+        "flow_loss": 1.0,
+        "mse": 1.0,
+        "rmse": 1.0,
+        "mae": 1.0,
+        "flow_loss_gt": 1.0,
+        "mse_gt": 1.0,
+        "rmse_gt": 1.0,
+        "mae_gt": 1.0,
+        "flow_loss_pred": 2.0,
+        "mse_pred": 2.0,
+        "rmse_pred": np.sqrt(2.0),
+        "mae_pred": 2.0,
+        "mse_vla_gt": 1.0,
+        "gt_gain": 0.0,
+        "relative_gt_error": 1.0,
+        "cache_indices": np.arange(4),
+        "n_high_w": None,
+        "composite_fm": 0.375,
+        "sample_mse_gt_left": np.asarray([0.0, 0.0, 4.0, 0.0]),
+        "sample_mse_gt_right": np.zeros((4,)),
+        "sample_mse_vla_left": np.asarray([1.0, 0.0, 1.0, 0.0]),
+        "sample_mse_vla_right": np.asarray([0.0, 1.0, 0.0, 1.0]),
+        "sample_mse_vla_gt_left": np.ones((4,)),
+        "sample_mse_vla_gt_right": np.ones((4,)),
+        "sample_gate_w_left": gate_left,
+        "sample_gate_w_right": gate_right,
+    }
+    for wrist, gate, change in (
+        ("left", 0.5, 0.6),
+        ("right", 0.5, 0.4),
+    ):
+        validation_values[f"gate_w_{wrist}"] = gate
+        validation_values[f"tactile_change_{wrist}"] = change
+        validation_values.update(
+            {f"{name}_{wrist}": value for name, value in wrist_metrics.items()}
+        )
+        for quantile in ("p10", "p25", "p50", "p75", "p90"):
+            validation_values[f"gate_w_{quantile}_{wrist}"] = gate
+            validation_values[f"tactile_change_{quantile}_{wrist}"] = change
+    validation = SimpleNamespace(**validation_values)
+
+    monkeypatch.setattr(cache_module, "MultiCachedPairs", FakeMultiPairs)
+    monkeypatch.setattr(data_module, "CachedTactileEmbeddingBatches", FakeConditioner)
+    monkeypatch.setattr(
+        model_module,
+        "train_step",
+        lambda *args, **kwargs: (
+            jnp.asarray(0.0),
+            {
+                name: jnp.asarray(0.0)
+                for name in (
+                    "gt_fm",
+                    "vla_fm",
+                    "composite_fm",
+                    "low_safety",
+                    "decode",
+                    "rank",
+                    "repair",
+                )
+            },
+        ),
+    )
+    evaluation_kwargs = {}
+
+    def fake_evaluate_split(*args, **kwargs):
+        del args
+        evaluation_kwargs.update(kwargs)
+        return validation
+
+    monkeypatch.setattr(metrics_module, "evaluate_split", fake_evaluate_split)
+    checkpoint_metrics = []
+
+    def fake_save_checkpoint(path, model, *, epoch, metrics, **kwargs):
+        del path, model, epoch, kwargs
+        checkpoint_metrics.append(dict(metrics))
+
+    monkeypatch.setattr(checkpoint_module, "save_checkpoint", fake_save_checkpoint)
+
+    train_decoder(
+        cache_dir=None,
+        cache_dirs=[tmp_path / "cache-a", tmp_path / "cache-b"],
+        dataset_sources=[{"repo_id": "dataset-a"}, {"repo_id": "dataset-b"}],
+        tactile_embedding_cache_root=tmp_path / "tactile-cache",
+        tactile_keys=["left-0", "right-0", "left-1", "right-1"],
+        tactile_embedding_dim=4,
+        tactile_image_size=8,
+        tactile_encoder_dir=tmp_path / "encoder",
+        output_dir=tmp_path / "output",
+        dataset_repo_id=None,
+        dataset_root=None,
+        tactile_window_divisor=1,
+        history_stride=1,
+        loss_mode="bimanual_gated",
+        gate_tau=0.4,
+        gate_temperature=0.1,
+        gate_lambda=1.0,
+        aux_decode_weight=0.0,
+        aux_decode_steps=1,
+        aux_decode_solver="euler",
+        low_gate_safety_weight=0.0,
+        low_gate_safety_margin=0.03,
+        rank_weight=0.0,
+        rank_margin=0.0,
+        repair_weight=0.0,
+        repair_margin=0.0,
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+        state_conditioning=False,
+        state_dropout_rate=0.0,
+        best_max_low_gate_unsafe_frac=0.1,
+        best_min_high_gate_gain=0.0,
+        best_min_high_gate_rank_satisfied_frac=0.8,
+        model_dim=4,
+        depth=1,
+        num_heads=1,
+        mlp_ratio=1,
+        learning_rate=1e-3,
+        weight_decay=0.0,
+        grad_clip_norm=None,
+        warmup_epochs=0,
+        lr_reference_dim=None,
+        min_learning_rate_ratio=0.1,
+        cosine_decay=False,
+        batch_size=4,
+        epochs=1,
+        validation_steps=1,
+        eval_every=1,
+        seed=0,
+        write_plots=False,
+        num_workers=0,
+        prefetch_batches=1,
+        load_threads=1,
+        pipeline_prefetch=1,
+        image_cache_size=0,
+        encode_batch_size=1,
+    )
+
+    assert evaluation_kwargs["loss_mode"] == "bimanual_gated"
+    assert evaluation_kwargs["gate_tau"] == pytest.approx(0.4)
+    assert evaluation_kwargs["gate_temperature"] == pytest.approx(0.1)
+    assert evaluation_kwargs["low_gate_threshold"] == pytest.approx(0.3)
+    assert evaluation_kwargs["high_gate_threshold"] == pytest.approx(0.7)
+    assert evaluation_kwargs["low_gate_safety_margin"] == pytest.approx(0.03)
+    assert evaluation_kwargs["rank_margin"] == pytest.approx(0.0)
+    assert evaluation_kwargs["repair_margin"] == pytest.approx(0.0)
+    assert len(source_calls) == 2
+    with (tmp_path / "output" / "history.csv").open(
+        newline="", encoding="utf-8"
+    ) as file:
+        history_row = next(csv.DictReader(file))
+    assert float(history_row["val_composite_fm"]) == pytest.approx(0.375)
+    assert float(history_row["val_gate_w_left"]) == pytest.approx(0.5)
+    assert float(history_row["val_worst_dataset_low_unsafe_frac_left"]) == 0.0
+    assert float(history_row["val_min_dataset_gt_gain_high_w_left"]) == -3.0
+    assert float(history_row["val_source_1_gt_gain_high_w_left"]) == -3.0
+    assert len(checkpoint_metrics) == 2
+    for metrics in checkpoint_metrics:
+        key = checkpoint_selection_key(
+            metrics,
+            loss_mode="bimanual_gated",
+            max_low_gate_unsafe_frac=0.1,
+            min_high_gate_gain=0.0,
+            min_high_gate_rank_satisfied_frac=0.8,
+        )
+        assert all(np.isfinite(key))
+        assert metrics["val_min_dataset_gt_gain_high_w_left"] == -3.0
+
+
 def test_bimanual_resume_requires_exact_objective_metadata():
     valid = {"extra_metadata": bimanual_objective_metadata(action_dim=32)}
     _validate_resume_loss_objective(
