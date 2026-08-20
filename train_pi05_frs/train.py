@@ -8,12 +8,17 @@ there causes ``CUDA_ERROR_NO_DEVICE`` spam and fails the light-import guard.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import pathlib
 from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
-LossMode = Literal["gt", "predicted", "gated"]
+from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
+
+LossMode = Literal["gt", "predicted", "gated", "bimanual_gated"]
 
 
 def _resolve_resume_dir(
@@ -60,6 +65,111 @@ def _validate_resume_cache_provenance(
             f"{', '.join(mismatches)}. Resume cannot be used for fine-tuning; "
             "start a new output directory with an explicit fine-tune workflow."
         )
+
+
+def _validate_resume_loss_objective(
+    checkpoint_metadata: Mapping[str, Any],
+    *,
+    loss_mode: LossMode,
+    action_dim: int,
+) -> None:
+    """Require the exact fixed objective contract before resuming bimanual training."""
+
+    if loss_mode != BIMANUAL_LOSS_MODE:
+        return
+    extra = checkpoint_metadata.get("extra_metadata")
+    if not isinstance(extra, Mapping):
+        raise ValueError("resume checkpoint is missing bimanual objective metadata")
+    validate_bimanual_objective_metadata(extra, action_dim=action_dim)
+
+
+def checkpoint_selection_key(
+    metrics: Mapping[str, Any],
+    *,
+    loss_mode: LossMode,
+    max_low_gate_unsafe_frac: float,
+    min_high_gate_gain: float,
+    min_high_gate_rank_satisfied_frac: float,
+) -> tuple[float, ...]:
+    """Return the lower-is-better checkpoint key for the active objective.
+
+    Bimanual selection keeps the source-project contract: each wrist is first
+    reduced across datasets, then the worst wrist controls the five-element key.
+    Legacy modes retain the previous two-element key and scalar-gated violation.
+    """
+
+    aggregate_mse = float(metrics.get("val_mse", float("inf")))
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        aggregate_gt_mse = float(metrics.get("val_mse_gt", float("inf")))
+        if not math.isfinite(aggregate_gt_mse):
+            aggregate_gt_mse = float("inf")
+        wrist_values: list[tuple[float, float, float]] = []
+        total_violation = 0.0
+        for wrist in ("left", "right"):
+            low_unsafe = float(
+                metrics.get(
+                    f"val_worst_dataset_low_unsafe_frac_{wrist}",
+                    metrics.get(f"val_low_unsafe_frac_{wrist}", float("nan")),
+                )
+            )
+            high_gain = float(
+                metrics.get(
+                    f"val_min_dataset_gt_gain_high_w_{wrist}",
+                    metrics.get(f"val_gt_gain_high_w_{wrist}", float("nan")),
+                )
+            )
+            rank_satisfied = float(
+                metrics.get(
+                    f"val_min_dataset_rank_satisfied_high_frac_{wrist}",
+                    metrics.get(
+                        f"val_rank_satisfied_high_frac_{wrist}", float("nan")
+                    ),
+                )
+            )
+            if not all(
+                math.isfinite(value)
+                for value in (
+                    low_unsafe,
+                    high_gain,
+                    rank_satisfied,
+                    aggregate_gt_mse,
+                )
+            ):
+                return (float("inf"),) * 5
+            total_violation += max(
+                0.0, low_unsafe - float(max_low_gate_unsafe_frac)
+            )
+            total_violation += max(0.0, float(min_high_gate_gain) - high_gain)
+            total_violation += max(
+                0.0,
+                float(min_high_gate_rank_satisfied_frac) - rank_satisfied,
+            )
+            wrist_values.append((high_gain, rank_satisfied, low_unsafe))
+        return (
+            total_violation,
+            -min(value[0] for value in wrist_values),
+            -min(value[1] for value in wrist_values),
+            max(value[2] for value in wrist_values),
+            aggregate_gt_mse,
+        )
+    if loss_mode != "gated":
+        return (0.0, aggregate_mse)
+
+    low_unsafe = float(metrics.get("val_low_gate_unsafe_frac", float("nan")))
+    high_gain = float(metrics.get("val_high_gate_gain", float("nan")))
+    high_rank = float(
+        metrics.get("val_high_gate_rank_satisfied_frac", float("nan"))
+    )
+    if not all(math.isfinite(value) for value in (low_unsafe, high_gain, high_rank)):
+        return (float("inf"), aggregate_mse)
+    violation = (
+        max(0.0, low_unsafe - max_low_gate_unsafe_frac)
+        / max(max_low_gate_unsafe_frac, 1e-8)
+        + max(0.0, min_high_gate_gain - high_gain)
+        + max(0.0, min_high_gate_rank_satisfied_frac - high_rank)
+        / max(min_high_gate_rank_satisfied_frac, 1e-8)
+    )
+    return (violation, aggregate_mse)
 
 
 def _validate_training_path_boundaries(
@@ -261,6 +371,13 @@ def train_decoder(
         "val_high_gate_rank_satisfied_frac",
         "val_high_gate_repair_satisfied_frac",
     ]
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        history_fields.insert(4, "train_loss_composite_fm")
+        gate_history_at = history_fields.index("train_flow_loss")
+        history_fields[gate_history_at:gate_history_at] = [
+            "train_gate_w_left",
+            "train_gate_w_right",
+        ]
 
     def _blank_history_row(epoch: int, **filled: float | int | str) -> dict[str, float | int | str]:
         row: dict[str, float | int | str] = dict.fromkeys(history_fields, "")
@@ -274,8 +391,11 @@ def train_decoder(
         raise ValueError("warmup_epochs must be non-negative.")
     if not 0.0 <= min_learning_rate_ratio <= 1.0:
         raise ValueError("min_learning_rate_ratio must be in [0, 1].")
-    if loss_mode not in ("gt", "predicted", "gated"):
-        raise ValueError(f"loss_mode must be 'gt', 'predicted', or 'gated', got {loss_mode!r}.")
+    if loss_mode not in ("gt", "predicted", "gated", BIMANUAL_LOSS_MODE):
+        raise ValueError(
+            "loss_mode must be 'gt', 'predicted', 'gated', or "
+            f"'{BIMANUAL_LOSS_MODE}', got {loss_mode!r}."
+        )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
     if not 0.0 <= gate_tau <= 1.0:
         raise ValueError(f"gate_tau must be in [0, 1], got {gate_tau}.")
@@ -333,6 +453,11 @@ def train_decoder(
     if resume_dir is not None:
         model, resume_metadata = load_checkpoint(resume_dir)
         _validate_resume_cache_provenance(resume_metadata, pairs.manifest)
+        _validate_resume_loss_objective(
+            resume_metadata,
+            loss_mode=loss_mode,
+            action_dim=int(pairs.manifest["action_dim"]),
+        )
         start_epoch = int(resume_metadata["epoch"]) + 1
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
@@ -353,7 +478,7 @@ def train_decoder(
             history_stride=history_stride,
             embedding_dim=tactile_embedding_dim,
             image_size=tactile_image_size,
-            build_episode_baselines=(loss_mode == "gated"),
+            build_episode_baselines=(loss_mode in ("gated", BIMANUAL_LOSS_MODE)),
         )
     else:
         conditioner = TactileConditionedBatches(
@@ -363,7 +488,7 @@ def train_decoder(
             dataset_repo_id=dataset_repo_id,
             dataset_root=dataset_root,
             history_stride=history_stride,
-            build_episode_baselines=(loss_mode == "gated"),
+            build_episode_baselines=(loss_mode in ("gated", BIMANUAL_LOSS_MODE)),
             num_workers=num_workers,
             prefetch_batches=prefetch_batches,
             load_threads=load_threads,
@@ -491,7 +616,7 @@ def train_decoder(
             "loss_mode=predicted (train/eval primary target=predicted_actions; also log vs gt; "
             "no aux decode MSE)"
         )
-    else:
+    elif loss_mode == "gated":
         print(
             "loss_mode=gated gated-v7 six-term objective "
             f"tau={gate_tau:g} T={gate_temperature:g} lambda={gate_lambda:g} "
@@ -500,6 +625,16 @@ def train_decoder(
             f"rank={rank_weight:g} repair={repair_weight:g} "
             f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
             f"(primary eval=gt; also log vs predicted)"
+        )
+    else:
+        print(
+            "loss_mode=bimanual_gated objective-v2 masked composite FM "
+            f"tau={gate_tau:g} T={gate_temperature:g} "
+            f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
+            f"decode_solver={aux_decode_solver} low_safety={low_gate_safety_weight:g} "
+            f"rank={rank_weight:g} repair={repair_weight:g} "
+            f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
+            "(primary eval=gt; also log vs predicted)"
         )
     if cosine_decay:
         print(
@@ -512,25 +647,22 @@ def train_decoder(
     output_dir.mkdir(parents=True, exist_ok=True)
     history_path = output_dir / "history.csv"
     plot_path = output_dir / "training_curves.png"
-    def _best_key(metrics: Mapping[str, Any]) -> tuple[float, float]:
-        low_unsafe = float(metrics.get("val_low_gate_unsafe_frac", float("nan")))
-        high_gain = float(metrics.get("val_high_gate_gain", float("nan")))
-        high_rank = float(metrics.get("val_high_gate_rank_satisfied_frac", float("nan")))
-        val_mse = float(metrics.get("val_mse", float("inf")))
-        if loss_mode != "gated":
-            return (0.0, val_mse)
-        if not np.isfinite(low_unsafe) or not np.isfinite(high_gain) or not np.isfinite(high_rank):
-            return (float("inf"), val_mse)
-        violation = (
-            max(0.0, low_unsafe - best_max_low_gate_unsafe_frac)
-            / max(best_max_low_gate_unsafe_frac, 1e-8)
-            + max(0.0, best_min_high_gate_gain - high_gain)
-            + max(0.0, best_min_high_gate_rank_satisfied_frac - high_rank)
-            / max(best_min_high_gate_rank_satisfied_frac, 1e-8)
+    def _best_key(metrics: Mapping[str, Any]) -> tuple[float, ...]:
+        return checkpoint_selection_key(
+            metrics,
+            loss_mode=loss_mode,
+            max_low_gate_unsafe_frac=best_max_low_gate_unsafe_frac,
+            min_high_gate_gain=best_min_high_gate_gain,
+            min_high_gate_rank_satisfied_frac=(
+                best_min_high_gate_rank_satisfied_frac
+            ),
         )
-        return (violation, val_mse)
 
-    best_key = (float("inf"), float("inf"))
+    best_key = (
+        (float("inf"),) * 5
+        if loss_mode == BIMANUAL_LOSS_MODE
+        else (float("inf"), float("inf"))
+    )
     best_path = output_dir / "best" / CHECKPOINT_NAME
     if best_path.exists():
         with best_path.open(encoding="utf-8") as file:
@@ -560,10 +692,31 @@ def train_decoder(
             for epoch in range(start_epoch, epochs + 1):
                 losses: list[float] = []
                 weights: list[int] = []
+                component_names = (
+                    (
+                        "gt_fm",
+                        "vla_fm",
+                        "composite_fm",
+                        "low_safety",
+                        "decode",
+                        "rank",
+                        "repair",
+                    )
+                    if loss_mode == BIMANUAL_LOSS_MODE
+                    else (
+                        "gt_fm",
+                        "vla_fm",
+                        "low_safety",
+                        "decode",
+                        "rank",
+                        "repair",
+                    )
+                )
                 component_values: dict[str, list[float]] = {
-                    name: []
-                    for name in ("gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair")
+                    name: [] for name in component_names
                 }
+                gate_w_left_values: list[float] = []
+                gate_w_right_values: list[float] = []
                 for batch_number, (
                     indices,
                     x_base_np,
@@ -578,16 +731,48 @@ def train_decoder(
                 ):
                     step_key = jax.random.fold_in(base_key, epoch * 1_000_000 + batch_number)
                     batch_n = len(x_base_np)
-                    if loss_mode == "gated":
-                        current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
-                        change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
+                    if loss_mode == BIMANUAL_LOSS_MODE:
+                        gate_token_fn = getattr(conditioner, "gate_current_tokens", None)
+                        current_tokens = (
+                            gate_token_fn(indices, tactile_seq)
+                            if gate_token_fn is not None
+                            else np.asarray(
+                                tactile_seq[:, -1, :, :], dtype=np.float32
+                            )
+                        )
+                        change = conditioner.tactile_change_per_wrist_for_cache_indices(
+                            indices, current_tokens
+                        )
                         gate_w = gate_weights_from_change(
                             change, tau=gate_tau, temperature=gate_temperature
                         )
+                        batch_gate_w_left = float(np.mean(gate_w[:, 0]))
+                        batch_gate_w_right = float(np.mean(gate_w[:, 1]))
+                        batch_gate_w = 0.5 * (
+                            batch_gate_w_left + batch_gate_w_right
+                        )
+                    elif loss_mode == "gated":
+                        current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
+                        gate_w = conditioner.gate_weights_for_cache_indices(
+                            indices,
+                            current_tokens,
+                            tau=gate_tau,
+                            temperature=gate_temperature,
+                        )
                         batch_gate_w = float(np.mean(gate_w))
+                        batch_gate_w_left = 0.0
+                        batch_gate_w_right = 0.0
                     else:
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
+                        batch_gate_w_left = 0.0
+                        batch_gate_w_right = 0.0
+                    if isinstance(pairs, MultiCachedPairs):
+                        batch_source_indices, _ = pairs.source_and_local_indices(
+                            indices
+                        )
+                    else:
+                        batch_source_indices = np.zeros((batch_n,), dtype=np.int32)
                     loss, batch_components = train_step(
                         model,
                         optimizer,
@@ -597,6 +782,7 @@ def train_decoder(
                         tactile_seq,
                         jnp.asarray(gate_w),
                         step_key,
+                        source_indices=jnp.asarray(batch_source_indices),
                         state=jnp.asarray(state_np),
                         state_dropout_rate=state_dropout_rate,
                         loss_mode=loss_mode,
@@ -617,8 +803,18 @@ def train_decoder(
                     for name, value in batch_components.items():
                         component_values[name].append(float(jax.device_get(value)))
                     weights.append(batch_n)
+                    gate_w_left_values.append(batch_gate_w_left)
+                    gate_w_right_values.append(batch_gate_w_right)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
-                        extra = f" gate_w={batch_gate_w:.4f}" if loss_mode == "gated" else ""
+                        if loss_mode == "gated":
+                            extra = f" gate_w={batch_gate_w:.4f}"
+                        elif loss_mode == BIMANUAL_LOSS_MODE:
+                            extra = (
+                                f" gate_w_left={batch_gate_w_left:.4f}"
+                                f" gate_w_right={batch_gate_w_right:.4f}"
+                            )
+                        else:
+                            extra = ""
                         print(
                             f"epoch={epoch}/{epochs} batch={batch_number + 1}/{steps_per_epoch} "
                             f"loss={losses[-1]:.6f}{extra}",
@@ -629,6 +825,16 @@ def train_decoder(
                     name: float(np.average(values, weights=weights))
                     for name, values in component_values.items()
                 }
+                train_gate_metrics: dict[str, float] = {}
+                if loss_mode == BIMANUAL_LOSS_MODE:
+                    train_gate_metrics = {
+                        "train_gate_w_left": float(
+                            np.average(gate_w_left_values, weights=weights)
+                        ),
+                        "train_gate_w_right": float(
+                            np.average(gate_w_right_values, weights=weights)
+                        ),
+                    }
                 run_eval = (epoch % eval_every == 0) or (epoch == epochs)
                 checkpoint_extra = {
                     "cache_records_sha256": pairs.manifest["records_sha256"],
@@ -663,6 +869,13 @@ def train_decoder(
                     ),
                     "eval_every": eval_every,
                 }
+                if loss_mode == BIMANUAL_LOSS_MODE:
+                    checkpoint_extra.pop("gate_lambda")
+                    checkpoint_extra.update(
+                        bimanual_objective_metadata(
+                            action_dim=int(model.config.action_dim)
+                        )
+                    )
                 if run_eval:
                     validation = evaluate_split(
                         model,
@@ -683,6 +896,7 @@ def train_decoder(
                     )
                     metrics: dict[str, float | str | int] = {
                         "train_loss_total": train_loss,
+                        **train_gate_metrics,
                         **{
                             f"train_loss_{name}": value
                             for name, value in train_components.items()
@@ -768,6 +982,7 @@ def train_decoder(
                 else:
                     metrics = {
                         "train_loss_total": train_loss,
+                        **train_gate_metrics,
                         **{
                             f"train_loss_{name}": value
                             for name, value in train_components.items()

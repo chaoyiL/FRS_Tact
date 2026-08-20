@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -334,6 +335,30 @@ def test_bimanual_metadata_rejects_wrong_tail_policy():
     metadata["padded_tail_policy"] = "train_gt"
     with pytest.raises(ValueError, match="padded_tail_policy"):
         validate_bimanual_objective_metadata(metadata, action_dim=32)
+
+
+def test_pipeline_forwards_bimanual_mode_without_gate_lambda(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools import train_frs as train_tool
+
+    config = copy.deepcopy(_valid_config(tmp_path))
+    config["frs_training"].pop("gate_lambda", None)
+    config["frs_training"]["loss_mode"] = BIMANUAL_LOSS_MODE
+    for source in config["datasets"]:
+        cache_dir = Path(config["action_cache"]["root"]).joinpath(
+            *str(source["repo_id"]).split("/")
+        )
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        train_tool, "train_decoder", lambda **kwargs: captured.update(kwargs)
+    )
+
+    train_tool.train_from_config(config)
+
+    assert captured["loss_mode"] == BIMANUAL_LOSS_MODE
 
 
 def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:

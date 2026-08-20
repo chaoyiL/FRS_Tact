@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import inspect
 import json
@@ -17,6 +18,7 @@ import pytest
 from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
+from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
 from train_pi05_frs.utils.model import DecoderConfig
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
 from train_pi05_frs.utils.model import bimanual_composite_endpoint
@@ -33,11 +35,48 @@ from train_pi05_frs.utils.model import make_optimizer
 from train_pi05_frs.utils.model import masked_flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import train_step
 from train_pi05_frs.train import (
+    _validate_resume_loss_objective,
     _validate_resume_cache_provenance,
     _validate_training_path_boundaries,
+    checkpoint_selection_key,
     train_decoder,
 )
 import numpy as np
+
+
+def test_bimanual_resume_requires_exact_objective_metadata():
+    valid = {"extra_metadata": bimanual_objective_metadata(action_dim=32)}
+    _validate_resume_loss_objective(
+        valid, loss_mode="bimanual_gated", action_dim=32
+    )
+    invalid = copy.deepcopy(valid)
+    invalid["extra_metadata"]["steered_action_dim"] = 19
+    with pytest.raises(ValueError, match="steered_action_dim"):
+        _validate_resume_loss_objective(
+            invalid, loss_mode="bimanual_gated", action_dim=32
+        )
+
+
+def test_bimanual_checkpoint_selection_uses_worst_source_wrist_metrics():
+    metrics = {
+        "val_mse_gt": 0.25,
+        "val_worst_dataset_low_unsafe_frac_left": 0.15,
+        "val_worst_dataset_low_unsafe_frac_right": 0.05,
+        "val_min_dataset_gt_gain_high_w_left": -0.1,
+        "val_min_dataset_gt_gain_high_w_right": 0.2,
+        "val_min_dataset_rank_satisfied_high_frac_left": 0.7,
+        "val_min_dataset_rank_satisfied_high_frac_right": 0.9,
+    }
+
+    key = checkpoint_selection_key(
+        metrics,
+        loss_mode="bimanual_gated",
+        max_low_gate_unsafe_frac=0.1,
+        min_high_gate_gain=0.0,
+        min_high_gate_rank_satisfied_frac=0.8,
+    )
+
+    assert key == pytest.approx((0.25, 0.1, -0.7, 0.15, 0.25))
 
 
 def test_32d_composite_steers_first_20_and_preserves_vla_tail():
