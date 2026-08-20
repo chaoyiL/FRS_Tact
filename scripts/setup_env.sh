@@ -188,18 +188,27 @@ validate_environment_targets() {
 
 configure_uv_storage() {
     validate_environment_targets
-    mkdir -p \
-        "$(dirname -- "${VENV_DIR}")" \
-        "$(dirname -- "${PI05_VENV_DIR}")" \
-        "${UV_CACHE_DIR_VALUE}"
+    mkdir -p "${UV_CACHE_DIR_VALUE}"
+    if should_setup_root; then
+        mkdir -p "$(dirname -- "${VENV_DIR}")"
+    fi
+    if should_setup_pi05; then
+        mkdir -p "$(dirname -- "${PI05_VENV_DIR}")"
+    fi
     export UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
     export UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}"
 
-    local env_device pi05_env_device cache_device
-    env_device="$(stat -c '%d' "$(dirname -- "${VENV_DIR}")")"
-    pi05_env_device="$(stat -c '%d' "$(dirname -- "${PI05_VENV_DIR}")")"
+    local cache_device env_device pi05_env_device needs_copy=0
     cache_device="$(stat -c '%d' "${UV_CACHE_DIR_VALUE}")"
-    if [[ "${env_device}" != "${cache_device}" || "${pi05_env_device}" != "${cache_device}" ]]; then
+    if should_setup_root; then
+        env_device="$(stat -c '%d' "$(dirname -- "${VENV_DIR}")")"
+        [[ "${env_device}" == "${cache_device}" ]] || needs_copy=1
+    fi
+    if should_setup_pi05; then
+        pi05_env_device="$(stat -c '%d' "$(dirname -- "${PI05_VENV_DIR}")")"
+        [[ "${pi05_env_device}" == "${cache_device}" ]] || needs_copy=1
+    fi
+    if ((needs_copy)); then
         export UV_LINK_MODE="copy"
         warn "uv cache 和虚拟环境不在同一文件系统，使用 UV_LINK_MODE=copy"
     fi

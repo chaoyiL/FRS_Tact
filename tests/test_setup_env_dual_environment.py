@@ -216,3 +216,57 @@ def test_invalid_or_conflicting_selectors_fail_before_side_effects(tmp_path: Pat
         assert completed.returncode != 0
         assert "用法" in completed.stderr
         assert read_events(case_dir) == []
+
+
+def test_root_storage_setup_does_not_create_unselected_pi05_parent(
+    tmp_path: Path,
+) -> None:
+    root_venv = tmp_path / "root" / ".venv"
+    pi05_venv = tmp_path / "absent-pi05" / ".venv"
+    command = f"""
+set -euo pipefail
+source {SETUP}
+SETUP_MODE=root
+VENV_DIR={root_venv}
+PI05_VENV_DIR={pi05_venv}
+UV_CACHE_DIR_VALUE={tmp_path / 'uv-cache'}
+configure_uv_storage
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert root_venv.parent.is_dir()
+    assert not pi05_venv.parent.exists()
+
+
+def test_pi05_storage_setup_does_not_create_unselected_root_parent(
+    tmp_path: Path,
+) -> None:
+    root_venv = tmp_path / "absent-root" / ".venv"
+    pi05_venv = tmp_path / "pi05" / ".venv"
+    command = f"""
+set -euo pipefail
+source {SETUP}
+SETUP_MODE=pi05_deploy
+VENV_DIR={root_venv}
+PI05_VENV_DIR={pi05_venv}
+UV_CACHE_DIR_VALUE={tmp_path / 'uv-cache'}
+configure_uv_storage
+"""
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert pi05_venv.parent.is_dir()
+    assert not root_venv.parent.exists()
