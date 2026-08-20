@@ -12,6 +12,38 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from train_pi05_frs.utils.bimanual_metrics import BIMANUAL_QUADRANTS, BIMANUAL_WRISTS
+
+
+_BIMANUAL_QUADRANT_HISTORY_METRICS = (
+    "mse_gt",
+    "mse_vla",
+    "mse_vla_gt",
+    "gt_gain",
+    "relative_gt_error",
+    "vla_preserve_ratio",
+    "rank_satisfied_frac",
+)
+_BIMANUAL_DISTRIBUTION_HISTORY_METRICS = (
+    "gate_w",
+    "gate_w_p10",
+    "gate_w_p25",
+    "gate_w_p50",
+    "gate_w_p75",
+    "gate_w_p90",
+    "tactile_change",
+    "tactile_change_p10",
+    "tactile_change_p25",
+    "tactile_change_p50",
+    "tactile_change_p75",
+    "tactile_change_p90",
+    "n_low_w",
+    "n_mid_w",
+    "n_high_w",
+    "low_safe_frac",
+    "rank_satisfied_high_frac",
+)
+
 HISTORY_FIELDS = (
     "epoch",
     "train_flow_loss",
@@ -33,6 +65,31 @@ HISTORY_FIELDS = (
     "val_mse_pred_low_w",
     "val_n_high_w",
     "val_n_low_w",
+) + (
+    "train_loss_total",
+    "train_loss_composite_fm",
+    "train_loss_low_safety",
+    "train_loss_decode",
+    "train_loss_rank",
+    "train_loss_repair",
+    "train_gate_w_left",
+    "train_gate_w_right",
+    "val_composite_fm",
+    "val_mse_vla_gt",
+    "val_gt_gain",
+    "val_relative_gt_error",
+    "checkpoint_selection_feasible",
+) + tuple(
+    f"val_{metric}_{wrist}"
+    for wrist in BIMANUAL_WRISTS
+    for metric in _BIMANUAL_DISTRIBUTION_HISTORY_METRICS
+) + tuple(
+    f"val_quadrant_{quadrant}_n" for quadrant in BIMANUAL_QUADRANTS
+) + tuple(
+    f"val_quadrant_{quadrant}_{metric}_{wrist}"
+    for quadrant in BIMANUAL_QUADRANTS
+    for wrist in BIMANUAL_WRISTS
+    for metric in _BIMANUAL_QUADRANT_HISTORY_METRICS
 )
 
 

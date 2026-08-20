@@ -326,6 +326,7 @@ def train_decoder(
         resolve_tactile_window,
     )
     from train_pi05_frs.utils.history_plot import plot_training_history
+    from train_pi05_frs.utils.bimanual_visualize import plot_bimanual_diagnostics
     from train_pi05_frs.utils.metrics import (
         bimanual_source_decode_metrics,
         evaluate_split,
@@ -748,7 +749,7 @@ def train_decoder(
             return
         try:
             written = plot_training_history(history_path, output_path=plot_path)
-        except (FileNotFoundError, ValueError) as exc:
+        except Exception as exc:
             print(f"warning: could not refresh training plot: {exc}", flush=True)
             return
         if announce:
@@ -1085,6 +1086,25 @@ def train_decoder(
                     writer.writerow(_blank_history_row(epoch, **metrics))
                     history_file.flush()
                     _refresh_training_plot()
+                    if loss_mode == BIMANUAL_LOSS_MODE and write_plots:
+                        try:
+                            bimanual_plots = plot_bimanual_diagnostics(
+                                history_path,
+                                validation,
+                                output_dir=output_dir,
+                                min_rank_satisfied=best_min_high_gate_rank_satisfied,
+                                min_low_safe=1.0 - best_max_low_gate_unsafe_frac,
+                            )
+                        except Exception as exc:
+                            # Diagnostics are best-effort: a valid validation event
+                            # must still be checkpointed when Matplotlib cannot render.
+                            print(
+                                f"warning: could not refresh bimanual diagnostics: {exc}",
+                                flush=True,
+                            )
+                        else:
+                            for path in bimanual_plots:
+                                print(f"bimanual_plot={path}", flush=True)
                     save_checkpoint(
                         output_dir / "last",
                         model,

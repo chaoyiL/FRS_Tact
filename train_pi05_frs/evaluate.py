@@ -19,6 +19,10 @@ from train_pi05_frs.utils.metrics import bimanual_source_decode_metrics
 from train_pi05_frs.utils.metrics import evaluate_split
 from train_pi05_frs.utils.model import FlowSolver
 from train_pi05_frs.utils.visualize import write_evaluation_plots
+from train_pi05_frs.utils.bimanual_visualize import (
+    plot_bimanual_action_examples,
+    plot_bimanual_gate_diagnostics,
+)
 from train_pi05_frs.pi05_cache.cache import CachedPairs, MultiCachedPairs, atomic_write_json
 
 
@@ -200,19 +204,23 @@ def _evaluate_decoder_legacy(
             )
 
         if write_plots:
-            plot_paths = write_evaluation_plots(
-                output_dir=output_dir,
-                result=result,
-                pairs=pairs,
-                model=model,
-                conditioner=conditioner,
-                num_steps=num_steps,
-                solver=solver,
-                num_trajectory_samples=num_trajectory_samples,
-                num_episode_strips=num_episode_strips,
-            )
-            for plot_path in plot_paths:
-                print(f"plot={plot_path}")
+            try:
+                plot_paths = write_evaluation_plots(
+                    output_dir=output_dir,
+                    result=result,
+                    pairs=pairs,
+                    model=model,
+                    conditioner=conditioner,
+                    num_steps=num_steps,
+                    solver=solver,
+                    num_trajectory_samples=num_trajectory_samples,
+                    num_episode_strips=num_episode_strips,
+                )
+            except Exception as exc:
+                print(f"warning: could not render evaluation plots: {exc}", flush=True)
+            else:
+                for plot_path in plot_paths:
+                    print(f"plot={plot_path}")
 
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
@@ -671,6 +679,33 @@ def evaluate_decoder(
                 cache_indices=result.cache_indices,
                 predicted_actions=result.predictions,
             )
+        if write_plots:
+            try:
+                gate_plot = plot_bimanual_gate_diagnostics(
+                    output_dir / "history.csv",
+                    result=result,
+                    output_path=output_dir / "gate_diagnostics.png",
+                )
+            except Exception as exc:
+                print(
+                    f"warning: could not render bimanual Gate diagnostics: {exc}",
+                    flush=True,
+                )
+            else:
+                print(f"plot={gate_plot}")
+            try:
+                action_plot = plot_bimanual_action_examples(
+                    result,
+                    pairs,
+                    output_path=output_dir / "bimanual_action_examples.png",
+                )
+            except Exception as exc:
+                print(
+                    f"warning: could not render bimanual action examples: {exc}",
+                    flush=True,
+                )
+            else:
+                print(f"plot={action_plot}")
         print(
             f"validation_samples={len(result.cache_indices)} solver={solver} "
             f"target={result.target} flow_loss={result.flow_loss:.8f} "
