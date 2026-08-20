@@ -18,6 +18,10 @@ from train_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_en
 from train_encoder.utils.image_dataset import create_image_dataset
 from train_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict
 from train_encoder.utils.prefetch import prefetch_iterator
+from train_pi05_frs.utils.bimanual_schema import (
+    LEFT_WRIST_TOKEN_INDICES,
+    RIGHT_WRIST_TOKEN_INDICES,
+)
 from train_pi05_frs.utils.mp_batches import MpTactileWindowLoader
 from train_pi05_frs.utils.window_io import (
     NUM_TACTILE_STREAMS,
@@ -113,6 +117,26 @@ def tactile_change_from_tokens(
     baseline_n = _l2_normalize(baseline_tokens.astype(np.float32))
     cosine = np.sum(current_n * baseline_n, axis=-1)  # [B, 4]
     return np.mean(1.0 - cosine, axis=-1).astype(np.float32)
+
+
+def tactile_change_per_wrist_from_tokens(
+    current_tokens: np.ndarray,
+    baseline_tokens: np.ndarray,
+) -> np.ndarray:
+    """Return per-wrist tactile change ``[B, 2]`` for tokens ``[B, 4, D]``."""
+
+    current = np.asarray(current_tokens, dtype=np.float32)
+    baseline = np.asarray(baseline_tokens, dtype=np.float32)
+    if current.shape != baseline.shape or current.ndim != 3 or current.shape[1] != 4:
+        raise ValueError("Expected matching [B, four tactile tokens, D]")
+    per_token = 1.0 - np.sum(_l2_normalize(current) * _l2_normalize(baseline), axis=-1)
+    return np.stack(
+        [
+            np.mean(per_token[:, LEFT_WRIST_TOKEN_INDICES], axis=1),
+            np.mean(per_token[:, RIGHT_WRIST_TOKEN_INDICES], axis=1),
+        ],
+        axis=1,
+    ).astype(np.float32)
 
 
 def gate_weights_from_change(
@@ -352,6 +376,28 @@ class TactileConditionedBatches:
 
         change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
         return gate_weights_from_change(change, tau=tau, temperature=temperature)
+
+    def tactile_change_per_wrist_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+    ) -> np.ndarray:
+        """Per-wrist tactile change ``[B, 2]`` vs episode first-frame baselines."""
+
+        if not self.episode_baselines:
+            raise RuntimeError(
+                "Episode baselines are empty; call build_episode_baseline_embeddings() first."
+            )
+        current = np.asarray(current_tokens, dtype=np.float32)
+        baselines = []
+        arrays = self.pairs.arrays
+        for cache_index in cache_indices:
+            episode_index = int(arrays["episode_index"][cache_index])
+            if episode_index not in self.episode_baselines:
+                raise KeyError(f"Missing episode baseline for episode_index={episode_index}.")
+            baselines.append(self.episode_baselines[episode_index])
+        baseline_batch = np.stack(baselines, axis=0)
+        return tactile_change_per_wrist_from_tokens(current, baseline_batch)
 
     def _samples_for_cache_indices(
         self, cache_indices: Sequence[int]
@@ -623,6 +669,26 @@ class CachedTactileEmbeddingBatches:
     ) -> np.ndarray:
         change = self.tactile_change_for_cache_indices(cache_indices, current_tokens)
         return gate_weights_from_change(change, tau=tau, temperature=temperature)
+
+    def tactile_change_per_wrist_for_cache_indices(
+        self,
+        cache_indices: Sequence[int],
+        current_tokens: np.ndarray | Array,
+    ) -> np.ndarray:
+        """Per-wrist tactile change ``[B, 2]`` vs source episode baselines."""
+
+        if not self.episode_baselines:
+            raise RuntimeError("episode baselines have not been built")
+        current = np.asarray(current_tokens, dtype=np.float32)
+        source_indices, _, episode_indices = self._source_episode_frames(cache_indices)
+        baseline = np.stack(
+            [
+                self.episode_baselines[(int(source_index), int(episode_index))]
+                for source_index, episode_index in zip(source_indices, episode_indices, strict=True)
+            ],
+            axis=0,
+        )
+        return tactile_change_per_wrist_from_tokens(current, baseline)
 
     def batches(
         self,

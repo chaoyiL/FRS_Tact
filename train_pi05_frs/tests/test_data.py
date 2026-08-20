@@ -15,6 +15,7 @@ from train_pi05_frs.utils.data import gate_weights_from_change
 from train_pi05_frs.utils.data import resolve_dataset_repo_id
 from train_pi05_frs.utils.data import resolve_tactile_window
 from train_pi05_frs.utils.data import resnet_embedding_dim_from_encoder
+from train_pi05_frs.utils.data import tactile_change_per_wrist_from_tokens
 from train_pi05_frs.utils.data import tactile_change_from_tokens
 from train_pi05_frs.utils.window_io import load_tactile_windows
 from train_pi05_frs.utils.window_io import window_frame_indices
@@ -130,6 +131,21 @@ class DataHelpersTest(unittest.TestCase):
         change = tactile_change_from_tokens(tokens, tokens)
         self.assertTrue(np.allclose(change, 0.0, atol=1e-6))
 
+    def test_tactile_change_is_aggregated_per_fixed_wrist_group(self):
+        baseline = np.zeros((1, 4, 2), dtype=np.float32)
+        baseline[..., 0] = 1.0
+        current = baseline.copy()
+        current[:, 2:, :] = np.asarray([0.0, 1.0], dtype=np.float32)
+        change = tactile_change_per_wrist_from_tokens(current, baseline)
+        np.testing.assert_allclose(change, [[0.0, 1.0]], atol=1e-6)
+
+    def test_per_wrist_gate_preserves_batch_and_wrist_axes(self):
+        change = np.asarray([[0.0, 1.0], [0.5, 0.5]], dtype=np.float32)
+        gate = gate_weights_from_change(change, tau=0.5, temperature=0.1)
+        self.assertEqual(gate.shape, (2, 2))
+        self.assertLess(float(gate[0, 0]), 0.05)
+        self.assertGreater(float(gate[0, 1]), 0.95)
+
     def test_load_tactile_windows_dedupes_frames(self):
         fake_dataset = mock.Mock()
         fake_dataset.indices_for_episode.return_value = tuple(range(0, 20))
@@ -221,6 +237,11 @@ class DataHelpersTest(unittest.TestCase):
             temperature=0.1,
         )
         self.assertEqual(weights.shape, (2,))
+        per_wrist = conditioner.tactile_change_per_wrist_for_cache_indices(
+            indices,
+            np.asarray(tactile_seq[:, -1, :, :]),
+        )
+        self.assertEqual(per_wrist.shape, (2, 2))
 
 
 if __name__ == "__main__":
