@@ -20,7 +20,7 @@ _WRIST_METRICS = (
 )
 
 
-def _as_bimanual_array(value: Any, *, name: str) -> np.ndarray:
+def _as_bimanual_array(value: Any) -> np.ndarray:
     array = np.asarray(value, dtype=np.float64)
     if array.ndim != 2 or array.shape[1] != 2:
         raise ValueError("bimanual quadrant inputs must all have shape [N, 2]")
@@ -32,8 +32,10 @@ def _as_bimanual_array(value: Any, *, name: str) -> np.ndarray:
 def _validate_thresholds(low_threshold: float, high_threshold: float) -> tuple[float, float]:
     low = float(low_threshold)
     high = float(high_threshold)
-    if not np.isfinite(low) or not np.isfinite(high) or low > high:
-        raise ValueError("low_threshold and high_threshold must be finite with low <= high")
+    if not np.isfinite(low) or not np.isfinite(high) or not (0.0 <= low < high <= 1.0):
+        raise ValueError(
+            "low_threshold and high_threshold must be finite, satisfy 0 <= low < high <= 1"
+        )
     return low, high
 
 
@@ -70,13 +72,7 @@ def bimanual_quadrant_metrics(
         raise ValueError("ranking_margin must be finite and non-negative")
 
     arrays = tuple(
-        _as_bimanual_array(value, name=name)
-        for name, value in (
-            ("mse_gt", mse_gt),
-            ("mse_vla", mse_vla),
-            ("mse_vla_gt", mse_vla_gt),
-            ("gate_weights", gate_weights),
-        )
+        _as_bimanual_array(value) for value in (mse_gt, mse_vla, mse_vla_gt, gate_weights)
     )
     if len({array.shape for array in arrays}) != 1:
         raise ValueError("bimanual quadrant inputs must have matching finite values")
@@ -130,7 +126,7 @@ def bimanual_gate_region_counts(
 ) -> np.ndarray:
     """Return a 3x3 left-by-right count matrix for low/mid/high Gate regions."""
     low, high = _validate_thresholds(low_threshold, high_threshold)
-    gates = _as_bimanual_array(gate_weights, name="gate_weights")
+    gates = _as_bimanual_array(gate_weights)
     regions = np.full(gates.shape, 1, dtype=np.intp)  # middle region
     regions[gates <= low] = 0
     regions[gates >= high] = 2

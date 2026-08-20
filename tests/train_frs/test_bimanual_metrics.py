@@ -78,3 +78,50 @@ def test_flatten_quadrant_metrics_uses_stable_json_friendly_keys():
     assert flat["val_quadrant_high_low_n"] == 1
     assert flat["val_quadrant_high_low_vla_preserve_ratio_right"] == pytest.approx(0.5)
     assert isinstance(flat["val_quadrant_low_high_n"], int)
+
+
+@pytest.mark.parametrize(
+    ("low_threshold", "high_threshold"),
+    [
+        (0.3, 0.3),
+        (0.7, 0.3),
+        (np.nan, 0.7),
+        (0.3, np.inf),
+        (-0.1, 0.7),
+        (0.3, 1.1),
+    ],
+)
+def test_threshold_validation_is_shared_and_requires_strict_unit_interval(
+    low_threshold, high_threshold
+):
+    metric_kwargs = dict(
+        mse_gt=np.ones((1, 2)),
+        mse_vla=np.ones((1, 2)),
+        mse_vla_gt=np.ones((1, 2)),
+        gate_weights=np.ones((1, 2)),
+        low_threshold=low_threshold,
+        high_threshold=high_threshold,
+    )
+    with pytest.raises(ValueError, match="threshold"):
+        bimanual_quadrant_metrics(**metric_kwargs)
+    with pytest.raises(ValueError, match="threshold"):
+        bimanual_gate_region_counts(
+            metric_kwargs["gate_weights"],
+            low_threshold=low_threshold,
+            high_threshold=high_threshold,
+        )
+
+
+def test_ranking_margin_is_added_to_gt_error_before_satisfaction_check():
+    kwargs = dict(
+        mse_gt=np.asarray([[1.0, 1.0], [1.0, 1.0]]),
+        mse_vla=np.asarray([[1.05, 1.05], [1.2, 1.2]]),
+        mse_vla_gt=np.ones((2, 2)),
+        gate_weights=np.asarray([[0.1, 0.1], [0.2, 0.2]]),
+        low_threshold=0.3,
+        high_threshold=0.7,
+    )
+    no_margin = bimanual_quadrant_metrics(**kwargs, ranking_margin=0.0)
+    margin = bimanual_quadrant_metrics(**kwargs, ranking_margin=0.1)
+    assert no_margin["low_low"]["left"]["rank_satisfied_frac"] == pytest.approx(1.0)
+    assert margin["low_low"]["left"]["rank_satisfied_frac"] == pytest.approx(0.5)
