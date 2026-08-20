@@ -12,6 +12,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
+from train_smolvla_frs.utils.bimanual_metrics import BIMANUAL_QUADRANTS, BIMANUAL_WRISTS
 from train_smolvla_frs.utils.gate_regions import GATE_BIN_SPECS
 
 GATE_BIN_HISTORY_METRICS = (
@@ -36,6 +37,15 @@ BIMANUAL_DISTRIBUTION_HISTORY_METRICS = (
     "tactile_change_p50",
     "tactile_change_p75",
     "tactile_change_p90",
+)
+QUADRANT_HISTORY_METRICS = (
+    "mse_gt",
+    "mse_vla",
+    "mse_vla_gt",
+    "gt_gain",
+    "relative_gt_error",
+    "vla_preserve_ratio",
+    "rank_satisfied_frac",
 )
 
 HISTORY_FIELDS = (
@@ -120,6 +130,13 @@ HISTORY_FIELDS = (
     f"val_{metric_name}_{wrist}"
     for wrist in ("left", "right")
     for metric_name in BIMANUAL_DISTRIBUTION_HISTORY_METRICS
+) + tuple(
+    f"val_quadrant_{quadrant}_n" for quadrant in BIMANUAL_QUADRANTS
+) + tuple(
+    f"val_quadrant_{quadrant}_{metric}_{wrist}"
+    for quadrant in BIMANUAL_QUADRANTS
+    for wrist in BIMANUAL_WRISTS
+    for metric in QUADRANT_HISTORY_METRICS
 ) + tuple(
     f"val_gate_bin_{bin_id}_{metric_name}"
     for bin_id, _, _ in GATE_BIN_SPECS

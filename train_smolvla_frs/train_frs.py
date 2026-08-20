@@ -538,6 +538,11 @@ def train_decoder(
         restore_optimizer_state,
         save_checkpoint,
     )
+    from train_smolvla_frs.utils.bimanual_metrics import (
+        BIMANUAL_QUADRANTS,
+        BIMANUAL_WRISTS,
+        flatten_bimanual_quadrant_metrics,
+    )
     from train_smolvla_frs.utils.data import (
         CachedTactileEmbeddingBatches,
         TactileConditionedBatches,
@@ -560,6 +565,15 @@ def train_decoder(
     )
     from utils.cache import CachedPairs, MultiCachedPairs
 
+    QUADRANT_HISTORY_METRICS = (
+        "mse_gt",
+        "mse_vla",
+        "mse_vla_gt",
+        "gt_gain",
+        "relative_gt_error",
+        "vla_preserve_ratio",
+        "rank_satisfied_frac",
+    )
     history_fields = [
         "epoch",
         "train_loss_total",
@@ -681,6 +695,15 @@ def train_decoder(
             f"val_{metric_name}_{wrist}"
             for metric_name in bimanual_distribution_metric_names
         )
+    history_fields.extend(
+        f"val_quadrant_{quadrant}_n" for quadrant in BIMANUAL_QUADRANTS
+    )
+    history_fields.extend(
+        f"val_quadrant_{quadrant}_{metric}_{wrist}"
+        for quadrant in BIMANUAL_QUADRANTS
+        for wrist in BIMANUAL_WRISTS
+        for metric in QUADRANT_HISTORY_METRICS
+    )
     gate_bin_metric_names = (
         "n",
         "mse_gt",
@@ -759,6 +782,9 @@ def train_decoder(
             f"'bimanual_gated', got {loss_mode!r}."
         )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
+    keep_validation_actions = bool(
+        write_plots and loss_mode == BIMANUAL_LOSS_MODE
+    )
     if gate_temperature <= 0:
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
     if gate_lambda < 0:
@@ -1588,7 +1614,7 @@ def train_decoder(
                         split="val",
                         batch_size=batch_size,
                         num_steps=validation_steps,
-                        keep_predictions=False,
+                        keep_predictions=keep_validation_actions,
                         solver=aux_decode_solver,
                         target=eval_target,
                         loss_mode=loss_mode,
@@ -1641,6 +1667,12 @@ def train_decoder(
                     if validation_composite_fm is not None:
                         metrics["val_composite_fm"] = float(
                             validation_composite_fm
+                        )
+                    if validation.bimanual_quadrants is not None:
+                        metrics.update(
+                            flatten_bimanual_quadrant_metrics(
+                                validation.bimanual_quadrants
+                            )
                         )
                     if validation.n_high_w is not None:
                         metrics.update(

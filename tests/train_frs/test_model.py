@@ -851,10 +851,35 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
             "relative_gt_error": 0.0,
             "n_high_w": None,
             "gate_bin_metrics": None,
+            "bimanual_quadrants": None,
         },
     )()
     if loss_mode == "bimanual_gated":
         validation.composite_fm = 0.375
+        quadrant_metric_names = (
+            "mse_gt",
+            "mse_vla",
+            "mse_vla_gt",
+            "gt_gain",
+            "relative_gt_error",
+            "vla_preserve_ratio",
+            "rank_satisfied_frac",
+        )
+        validation.bimanual_quadrants = {
+            quadrant: {
+                "n": 0,
+                **{
+                    wrist: dict.fromkeys(quadrant_metric_names, float("nan"))
+                    for wrist in ("left", "right")
+                },
+            }
+            for quadrant in ("low_low", "high_low", "low_high", "high_high")
+        }
+        validation.bimanual_quadrants["high_low"] = {
+            "n": 2,
+            "left": dict.fromkeys(quadrant_metric_names, 0.5),
+            "right": dict.fromkeys(quadrant_metric_names, 0.1),
+        }
         for wrist, gate_mean, change_mean in (
             ("left", 0.85, 0.75),
             ("right", 0.15, 0.25),
@@ -915,7 +940,14 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         )
 
     monkeypatch.setattr(model_module, "train_step", fake_train_step)
-    monkeypatch.setattr(metrics_module, "evaluate_split", lambda *args, **kwargs: validation)
+    evaluation_kwargs = []
+
+    def fake_evaluate_split(*args, **kwargs):
+        del args
+        evaluation_kwargs.append(kwargs)
+        return validation
+
+    monkeypatch.setattr(metrics_module, "evaluate_split", fake_evaluate_split)
 
     train_module.train_decoder(
         cache_dir=tmp_path / "cache",
@@ -958,7 +990,7 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         validation_steps=1,
         eval_every=1,
         seed=0,
-        write_plots=False,
+        write_plots=loss_mode == "bimanual_gated",
         num_workers=0,
         prefetch_batches=1,
         load_threads=1,
@@ -969,6 +1001,11 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
     )
 
     assert len(seen_gates) == 1
+    assert len(evaluation_kwargs) == 1
+    if loss_mode == "bimanual_gated":
+        assert evaluation_kwargs[0]["keep_predictions"] is True
+    else:
+        assert evaluation_kwargs[0]["keep_predictions"] is False
     np.testing.assert_allclose(seen_gates[0], expected_gate)
     with (tmp_path / "output" / "history.csv").open(
         newline="",
@@ -990,6 +1027,13 @@ def test_gated_training_entry_records_loss_contract_and_gate_shape(
         assert float(history_row["val_gate_w_p90_right"]) == pytest.approx(0.25)
         assert float(history_row["val_tactile_change_p10_left"]) == pytest.approx(0.65)
         assert float(history_row["val_tactile_change_p10_right"]) == pytest.approx(0.15)
+        assert history_row["val_quadrant_high_low_n"] == "2"
+        assert float(
+            history_row["val_quadrant_high_low_relative_gt_error_left"]
+        ) == pytest.approx(0.5)
+        assert float(
+            history_row["val_quadrant_high_low_vla_preserve_ratio_right"]
+        ) == pytest.approx(0.1)
     else:
         assert history_row["train_gate_w_left"] == ""
         assert history_row["train_gate_w_right"] == ""

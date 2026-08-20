@@ -64,6 +64,9 @@ class HistoryPlotTest(unittest.TestCase):
             "val_gate_w_p90_right",
             "val_tactile_change_p10_left",
             "val_tactile_change_p10_right",
+            "val_quadrant_high_low_n",
+            "val_quadrant_high_low_relative_gt_error_left",
+            "val_quadrant_high_low_vla_preserve_ratio_right",
         }
         self.assertTrue(expected_fields <= set(HISTORY_FIELDS))
         with tempfile.TemporaryDirectory() as directory:
@@ -83,6 +86,9 @@ class HistoryPlotTest(unittest.TestCase):
                     "val_gate_w_p90_right": 0.4,
                     "val_tactile_change_p10_left": 0.6,
                     "val_tactile_change_p10_right": 0.05,
+                    "val_quadrant_high_low_n": 2,
+                    "val_quadrant_high_low_relative_gt_error_left": 0.5,
+                    "val_quadrant_high_low_vla_preserve_ratio_right": 0.1,
                 }
             )
             with history.open("w", newline="", encoding="utf-8") as file:
@@ -103,6 +109,13 @@ class HistoryPlotTest(unittest.TestCase):
             self.assertEqual(parsed[0]["val_gate_w_right"], 0.2)
             self.assertEqual(parsed[0]["val_gate_w_p90_left"], 0.95)
             self.assertEqual(parsed[0]["val_gate_w_p90_right"], 0.4)
+            self.assertEqual(parsed[0]["val_quadrant_high_low_n"], 2.0)
+            self.assertEqual(
+                parsed[0]["val_quadrant_high_low_relative_gt_error_left"], 0.5
+            )
+            self.assertEqual(
+                parsed[0]["val_quadrant_high_low_vla_preserve_ratio_right"], 0.1
+            )
 
     def test_plots_vla_baseline_repair_and_gate_quantiles(self):
         with tempfile.TemporaryDirectory() as directory:
