@@ -147,6 +147,7 @@ def test_overview_and_behavior_render_expected_panels_and_low_sample_notice(tmp_
     assert overview_subplots.call_args.args[:2] == (6, 1)
     assert behavior_subplots.call_args.args[:2] == (4, 2)
     overview_axes = figures["overview"].axes
+    assert len(overview_axes) == 7
     overview_labels = [
         {line.get_label() for line in axis.lines}
         for axis in overview_axes
@@ -179,6 +180,8 @@ def test_overview_and_behavior_render_expected_panels_and_low_sample_notice(tmp_
         "minimum rank",
         "minimum safe",
     }.issubset(overview_labels[4])
+    gate_axis = overview_axes[5]
+    count_axis = overview_axes[6]
     assert {
         "left Gate mean",
         "left Gate p10",
@@ -188,13 +191,25 @@ def test_overview_and_behavior_render_expected_panels_and_low_sample_notice(tmp_
         "right Gate p10",
         "right Gate p50",
         "right Gate p90",
+    }.issubset(overview_labels[5])
+    assert {
         "left low samples",
         "left mid samples",
         "left high samples",
         "right low samples",
         "right mid samples",
         "right high samples",
-    }.issubset(overview_labels[5])
+    }.issubset(overview_labels[6])
+    assert not overview_labels[5].intersection(overview_labels[6])
+    assert gate_axis.get_ylabel() == "Gate weight"
+    assert count_axis.get_ylabel() == "samples"
+    assert gate_axis.get_ylim() == pytest.approx((-0.05, 1.05))
+    assert gate_axis.get_shared_x_axes().joined(gate_axis, count_axis)
+    assert count_axis.get_legend() is None
+    assert {
+        label.get_text()
+        for label in gate_axis.get_legend().get_texts()
+    } >= overview_labels[5] | overview_labels[6]
     assert any(
         "Insufficient samples" in text.get_text()
         for text in figures["behavior"].axes[2].texts

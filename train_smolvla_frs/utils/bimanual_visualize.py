@@ -178,7 +178,7 @@ def plot_bimanual_training_overview(
 
     rows = _read_bimanual_rows(history_path, require_overview_fields=True)
     fig, axes = plt.subplots(6, 1, figsize=(11, 20), sharex=True)
-    fig.subplots_adjust(left=0.10, right=0.97, top=0.97, bottom=0.06, hspace=0.45)
+    fig.subplots_adjust(left=0.10, right=0.91, top=0.97, bottom=0.06, hspace=0.45)
 
     loss_axis = axes[0]
     for field, label, color in (
@@ -278,6 +278,7 @@ def plot_bimanual_training_overview(
     )
 
     gate_axis = axes[5]
+    count_axis = gate_axis.twinx()
     for wrist, color in zip(BIMANUAL_WRISTS, ("#4C72B0", "#DD8452"), strict=True):
         for statistic, linestyle in (
             ("", "-"),
@@ -296,7 +297,7 @@ def plot_bimanual_training_overview(
             )
         for region, linestyle in (("low", "--"), ("mid", ":"), ("high", "-.")):
             _plot_series(
-                gate_axis,
+                count_axis,
                 rows,
                 f"val_n_{region}_w_{wrist}",
                 label=f"{wrist} {region} samples",
@@ -304,10 +305,24 @@ def plot_bimanual_training_overview(
                 alpha=0.72,
                 linestyle=linestyle,
             )
+    gate_axis.set_ylim(-0.05, 1.05)
     _finish_axis(
         gate_axis,
         title="Validation Gate distribution and region counts",
-        ylabel="Gate / samples",
+        ylabel="Gate weight",
+    )
+    count_axis.set_ylabel("samples")
+    count_axis.set_ylim(bottom=0.0)
+    count_axis.grid(False)
+    gate_handles, gate_labels = gate_axis.get_legend_handles_labels()
+    count_handles, count_labels = count_axis.get_legend_handles_labels()
+    gate_axis.legend(
+        gate_handles + count_handles,
+        gate_labels + count_labels,
+        loc="upper center",
+        ncol=4,
+        fontsize=6.5,
+        framealpha=0.9,
     )
     gate_axis.set_xlabel("epoch")
 
