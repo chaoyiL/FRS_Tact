@@ -2329,7 +2329,7 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
     return runtime, policy
 
 
-def _pi05_contract_runtime() -> object:
+def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
     from deploy_pi05.frs_runtime import FRSRuntime as Pi05FRSRuntime
 
     runtime = object.__new__(Pi05FRSRuntime)
@@ -2346,7 +2346,7 @@ def _pi05_contract_runtime() -> object:
     runtime.embedding_dim = 512
     runtime.model = SimpleNamespace(
         config=SimpleNamespace(
-            action_dim=32,
+            action_dim=action_dim,
             action_horizon=10,
             num_tactile_tokens=4,
             resnet_embedding_dim=512,
@@ -2373,7 +2373,7 @@ def _pi05_contract_runtime() -> object:
     }
     runtime.policy = SimpleNamespace(
         config=SimpleNamespace(
-            action_dim=32,
+            action_dim=action_dim,
             action_horizon=10,
             state_dim=20,
             asset_id="physical_bimanual",
@@ -2385,20 +2385,35 @@ def _pi05_contract_runtime() -> object:
 
 
 @pytest.mark.parametrize(
-    "objective_metadata",
+    ("action_dim", "objective_metadata"),
     [
-        {"loss_mode": "gated"},
-        bimanual_objective_metadata(action_dim=32),
+        (32, {"loss_mode": "gated"}),
+        (20, bimanual_objective_metadata(action_dim=20)),
+        (32, bimanual_objective_metadata(action_dim=32)),
     ],
-    ids=("legacy-gated", "bimanual-gated"),
+    ids=("legacy-gated", "bimanual-gated-20d", "bimanual-gated-32d"),
 )
 def test_frs_contract_accepts_matching_training_metadata(
+    action_dim: int,
     objective_metadata: dict[str, object],
 ) -> None:
-    runtime = _pi05_contract_runtime()
+    runtime = _pi05_contract_runtime(action_dim=action_dim)
     runtime.metadata["extra_metadata"].update(objective_metadata)
 
     runtime._validate_contract(source_sample_steps=10)
+
+
+@pytest.mark.parametrize("action_dim", [19, 21, 33])
+def test_frs_bimanual_contract_rejects_unsupported_action_dimensions(
+    action_dim: int,
+) -> None:
+    runtime = _pi05_contract_runtime(action_dim=action_dim)
+    metadata = bimanual_objective_metadata(action_dim=max(action_dim, 20))
+    metadata["action_dim"] = action_dim
+    runtime.metadata["extra_metadata"].update(metadata)
+
+    with pytest.raises(ValueError, match="action_dim"):
+        runtime._validate_contract(source_sample_steps=10)
 
 
 @pytest.mark.parametrize(

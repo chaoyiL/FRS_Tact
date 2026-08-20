@@ -96,3 +96,82 @@ configuration expectations:
    - Task 7 does not modify the SmolVLA config or control frequency.
 
 No configuration was changed to mask either environment/pre-existing failure.
+
+## Important finding follow-up: bimanual action-dimension allowlist
+
+The bimanual branch now rejects a decoder action width unless it is exactly 20
+or 32 before comparing the remaining objective metadata. The legacy `gated`
+branch remains unchanged.
+
+### RED
+
+After adding coherent decoder/policy/metadata cases for unsupported dimensions:
+
+```bash
+cd /home/typhon/FRS_Tact/.worktrees/pi05-bimanual-frs
+/home/typhon/FRS_Tact/.venv/bin/python -m pytest \
+  tests/jax/test_frs_deployment.py -k 'contract and bimanual' -q
+```
+
+```text
+..FFF.......                                                             [100%]
+3 failed, 9 passed, 140 deselected in 3.34s
+```
+
+The 19D, 21D, and 33D cases each failed with
+`Failed: DID NOT RAISE <class 'ValueError'>`, proving that matching metadata
+previously allowed arbitrary decoder widths.
+
+### GREEN
+
+Focused bimanual contract:
+
+```text
+............                                                             [100%]
+12 passed, 140 deselected in 3.21s
+```
+
+This includes valid 20D and 32D contracts plus rejection of 19D, 21D, and 33D.
+
+Explicit legacy and supported-width acceptance node:
+
+```bash
+/home/typhon/FRS_Tact/.venv/bin/python -m pytest \
+  'tests/jax/test_frs_deployment.py::test_frs_contract_accepts_matching_training_metadata' -q
+```
+
+```text
+...                                                                      [100%]
+3 passed in 3.21s
+```
+
+Training checkpoint cross-runtime loading, forced to CPU to avoid contention
+with other JAX jobs:
+
+```bash
+cd /home/typhon/FRS_Tact/.worktrees/pi05-bimanual-frs/train_pi05_frs
+JAX_PLATFORMS=cpu \
+DEPLOY_PI05_PYTHON=/home/typhon/FRS_Tact/deploy_pi05/.venv/bin/python \
+PYTHONPATH="$PWD/src:$(dirname "$PWD")" PYTHONSAFEPATH=1 \
+.venv/bin/python -m pytest tests/test_deployment_checkpoint_compatibility.py -q
+```
+
+```text
+..                                                                     [100%]
+2 passed, 2 subtests passed in 9.33s
+```
+
+Pi0.5 deployment-only suite:
+
+```bash
+cd /home/typhon/FRS_Tact/.worktrees/pi05-bimanual-frs
+JAX_PLATFORMS=cpu \
+PYTHONPATH="$PWD/deploy_pi05/src:$PWD/deploy_pi05:$PWD" PYTHONSAFEPATH=1 \
+train_pi05_frs/.venv/bin/python -m pytest \
+  tests/test_deploy_pi05_deployment_only.py -q
+```
+
+```text
+...................                                                      [100%]
+19 passed in 4.41s
+```

@@ -237,6 +237,8 @@ def _validate_loss_contract(extra: Mapping[str, Any], *, action_dim: int) -> Non
         return
     if loss_mode != "bimanual_gated":
         raise ValueError(f"unsupported FRS loss_mode: {loss_mode!r}")
+    if action_dim not in {20, 32}:
+        raise ValueError(f"unsupported bimanual FRS action_dim: {action_dim!r}")
     expected = {
         "loss_objective_version": 2,
         "loss_weighting_version": 7,
@@ -346,7 +348,7 @@ class FRSRuntime:
         extra = self.metadata.get("extra_metadata")
         if not isinstance(extra, Mapping):
             raise ValueError("FRS checkpoint is missing extra_metadata")
-        _validate_loss_contract(extra, action_dim=int(decoder.action_dim))
+        _validate_loss_contract(extra, action_dim=decoder.action_dim)
         _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
         _require_equal(str(extra.get("aux_decode_solver")), self.config.decode_solver, "decode_solver")
         _require_equal(int(extra.get("aux_decode_steps", 0)), self.config.decode_steps, "decode_steps")
