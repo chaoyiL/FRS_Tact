@@ -17,7 +17,11 @@ import jax.numpy as jnp
 import numpy as np
 
 from .frs_config import validate_frs_config_section
-from .frs_inference.decoder import DECODER_INPUT_VERSION, decode_actions
+from .frs_inference.decoder import (
+    DECODER_INPUT_VERSION,
+    decode_actions,
+    decode_bimanual_actions,
+)
 from .frs_inference.decoder_checkpoint import load_checkpoint as load_frs_checkpoint
 from .frs_inference.encoder_checkpoint import load_tactile_encoder
 from .frs_inference.encoder_config import tactile_clip_config_from_dict
@@ -436,6 +440,43 @@ class FRSRuntime:
             raise ValueError(f"normalized FRS state must be finite with shape {expected}")
         return normalized
 
+    def _uses_bimanual_decode(self) -> bool:
+        extra = self.metadata.get("extra_metadata")
+        return bool(
+            isinstance(extra, Mapping)
+            and extra.get("loss_mode") == "bimanual_gated"
+        )
+
+    def _decode_action_chunk(
+        self,
+        x_base: Any,
+        tactile: Any,
+        *,
+        frozen_endpoint: Any,
+        state: jax.Array | None,
+    ) -> jax.Array:
+        kwargs: dict[str, Any] = {}
+        if state is not None:
+            kwargs["state"] = state
+        if self._uses_bimanual_decode():
+            return decode_bimanual_actions(
+                self.model,
+                x_base,
+                tactile,
+                frozen_endpoint=frozen_endpoint,
+                num_steps=self.config.decode_steps,
+                solver=self.config.decode_solver,
+                **kwargs,
+            )
+        return decode_actions(
+            self.model,
+            x_base,
+            tactile,
+            num_steps=self.config.decode_steps,
+            solver=self.config.decode_solver,
+            **kwargs,
+        )
+
     @staticmethod
     def _readonly(value: Any) -> np.ndarray:
         array = np.array(jax.device_get(value), dtype=np.float32, copy=True)
@@ -497,17 +538,12 @@ class FRSRuntime:
             num_steps=self.config.reverse_steps,
             solver=self.config.reverse_solver,
         )
-        kwargs: dict[str, Any] = {}
         state = self._normalized_state(observation)
-        if state is not None:
-            kwargs["state"] = state
-        decoded = decode_actions(
-            self.model,
+        decoded = self._decode_action_chunk(
             x_base,
             jnp.asarray(self.history.window_tokens()[None, ...]),
-            num_steps=self.config.decode_steps,
-            solver=self.config.decode_solver,
-            **kwargs,
+            frozen_endpoint=normalized,
+            state=state,
         )
         jax.block_until_ready(decoded)
 
@@ -652,18 +688,13 @@ class FRSRuntime:
         tactile = jnp.asarray(self.history.window_tokens()[None, ...], dtype=jnp.float32)
         change = tactile_change_from_tokens(current[None, ...], self._episode_baseline[None, ...])
         encode_finished = time.time()
-        kwargs: dict[str, Any] = {}
         state = self._normalized_state(observation)
-        if state is not None:
-            kwargs["state"] = state
         decode_started = time.time()
-        decoded = decode_actions(
-            self.model,
+        decoded = self._decode_action_chunk(
             self._x_base_device,
             tactile,
-            num_steps=self.config.decode_steps,
-            solver=self.config.decode_solver,
-            **kwargs,
+            frozen_endpoint=self._action_vla_normalized,
+            state=state,
         )
         decoded_array, delta, max_abs = self._validated_decoded(decoded)
         decode_finished = time.time()

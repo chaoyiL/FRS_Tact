@@ -18,6 +18,8 @@ FlowSolver = Literal["euler", "fireflow"]
 DEFAULT_GRU_HIDDEN_DIM = 256
 DEFAULT_RESNET_EMBEDDING_DIM = 512
 DECODER_INPUT_VERSION = 2
+BIMANUAL_STEERED_ACTION_DIM = 20
+BIMANUAL_ACTION_DIMS = (20, 32)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -309,6 +311,148 @@ def decode_fireflow(
         x_base,
         num_steps=num_steps,
     )
+
+
+def project_bimanual_action_for_model(action: Array) -> Array:
+    """Return the canonical decoder input with a zeroed non-physical tail."""
+
+    if action.shape[-1] not in BIMANUAL_ACTION_DIMS:
+        raise ValueError(
+            "bimanual model input action_dim must be exactly one of "
+            f"{BIMANUAL_ACTION_DIMS!r}, got {action.shape[-1]!r}"
+        )
+    if action.shape[-1] == BIMANUAL_STEERED_ACTION_DIM:
+        return action
+    return jnp.concatenate(
+        (
+            action[..., :BIMANUAL_STEERED_ACTION_DIM],
+            jnp.zeros_like(action[..., BIMANUAL_STEERED_ACTION_DIM:]),
+        ),
+        axis=-1,
+    )
+
+
+def restore_bimanual_frozen_tail(
+    decoded: Array,
+    frozen_endpoint: Array,
+) -> Array:
+    """Restore the non-physical endpoint after physical-only integration."""
+
+    if decoded.shape != frozen_endpoint.shape:
+        raise ValueError("bimanual decoded and frozen endpoint shapes must match")
+    if decoded.shape[-1] not in BIMANUAL_ACTION_DIMS:
+        raise ValueError(
+            "bimanual decoded action_dim must be exactly one of "
+            f"{BIMANUAL_ACTION_DIMS!r}, got {decoded.shape[-1]!r}"
+        )
+    if decoded.shape[-1] == BIMANUAL_STEERED_ACTION_DIM:
+        return decoded
+    return jnp.concatenate(
+        (
+            decoded[..., :BIMANUAL_STEERED_ACTION_DIM],
+            frozen_endpoint[..., BIMANUAL_STEERED_ACTION_DIM:],
+        ),
+        axis=-1,
+    )
+
+
+def _bimanual_velocity_from_condition(
+    model: TactileConditionedFlowDecoder,
+    x_t: Array,
+    t: Array,
+    condition: Array,
+) -> Array:
+    canonical_input = project_bimanual_action_for_model(x_t)
+    velocity = model.velocity_from_condition(canonical_input, t, condition)
+    return project_bimanual_action_for_model(velocity)
+
+
+@partial(nnx.jit, static_argnames=("num_steps",))
+def decode_bimanual_euler(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    tactile_seq: Array,
+    frozen_endpoint: Array,
+    *,
+    num_steps: int,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
+) -> Array:
+    if num_steps <= 0:
+        raise ValueError(f"num_steps must be positive, got {num_steps}.")
+    canonical_base = project_bimanual_action_for_model(x_base)
+    batch_size = canonical_base.shape[0]
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
+    condition = model.encode_condition(tactile_seq, state, state_keep_mask)
+
+    def body(step: int, x_t: Array) -> Array:
+        t = jnp.full((batch_size,), step * dt, dtype=jnp.float32)
+        velocity = _bimanual_velocity_from_condition(model, x_t, t, condition)
+        return x_t + dt * velocity
+
+    decoded = jax.lax.fori_loop(0, num_steps, body, canonical_base)
+    return restore_bimanual_frozen_tail(decoded, frozen_endpoint)
+
+
+@partial(nnx.jit, static_argnames=("num_steps",))
+def decode_bimanual_fireflow(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    tactile_seq: Array,
+    frozen_endpoint: Array,
+    *,
+    num_steps: int,
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
+) -> Array:
+    canonical_base = project_bimanual_action_for_model(x_base)
+    condition = model.encode_condition(tactile_seq, state, state_keep_mask)
+    decoded = fireflow_integrate_velocity(
+        lambda x, t: _bimanual_velocity_from_condition(
+            model, x, t, condition
+        ),
+        canonical_base,
+        num_steps=num_steps,
+    )
+    return restore_bimanual_frozen_tail(decoded, frozen_endpoint)
+
+
+def decode_bimanual_actions(
+    model: TactileConditionedFlowDecoder,
+    x_base: Array,
+    tactile_seq: Array,
+    *,
+    frozen_endpoint: Array,
+    num_steps: int,
+    solver: FlowSolver = "euler",
+    state: Array | None = None,
+    state_keep_mask: Array | None = None,
+) -> Array:
+    """Decode only physical dimensions, then restore the frozen VLA tail."""
+
+    if x_base.shape != frozen_endpoint.shape:
+        raise ValueError("bimanual base and frozen endpoint shapes must match")
+    if solver == "euler":
+        return decode_bimanual_euler(
+            model,
+            x_base,
+            tactile_seq,
+            frozen_endpoint,
+            num_steps=num_steps,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+    if solver == "fireflow":
+        return decode_bimanual_fireflow(
+            model,
+            x_base,
+            tactile_seq,
+            frozen_endpoint,
+            num_steps=num_steps,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+    raise ValueError(f"solver must be 'euler' or 'fireflow', got {solver!r}.")
 
 
 def decode_actions(

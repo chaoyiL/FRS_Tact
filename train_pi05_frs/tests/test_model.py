@@ -19,6 +19,7 @@ import pytest
 
 import train_pi05_frs.evaluate as evaluate_module
 import train_pi05_frs.utils.metrics as metrics_module
+import train_pi05_frs.utils.model as model_module
 from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
@@ -316,8 +317,8 @@ def test_bimanual_evaluation_uses_first_20_dims_and_keeps_wrists_separate(
     )
     monkeypatch.setattr(
         metrics_module,
-        "decode_actions",
-        lambda model, x_base, tactile_input, num_steps, solver, state: prediction,
+        "decode_bimanual_actions",
+        lambda *args, **kwargs: prediction,
     )
 
     result = evaluate_split(
@@ -394,7 +395,7 @@ def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
     )
     monkeypatch.setattr(
         metrics_module,
-        "decode_actions",
+        "decode_bimanual_actions",
         lambda *args, **kwargs: current["prediction"],
     )
 
@@ -480,6 +481,57 @@ def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
     ):
         np.testing.assert_allclose(getattr(perturbed, field), getattr(baseline, field))
     assert perturbed_key == baseline_key
+
+
+def test_bimanual_evaluation_uses_physical_decode_path_and_restores_vla_tail() -> None:
+    gt_action = np.zeros((1, 2, 32), dtype=np.float32)
+    vla_action = np.zeros_like(gt_action)
+    vla_action[..., 20:] = 0.25
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((4, 1), dtype=np.float32)}
+
+        def __init__(self, x_base_tail: float):
+            self.x_base_tail = x_base_tail
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            x_base = np.zeros_like(gt_action)
+            x_base[..., 20:] = self.x_base_tail
+            yield (
+                np.asarray([0], dtype=np.int64),
+                x_base,
+                vla_action,
+                gt_action,
+                np.zeros((1, 0), dtype=np.float32),
+                np.zeros((1, 1, 4, 1), dtype=np.float32),
+            )
+
+        def tactile_change_per_wrist_for_cache_indices(self, indices, tokens):
+            del indices, tokens
+            return np.ones((1, 2), dtype=np.float32)
+
+    def evaluate(x_base_tail: float):
+        return evaluate_split(
+            _TailCoupledVelocity(),
+            FakeConditioner(x_base_tail),  # type: ignore[arg-type]
+            split="val",
+            batch_size=1,
+            num_steps=2,
+            keep_predictions=True,
+            loss_mode="bimanual_gated",
+            gate_tau=0.5,
+            gate_temperature=0.1,
+        )
+
+    baseline = evaluate(0.0)
+    perturbed = evaluate(5.0)
+
+    assert baseline.mse_gt == pytest.approx(0.0)
+    assert perturbed.mse_gt == pytest.approx(baseline.mse_gt)
+    np.testing.assert_allclose(baseline.predictions[..., 20:], 0.25)
+    np.testing.assert_allclose(perturbed.predictions, baseline.predictions)
 
 
 @pytest.mark.parametrize("action_dim", (19, 21, 24, 33))
@@ -969,6 +1021,137 @@ class _ConstantVelocity:
         return jnp.broadcast_to(self.velocity, x_t.shape)
 
 
+class _TailCoupledVelocity(nnx.Module):
+    """Expose any padded decoder input through the physical velocity output."""
+
+    def __call__(self, x_t, t, tactile_seq, *, state=None, state_keep_mask=None):
+        del t, tactile_seq, state, state_keep_mask
+        return self._velocity(x_t)
+
+    def encode_condition(self, tactile_seq, state, state_keep_mask):
+        del state, state_keep_mask
+        return tactile_seq
+
+    def velocity_from_condition(self, x_t, t, condition):
+        del t, condition
+        return self._velocity(x_t)
+
+    @staticmethod
+    def _velocity(x_t):
+        physical = x_t[..., :20]
+        if x_t.shape[-1] == 20:
+            return jnp.zeros_like(physical)
+        tail_signal = jnp.sum(x_t[..., 20:], axis=-1, keepdims=True)
+        coupled_physical = jnp.broadcast_to(tail_signal, physical.shape)
+        return jnp.concatenate(
+            (coupled_physical, jnp.full_like(x_t[..., 20:], 17.0)), axis=-1
+        )
+
+
+@pytest.mark.parametrize("perturbed_input", ("x_base", "target"))
+def test_masked_flow_matching_projects_32d_tail_before_real_model_call(
+    perturbed_input: str,
+) -> None:
+    model = _TailCoupledVelocity()
+    x_base = jnp.zeros((1, 2, 32), dtype=jnp.float32)
+    target = jnp.concatenate(
+        (
+            jnp.ones((1, 2, 20), dtype=jnp.float32),
+            jnp.zeros((1, 2, 12), dtype=jnp.float32),
+        ),
+        axis=-1,
+    )
+    arguments = {
+        "x_base": x_base,
+        "target": target,
+    }
+    baseline = masked_flow_matching_loss_per_sample(
+        model,
+        arguments["x_base"],
+        arguments["target"],
+        jnp.asarray([0.25], dtype=jnp.float32),
+        jnp.zeros((1, 1, 1), dtype=jnp.float32),
+    )
+    arguments[perturbed_input] = arguments[perturbed_input].at[..., 20:].set(5.0)
+    perturbed = masked_flow_matching_loss_per_sample(
+        model,
+        arguments["x_base"],
+        arguments["target"],
+        jnp.asarray([0.25], dtype=jnp.float32),
+        jnp.zeros((1, 1, 1), dtype=jnp.float32),
+    )
+
+    np.testing.assert_allclose(baseline, [1.0])
+    np.testing.assert_allclose(perturbed, baseline)
+
+
+@pytest.mark.parametrize("solver", ("euler", "fireflow"))
+@pytest.mark.parametrize("action_dim", (20, 32))
+def test_bimanual_decode_projects_every_velocity_input_and_restores_vla_tail(
+    solver: str,
+    action_dim: int,
+) -> None:
+    decode_bimanual_actions = getattr(
+        model_module, "decode_bimanual_actions", None
+    )
+    assert callable(decode_bimanual_actions)
+    x_base = jnp.zeros((1, 2, action_dim), dtype=jnp.float32)
+    frozen_vla = jnp.zeros_like(x_base)
+    if action_dim == 32:
+        x_base = x_base.at[..., 20:].set(5.0)
+        frozen_vla = frozen_vla.at[..., 20:].set(0.25)
+
+    decoded = decode_bimanual_actions(
+        _TailCoupledVelocity(),
+        x_base,
+        jnp.zeros((1, 1, 1), dtype=jnp.float32),
+        frozen_endpoint=frozen_vla,
+        num_steps=2,
+        solver=solver,
+    )
+
+    np.testing.assert_allclose(decoded[..., :20], 0.0)
+    if action_dim == 20:
+        legacy = decode_actions(
+            _TailCoupledVelocity(),
+            x_base,
+            jnp.zeros((1, 1, 1), dtype=jnp.float32),
+            num_steps=2,
+            solver=solver,
+        )
+        np.testing.assert_allclose(decoded, legacy)
+    else:
+        np.testing.assert_allclose(decoded[..., 20:], 0.25)
+
+
+def test_bimanual_aux_decode_is_invariant_to_32d_base_tail() -> None:
+    model = _TailCoupledVelocity()
+    gt = jnp.zeros((1, 2, 32), dtype=jnp.float32)
+    frozen_vla = gt.at[..., 20:].set(0.25)
+
+    def decode_component(x_base):
+        return bimanual_loss_components_per_sample(
+            model,
+            x_base,
+            gt,
+            frozen_vla,
+            jnp.asarray([0.5], dtype=jnp.float32),
+            jnp.zeros((1, 1, 1), dtype=jnp.float32),
+            jnp.ones((1, 2), dtype=jnp.float32),
+            aux_decode_weight=1.0,
+            aux_decode_steps=2,
+            low_gate_safety_weight=0.0,
+            rank_weight=0.0,
+            repair_weight=0.0,
+        )["decode"]
+
+    baseline = decode_component(jnp.zeros_like(gt))
+    perturbed = decode_component(jnp.zeros_like(gt).at[..., 20:].set(5.0))
+
+    np.testing.assert_allclose(baseline, [0.0])
+    np.testing.assert_allclose(perturbed, baseline)
+
+
 def test_masked_flow_matching_ignores_32d_tail_residual():
     tail_only = jnp.concatenate([jnp.zeros((20,)), jnp.full((12,), 100.0)])
     loss = masked_flow_matching_loss_per_sample(
@@ -1014,7 +1197,7 @@ def test_bimanual_single_active_wrist_rank_is_not_diluted():
     vla = jnp.full_like(gt, 2.0)
     decoded = vla.at[..., :10].set(2.5)
     with mock.patch(
-        "train_pi05_frs.utils.model.decode_actions", return_value=decoded
+        "train_pi05_frs.utils.model.decode_bimanual_actions", return_value=decoded
     ) as decode:
         components = bimanual_loss_components_per_sample(
             _ConstantVelocity(jnp.zeros((20,))),
@@ -1043,7 +1226,7 @@ def test_bimanual_source_normalization_ignores_appended_inactive_source():
         vla = jnp.full_like(gt, 2.0)
         decoded = vla.at[..., :10].set(decoded_values[:, None, None])
         with mock.patch(
-            "train_pi05_frs.utils.model.decode_actions", return_value=decoded
+            "train_pi05_frs.utils.model.decode_bimanual_actions", return_value=decoded
         ):
             components = bimanual_loss_components_per_sample(
                 _ConstantVelocity(jnp.zeros((20,))),
@@ -1320,7 +1503,8 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             jax.random.key(93),
             source_indices=jnp.asarray([0, 0], dtype=jnp.int32),
             loss_mode="bimanual_gated",
-            aux_decode_weight=0.0,
+            aux_decode_weight=1.0,
+            aux_decode_steps=1,
         )
 
         self.assertEqual(

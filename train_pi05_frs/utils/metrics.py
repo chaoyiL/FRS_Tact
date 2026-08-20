@@ -17,6 +17,7 @@ from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
 from train_pi05_frs.utils.model import bimanual_composite_endpoint
 from train_pi05_frs.utils.model import bimanual_mse_per_sample
 from train_pi05_frs.utils.model import decode_actions
+from train_pi05_frs.utils.model import decode_bimanual_actions
 from train_pi05_frs.utils.model import flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import masked_flow_matching_loss_per_sample
 
@@ -712,10 +713,11 @@ def evaluate_split(
         composite_flow = masked_flow_matching_loss_per_sample(
             model, x_base, composite_target, t, tactile_seq, state=state
         )
-        prediction = decode_actions(
+        prediction = decode_bimanual_actions(
             model,
             x_base,
             tactile_seq,
+            frozen_endpoint=vla_action,
             num_steps=num_steps,
             solver=solver,
             state=state,

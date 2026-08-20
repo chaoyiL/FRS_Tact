@@ -2516,6 +2516,98 @@ def test_frs_legacy_runtime_safety_remains_full_width() -> None:
         runtime._validated_decoded(decoded)
 
 
+@pytest.mark.parametrize("solver", ("euler", "fireflow"))
+def test_pi05_deployment_bimanual_decoder_projects_tail_and_restores_vla(
+    solver: str,
+) -> None:
+    from flax import nnx
+
+    from deploy_pi05.frs_inference import decoder as decoder_module
+
+    class TailCoupledVelocity(nnx.Module):
+        def encode_condition(self, tactile_seq, state, state_keep_mask):
+            del state, state_keep_mask
+            return tactile_seq
+
+        def velocity_from_condition(self, x_t, t, condition):
+            del t, condition
+            tail_signal = jnp.sum(x_t[..., 20:], axis=-1, keepdims=True)
+            return jnp.concatenate(
+                (
+                    jnp.broadcast_to(tail_signal, x_t[..., :20].shape),
+                    jnp.full_like(x_t[..., 20:], 17.0),
+                ),
+                axis=-1,
+            )
+
+    decode_bimanual_actions = getattr(
+        decoder_module, "decode_bimanual_actions", None
+    )
+    assert callable(decode_bimanual_actions)
+    x_base = jnp.zeros((1, 2, 32), dtype=jnp.float32).at[..., 20:].set(5.0)
+    frozen_vla = jnp.zeros_like(x_base).at[..., 20:].set(0.25)
+
+    decoded = decode_bimanual_actions(
+        TailCoupledVelocity(),
+        x_base,
+        jnp.zeros((1, 1, 1), dtype=jnp.float32),
+        frozen_endpoint=frozen_vla,
+        num_steps=2,
+        solver=solver,
+    )
+
+    np.testing.assert_allclose(decoded[..., :20], 0.0)
+    np.testing.assert_allclose(decoded[..., 20:], 0.25)
+
+
+@pytest.mark.parametrize("loss_mode", ("gated", "bimanual_gated"))
+def test_pi05_runtime_dispatches_only_bimanual_checkpoints_to_physical_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_mode: str,
+) -> None:
+    from deploy_pi05 import frs_runtime as pi05_runtime_module
+
+    runtime = _pi05_contract_runtime()
+    runtime.metadata["extra_metadata"]["loss_mode"] = loss_mode
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def legacy_decode(*args, **kwargs):
+        del args
+        calls.append(("legacy", kwargs))
+        return jnp.zeros((1, 10, 32), dtype=jnp.float32)
+
+    def bimanual_decode(*args, **kwargs):
+        del args
+        calls.append(("bimanual", kwargs))
+        return jnp.zeros((1, 10, 32), dtype=jnp.float32)
+
+    monkeypatch.setattr(pi05_runtime_module, "decode_actions", legacy_decode)
+    monkeypatch.setattr(
+        pi05_runtime_module,
+        "decode_bimanual_actions",
+        bimanual_decode,
+        raising=False,
+    )
+    frozen_vla = jnp.full((1, 10, 32), 0.25, dtype=jnp.float32)
+    dispatch = getattr(runtime, "_decode_action_chunk", None)
+    assert callable(dispatch)
+
+    dispatch(
+        jnp.zeros_like(frozen_vla),
+        jnp.zeros((1, 10, 4, 512), dtype=jnp.float32),
+        frozen_endpoint=frozen_vla,
+        state=None,
+    )
+
+    assert [name for name, _ in calls] == [
+        "bimanual" if loss_mode == "bimanual_gated" else "legacy"
+    ]
+    if loss_mode == "bimanual_gated":
+        assert calls[0][1]["frozen_endpoint"] is frozen_vla
+    else:
+        assert "frozen_endpoint" not in calls[0][1]
+
+
 def test_frs_contract_allows_deployment_solver_to_differ_from_validation_solver() -> None:
     runtime, policy = _contract_runtime()
     runtime.config.decode_solver = "fireflow"

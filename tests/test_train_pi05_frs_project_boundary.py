@@ -61,7 +61,10 @@ PROTECTED = (
     "train_smolvla_frs",
     "train_vtsmolvla",
 )
-APPROVED_PROTECTED_CHANGES = {"deploy_pi05/frs_runtime.py"}
+APPROVED_PROTECTED_CHANGES = {
+    "deploy_pi05/frs_inference/decoder.py",
+    "deploy_pi05/frs_runtime.py",
+}
 APPROVED_ADAPTATIONS = {
     "prepare_pi05.py": "train_pi05_frs/pi05_cache/prepare.py",
     "utils/cache.py": "train_pi05_frs/pi05_cache/cache.py",
