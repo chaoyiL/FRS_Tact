@@ -8,10 +8,12 @@ Prepare the environment, data, and checkpoint first. The launcher deliberately d
 not install or download dependencies:
 
 ```bash
-bash scripts/setup_env.sh
+bash scripts/setup_env.sh --root
 bash scripts/download_data.sh
 bash scripts/download_ckpt.sh
 ```
+
+省略 `--root` 时，统一安装脚本会保持兼容行为，同时安装根环境和 Pi0.5 部署环境。
 
 ```bash
 bash train_smolvla/scripts/train.sh

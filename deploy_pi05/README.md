@@ -29,8 +29,12 @@ FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使�
 脚本会拒绝把两者设置成同一路径：
 
 ```bash
-cd /home/typhon/FRS_Tact && bash scripts/setup_env.sh
+cd /home/typhon/FRS_Tact
+bash scripts/setup_env.sh --pi05_deploy
 ```
+
+省略 `--pi05_deploy` 时，统一脚本会保持旧行为，同时安装根项目环境和 Pi0.5
+部署环境。只部署 Pi0.5 时使用上述选项，可跳过根 SmolVLA/FRS 依赖同步和验证。
 
 如果通过 `PI05_VENV_DIR` 把 Pi0.5 环境放到其他位置，启动前先执行
 `source /home/typhon/FRS_Tact/.env.frs`，让启动器读取生成的 Python 路径。

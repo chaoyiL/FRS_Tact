@@ -7,11 +7,13 @@ This package runs vision-tactile SmolVLA JAX fine-tuning from one YAML configura
 Prepare the environment, data, and checkpoint before launching:
 
 ```bash
-bash scripts/setup_env.sh
+bash scripts/setup_env.sh --root
 bash scripts/download_data.sh
 bash scripts/download_ckpt.sh
 bash train_vtsmolvla/scripts/train.sh
 ```
+
+省略 `--root` 时，统一安装脚本会保持兼容行为，同时安装根环境和 Pi0.5 部署环境。
 
 All datasets, checkpoints, tactile encoder/cache settings, training parameters,
 output paths, and launcher behavior live in
