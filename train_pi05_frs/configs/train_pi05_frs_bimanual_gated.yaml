@@ -1,0 +1,105 @@
+# Full Pi0.5 FRS pipeline with the fixed physical bimanual objective.
+checkpoint: gs://openpi-assets/checkpoints/pi05_base
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: actions
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+      observation.images.camera1: observation.images.camera2
+
+action_cache:
+  root: /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: slerpflow
+  batch_size: 64
+  load_workers: 4
+  flush_every: 8
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+tactile_embedding_cache:
+  enabled: true
+  root: /workspace/tactile_embeddings
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_0809
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 4
+  tactile_image_size: 224
+  state_conditioning: true
+  state_dropout_rate: 0.1
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
+  action_dim: 32
+  action_horizon: 50
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
+
+norm_stats:
+  dir: gs://openpi-assets/checkpoints/pi05_base/assets
+  asset_id: trossen
+  use_quantile_norm: true
+
+frs_training:
+  output: /workspace/frs_pick_tube_pi05/run_bimanual_gated_v1
+  tactile_window_divisor: 5
+  history_stride: 3
+  loss_mode: bimanual_gated
+  gate_tau: 0.4
+  gate_temperature: 0.1
+  aux_decode_weight: 4.0
+  aux_decode_steps: 10
+  aux_decode_solver: fireflow
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  rank_low_gate_threshold: 0.3
+  rank_high_gate_threshold: 0.7
+  rank_weight: 2.0
+  rank_margin: 0.0
+  repair_weight: 0.0
+  repair_margin: 0.0
+  best_max_low_gate_unsafe_frac: 0.1
+  best_min_high_gate_gain: 0.0
+  best_min_high_gate_rank_satisfied_frac: 0.8
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+  batch_size: 128
+  epochs: 100
+  validation_steps: 10
+  eval_every: 5
+  seed: 42
+  write_plots: true
+  resume: false
+  resume_from: null

@@ -24,6 +24,9 @@ import yaml
 from train_pi05_frs.utils.path_safety import validate_fresh_output_root
 from train_pi05_frs.utils.path_safety import validate_implicit_resume_root
 from train_pi05_frs.utils.path_safety import validate_output_roots
+from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
+from train_pi05_frs.utils.bimanual_schema import STEERED_ACTION_DIM
+from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 
 
 TRAIN_ROOT = Path(__file__).resolve().parents[1]
@@ -867,6 +870,14 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     ):
         _reject_unknown_keys(section, allowed, prefix=prefix)
 
+    loss_mode = training.get("loss_mode", "gated")
+    if loss_mode not in ("gt", "predicted", "gated", BIMANUAL_LOSS_MODE):
+        raise ValueError("config.frs_training.loss_mode is invalid")
+    if loss_mode == BIMANUAL_LOSS_MODE and "gate_lambda" in training:
+        raise ValueError(
+            "config.frs_training.gate_lambda is not supported for bimanual_gated"
+        )
+
     sanitized_cache_dirs = [
         source_cache_dir(str(action_cache.get("root", "")), str(source["repo_id"]))
         for source in datasets
@@ -910,6 +921,8 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         raise ValueError("config.model.tactile_keys must be a non-empty list")
     for index, key in enumerate(tactile_keys):
         _nonempty_string(key, f"model.tactile_keys[{index}]")
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        validate_bimanual_tactile_keys(tactile_keys)
     camera_map = _string_mapping(model.get("camera_map"), "model.camera_map", nonempty=True)
     allowed_cameras = {"base_0_rgb", "left_wrist_0_rgb", "right_wrist_0_rgb"}
     unknown_cameras = set(camera_map) - allowed_cameras
@@ -965,6 +978,10 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         ("action_horizon", 50),
         )
     }
+    if loss_mode == BIMANUAL_LOSS_MODE and model_integers["action_dim"] < STEERED_ACTION_DIM:
+        raise ValueError(
+            f"config.model.action_dim must be >= {STEERED_ACTION_DIM} for bimanual_gated"
+        )
     if len(tactile_keys) != 4 or model_integers["tactile_num_tokens"] != 4:
         raise ValueError(
             "config.model.tactile_keys and tactile_num_tokens must each be exactly 4"
@@ -1079,8 +1096,6 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
             raise ValueError(f"config.frs_training.{key} must be in [0, 1]")
     if training.get("resume_from") not in (None, ""):
         _nonempty_string(training["resume_from"], "frs_training.resume_from")
-    if training.get("loss_mode", "gated") not in ("gt", "predicted", "gated"):
-        raise ValueError("config.frs_training.loss_mode is invalid")
     if training.get("aux_decode_solver", "fireflow") not in ("euler", "fireflow"):
         raise ValueError("config.frs_training.aux_decode_solver is invalid")
     if training.get("lr_schedule", "cosine") not in ("cosine", "constant"):

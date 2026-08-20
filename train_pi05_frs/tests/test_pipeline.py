@@ -13,6 +13,13 @@ import numpy as np
 import pytest
 import yaml
 
+from train_pi05_frs.utils.bimanual_schema import (
+    BIMANUAL_LOSS_MODE,
+    bimanual_objective_metadata,
+    validate_bimanual_objective_metadata,
+)
+from train_pi05_frs.tools.train_frs import load_config, validate_config
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TRAIN_ROOT = REPO_ROOT / "train_pi05_frs"
@@ -304,6 +311,29 @@ def test_default_config_and_tools_live_inside_training_project() -> None:
     assert config["checkpoint"] == "gs://openpi-assets/checkpoints/pi05_base"
     assert config["action_cache"]["reverse_solver"] == "slerpflow"
     assert config["frs_training"]["loss_mode"] == "gated"
+
+
+def test_bimanual_config_is_independent_and_validated():
+    path = TRAIN_ROOT / "configs" / "train_pi05_frs_bimanual_gated.yaml"
+    config = load_config(path)
+    assert config["frs_training"]["loss_mode"] == BIMANUAL_LOSS_MODE
+    assert "gate_lambda" not in config["frs_training"]
+    validate_config(config, check_paths=False)
+
+
+def test_bimanual_metadata_supports_native_and_padded_action_widths():
+    for action_dim in (20, 32):
+        metadata = bimanual_objective_metadata(action_dim=action_dim)
+        validate_bimanual_objective_metadata(metadata, action_dim=action_dim)
+        assert metadata["steered_action_dim"] == 20
+        assert metadata["padded_tail_policy"] == "vla_endpoint_masked"
+
+
+def test_bimanual_metadata_rejects_wrong_tail_policy():
+    metadata = bimanual_objective_metadata(action_dim=32)
+    metadata["padded_tail_policy"] = "train_gt"
+    with pytest.raises(ValueError, match="padded_tail_policy"):
+        validate_bimanual_objective_metadata(metadata, action_dim=32)
 
 
 def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:
