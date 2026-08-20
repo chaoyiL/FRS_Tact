@@ -1528,6 +1528,7 @@ def test_frs_server_config_advertises_explicit_v1_fields() -> None:
         "no_state_obs_mode": False,
         "steps_per_inference": 10,
         "action_horizon": 10,
+        "observation_profile": "smolvla_vitac_256",
         "execution_protocol": "frs_steering_v1",
         "steering_protection_interval_s": None,
         "frs_tactile_keys": ["left", "right"],

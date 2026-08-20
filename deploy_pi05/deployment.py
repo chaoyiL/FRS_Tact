@@ -36,6 +36,7 @@ _CAMERA_MAP_CONTRACT = {
 }
 _EMPTY_CAMERAS_CONTRACT: list[str] = []
 PI05_OBSERVATION_PROFILE = "pi05_vision_224"
+PI05_VITAC_OBSERVATION_PROFILE = "pi05_vitac_224"
 
 
 def configure_deployment_logging() -> None:
@@ -371,10 +372,13 @@ def make_server_config(
             control["steps_per_inference"], "control.steps_per_inference"
         ),
         "action_horizon": _as_int(control["action_horizon"], "control.action_horizon"),
+        "observation_profile": (
+            PI05_OBSERVATION_PROFILE
+            if mode == "pi05"
+            else PI05_VITAC_OBSERVATION_PROFILE
+        ),
     }
-    if mode == "pi05":
-        result["observation_profile"] = PI05_OBSERVATION_PROFILE
-    else:
+    if mode == "frs":
         if frs_runtime is None:
             raise ValueError("frs_runtime is required for FRS server config")
         result.update(

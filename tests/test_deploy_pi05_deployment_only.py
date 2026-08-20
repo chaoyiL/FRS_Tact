@@ -4,6 +4,7 @@ import ast
 import inspect
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -267,6 +268,34 @@ def test_plain_pi05_server_config_requests_fixed_224_observation_profile() -> No
     )
 
     assert server_config["observation_profile"] == "pi05_vision_224"
+
+
+def test_pi05_frs_server_config_requests_fixed_224_vitac_profile() -> None:
+    from deploy_pi05.deployment import make_server_config
+
+    server_config = make_server_config(
+        {
+            "observation": {
+                "data_type": "vitac",
+                "language_prompt": "pick up the tubes",
+                "single_arm_mode": False,
+                "no_state_obs_mode": False,
+            },
+            "control": {
+                "control_frequency": 10.0,
+                "controller_frequency": 80.0,
+                "steps_per_inference": 50,
+                "action_horizon": 50,
+            },
+        },
+        mode="frs",
+        frs_runtime=SimpleNamespace(
+            config=SimpleNamespace(steering_protection_interval_s=None),
+            tactile_keys=("left", "right"),
+        ),
+    )
+
+    assert server_config["observation_profile"] == "pi05_vitac_224"
 
 
 def _policy_for_model_input() -> object:

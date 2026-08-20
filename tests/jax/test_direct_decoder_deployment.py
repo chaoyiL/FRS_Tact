@@ -857,6 +857,7 @@ def test_direct_run_advertises_server_config_and_routes_per_action_chunks(
         "no_state_obs_mode": False,
         "steps_per_inference": 20,
         "action_horizon": 20,
+        "observation_profile": "smolvla_vitac_256",
         "execution_protocol": "frs_steering_v1",
         "steering_protection_interval_s": None,
         "frs_tactile_keys": list(DIRECT_TACTILE_KEYS),
