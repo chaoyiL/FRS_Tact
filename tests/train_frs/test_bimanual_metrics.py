@@ -38,6 +38,10 @@ def test_quadrant_ratios_use_group_means_across_different_baseline_scales():
     assert left["mse_vla_gt"] == pytest.approx(51.0)
     assert left["relative_gt_error"] == pytest.approx(13.0 / 51.0)
     assert left["relative_gt_error"] != pytest.approx(np.mean([1.0 / 2.0, 25.0 / 100.0]))
+    assert left["vla_preserve_ratio"] == pytest.approx(13.5 / 51.0)
+    assert left["vla_preserve_ratio"] != pytest.approx(
+        np.mean([2.0 / 2.0, 25.0 / 100.0])
+    )
 
 
 def test_quadrant_ratios_clamp_zero_and_near_zero_group_baselines():
