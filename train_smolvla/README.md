@@ -10,7 +10,7 @@ not install or download dependencies:
 ```bash
 bash scripts/setup_env.sh --root
 bash scripts/download_data.sh
-bash scripts/download_ckpt.sh
+bash scripts/download_encoder.sh
 ```
 
 省略 `--root` 时，统一安装脚本会保持兼容行为，同时安装根环境和 Pi0.5 部署环境。

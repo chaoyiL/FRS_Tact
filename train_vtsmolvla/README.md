@@ -9,7 +9,7 @@ Prepare the environment, data, and checkpoint before launching:
 ```bash
 bash scripts/setup_env.sh --root
 bash scripts/download_data.sh
-bash scripts/download_ckpt.sh
+bash scripts/download_encoder.sh
 bash train_vtsmolvla/scripts/train.sh
 ```
 

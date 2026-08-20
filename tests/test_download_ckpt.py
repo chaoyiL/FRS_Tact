@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 from deploy_smolvla.src import download_ckpt
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,7 +20,7 @@ def test_output_dir_override_is_preserved(tmp_path: Path) -> None:
     assert args.output_dir == tmp_path / "custom"
 
 
-def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -> None:
+def test_encoder_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -> None:
     project = tmp_path / "project"
     scripts = project / "scripts"
     download_src = project / "deploy_smolvla" / "src"
@@ -29,8 +28,8 @@ def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -
     scripts.mkdir(parents=True)
     download_src.mkdir(parents=True)
     fake_bin.mkdir()
-    wrapper = scripts / "download_ckpt.sh"
-    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+    wrapper = scripts / "download_encoder.sh"
+    shutil.copy2(ROOT / "scripts" / "download_encoder.sh", wrapper)
     shutil.copy2(ROOT / "deploy_smolvla" / "src" / "download_ckpt.py", download_src / "download_ckpt.py")
     uv = fake_bin / "uv"
     uv.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
@@ -64,6 +63,200 @@ def test_shell_wrapper_reports_defaults_and_forwards_arguments(tmp_path: Path) -
         "--output-dir",
         str(custom_output),
     ]
+
+
+def test_model_shell_wrapper_downloads_repo_to_project_model_dir(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts.mkdir(parents=True)
+    fake_bin.mkdir()
+    wrapper = scripts / "download_ckpt.sh"
+    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+    uv = fake_bin / "uv"
+    uv.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", str(wrapper), "--Aether258/pi05_bi_two_tubes_all_step8000"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    output_dir = project / "checkpoints" / "model" / "pi05_bi_two_tubes_all_step8000"
+    assert result.returncode == 0, result.stderr
+    assert "模型仓库：Aether258/pi05_bi_two_tubes_all_step8000" in result.stdout
+    assert f"下载目录：{output_dir}" in result.stdout
+    assert result.stdout.splitlines()[-9:] == [
+        "run",
+        "--no-sync",
+        "hf",
+        "download",
+        "Aether258/pi05_bi_two_tubes_all_step8000",
+        "--repo-type",
+        "model",
+        "--local-dir",
+        str(output_dir),
+    ]
+
+
+def test_model_shell_wrapper_accepts_standard_positional_repo(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts.mkdir(parents=True)
+    fake_bin.mkdir()
+    wrapper = scripts / "download_ckpt.sh"
+    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+    uv = fake_bin / "uv"
+    uv.write_text("#!/usr/bin/env bash\nprintf '%s\\n' \"$@\"\n", encoding="utf-8")
+    uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    result = subprocess.run(
+        ["bash", str(wrapper), "Aether258/pi05_bi_two_tubes_all_step8000"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Aether258/pi05_bi_two_tubes_all_step8000" in result.stdout
+
+
+def test_model_shell_wrapper_rejects_unsafe_repo_id(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    scripts.mkdir(parents=True)
+    wrapper = scripts / "download_ckpt.sh"
+    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+
+    result = subprocess.run(
+        ["bash", str(wrapper), "--../../outside"],
+        cwd=project,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "仓库 ID" in result.stderr
+
+
+def test_model_shell_wrapper_reuses_owned_dir_and_rejects_same_name_from_other_owner(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts.mkdir(parents=True)
+    fake_bin.mkdir()
+    wrapper = scripts / "download_ckpt.sh"
+    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+    call_log = tmp_path / "uv-calls.log"
+    uv = fake_bin / "uv"
+    uv.write_text(
+        "#!/usr/bin/env bash\nprintf 'called\\n' >>\"$UV_CALL_LOG\"\n",
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["UV_CALL_LOG"] = str(call_log)
+
+    first = subprocess.run(
+        ["bash", str(wrapper), "alice/shared-model"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    resumed = subprocess.run(
+        ["bash", str(wrapper), "alice/shared-model"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    conflict = subprocess.run(
+        ["bash", str(wrapper), "bob/shared-model"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    output_dir = project / "checkpoints" / "model" / "shared-model"
+    repo_marker = (
+        project
+        / "checkpoints"
+        / "model"
+        / ".frs_hf_repos"
+        / "shared-model.repo-id"
+    )
+    assert first.returncode == 0, first.stderr
+    assert resumed.returncode == 0, resumed.stderr
+    assert output_dir.is_dir()
+    assert repo_marker.read_text(encoding="utf-8").strip() == "alice/shared-model"
+    assert call_log.read_text(encoding="utf-8").splitlines() == ["called", "called"]
+    assert conflict.returncode != 0
+    assert "已经属于 alice/shared-model" in conflict.stderr
+
+
+def test_model_shell_wrapper_rejects_unowned_nonempty_or_symlink_target(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    scripts = project / "scripts"
+    fake_bin = tmp_path / "bin"
+    scripts.mkdir(parents=True)
+    fake_bin.mkdir()
+    wrapper = scripts / "download_ckpt.sh"
+    shutil.copy2(ROOT / "scripts" / "download_ckpt.sh", wrapper)
+    uv = fake_bin / "uv"
+    uv.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    uv.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    model_root = project / "checkpoints" / "model"
+    unowned = model_root / "unowned"
+    unowned.mkdir(parents=True)
+    (unowned / "weights.bin").write_bytes(b"existing")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (model_root / "linked").symlink_to(outside, target_is_directory=True)
+
+    unowned_result = subprocess.run(
+        ["bash", str(wrapper), "owner/unowned"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    symlink_result = subprocess.run(
+        ["bash", str(wrapper), "owner/linked"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert unowned_result.returncode != 0
+    assert "缺少仓库归属标记" in unowned_result.stderr
+    assert symlink_result.returncode != 0
+    assert "符号链接" in symlink_result.stderr
+    assert list(outside.iterdir()) == []
 
 
 def test_main_downloads_and_verifies_custom_output_offline(

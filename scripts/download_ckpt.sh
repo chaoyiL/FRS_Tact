@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-'''
-bash scripts/download_ckpt.sh \
-  --repo-id KaiyueChen/encoder_ckpt_0809 \
-  --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
-'''
 
 set -Eeuo pipefail
 
@@ -17,16 +12,42 @@ trap 'status=$?; echo "[download-ckpt] 下载失败，退出码 ${status}" >&2; 
 
 usage() {
     printf '%s\n' \
-        "用法：scripts/download_ckpt.sh [--full] [download_ckpt.py 参数]" \
+        "用法：" \
+        "  bash scripts/download_ckpt.sh OWNER/REPO" \
+        "  bash scripts/download_ckpt.sh --OWNER/REPO" \
         "" \
-        "默认下载 FRS 所需的最小 tactile encoder checkpoint。" \
-        "  --full                 下载 optimizer 和 memory bank 等完整文件" \
-        "  --repo-id ID           覆盖 Hugging Face 仓库" \
-        "  --output-dir PATH      覆盖下载目录" \
-        "  --revision REVISION    指定分支、tag 或 commit" \
-        "  --cache-dir PATH       指定 Hugging Face 缓存目录" \
-        "  --force-download       强制重新下载"
+        "完整下载 Hugging Face 模型到：" \
+        "  <项目根目录>/checkpoints/model/<仓库名>"
 }
+
+if (($# != 1)); then
+    usage >&2
+    fail "必须提供一个 Hugging Face 模型仓库 ID"
+fi
+
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    --*)
+        repo_id="${1#--}"
+        ;;
+    *)
+        repo_id="$1"
+        ;;
+esac
+
+if [[ ! "${repo_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    fail "无效的 Hugging Face 仓库 ID：${repo_id}；应为 OWNER/REPO"
+fi
+
+repo_name="${repo_id##*/}"
+checkpoint_root="${PROJECT_ROOT}/checkpoints"
+model_root="${checkpoint_root}/model"
+metadata_root="${model_root}/.frs_hf_repos"
+output_dir="${model_root}/${repo_name}"
+repo_marker="${metadata_root}/${repo_name}.repo-id"
 
 if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck disable=SC1090
@@ -35,40 +56,39 @@ fi
 
 if command -v uv >/dev/null 2>&1; then
     UV_BIN="$(command -v uv)"
-elif [[ -x "${HOME}/.local/bin/uv" ]]; then
+elif [[ -n "${HOME:-}" && -x "${HOME}/.local/bin/uv" ]]; then
     UV_BIN="${HOME}/.local/bin/uv"
 else
     fail "找不到 uv；请先运行 scripts/setup_env.sh"
 fi
 
-# FRS 只需要 encoder 参数，默认不下载 optimizer/memory bank。
-# 传入 --full 可下载完整 checkpoint；其余参数原样传给 download_ckpt.py。
-minimal=1
-forwarded=()
-for argument in "$@"; do
-    case "${argument}" in
-        -h|--help)
-            usage
-            exit 0
-            ;;
-        --full)
-            minimal=0
-            ;;
-        *)
-            forwarded+=("${argument}")
-            ;;
-    esac
-done
-
-command=(
-    "${UV_BIN}" run --no-sync python "${PROJECT_ROOT}/deploy_smolvla/src/download_ckpt.py"
-)
-if ((minimal)); then
-    command+=(--minimal)
+if [[ -L "${checkpoint_root}" || -L "${model_root}" || -L "${metadata_root}" ]]; then
+    fail "checkpoint 下载路径不能是符号链接"
 fi
-command+=("${forwarded[@]}")
+mkdir -p "${metadata_root}"
+if [[ -L "${output_dir}" ]]; then
+    fail "模型下载目录不能是符号链接：${output_dir}"
+fi
+if [[ -e "${output_dir}" && ! -d "${output_dir}" ]]; then
+    fail "下载目标不是目录：${output_dir}"
+fi
+if [[ -L "${repo_marker}" ]]; then
+    fail "仓库归属标记不能是符号链接：${repo_marker}"
+fi
+if [[ -f "${repo_marker}" ]]; then
+    owned_repo_id="$(<"${repo_marker}")"
+    if [[ "${owned_repo_id}" != "${repo_id}" ]]; then
+        fail "目录 ${output_dir} 已经属于 ${owned_repo_id}，拒绝混入 ${repo_id}"
+    fi
+elif [[ -d "${output_dir}" && -n "$(find "${output_dir}" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+    fail "目录 ${output_dir} 已存在但缺少仓库归属标记，请先确认或移走该目录"
+else
+    mkdir -p "${output_dir}"
+    printf '%s\n' "${repo_id}" >"${repo_marker}"
+fi
 
-log "下载 tactile encoder checkpoint"
-log "默认仓库：liuchaoyi/encoder_ckpt_06"
-log "默认目录：${PROJECT_ROOT}/checkpoints/encoder/encoder_ckpt_06"
-"${command[@]}"
+log "模型仓库：${repo_id}"
+log "下载目录：${output_dir}"
+"${UV_BIN}" run --no-sync hf download "${repo_id}" \
+    --repo-type model \
+    --local-dir "${output_dir}"
