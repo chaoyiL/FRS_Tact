@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-/*
-示例：
-bash scripts/upload_frs_ckpt.sh \
-  KaiyueChen/smolvla_frs_pick_tube_05_bimanual_best \
-  /workspace/frs_pick_tube_05/frs_bimanual_gated_01/best
-*/
+# 示例：
+# bash scripts/upload_frs_ckpt.sh \
+#   KaiyueChen/smolvla_frs_pick_tube_05_bimanual_best \
+#   /workspace/frs_pick_tube_05/frs_bimanual_gated_01/best
 
 set -Eeuo pipefail
 
@@ -65,6 +63,7 @@ fi
 if ! params_path="$(
     "${UV_BIN}" run --no-sync python - \
         "${checkpoint_dir}/checkpoint.json" "${checkpoint_dir}" <<'PY'
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -75,22 +74,80 @@ try:
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
 except (OSError, UnicodeError, json.JSONDecodeError) as exc:
     raise SystemExit(f"无法读取 checkpoint.json：{exc}") from exc
-params_file = metadata.get("params_file")
-if not isinstance(params_file, str) or not params_file:
-    raise SystemExit("checkpoint.json 缺少有效的 params_file")
-relative_path = Path(params_file)
-if relative_path.is_absolute() or relative_path.parent != Path("."):
-    raise SystemExit(f"params_file 必须是 checkpoint 目录中的文件名：{params_file}")
-params_path = checkpoint_dir / relative_path
-if params_path.is_symlink() or not params_path.is_file():
-    raise SystemExit(f"params_file 不存在或不是普通文件：{params_file}")
-resolved = params_path.resolve(strict=True)
-if resolved.parent != checkpoint_dir:
-    raise SystemExit(f"params_file 越出 checkpoint 目录：{params_file}")
-print(resolved)
+
+
+def sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_json(value: object) -> bytes:
+    return (json.dumps(value, sort_keys=True) + "\n").encode("utf-8")
+
+
+try:
+    version = int(metadata.get("version", 1))
+except (TypeError, ValueError) as exc:
+    raise SystemExit("checkpoint.json 的 version 无效") from exc
+
+if version >= 3:
+    generation = metadata.get("generation")
+    if not isinstance(generation, str) or not generation:
+        raise SystemExit("checkpoint v3 缺少有效的 generation")
+    if checkpoint_dir.parent.name == ".checkpoint-generations" and checkpoint_dir.name != generation:
+        raise SystemExit(
+            f"checkpoint generation 不匹配：metadata={generation!r}, directory={checkpoint_dir.name!r}"
+        )
+
+    files = metadata.get("files")
+    if not isinstance(files, dict):
+        raise SystemExit("checkpoint v3 缺少有效的 files 清单")
+    expected_files = {"params.npz", "checkpoint.json"}
+    if metadata.get("has_opt_state"):
+        expected_files.update(("opt_state.npz", "opt_state.treedef.pkl"))
+    if set(files) != expected_files:
+        raise SystemExit(
+            f"checkpoint 文件清单不匹配：{sorted(files)} != {sorted(expected_files)}"
+        )
+
+    for name in sorted(expected_files):
+        record = files.get(name)
+        if not isinstance(record, dict):
+            raise SystemExit(f"checkpoint 文件记录无效：{name}")
+        if record.get("generation") != generation:
+            raise SystemExit(f"checkpoint 文件 generation 不匹配：{name}")
+        path = checkpoint_dir / name
+        if path.is_symlink() or not path.is_file():
+            raise SystemExit(f"checkpoint 文件不存在或不是普通文件：{name}")
+        if path.resolve(strict=True).parent != checkpoint_dir:
+            raise SystemExit(f"checkpoint 文件越出 checkpoint 目录：{name}")
+        if name == "checkpoint.json":
+            canonical = json.loads(json.dumps(metadata))
+            canonical["files"]["checkpoint.json"]["sha256"] = ""
+            payload = canonical_json(canonical)
+        else:
+            payload = path.read_bytes()
+        if record.get("size") != len(payload):
+            raise SystemExit(f"checkpoint 文件大小不匹配：{name}")
+        if record.get("sha256") != sha256(payload):
+            raise SystemExit(f"checkpoint 文件校验和不匹配：{name}")
+    params_path = checkpoint_dir / "params.npz"
+else:
+    params_file = metadata.get("params_file")
+    if not isinstance(params_file, str) or not params_file:
+        raise SystemExit("旧版 checkpoint.json 缺少有效的 params_file")
+    relative_path = Path(params_file)
+    if relative_path.is_absolute() or relative_path.parent != Path("."):
+        raise SystemExit(f"params_file 必须是 checkpoint 目录中的文件名：{params_file}")
+    params_path = checkpoint_dir / relative_path
+    if params_path.is_symlink() or not params_path.is_file():
+        raise SystemExit(f"params_file 不存在或不是普通文件：{params_file}")
+    if params_path.resolve(strict=True).parent != checkpoint_dir:
+        raise SystemExit(f"params_file 越出 checkpoint 目录：{params_file}")
+
+print(params_path.resolve(strict=True))
 PY
 )"; then
-    fail "checkpoint.json 中的 params_file 校验失败"
+    fail "checkpoint generation 校验失败"
 fi
 
 log "仓库：${repo_id}（public）"

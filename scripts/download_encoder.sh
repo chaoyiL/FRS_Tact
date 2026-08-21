@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # 示例：
-# bash scripts/download_encoder.sh \
-#   --repo-id KaiyueChen/encoder_ckpt_0809 \
-#   --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
+: <<'COMMENT'
+bash scripts/download_encoder.sh \
+  --repo-id KaiyueChen/encoder_ckpt_0809 \
+  --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
+COMMENT
 
 set -Eeuo pipefail
 
