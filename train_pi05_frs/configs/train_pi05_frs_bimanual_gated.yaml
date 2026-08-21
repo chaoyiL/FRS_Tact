@@ -1,6 +1,6 @@
 # Full Pi0.5 FRS pipeline with the fixed physical bimanual objective.
-# Pinned native JAX/Orbax fine-tune from Hugging Face.
-checkpoint: hf://KaiyueChen/pi05_pick_tube_8000@621feba94ab2ba190fe85f2de0ddbe4964e7e5a4
+# Local snapshot of the pinned native JAX/Orbax Hugging Face fine-tune.
+checkpoint: /workspace/checkpoints/pi05_pick_tube_8000
 allow_download: true
 
 datasets:
@@ -54,13 +54,13 @@ model:
   camera_map:
     left_wrist_0_rgb: observation.images.camera1
     right_wrist_0_rgb: observation.images.camera2
-  action_dim: 32
+  action_dim: 20
   action_horizon: 50
   paligemma_variant: gemma_2b_lora
   action_expert_variant: gemma_300m_lora
 
 norm_stats:
-  dir: hf://KaiyueChen/pi05_pick_tube_8000@621feba94ab2ba190fe85f2de0ddbe4964e7e5a4/assets
+  dir: /workspace/checkpoints/pi05_pick_tube_8000/assets
   asset_id: pick_tube_all
   use_quantile_norm: true
 
