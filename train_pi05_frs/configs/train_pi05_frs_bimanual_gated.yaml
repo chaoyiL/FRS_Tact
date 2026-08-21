@@ -1,5 +1,6 @@
 # Full Pi0.5 FRS pipeline with the fixed physical bimanual objective.
-checkpoint: gs://openpi-assets/checkpoints/pi05_base
+# Pinned native JAX/Orbax fine-tune from Hugging Face.
+checkpoint: hf://KaiyueChen/pi05_pick_tube_8000@621feba94ab2ba190fe85f2de0ddbe4964e7e5a4
 allow_download: true
 
 datasets:
@@ -11,7 +12,7 @@ datasets:
       observation.images.camera1: observation.images.camera2
 
 action_cache:
-  root: /workspace/frs_pick_tube_pi05/action_cache_slerpflow_k50_state_v3
+  root: /workspace/frs_pick_tube_pi05/action_cache_pick_tube_8000_slerpflow_k50_state_v3
   model_sample_steps: 10
   reverse_steps: 50
   reverse_solver: slerpflow
@@ -55,16 +56,16 @@ model:
     right_wrist_0_rgb: observation.images.camera2
   action_dim: 32
   action_horizon: 50
-  paligemma_variant: gemma_2b
-  action_expert_variant: gemma_300m
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
 
 norm_stats:
-  dir: gs://openpi-assets/checkpoints/pi05_base/assets
-  asset_id: trossen
+  dir: hf://KaiyueChen/pi05_pick_tube_8000@621feba94ab2ba190fe85f2de0ddbe4964e7e5a4/assets
+  asset_id: pick_tube_all
   use_quantile_norm: true
 
 frs_training:
-  output: /workspace/frs_pick_tube_pi05/run_bimanual_gated_v1
+  output: /workspace/frs_pick_tube_pi05/run_bimanual_gated_pick_tube_8000_v1
   tactile_window_divisor: 5
   history_stride: 3
   loss_mode: bimanual_gated

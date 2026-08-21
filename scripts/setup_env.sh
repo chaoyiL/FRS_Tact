@@ -19,21 +19,32 @@ PYTHON_VERSION="3.12"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
 
 if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
-    DEFAULT_VENV_DIR="/opt/venvs/frs_tact"
-    DEFAULT_STORAGE_ROOT="/workspace"
+    DEFAULT_WORKSPACE_ROOT="/workspace"
+else
+    DEFAULT_WORKSPACE_ROOT="${PROJECT_ROOT}/.cache"
+fi
+WORKSPACE_ROOT_VALUE="${FRS_WORKSPACE_ROOT:-${DEFAULT_WORKSPACE_ROOT}}"
+if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
+    DEFAULT_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/frs_tact"
+    DEFAULT_PI05_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/pi05_deploy"
+    DEFAULT_UV_CACHE_DIR="${WORKSPACE_ROOT_VALUE}/uv-cache"
+    DEFAULT_STORAGE_ROOT="${WORKSPACE_ROOT_VALUE}"
 else
     DEFAULT_VENV_DIR="${PROJECT_ROOT}/.venv"
+    DEFAULT_PI05_VENV_DIR="${PROJECT_ROOT}/deploy_pi05/.venv"
+    DEFAULT_UV_CACHE_DIR="${HOME}/.cache/uv"
     DEFAULT_STORAGE_ROOT="${PROJECT_ROOT}/.cache"
 fi
 VENV_DIR="${FRS_VENV_DIR:-${DEFAULT_VENV_DIR}}"
 PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"
-PI05_VENV_DIR="${PI05_VENV_DIR:-${PI05_PROJECT_ROOT}/.venv}"
-UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${HOME}/.cache/uv}"
+PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"
+UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${DEFAULT_UV_CACHE_DIR}}"
 STORAGE_ROOT="${FRS_STORAGE_ROOT:-${DEFAULT_STORAGE_ROOT}}"
 HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
 HF_HUB_CACHE_VALUE="${HF_HOME_VALUE}/hub"
 HF_DATASETS_CACHE_VALUE="${HF_HOME_VALUE}/datasets_arrow"
 HF_LEROBOT_HOME_VALUE="${HF_HOME_VALUE}/lerobot"
+OPENPI_DATA_HOME_VALUE="${STORAGE_ROOT}/openpi-cache"
 TMPDIR_VALUE="${STORAGE_ROOT}/tmp"
 UV_BIN=""
 SETUP_MODE="all"
@@ -230,11 +241,14 @@ configure_runtime_storage() {
         "${HF_HUB_CACHE_VALUE}" \
         "${HF_DATASETS_CACHE_VALUE}" \
         "${HF_LEROBOT_HOME_VALUE}" \
+        "${OPENPI_DATA_HOME_VALUE}" \
         "${TMPDIR_VALUE}"
+    export WORKSPACE_ROOT="${WORKSPACE_ROOT_VALUE}"
     export HF_HOME="${HF_HOME_VALUE}"
     export HF_HUB_CACHE="${HF_HUB_CACHE_VALUE}"
     export HF_DATASETS_CACHE="${HF_DATASETS_CACHE_VALUE}"
     export HF_LEROBOT_HOME="${HF_LEROBOT_HOME_VALUE}"
+    export OPENPI_DATA_HOME="${OPENPI_DATA_HOME_VALUE}"
     export TMPDIR="${TMPDIR_VALUE}"
 }
 
@@ -246,10 +260,12 @@ write_environment_file() {
         printf 'export PI05_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export PI05_FRS_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export UV_CACHE_DIR=%q\n' "${UV_CACHE_DIR}"
+        printf 'export WORKSPACE_ROOT=%q\n' "${WORKSPACE_ROOT}"
         printf 'export HF_HOME=%q\n' "${HF_HOME}"
         printf 'export HF_HUB_CACHE=%q\n' "${HF_HUB_CACHE}"
         printf 'export HF_DATASETS_CACHE=%q\n' "${HF_DATASETS_CACHE}"
         printf 'export HF_LEROBOT_HOME=%q\n' "${HF_LEROBOT_HOME}"
+        printf 'export OPENPI_DATA_HOME=%q\n' "${OPENPI_DATA_HOME}"
         printf 'export TMPDIR=%q\n' "${TMPDIR}"
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
@@ -435,7 +451,9 @@ print_summary() {
         echo "Pi0.5 部署环境（本次未安装）：${PI05_VENV_DIR}"
     fi
     echo "环境变量：${ENV_FILE}"
+    echo "Workspace 根目录：${WORKSPACE_ROOT}"
     echo "Hugging Face 缓存：${HF_HOME}"
+    echo "OpenPI 缓存：${OPENPI_DATA_HOME}"
     echo "Arrow 数据缓存：${HF_DATASETS_CACHE}"
     echo
     echo "首次使用时登录："
