@@ -36,7 +36,7 @@ frs:
     threshold: 0.08
     multiplier: 0.8
     above_multiplier: 1.0
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/frs_no_rank/best
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/smolvla_frs_pick_tube_05_bimanual_best
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
 
   tactile_keys:

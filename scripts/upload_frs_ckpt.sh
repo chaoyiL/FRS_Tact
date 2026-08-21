@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+/*
+示例：
+bash scripts/upload_frs_ckpt.sh \
+  KaiyueChen/smolvla_frs_pick_tube_05_bimanual_best \
+  /workspace/frs_pick_tube_05/frs_bimanual_gated_01/best
+*/
 
 set -Eeuo pipefail
 

@@ -1,5 +1,5 @@
 # Plain-vision pi0.5 deployment configuration.
-checkpoint: /home/typhon/ManiSkill-vitac/checkpoints/6000/
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step6000/checkpoint/
 seed: 0
 num_steps: 10
 
@@ -17,8 +17,8 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/ManiSkill-vitac/checkpoints/6000/assets
-  asset_id: pick_tube_all
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step6000/checkpoint/assets/
+  asset_id: two_tubes_0102
   use_quantile_norm: true
 
 connection:
@@ -36,7 +36,9 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
+  #Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  #Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   single_arm_mode: false
   no_state_obs_mode: false
 
@@ -53,6 +55,6 @@ runtime:
 
 logging:
   save_observations: true
-  output_dir: outputs/pi05_observations
+  output_dir: outputs/pi05_task1
   save_every: 1
   queue_size: 32
