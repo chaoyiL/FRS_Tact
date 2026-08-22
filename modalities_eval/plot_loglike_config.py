@@ -16,7 +16,6 @@ _PATH_KEYS = (
     "dataset_root",
     "output_dir",
     "output_path",
-    "compare_reverse_dir",
 )
 
 
@@ -58,18 +57,15 @@ def _coerce_rename_map(value: Any) -> str | None:
 def flatten_plot_loglike_defaults(
     cfg: Mapping[str, Any],
     *,
-    script: str,
+    script: str = "reverse",
 ) -> dict[str, Any]:
-    """Flatten shared + script-specific YAML sections into argparse defaults.
+    """Flatten ``data`` + ``integration`` + ``reverse`` into argparse defaults."""
 
-    ``script`` is ``\"reverse\"`` or ``\"forward\"``.
-    """
-
-    if script not in ("reverse", "forward"):
-        raise ValueError(f"script must be 'reverse' or 'forward', got {script!r}")
+    if script != "reverse":
+        raise ValueError(f"script must be 'reverse', got {script!r}")
 
     defaults: dict[str, Any] = {}
-    for section_name in ("data", "integration", script):
+    for section_name in ("data", "integration", "reverse"):
         for key, value in _section(cfg, section_name).items():
             if key in _PATH_KEYS:
                 defaults[key] = _coerce_path(value)
@@ -96,11 +92,11 @@ def add_config_argument(
 def parse_args_with_config(
     build_parser,
     *,
-    script: str,
+    script: str = "reverse",
     argv: Sequence[str] | None = None,
     default_config: pathlib.Path = DEFAULT_CONFIG,
 ) -> argparse.Namespace:
-    """Parse CLI with YAML defaults from ``data`` + ``integration`` + script section."""
+    """Parse CLI with YAML defaults from ``data`` + ``integration`` + ``reverse``."""
 
     argv_list = list(argv) if argv is not None else None
     pre = argparse.ArgumentParser(add_help=False)

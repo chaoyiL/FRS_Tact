@@ -15,6 +15,7 @@ import plot_loglike_modalities
 
 
 def test_default_arguments_run_requested_evaluation() -> None:
+    cfg = plot_loglike_config.load_yaml_config(plot_loglike_config.DEFAULT_CONFIG)
     args = plot_loglike_config.parse_args_with_config(
         plot_loglike_modalities._build_parser,
         script="reverse",
@@ -22,16 +23,16 @@ def test_default_arguments_run_requested_evaluation() -> None:
     )
 
     assert args.config == plot_loglike_config.DEFAULT_CONFIG
-    assert args.checkpoint_dir == pathlib.Path("/home/typhon/models/tactile_test_05_1.5w")
-    assert args.dataset_repo_id == "chaoyi/tactile_test_03"
-    assert args.episode_index == 0
-    assert args.sample_interval == 10
-    assert args.num_steps == 15
-    assert args.ode_solver == "fireflow"
-    assert args.eval_batch_size == 4
-    assert args.hutchinson_samples == 1
-    assert args.modalities == ["vision", "state", "language_prompt"]
-    assert args.output_dir == pathlib.Path("eval_outputs/loglike")
+    assert args.checkpoint_dir == pathlib.Path(cfg["data"]["checkpoint_dir"])
+    assert args.dataset_repo_id == cfg["data"]["dataset_repo_id"]
+    assert args.episode_index == cfg["data"]["episode_index"]
+    assert args.sample_interval == cfg["data"]["sample_interval"]
+    assert args.num_steps == cfg["integration"]["num_steps"]
+    assert args.ode_solver == cfg["integration"]["ode_solver"]
+    assert args.eval_batch_size == cfg["integration"]["eval_batch_size"]
+    assert args.hutchinson_samples == cfg["integration"]["hutchinson_samples"]
+    assert args.modalities == cfg["reverse"]["modalities"]
+    assert args.output_dir == pathlib.Path(cfg["reverse"]["output_dir"])
 
 
 def test_plot_only_cli_inputs_are_removed() -> None:

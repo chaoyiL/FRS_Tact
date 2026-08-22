@@ -1,29 +1,27 @@
-# Reverse / forward 模态 log-likelihood 消融绘图配置。
-# 二者共用 data + integration；脚本专有项分别写在 reverse / forward。
+# Reverse 模态 log-likelihood 消融绘图配置。
 # 运行:
 #   uv run python -m modalities_eval.plot_loglike_modalities --config configs/plot_loglike_modalities.yaml
-#   uv run python -m modalities_eval.plot_loglike_modalities_forward --config configs/plot_loglike_modalities.yaml
 # CLI 同名参数可覆盖 YAML。
 
-# ---- 数据 / episode（两脚本共用）----
+# ---- 数据 / episode ----
 data:
-  checkpoint_dir: /home/typhon/models/tactile_test_05_1.5w
-  dataset_repo_id: chaoyi/tactile_test_03
+  checkpoint_dir: /home/rvsa/codehub/FRS_Tact/checkpoints/tactile_test_L32_4k
+  dataset_repo_id: chaoyi/tactile_test_05
   dataset_root: null
   dataset_revision: null
   action_key: null
   # JSON 对象字符串，或 YAML mapping（加载时会转成 JSON 字符串）
   rename_map: null
   allow_download: false
-  episode_index: 0
+  episode_index: 100
   frame: 0
-  max_frames: 1000
-  sample_interval: 10
+  max_frames: 400
+  sample_interval: 5
   single_frame: false
 
-# ---- 积分 / 迭代（两脚本共用）----
+# ---- 积分 / 迭代 ----
 integration:
-  num_steps: 15
+  num_steps: 50
   ode_solver: fireflow   # euler | fireflow | slerpflow
   eval_batch_size: 4
   hutchinson_samples: 1
@@ -38,16 +36,3 @@ reverse:
   output_dir: eval_outputs/loglike
   y_field: contribution
   output_path: null
-
-# ---- forward：plot_loglike_modalities_forward.py ----
-forward:
-  modalities:
-    - vision
-    - state
-    - language_prompt
-  output_dir: eval_outputs/loglike_forward
-  y_field: contribution
-  output_path: null
-  noise_seed: 0
-  # 例如 eval_outputs/loglike；null = 不做 forward vs reverse 对比
-  compare_reverse_dir: null

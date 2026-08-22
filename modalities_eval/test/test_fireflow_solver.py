@@ -125,9 +125,10 @@ def test_solver_nfe_counts(num_steps: int) -> None:
         dt=dt,
         rng_key=rng_key,
         velocity_fn=_toy_velocity,
-        hutchinson_samples=1,
+        velocity_trace_fn=_toy_velocity_trace,
     )
-    assert int(slerpflow_nfe) == num_steps + 1
+    # initial v_curr + per-step (model trace + v_next inside slerp)
+    assert int(slerpflow_nfe) == 1 + 2 * num_steps
 
 
 def test_slerpflow_preserves_input_shape() -> None:
@@ -144,13 +145,46 @@ def test_slerpflow_preserves_input_shape() -> None:
         dt=jnp.asarray(1.0 / num_steps, dtype=jnp.float32),
         rng_key=jax.random.PRNGKey(0),
         velocity_fn=_toy_velocity,
-        hutchinson_samples=1,
+        velocity_trace_fn=_toy_velocity_trace,
     )
 
     assert x_out.shape == x_start.shape
     assert r_out.shape == r_tot.shape
     assert bool(jnp.all(jnp.isfinite(x_out)))
     assert bool(jnp.all(jnp.isfinite(r_out)))
+
+
+def test_slerpflow_uses_model_divergence_not_v_slerp() -> None:
+    """Constant div(v_θ) must accumulate like Euler, independent of Slerp path."""
+
+    x_start = jax.random.normal(jax.random.PRNGKey(2), (2, 3, 4), dtype=jnp.float32)
+    r_tot = jnp.zeros((x_start.shape[0],), dtype=jnp.float32)
+    t = jnp.zeros((x_start.shape[0],), dtype=jnp.float32)
+    num_steps = 7
+    step_indices = jnp.arange(num_steps, dtype=jnp.int32)
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
+    rng_key = jax.random.PRNGKey(0)
+
+    _, r_euler, _ = _run_euler_likelihood_scan(
+        x=x_start,
+        r_tot=r_tot,
+        t=t,
+        step_indices=step_indices,
+        dt=dt,
+        rng_key=rng_key,
+        velocity_trace_fn=_toy_velocity_trace,
+    )
+    _, r_slerp, _ = _run_slerpflow_likelihood_scan(
+        x=x_start,
+        r_tot=r_tot,
+        t=t,
+        step_indices=step_indices,
+        dt=dt,
+        rng_key=rng_key,
+        velocity_fn=_toy_velocity,
+        velocity_trace_fn=_toy_velocity_trace,
+    )
+    np.testing.assert_allclose(np.asarray(r_slerp), np.asarray(r_euler), rtol=1e-5, atol=1e-5)
 
 
 def test_slerpflow_matches_repo_integration_trajectory() -> None:
@@ -167,7 +201,7 @@ def test_slerpflow_matches_repo_integration_trajectory() -> None:
         dt=dt,
         rng_key=jax.random.PRNGKey(0),
         velocity_fn=_toy_velocity,
-        hutchinson_samples=1,
+        velocity_trace_fn=_toy_velocity_trace,
     )
     x_repo = repo_integration.slerpflow_integrate_velocity(
         _toy_velocity,

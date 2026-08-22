@@ -1,0 +1,28 @@
+# SlerpFlow / FireFlow / Euler logp 数值对比实验配置。
+# 运行:
+#   uv run python -m modalities_eval.solver_logp_sweep --config configs/solver_logp_sweep.yaml
+# CLI 同名参数可覆盖 YAML。
+
+# ---- 数据 / 单帧 ----
+data:
+  checkpoint_dir: /home/rvsa/codehub/FRS_Tact/checkpoints/tactile_test_L32_4k
+  dataset_repo_id: chaoyi/tactile_test_05
+  dataset_root: null
+  dataset_revision: null
+  action_key: null
+  rename_map: null
+  allow_download: false
+  episode_index: 100
+  frame: 0
+  max_frames: 400
+
+# ---- 实验超参 ----
+experiment:
+  k_values: [10, 15, 20, 25, 40, 80, 100, 150, 200]
+  atol: 1.0
+  patience: 2
+  hutchinson_samples: 1
+  hutchinson_seed: 0
+  output_dir: eval_outputs/loglike/solver_logp_sweep
+  # true = 每个 k/solver 后清 JAX cache（省显存，略慢）
+  clear_cache_between_runs: true

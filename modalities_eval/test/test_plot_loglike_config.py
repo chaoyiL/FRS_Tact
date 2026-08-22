@@ -11,7 +11,7 @@ if str(EVAL_SCRIPTS) not in sys.path:
 import plot_loglike_config
 
 
-def test_flatten_uses_shared_sections_and_script_block() -> None:
+def test_flatten_uses_shared_sections_and_reverse_block() -> None:
     cfg = {
         "data": {
             "checkpoint_dir": "/ckpt",
@@ -28,32 +28,20 @@ def test_flatten_uses_shared_sections_and_script_block() -> None:
             "output_dir": "out/rev",
             "modalities": ["state"],
         },
-        "forward": {
-            "output_dir": "out/fwd",
-            "noise_seed": 8,
-            "compare_reverse_dir": "out/rev",
-        },
     }
 
     reverse = plot_loglike_config.flatten_plot_loglike_defaults(cfg, script="reverse")
-    forward = plot_loglike_config.flatten_plot_loglike_defaults(cfg, script="forward")
 
     assert reverse["checkpoint_dir"] == pathlib.Path("/ckpt")
     assert reverse["num_steps"] == 21
     assert reverse["ode_solver"] == "slerpflow"
     assert reverse["output_dir"] == pathlib.Path("out/rev")
     assert reverse["modalities"] == ["state"]
-    assert "noise_seed" not in reverse
-
-    assert forward["checkpoint_dir"] == pathlib.Path("/ckpt")
-    assert forward["num_steps"] == 21
-    assert forward["noise_seed"] == 8
-    assert forward["output_dir"] == pathlib.Path("out/fwd")
-    assert forward["compare_reverse_dir"] == pathlib.Path("out/rev")
 
 
 def test_default_config_file_exists() -> None:
     assert plot_loglike_config.DEFAULT_CONFIG.is_file()
     cfg = plot_loglike_config.load_yaml_config(plot_loglike_config.DEFAULT_CONFIG)
     assert "data" in cfg and "integration" in cfg
-    assert "reverse" in cfg and "forward" in cfg
+    assert "reverse" in cfg
+    assert "forward" not in cfg

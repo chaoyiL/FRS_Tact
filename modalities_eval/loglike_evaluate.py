@@ -36,29 +36,20 @@ from utils import (  # noqa: E402
 
 DEFAULT_HUTCHINSON_SAMPLES = 1
 DEFAULT_HUTCHINSON_SEED = 0
-DEFAULT_NOISE_SEED = 0
 ODE_SOLVER_EULER = "euler"
 ODE_SOLVER_FIREFLOW = "fireflow"
 ODE_SOLVER_SLERPFLOW = "slerpflow"
 ODE_SOLVERS = (ODE_SOLVER_EULER, ODE_SOLVER_FIREFLOW, ODE_SOLVER_SLERPFLOW)
-LIKELIHOOD_DIRECTION_TO_BASE = "to_base"
-LIKELIHOOD_DIRECTION_FROM_NOISE = "from_noise"
 
 
 @dataclasses.dataclass(frozen=True)
 class LikelihoodIntegrationResult:
-    """Result of a CNF likelihood integration.
-
-    For data→base (`to_base`): `x_base` is the endpoint noise and `x_data` is None.
-    For noise→data (`from_noise`): `x_base` is the starting noise and `x_data` is the
-    generated endpoint.
-    """
+    """Result of integrating data actions to the base distribution."""
 
     x_base: jax.Array
     r_tot: jax.Array
     log_p_base: jax.Array
     log_likelihood: jax.Array
-    x_data: jax.Array | None = None
 
 
 VelocityFn = Callable[[jax.Array, jax.Array], jax.Array]
@@ -120,37 +111,6 @@ def slerpflow_step_velocity(
     d_next = _slerp_unit_directions(d_t, d_euler, alpha=0.5)
     v_slerp = (rho_next * d_next - z_t) / dt
     return v_slerp, v_next
-
-
-def hutchinson_trace_of_map(
-    map_fn: Callable[[jax.Array], jax.Array],
-    x: jax.Array,
-    rng_key: jax.Array,
-    *,
-    num_samples: int,
-) -> tuple[jax.Array, jax.Array]:
-    """Estimate div map_fn(x) with Rademacher Hutchinson probes."""
-
-    if num_samples <= 0:
-        raise ValueError(f"num_samples must be positive, got {num_samples}")
-
-    x = jnp.asarray(x, dtype=jnp.float32)
-    event_axes = tuple(range(1, x.ndim))
-    sample_keys = jax.random.split(rng_key, num_samples)
-
-    def scan_body(carry, key: jax.Array):
-        trace, value = carry
-        probe = jax.random.rademacher(key, (1, *x.shape[1:]), dtype=jnp.float32)
-        probe = jnp.broadcast_to(probe, x.shape)
-        value, tangent_out = jax.jvp(map_fn, (x,), (probe,))
-        trace_estimate = jnp.sum(probe * tangent_out, axis=event_axes)
-        return (trace + trace_estimate, value), None
-
-    trace0 = jnp.zeros((x.shape[0],), dtype=jnp.float32)
-    value0 = jnp.zeros_like(x)
-    (trace, value), _ = jax.lax.scan(scan_body, (trace0, value0), sample_keys)
-    trace = trace / jnp.asarray(num_samples, dtype=jnp.float32)
-    return value, trace
 
 
 def _run_euler_likelihood_scan(
@@ -230,46 +190,6 @@ def _run_fireflow_likelihood_scan(
     return x, r_tot, nfe
 
 
-def slerpflow_velocity_and_hutchinson_trace(
-    z_t: jax.Array,
-    v_curr: jax.Array,
-    dt: jax.Array,
-    t_next: jax.Array,
-    velocity_fn: VelocityFn,
-    rng_key: jax.Array,
-    *,
-    num_samples: int,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """Estimate div v_slerp(z_t) and return (v_slerp, divergence, v_next)."""
-
-    if num_samples <= 0:
-        raise ValueError(f"num_samples must be positive, got {num_samples}")
-
-    z_t = jnp.asarray(z_t, dtype=jnp.float32)
-    event_axes = tuple(range(1, z_t.ndim))
-    sample_keys = jax.random.split(rng_key, num_samples)
-
-    def joint_fn(z_arg: jax.Array) -> tuple[jax.Array, jax.Array]:
-        return slerpflow_step_velocity(z_arg, v_curr, dt, t_next, velocity_fn)
-
-    def scan_body(carry, key: jax.Array):
-        trace, v_slerp, v_next = carry
-        probe = jax.random.rademacher(key, (1, *z_t.shape[1:]), dtype=jnp.float32)
-        probe = jnp.broadcast_to(probe, z_t.shape)
-        (v_slerp, v_next), (tangent_slerp, _) = jax.jvp(joint_fn, (z_t,), (probe,))
-        trace_estimate = jnp.sum(probe * tangent_slerp, axis=event_axes)
-        return (trace + trace_estimate, v_slerp, v_next), None
-
-    trace0 = jnp.zeros((z_t.shape[0],), dtype=jnp.float32)
-    (trace, v_slerp, v_next), _ = jax.lax.scan(
-        scan_body,
-        (trace0, jnp.zeros_like(z_t), jnp.zeros_like(z_t)),
-        sample_keys,
-    )
-    trace = trace / jnp.asarray(num_samples, dtype=jnp.float32)
-    return v_slerp, trace, v_next
-
-
 def _run_slerpflow_likelihood_scan(
     *,
     x: jax.Array,
@@ -279,9 +199,15 @@ def _run_slerpflow_likelihood_scan(
     dt: jax.Array,
     rng_key: jax.Array,
     velocity_fn: VelocityFn,
-    hutchinson_samples: int,
+    velocity_trace_fn: VelocityTraceFn,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
-    """SlerpFlow scan with Hutchinson divergence on the effective v_slerp field."""
+    """SlerpFlow state update with model-velocity divergence for likelihood.
+
+    The continuity equation for the trained flow uses ``div v_θ(x,t)``, not
+    ``div v_slerp``. SlerpFlow only corrects the discrete trajectory; the
+    accumulated log-density change must still come from the model field
+    (same convention as Euler / FireFlow).
+    """
 
     v_curr = velocity_fn(x, t)
     nfe = jnp.asarray(1, dtype=jnp.int32)
@@ -289,21 +215,24 @@ def _run_slerpflow_likelihood_scan(
     def scan_body(carry, step_index):
         x_t, r_tot_t, t_t, v_curr_t, nfe_t = carry
         t_next = t_t + dt
-        v_slerp, divergence, v_next = slerpflow_velocity_and_hutchinson_trace(
+        _, divergence = velocity_trace_fn(
+            x_t,
+            t_t,
+            jax.random.fold_in(rng_key, step_index),
+        )
+        v_slerp, v_next = slerpflow_step_velocity(
             x_t,
             v_curr_t,
             dt,
             t_next,
             velocity_fn,
-            jax.random.fold_in(rng_key, step_index),
-            num_samples=hutchinson_samples,
         )
         return (
             x_t + dt * v_slerp,
             r_tot_t + dt * divergence,
             t_next,
             v_next,
-            nfe_t + 1,
+            nfe_t + 2,
         ), None
 
     (x, r_tot, _, _, nfe), _ = jax.lax.scan(
@@ -322,31 +251,15 @@ def _get_likelihood_scan(
     hutchinson_samples: int,
     hutchinson_seed: int,
     ode_solver: str,
-    direction: str = LIKELIHOOD_DIRECTION_TO_BASE,
 ):
     """Return a cached compiled scan so observations are not captured as constants."""
 
     ode_solver = _validate_ode_solver(ode_solver)
-    if direction not in (LIKELIHOOD_DIRECTION_TO_BASE, LIKELIHOOD_DIRECTION_FROM_NOISE):
-        raise ValueError(
-            f"direction must be {LIKELIHOOD_DIRECTION_TO_BASE!r} or "
-            f"{LIKELIHOOD_DIRECTION_FROM_NOISE!r}, got {direction!r}"
-        )
-    cache_key = (
-        id(model),
-        batch_size,
-        num_steps,
-        hutchinson_samples,
-        hutchinson_seed,
-        ode_solver,
-        direction,
-    )
+    cache_key = (id(model), batch_size, num_steps, hutchinson_samples, hutchinson_seed, ode_solver)
     if cache_key in _RUN_SCAN_CACHE:
         return _RUN_SCAN_CACHE[cache_key]
 
-    dt_sign = 1.0 if direction == LIKELIHOOD_DIRECTION_TO_BASE else -1.0
-    dt = jnp.asarray(dt_sign / num_steps, dtype=jnp.float32)
-    t0 = 0.0 if direction == LIKELIHOOD_DIRECTION_TO_BASE else 1.0
+    dt = jnp.asarray(1.0 / num_steps, dtype=jnp.float32)
     rng_key = jax.random.PRNGKey(hutchinson_seed)
 
     @jax.jit
@@ -368,7 +281,7 @@ def _get_likelihood_scan(
                 num_samples=hutchinson_samples,
             )
 
-        t = jnp.full((batch_size,), t0, dtype=jnp.float32)
+        t = jnp.zeros((batch_size,), dtype=jnp.float32)
         r_tot = jnp.zeros((batch_size,), dtype=jnp.float32)
         if ode_solver == ODE_SOLVER_EULER:
             x, r_tot, _ = _run_euler_likelihood_scan(
@@ -400,7 +313,7 @@ def _get_likelihood_scan(
                 dt=dt,
                 rng_key=rng_key,
                 velocity_fn=velocity_fn,
-                hutchinson_samples=hutchinson_samples,
+                velocity_trace_fn=velocity_trace_fn,
             )
         return x, r_tot
 
@@ -454,13 +367,11 @@ def standard_normal_log_prob(x: jax.Array) -> jax.Array:
 
 
 def _select_batch_result(result: LikelihoodIntegrationResult, index: int) -> LikelihoodIntegrationResult:
-    x_data = None if result.x_data is None else result.x_data[index : index + 1]
     return LikelihoodIntegrationResult(
         x_base=result.x_base[index : index + 1],
         r_tot=result.r_tot[index : index + 1],
         log_p_base=result.log_p_base[index : index + 1],
         log_likelihood=result.log_likelihood[index : index + 1],
-        x_data=x_data,
     )
 
 
@@ -588,96 +499,6 @@ def integrate_to_base_log_likelihood_with_context(
         hutchinson_samples=hutchinson_samples,
         hutchinson_seed=hutchinson_seed,
         ode_solver=ode_solver,
-    )
-
-
-def integrate_batched_from_noise_log_likelihood_with_context(
-    model: SmolVLAEvalModel,
-    context: VelocityContext,
-    noise: jax.Array,
-    *,
-    num_steps: int,
-    hutchinson_samples: int = DEFAULT_HUTCHINSON_SAMPLES,
-    hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
-    ode_solver: str = ODE_SOLVER_EULER,
-) -> LikelihoodIntegrationResult:
-    """Integrate shared Gaussian noise from t=1 to data at t=0 with divergence.
-
-    Uses log p(x) = log N(z) - r_fwd where r_fwd accumulates div * dt along t:1→0.
-    """
-
-    if num_steps <= 0:
-        raise ValueError(f"num_steps must be positive, got {num_steps}")
-    if hutchinson_samples <= 0:
-        raise ValueError(f"hutchinson_samples must be positive, got {hutchinson_samples}")
-    ode_solver = _validate_ode_solver(ode_solver)
-
-    z = jnp.asarray(noise, dtype=jnp.float32)
-    if z.ndim == 2:
-        z = z[None, ...]
-
-    batch_size = z.shape[0]
-    step_indices = jnp.arange(num_steps, dtype=jnp.int32)
-    run_scan = _get_likelihood_scan(
-        model,
-        batch_size=batch_size,
-        num_steps=num_steps,
-        hutchinson_samples=hutchinson_samples,
-        hutchinson_seed=hutchinson_seed,
-        ode_solver=ode_solver,
-        direction=LIKELIHOOD_DIRECTION_FROM_NOISE,
-    )
-    x_data, r_fwd = run_scan(context, z, step_indices)
-
-    log_p_base = standard_normal_log_prob(z)
-    log_likelihood = log_p_base - r_fwd
-    return LikelihoodIntegrationResult(
-        x_base=z,
-        r_tot=r_fwd,
-        log_p_base=log_p_base,
-        log_likelihood=log_likelihood,
-        x_data=x_data,
-    )
-
-
-def integrate_batched_from_noise_log_likelihood(
-    model: SmolVLAEvalModel,
-    observation: EvalObservation,
-    noise: jax.Array,
-    *,
-    num_steps: int,
-    hutchinson_samples: int = DEFAULT_HUTCHINSON_SAMPLES,
-    hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
-    ode_solver: str = ODE_SOLVER_EULER,
-) -> LikelihoodIntegrationResult:
-    """Integrate SmolVLA noise at t=1 to data actions at t=0."""
-
-    context = create_velocity_context(model, observation)
-    return integrate_batched_from_noise_log_likelihood_with_context(
-        model,
-        context,
-        noise,
-        num_steps=num_steps,
-        hutchinson_samples=hutchinson_samples,
-        hutchinson_seed=hutchinson_seed,
-        ode_solver=ode_solver,
-    )
-
-
-def sample_shared_action_noise(
-    model: SmolVLAEvalModel,
-    *,
-    batch_size: int,
-    noise_seed: int,
-    dataset_index: int,
-) -> jax.Array:
-    """Sample one Gaussian noise tensor; fold dataset_index into the seed for stability."""
-
-    rng = jax.random.fold_in(jax.random.PRNGKey(noise_seed), int(dataset_index))
-    return jax.random.normal(
-        rng,
-        (batch_size, model.config.chunk_size, model.config.max_action_dim),
-        dtype=jnp.float32,
     )
 
 
@@ -817,113 +638,13 @@ def compute_episode_modality_contributions(
     return rows
 
 
-def compute_episode_modality_contributions_from_noise(
-    model: SmolVLAEvalModel,
-    frames: Sequence[int],
-    dataset_indices: Sequence[int],
-    observations: Sequence[EvalObservation],
-    prompts: Sequence[str | None],
-    *,
-    modality: str,
-    num_steps: int,
-    hutchinson_samples: int = DEFAULT_HUTCHINSON_SAMPLES,
-    hutchinson_seed: int = DEFAULT_HUTCHINSON_SEED,
-    noise_seed: int = DEFAULT_NOISE_SEED,
-    ode_solver: str = ODE_SOLVER_EULER,
-    prompt_tokenizer: Any | None = None,
-    state_in_prompt: bool = False,
-    eval_batch_size: int = 4,
-) -> list[dict[str, float | int]]:
-    """Ablation contributions via shared-noise forward (noise→data) likelihood.
-
-    Each frame draws one z ~ N(0, I) from `noise_seed` folded with `dataset_index`.
-    Original and ablated observations share that same z.
-    """
-
-    if eval_batch_size <= 0:
-        raise ValueError(f"eval_batch_size must be positive, got {eval_batch_size}")
-    ode_solver = _validate_ode_solver(ode_solver)
-
-    rows: list[dict[str, float | int]] = []
-    total_frames = len(frames)
-    for start in range(0, total_frames, eval_batch_size):
-        stop = min(start + eval_batch_size, total_frames)
-        chunk_observations = observations[start:stop]
-        chunk_prompts = prompts[start:stop]
-        chunk_dataset_indices = dataset_indices[start:stop]
-
-        batched_observations = []
-        batched_noise = []
-        for observation, prompt, dataset_index in zip(
-            chunk_observations, chunk_prompts, chunk_dataset_indices, strict=True
-        ):
-            ablated_observation = ablate_modality_observation(
-                observation,
-                modality=modality,
-                prompt=prompt,
-                prompt_tokenizer=prompt_tokenizer,
-                state_in_prompt=state_in_prompt,
-            )
-            noise = sample_shared_action_noise(
-                model,
-                batch_size=1,
-                noise_seed=noise_seed,
-                dataset_index=int(dataset_index),
-            )[0]
-            batched_observations.extend((observation, ablated_observation))
-            batched_noise.extend((noise, noise))
-
-        batched_result = integrate_batched_from_noise_log_likelihood(
-            model,
-            _stack_observations(*batched_observations),
-            jnp.stack(batched_noise, axis=0),
-            num_steps=num_steps,
-            hutchinson_samples=hutchinson_samples,
-            hutchinson_seed=hutchinson_seed,
-            ode_solver=ode_solver,
-        )
-
-        for chunk_offset, (frame, dataset_index) in enumerate(
-            zip(frames[start:stop], chunk_dataset_indices, strict=True)
-        ):
-            original_index = 2 * chunk_offset
-            ablated_index = original_index + 1
-            row = {
-                "frame": int(frame),
-                "dataset_index": int(dataset_index),
-                "original_log_likelihood": _scalar(batched_result.log_likelihood[original_index]),
-                "ablated_log_likelihood": _scalar(batched_result.log_likelihood[ablated_index]),
-                "original_r_tot": _scalar(batched_result.r_tot[original_index]),
-                "ablated_r_tot": _scalar(batched_result.r_tot[ablated_index]),
-                "delta_logp": _scalar(
-                    batched_result.log_p_base[original_index] - batched_result.log_p_base[ablated_index]
-                ),
-                "delta_r_tot": _scalar(
-                    batched_result.r_tot[original_index] - batched_result.r_tot[ablated_index]
-                ),
-                "contribution": _scalar(
-                    batched_result.log_likelihood[original_index]
-                    - batched_result.log_likelihood[ablated_index]
-                ),
-            }
-            rows.append(row)
-            print(
-                f"frame={row['frame']} dataset_index={row['dataset_index']} "
-                f"original_log_likelihood={row['original_log_likelihood']:.6f} "
-                f"ablated_log_likelihood={row['ablated_log_likelihood']:.6f} "
-                f"delta_logp(x_base)={row['delta_logp']:.6f} "
-                f"delta_r_tot={row['delta_r_tot']:.6f}"
-            )
-
-    return rows
-
-
 def save_contribution_curve(
     rows: Sequence[dict[str, float | int]],
     *,
     output_dir: pathlib.Path,
     modality: str,
     episode_index: str,
+    write_plot: bool = True,
 ) -> tuple[pathlib.Path, pathlib.Path | None]:
     os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     os.environ.setdefault("XDG_CACHE_HOME", "/tmp")
@@ -946,6 +667,9 @@ def save_contribution_curve(
         )
         writer.writeheader()
         writer.writerows(rows)
+
+    if not write_plot:
+        return csv_path, None
 
     try:
         import matplotlib

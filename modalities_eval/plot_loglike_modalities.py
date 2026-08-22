@@ -154,16 +154,15 @@ def evaluate_modalities(
             ode_solver=ode_solver,
             eval_batch_size=eval_batch_size,
         )
-        csv_path, component_plot_path = save_contribution_curve(
+        csv_path, _ = save_contribution_curve(
             rows,
             output_dir=output_dir,
             modality=modality,
             episode_index=str(episode_index),
+            write_plot=False,
         )
         csv_paths.append(csv_path)
         print(f"curve_csv={csv_path}")
-        if component_plot_path is not None:
-            print(f"curve_plot={component_plot_path}")
 
     return csv_paths
 
