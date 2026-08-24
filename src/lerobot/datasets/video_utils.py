@@ -344,6 +344,16 @@ class FrameTimestampError(ValueError):
 
 
 _default_decoder_cache = VideoDecoderCache()
+_thread_local_decoder_cache = threading.local()
+
+
+def _thread_local_default_cache() -> VideoDecoderCache:
+    """Per-thread cache so concurrent same-file decodes do not share a VideoDecoder."""
+    cache = getattr(_thread_local_decoder_cache, "instance", None)
+    if cache is None:
+        cache = VideoDecoderCache()
+        _thread_local_decoder_cache.instance = cache
+    return cache
 
 
 def decode_video_frames_torchcodec(
@@ -372,7 +382,7 @@ def decode_video_frames_torchcodec(
     can be adjusted during encoding to take into account decoding time and video size in bytes.
     """
     if decoder_cache is None:
-        decoder_cache = _default_decoder_cache
+        decoder_cache = _thread_local_default_cache()
 
     # Use cached decoder instead of creating new one each time
     decoder = decoder_cache.get_decoder(str(video_path))

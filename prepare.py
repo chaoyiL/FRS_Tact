@@ -3,10 +3,13 @@ from __future__ import annotations
 import argparse
 import hashlib
 import pathlib
+import queue
 import sys
+import threading
 import time
-from collections.abc import Mapping, Sequence
-from typing import Any
+from collections.abc import Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, TypeVar
 
 import jax
 import jax.numpy as jnp
@@ -40,6 +43,37 @@ from utils.source_model import deterministic_noise
 from utils.source_model import inversion_mse
 from utils.source_model import sample_and_reverse
 from utils.source_model import stack_observations
+
+T = TypeVar("T")
+_PREFETCH_STOP = object()
+
+
+def _prefetch_iterator(iterator: Iterator[T], *, buffer_size: int) -> Iterator[T]:
+    """Pull the next batches on a daemon thread while the consumer runs."""
+    if buffer_size <= 0:
+        raise ValueError(f"buffer_size must be positive, got {buffer_size}.")
+
+    ready: queue.Queue[object] = queue.Queue(maxsize=buffer_size)
+    error: list[BaseException] = []
+
+    def _producer() -> None:
+        try:
+            for item in iterator:
+                ready.put(item)
+        except BaseException as exc:  # noqa: BLE001 — propagate to consumer
+            error.append(exc)
+        finally:
+            ready.put(_PREFETCH_STOP)
+
+    thread = threading.Thread(target=_producer, name="prepare-prefetch", daemon=True)
+    thread.start()
+    while True:
+        item = ready.get()
+        if item is _PREFETCH_STOP:
+            if error:
+                raise error[0]
+            return
+        yield item  # type: ignore[misc]
 
 
 def _as_scalar(value: Any) -> Any:
@@ -204,25 +238,28 @@ def _create_dataset(model: SmolVLAEvalModel, metadata: LeRobotDatasetMetadata) -
     )
 
 
-def _load_observation_and_gt(
-    model: SmolVLAEvalModel, dataset: LeRobotDataset, dataset_index: int
-) -> tuple[EvalObservation, jax.Array]:
-    sample = dataset[dataset_index]
-    observation, gt_actions, _ = model.prepare_sample(sample)
-    return observation, jnp.asarray(gt_actions, dtype=jnp.float32)
-
-
-def _load_observation_batch(
-    model: SmolVLAEvalModel,
+def _load_raw_samples(
     dataset: LeRobotDataset,
     batch_records: Sequence[SampleRecord],
+    *,
+    executor: ThreadPoolExecutor | None,
+) -> list[Any]:
+    indices = [record.dataset_index for record in batch_records]
+    if executor is None or len(indices) <= 1:
+        return [dataset[index] for index in indices]
+    return list(executor.map(dataset.__getitem__, indices))
+
+
+def _prepare_observation_batch(
+    model: SmolVLAEvalModel,
+    samples: Sequence[Any],
 ) -> tuple[EvalObservation, jax.Array]:
     observations: list[EvalObservation] = []
     gt_actions: list[jax.Array] = []
-    for record in batch_records:
-        observation, actions = _load_observation_and_gt(model, dataset, record.dataset_index)
+    for sample in samples:
+        observation, actions, _ = model.prepare_sample(sample)
         observations.append(observation)
-        gt_actions.append(actions)
+        gt_actions.append(jnp.asarray(actions, dtype=jnp.float32))
     return stack_observations(observations), jnp.stack(gt_actions, axis=0)
 
 
@@ -283,6 +320,8 @@ def prepare_cache(
     max_samples: int | None,
     drop_tail_action_chunks: int = 1,
     flush_every: int = 8,
+    load_threads: int = 16,
+    prefetch_batches: int = 4,
 ) -> dict[str, Any]:
     if model_sample_steps <= 0 or reverse_steps <= 0 or batch_size <= 0:
         raise ValueError("model_sample_steps, reverse_steps, and batch_size must all be positive.")
@@ -292,6 +331,10 @@ def prepare_cache(
         raise ValueError(f"flush_every must be positive, got {flush_every}.")
     if drop_tail_action_chunks < 0:
         raise ValueError(f"drop_tail_action_chunks must be >= 0, got {drop_tail_action_chunks}.")
+    if load_threads < 0:
+        raise ValueError(f"load_threads must be >= 0, got {load_threads}.")
+    if prefetch_batches <= 0:
+        raise ValueError(f"prefetch_batches must be positive, got {prefetch_batches}.")
 
     model = load_model(
         checkpoint_dir,
@@ -396,6 +439,15 @@ def prepare_cache(
     loop_started = time.perf_counter()
     batches_since_flush = 0
     starts = list(range(completed, len(records), batch_size))
+    worker_count = min(load_threads, batch_size) if load_threads > 1 else 0
+    print(
+        f"dataloader=load_threads={worker_count or 1} prefetch_batches={prefetch_batches} "
+        f"batch_size={batch_size}",
+        flush=True,
+    )
+    if starts:
+        # Materialize the HF reader on the main thread before worker threads start.
+        _ = dataset.hf_dataset
 
     pending: dict[str, Any] | None = None
 
@@ -435,42 +487,59 @@ def prepare_cache(
         )
         pending = None
 
-    for batch_number, start in enumerate(starts):
-        stop = min(start + batch_size, len(records))
-        batch_records = records[start:stop]
-        valid = len(batch_records)
-        observation_batch, gt_action_batch = _load_observation_batch(model, dataset, batch_records)
-        if valid < batch_size:
-            observation_batch = _pad_observation_batch(observation_batch, batch_size)
-            gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
-            pad_indices = [batch_records[-1].dataset_index] * (batch_size - valid)
-        else:
-            pad_indices = []
-        dataset_indices = [record.dataset_index for record in batch_records] + pad_indices
-        noise = deterministic_noise(dataset_indices, action_shape, seed=inference_seed)
+    def _iter_raw_batches(
+        executor: ThreadPoolExecutor | None,
+    ) -> Iterator[tuple[int, int, list[SampleRecord], list[Any]]]:
+        for start in starts:
+            stop = min(start + batch_size, len(records))
+            batch_records = records[start:stop]
+            samples = _load_raw_samples(dataset, batch_records, executor=executor)
+            yield start, stop, batch_records, samples
 
-        # Overlap: while this batch runs on device, commit the previous batch to host/disk.
-        predicted_actions, x_base = sample_and_reverse(
-            model,
-            observation_batch,
-            noise,
-            sample_steps=model_sample_steps,
-            reverse_steps=reverse_steps,
-            solver=reverse_solver,
-        )
-        _commit_pending(force_flush=False)
-        pending = {
-            "start": start,
-            "stop": stop,
-            "valid": valid,
-            "predicted": predicted_actions,
-            "x_base": x_base,
-            "gt_action": gt_action_batch,
-            "noise": noise,
-        }
-        if batch_number == 0:
-            # Force first-batch compile/sync so ETA is meaningful after warmup.
-            jax.block_until_ready((predicted_actions, x_base))
+    executor = ThreadPoolExecutor(max_workers=worker_count) if worker_count > 1 else None
+    try:
+        raw_batches = _iter_raw_batches(executor)
+        if prefetch_batches > 1:
+            raw_batches = _prefetch_iterator(raw_batches, buffer_size=prefetch_batches)
+
+        for batch_number, (start, stop, batch_records, samples) in enumerate(raw_batches):
+            valid = len(batch_records)
+            observation_batch, gt_action_batch = _prepare_observation_batch(model, samples)
+            if valid < batch_size:
+                observation_batch = _pad_observation_batch(observation_batch, batch_size)
+                gt_action_batch = _pad_action_batch(gt_action_batch, batch_size)
+                pad_indices = [batch_records[-1].dataset_index] * (batch_size - valid)
+            else:
+                pad_indices = []
+            dataset_indices = [record.dataset_index for record in batch_records] + pad_indices
+            noise = deterministic_noise(dataset_indices, action_shape, seed=inference_seed)
+
+            # Overlap: GPU on this batch, prefetch thread loads upcoming batches,
+            # and the previous device result is committed to host/disk.
+            predicted_actions, x_base = sample_and_reverse(
+                model,
+                observation_batch,
+                noise,
+                sample_steps=model_sample_steps,
+                reverse_steps=reverse_steps,
+                solver=reverse_solver,
+            )
+            _commit_pending(force_flush=False)
+            pending = {
+                "start": start,
+                "stop": stop,
+                "valid": valid,
+                "predicted": predicted_actions,
+                "x_base": x_base,
+                "gt_action": gt_action_batch,
+                "noise": noise,
+            }
+            if batch_number == 0:
+                # Force first-batch compile/sync so ETA is meaningful after warmup.
+                jax.block_until_ready((predicted_actions, x_base))
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     _commit_pending(force_flush=True)
 
@@ -492,14 +561,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_eval_data_arguments(parser, required=True)
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--model-sample-steps", type=int, default=10)
-    parser.add_argument("--reverse-steps", type=int, default=50)
+    parser.add_argument("--reverse-steps", type=int, default=20)
     parser.add_argument(
         "--reverse-solver",
         choices=("euler", "fireflow", "slerpflow"),
         default="slerpflow",
         help="Numerical integrator for reverse action integration (default: slerpflow).",
     )
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--load-threads",
+        type=int,
+        default=32,
+        help="Threads used to decode dataset samples inside each batch (default: 16). Set 1 to disable.",
+    )
+    parser.add_argument(
+        "--prefetch-batches",
+        type=int,
+        default=8,
+        help="CPU-side batches to decode ahead of the GPU (default: 4). Set 1 to disable.",
+    )
     parser.add_argument(
         "--flush-every",
         type=int,
@@ -509,7 +590,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-seed", type=int, default=0)
     parser.add_argument("--split-seed", type=int, default=0)
     parser.add_argument("--val-fraction", type=float, default=0.2)
-    parser.add_argument("--frame-stride", type=int, default=1)
+    parser.add_argument("--frame-stride", type=int, default=10)
     parser.add_argument(
         "--drop-tail-action-chunks",
         type=int,
@@ -547,6 +628,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         max_samples=args.max_samples,
         drop_tail_action_chunks=args.drop_tail_action_chunks,
         flush_every=args.flush_every,
+        load_threads=args.load_threads,
+        prefetch_batches=args.prefetch_batches,
     )
 
 

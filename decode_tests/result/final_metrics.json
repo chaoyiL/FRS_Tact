@@ -1,0 +1,18 @@
+{
+  "best_val_mse_target": 0.01643785834312439,
+  "sample_plot": "/home/rvsa/codehub/FRS_Tact/decode_tests/result/val_gt_vs_pred_samples.png",
+  "test_flow_loss": 0.003472559852525592,
+  "test_mae_gt": 0.39880356192588806,
+  "test_mae_target": 0.07238776981830597,
+  "test_mse_gt": 0.4832589328289032,
+  "test_mse_target": 0.017400188371539116,
+  "test_rmse_gt": 0.6951682567596436,
+  "test_rmse_target": 0.13190977275371552,
+  "val_flow_loss": 0.003474108874797821,
+  "val_mae_gt": 0.38961905241012573,
+  "val_mae_target": 0.07174216955900192,
+  "val_mse_gt": 0.46023398637771606,
+  "val_mse_target": 0.01710447482764721,
+  "val_rmse_gt": 0.6784054636955261,
+  "val_rmse_target": 0.1307840794324875
+}
