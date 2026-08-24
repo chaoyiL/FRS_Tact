@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import time
 from collections.abc import Mapping, Sequence
@@ -16,9 +17,8 @@ from .deployment import (
     ObservationSaver,
     cleanup_deployment_resources,
     configure_deployment_logging,
-    load_deployment_config,
+    load_deployment_config_bytes,
     make_policy_config,
-    make_server_config,
     optional_bool,
     prepare_observation,
     print_startup_summary,
@@ -98,7 +98,11 @@ def run_legacy_loop(
 def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     """Run the plain pi0.5 legacy-chunk client."""
     config_path = config_path.expanduser().resolve()
-    config = load_deployment_config(config_path, mode="pi05")
+    config_bytes = config_path.read_bytes()
+    config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+    print(f"[startup] deploy config path: {config_path}")
+    print(f"[startup] deploy config sha256: {config_sha256}")
+    config = load_deployment_config_bytes(config_bytes, mode="pi05")
     policy_config = make_policy_config(config, config_path)
     connection = section(config, "connection")
     observation_config = section(config, "observation")
@@ -128,7 +132,6 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     policy = _make_policy(policy_config)
     print(f"[startup] pi0.5 model loaded in {time.perf_counter() - load_started:.1f}s")
     image_keys = tuple(policy.robot_image_keys)
-    server_config = make_server_config(config, mode="pi05")
     bridge: RobotBridgeClient | None = None
     saver: ObservationSaver | None = None
     try:
@@ -141,7 +144,6 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
             ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
         )
-        bridge.send_config(server_config)
         saver = start_observation_saver(
             config.get("logging", {}) or {},
             image_keys,

@@ -1,5 +1,5 @@
 # Pi0.5 + FRS deployment configuration.
-checkpoint: /home/typhon/ManiSkill-vitac/checkpoints/6000/
+checkpoint: /home/typhon/ManiSkill-vitac/checkpoints/8000_pick_tube
 seed: 0
 num_steps: 10
 
@@ -16,19 +16,20 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/ManiSkill-vitac/checkpoints/6000/assets
+  dir: /home/typhon/ManiSkill-vitac/checkpoints/8000_pick_tube/assets
   asset_id: pick_tube_all
   use_quantile_norm: true
 
 frs:
   enabled: true
-  checkpoint: /workspace/frs_pick_tube_pi05/run_gated_v7_state_01/best
-  tactile_encoder_checkpoint: /workspace/checkpoints/encoder_ckpt_0809
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/pi05_frs_pick_tube_8000_bimanual_last
+  tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0809
   tactile_keys:
     - observation.images.tactile_left_0
     - observation.images.tactile_right_0
     - observation.images.tactile_left_1
     - observation.images.tactile_right_1
+  # Training contract: action_horizon 50 / divisor 5 = tactile window 10.
   tactile_window_divisor: 5
   history_stride: 3
   reverse_steps: 50
@@ -37,9 +38,8 @@ frs:
   decode_solver: fireflow
   steering_protection_interval_s: null
   temporal_ensemble_coeff: 0.1
-  gripper_gain:
-    threshold: 0.1
-    gain: 0.05
+  # Parsed for legacy checkpoint compatibility, but PI0.5 VLA owns grippers 9/19.
+  gripper_gain: null
   verify_source_checkpoint_fingerprint: false
   max_normalized_action_abs: 8.0
   max_normalized_delta_rms: 4.0

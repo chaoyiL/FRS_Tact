@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -15,6 +18,146 @@ VT_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_vtsmolvla.sh"
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
+
+
+def test_pi05_path_loader_delegates_raw_bytes_to_bytes_loader(monkeypatch, tmp_path: Path) -> None:
+    from deploy_pi05 import deployment
+
+    config_path = tmp_path / "deploy_pi05.yaml"
+    raw_config = b"the bytes loader receives this exact payload\n"
+    config_path.write_bytes(raw_config)
+    seen: list[tuple[bytes, str]] = []
+    expected = {"loaded": "from raw bytes"}
+
+    monkeypatch.setattr(
+        deployment,
+        "load_deployment_config_bytes",
+        lambda payload, mode: seen.append((payload, mode)) or expected,
+        raising=False,
+    )
+
+    assert deployment.load_deployment_config(config_path, "pi05") is expected
+    assert seen == [(raw_config, "pi05")]
+
+
+def test_plain_pi05_client_starts_without_config_handshake(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    from deploy_pi05 import pi05_client
+
+    events: list[object] = []
+    config_path = tmp_path / "deploy_pi05.yaml"
+    raw_config = b"raw YAML bytes are hashed exactly\n"
+    config_path.write_bytes(raw_config)
+    config = {
+        "connection": {
+            "address": "robot.example",
+            "port": 8000,
+            "observation_timeout_s": 1.25,
+        },
+        "observation": {"language_prompt": "move the block"},
+        "runtime": {"warmup_runs": 1, "auto_start": True},
+        "seed": 7,
+        "num_steps": 2,
+        "logging": {},
+    }
+
+    class FakeBridge:
+        def __init__(self, **kwargs) -> None:
+            events.append(("connect", kwargs["address"], kwargs["port"]))
+            self.received = 0
+
+        def receive_observation(self, *, timeout: float) -> tuple[int, dict[str, object]]:
+            self.received += 1
+            events.append(("receive", timeout))
+            return self.received * 10, {"source": self.received}
+
+        def send_state(self, state: str) -> None:
+            events.append(("state", state))
+
+        def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            events.append(("action", action.shape, obs_seq))
+
+    class FakePolicy:
+        config = SimpleNamespace(
+            state_dim=2,
+            action_horizon=2,
+            action_dim=2,
+            robot_action_dim=2,
+        )
+        robot_image_keys = ("camera",)
+
+        def predict_action_chunk(self, observation, task: str, *, seed: int, num_steps: int):
+            events.append(("predict", observation["source"], task, seed, num_steps))
+            return np.zeros((1, 2, 2), dtype=np.float32)
+
+        def unnormalize_actions(self, action: np.ndarray) -> np.ndarray:
+            return action
+
+    read_paths: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def record_read_bytes(path: Path) -> bytes:
+        read_paths.append(path)
+        return original_read_bytes(path)
+
+    loaded_payloads: list[tuple[bytes, str]] = []
+
+    def load_from_bytes(payload: bytes, mode: str) -> dict[str, object]:
+        loaded_payloads.append((payload, mode))
+        if payload != raw_config:
+            raise AssertionError("pi0.5 config loader received bytes different from the hash input")
+        return config
+
+    monkeypatch.setattr(Path, "read_bytes", record_read_bytes)
+    monkeypatch.setattr(
+        pi05_client,
+        "load_deployment_config",
+        lambda *args, **kwargs: pytest.fail("pi0.5 client must not reload config by path"),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        pi05_client,
+        "load_deployment_config_bytes",
+        load_from_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(pi05_client, "make_policy_config", lambda *args: object())
+    monkeypatch.setattr(
+        pi05_client,
+        "make_server_config",
+        lambda *args, **kwargs: {},
+        raising=False,
+    )
+    monkeypatch.setattr(pi05_client, "_jax_runtime", lambda: ("cpu", ()))
+    monkeypatch.setattr(pi05_client, "print_startup_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pi05_client, "_make_policy", lambda policy_config: FakePolicy())
+    monkeypatch.setattr(pi05_client, "RobotBridgeClient", FakeBridge)
+    monkeypatch.setattr(pi05_client, "prepare_observation", lambda observation, **kwargs: observation)
+    monkeypatch.setattr(pi05_client, "start_observation_saver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        pi05_client,
+        "cleanup_deployment_resources",
+        lambda *args, **kwargs: events.append("cleanup"),
+    )
+
+    pi05_client.run(config_path, max_iterations_override=1)
+
+    output = capsys.readouterr().out
+    assert f"[startup] deploy config path: {config_path.resolve()}" in output
+    assert f"[startup] deploy config sha256: {hashlib.sha256(raw_config).hexdigest()}" in output
+    assert read_paths == [config_path.resolve()]
+    assert loaded_payloads == [(raw_config, "pi05")]
+    assert events == [
+        ("connect", "robot.example", 8000),
+        ("receive", 1.25),
+        ("predict", 1, "move the block", 7, 2),
+        ("state", "start"),
+        ("receive", 1.25),
+        ("predict", 2, "move the block", 7, 2),
+        ("action", (2, 2), 20),
+        "cleanup",
+    ]
 
 
 def test_policy_loader_selects_vt_policy_for_a_tactile_contract(monkeypatch, tmp_path) -> None:

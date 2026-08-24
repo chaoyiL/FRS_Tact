@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 
 
 _BIMANUAL_STEERED_ACTION_DIM = 20
+_GRIPPER_ACTION_INDICES = (9, 19)
 _BIMANUAL_TACTILE_KEY_BASENAMES = (
     "tactile_left_0",
     "tactile_right_0",
@@ -128,6 +129,24 @@ def _gripper_gain_config(value: Any) -> tuple[float, float] | None:
     if not math.isfinite(threshold) or not math.isfinite(gain) or gain < 0:
         raise ValueError("frs.gripper_gain threshold/gain must be finite and gain non-negative")
     return threshold, gain
+
+
+def _apply_gripper_gain(
+    action: np.ndarray,
+    *,
+    threshold: float,
+    gain: float,
+) -> np.ndarray:
+    if action.shape != (20,):
+        raise ValueError("gripper gain requires a 20-dimensional robot action")
+    adjusted = action.copy()
+    indices = np.asarray((9, 19))
+    adjusted[indices] = np.where(
+        adjusted[indices] < threshold,
+        adjusted[indices] * gain,
+        adjusted[indices],
+    )
+    return adjusted
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -630,9 +649,12 @@ class FRSRuntime:
         safety_width = (
             _BIMANUAL_STEERED_ACTION_DIM if bimanual else int(array.shape[-1])
         )
+        array = np.array(array, copy=True)
         if bimanual and array.shape[-1] > safety_width:
-            array = np.array(array, copy=True)
             array[..., safety_width:] = self._action_vla_normalized[..., safety_width:]
+        array[..., _GRIPPER_ACTION_INDICES] = self._action_vla_normalized[
+            ..., _GRIPPER_ACTION_INDICES
+        ]
         if not np.isfinite(array).all():
             raise ValueError(f"FRS output must be finite with shape {expected}, got {array.shape}")
         physical = array[..., :safety_width]
@@ -679,6 +701,7 @@ class FRSRuntime:
             raise ValueError("unique FRS requests must have strictly increasing action_index")
         assert self._episode_baseline is not None
         assert self._action_vla_normalized is not None
+        assert self._action_vla is not None
         assert self._x_base is not None
         assert self._x_base_device is not None
 
@@ -707,22 +730,19 @@ class FRSRuntime:
             ages = np.arange(len(candidates) - 1, -1, -1)
             weights = np.exp(-self.config.temporal_ensemble_coeff * ages)
             selected = np.average(np.stack(candidates), axis=0, weights=weights)
+        selected = np.array(selected, dtype=np.float32, copy=True)
+        selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla_normalized[
+            0, action_index, list(_GRIPPER_ACTION_INDICES)
+        ]
         selected_normalized = self._public(selected)
         robot_selected = np.asarray(self.policy.unnormalize_actions(selected_normalized), dtype=np.float32)
         expected_robot = (self.policy.config.robot_action_dim,)
         if robot_selected.shape != expected_robot or not np.isfinite(robot_selected).all():
             raise ValueError(f"selected robot action must be finite with shape {expected_robot}")
-        if self.config.gripper_gain is not None:
-            if robot_selected.shape != (20,):
-                raise ValueError("gripper gain requires a 20-dimensional robot action")
-            threshold, gain = self.config.gripper_gain
-            robot_selected = robot_selected.copy()
-            indices = np.asarray((9, 19))
-            robot_selected[indices] = np.where(
-                robot_selected[indices] < threshold,
-                robot_selected[indices] - gain,
-                robot_selected[indices],
-            )
+        robot_selected = np.array(robot_selected, copy=True)
+        robot_selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla[
+            0, action_index, list(_GRIPPER_ACTION_INDICES)
+        ]
         diagnostics = FRSDiagnostics(float(change[0]), delta, max_abs)
         result = FRSSteerResult(
             chunk_id=chunk_id,

@@ -174,7 +174,7 @@ def _run_frs(
             if (ack.chunk_id, ack.request_id, ack.action_index) != request_ids:
                 raise RuntimeError("FRSSteerAck does not match its request")
             if ack.status == "rejected":
-                raise RuntimeError(f"robot rejected FRS action {request_ids}")
+                LOGGER.warning("Skipping robot-rejected FRS action %s", request_ids)
 
 
 def run(config_path: Path, max_iterations_override: int | None = None) -> None:

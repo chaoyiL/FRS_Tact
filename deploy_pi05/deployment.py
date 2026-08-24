@@ -251,10 +251,15 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
 
 def load_deployment_config(path: Path, mode: DeploymentMode) -> dict[str, Any]:
     """Load a standalone pi0.5 deployment YAML for the requested mode."""
-    expected_data_type = _mode_data_type(mode)
     if not path.is_file():
         raise FileNotFoundError(f"config not found: {path}")
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return load_deployment_config_bytes(path.read_bytes(), mode)
+
+
+def load_deployment_config_bytes(payload: bytes, mode: DeploymentMode) -> dict[str, Any]:
+    """Load a standalone pi0.5 deployment YAML from its original bytes."""
+    expected_data_type = _mode_data_type(mode)
+    payload = yaml.safe_load(payload) or {}
     if not isinstance(payload, dict):
         raise ValueError("config root must be a mapping")
     config = payload

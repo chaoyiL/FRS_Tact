@@ -206,23 +206,6 @@ def _positive_history_stride(raw: Mapping[str, Any]) -> int:
     return stride
 
 
-def strided_unpadded_tokens(
-    frames: Sequence[np.ndarray],
-    *,
-    window: int,
-    stride: int,
-) -> tuple[np.ndarray, ...]:
-    """Select up to ``window`` frames walking backward by ``stride`` without padding."""
-
-    if window <= 0 or stride <= 0:
-        raise ValueError("window and stride must be positive")
-    if not frames:
-        raise ValueError("tactile history is empty")
-    current = len(frames) - 1
-    max_offset = min(window - 1, current // stride)
-    return tuple(frames[current - offset * stride] for offset in range(max_offset, -1, -1))
-
-
 def _reject_deprecated_gate_config(raw: Mapping[str, Any]) -> None:
     deprecated = {"gate_tau", "gate_temperature"}.intersection(raw)
     if deprecated:
@@ -453,6 +436,21 @@ class TactileHistory:
 
     def append(self, tokens: np.ndarray) -> None:
         self._frames.append(self._validated_copy(tokens))
+
+    def window_tokens_after(self, tokens: np.ndarray) -> np.ndarray:
+        """Preview the fixed window after an append without mutating history."""
+
+        prepared = self._validated_copy(tokens)
+        frames = (*self._frames, prepared)
+        maxlen = self._frames.maxlen
+        if maxlen is not None and len(frames) > maxlen:
+            frames = frames[-maxlen:]
+        current = len(frames) - 1
+        indices = [
+            max(0, current - offset * self.stride)
+            for offset in reversed(range(self.window))
+        ]
+        return np.stack([frames[index] for index in indices], axis=0)
 
     def window_tokens(self) -> np.ndarray:
         if not self._frames:
@@ -862,6 +860,9 @@ class FRSSteeringPolicy:
         )
         if decoded_array.shape != expected:
             raise ValueError(f"FRS output must have shape {expected}, got {decoded_array.shape}")
+        if expected[-1] == 20:
+            decoded_array = np.array(decoded_array, copy=True)
+            decoded_array[..., [9, 19]] = self._action_vla_normalized[..., [9, 19]]
         if not np.isfinite(decoded_array).all():
             raise ValueError("FRS action contains NaN or Inf")
         delta_rms = float(
@@ -930,14 +931,8 @@ class FRSSteeringPolicy:
             )
         if not np.isfinite(current).all():
             raise ValueError("tactile encoder produced NaN or Inf")
-        window = self.resolved_tactile_window()
-        stride = int(self.config.history_stride)
-        stored = (*self._tactile_sequence, current)
-        keep = (window - 1) * stride + 1
-        if len(stored) > keep:
-            stored = stored[-keep:]
-        tactile_sequence = strided_unpadded_tokens(stored, window=window, stride=stride)
-        tactile = jnp.expand_dims(jnp.asarray(np.stack(tactile_sequence)), axis=0)
+        tactile_sequence = self.history.window_tokens_after(current)
+        tactile = jnp.expand_dims(jnp.asarray(tactile_sequence), axis=0)
         change = tactile_change_from_tokens(
             current[None, ...],
             self._episode_baseline[None, ...],
@@ -987,6 +982,13 @@ class FRSSteeringPolicy:
                 self._action_vla[0, action_index],
                 inactive_threshold,
             )
+        if selected.shape == (20,):
+            selected = np.array(selected, copy=True)
+            selected[[9, 19]] = self._action_vla_normalized[
+                0,
+                action_index,
+                [9, 19],
+            ]
         selected_normalized = self._immutable_public_array(selected)
         robot_selected = np.asarray(
             self.policy.preprocessor.unnormalize_actions(selected_normalized),
@@ -1000,23 +1002,9 @@ class FRSSteeringPolicy:
             )
         if not np.isfinite(robot_selected).all():
             raise ValueError("robot-space selected action must be finite")
-        gripper_gain = getattr(self.config, "gripper_gain", None)
-        if gripper_gain is not None:
-            if robot_selected.shape != (20,):
-                raise ValueError("FRS gripper gain requires a 20-dimensional action")
-            threshold, multiplier, above_multiplier = gripper_gain
+        if robot_selected.shape == (20,):
             robot_selected = robot_selected.copy()
-            gripper_indices = np.asarray((9, 19))
-            gripper_widths = robot_selected[gripper_indices]
-            robot_selected[gripper_indices] = np.where(
-                gripper_widths < threshold,
-                gripper_widths * multiplier,
-                np.where(
-                    gripper_widths > threshold,
-                    gripper_widths * above_multiplier,
-                    gripper_widths,
-                ),
-            )
+            robot_selected[[9, 19]] = self._action_vla[0, action_index, [9, 19]]
         selected_action = self._immutable_public_array(robot_selected)
 
         result = FRSSteerResult(
@@ -1035,12 +1023,17 @@ class FRSSteeringPolicy:
             decode_started_at=decode_started_at,
             decode_finished_at=decode_finished_at,
         )
-        self._tactile_sequence = list(stored)
+        next_last_vla_normalized = self._readonly_array(self._action_vla_normalized)
+        next_last_frs_normalized = self._readonly_array(decoded_array)
+
+        # Commit only after every validation, conversion and allocation that can
+        # fail, so an unsuccessful request never advances episode history.
+        self.history.append(current)
         self._request_results[request_id] = (chunk_id, action_index, tactile_hash, result)
         self._last_action_index = action_index
         self.last_diagnostics = diagnostics
-        self.last_vla_normalized = self._readonly_array(self._action_vla_normalized)
-        self.last_frs_normalized = self._readonly_array(decoded_array)
+        self.last_vla_normalized = next_last_vla_normalized
+        self.last_frs_normalized = next_last_frs_normalized
         return result
 
     def _snapshot_live_state(self) -> tuple[Any, ...]:
