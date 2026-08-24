@@ -39,7 +39,7 @@ tactile_embedding_cache:
 
 model:
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_0809
+  tactile_encoder_path: /workspace/checkpoints/encoder_ckpt_0824
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_left_0
@@ -65,7 +65,7 @@ norm_stats:
   use_quantile_norm: true
 
 frs_training:
-  output: /workspace/frs_pick_tube_pi05/run_bimanual_gated_pick_tube_8000_v1
+  output: /workspace/frs_pick_tube_pi05/run_bimanual_gated_pick_tube_8000_0824
   tactile_window_divisor: 5
   history_stride: 3
   loss_mode: bimanual_gated
