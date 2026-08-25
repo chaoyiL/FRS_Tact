@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=71"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "deco-training"
+version = "0.1.0"
+description = "Standalone DECO Stage 1 visual policy training and TorchScript export"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "torch>=2.7,<2.12",
+  "torchvision>=0.22,<0.27",
+  "numpy>=1.26,<2.3",
+  "Pillow>=10,<13",
+  "pyarrow>=18,<30",
+  "einops>=0.8,<0.9",
+  "tqdm>=4.67,<5",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<10"]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[tool.pytest.ini_options]
+addopts = "--import-mode=importlib"
