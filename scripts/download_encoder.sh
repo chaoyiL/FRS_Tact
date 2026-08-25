@@ -2,8 +2,8 @@
 # 示例：
 : <<'COMMENT'
 bash scripts/download_encoder.sh \
-  --repo-id KaiyueChen/encoder_ckpt_0809 \
-  --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0809/best
+  --repo-id KaiyueChen/encoder_ckpt_0824 \
+  --output-dir /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
 COMMENT
 
 set -Eeuo pipefail

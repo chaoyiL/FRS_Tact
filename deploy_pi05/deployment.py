@@ -271,6 +271,11 @@ def load_deployment_config_bytes(payload: bytes, mode: DeploymentMode) -> dict[s
 
     validate_common_config(config)
     if mode == "frs":
+        if section(config, "runtime").get("auto_start", False):
+            raise ValueError(
+                "FRS runtime.auto_start must be false so the operator can verify "
+                "the shared YAML SHA256 before START"
+            )
         section(config, "frs")
         _validate_frs_config_section(config)
     return config

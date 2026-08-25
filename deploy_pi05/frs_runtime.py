@@ -16,7 +16,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .frs_config import validate_frs_config_section
+from .frs_config import GripperHysteresisConfig, validate_frs_config_section
 from .frs_inference.decoder import (
     DECODER_INPUT_VERSION,
     decode_actions,
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
 _BIMANUAL_STEERED_ACTION_DIM = 20
 _GRIPPER_ACTION_INDICES = (9, 19)
+_POSITION_ACTION_SLICES = (slice(0, 3), slice(10, 13))
 _BIMANUAL_TACTILE_KEY_BASENAMES = (
     "tactile_left_0",
     "tactile_right_0",
@@ -147,6 +148,40 @@ def _apply_gripper_gain(
         adjusted[indices],
     )
     return adjusted
+
+
+def _select_latched_vla_translation(
+    selected: np.ndarray,
+    vla_normalized: np.ndarray,
+    vla_action: np.ndarray,
+    latched: tuple[bool, bool],
+    config: GripperHysteresisConfig,
+) -> tuple[np.ndarray, tuple[bool, bool]]:
+    for name, value in (
+        ("selected", selected),
+        ("vla_normalized", vla_normalized),
+        ("vla_action", vla_action),
+    ):
+        if value.shape != (20,) or not np.isfinite(value).all():
+            raise ValueError(f"{name} must be finite with shape (20,)")
+    if len(latched) != 2 or any(type(value) is not bool for value in latched):
+        raise ValueError("gripper latch state must contain two booleans")
+
+    protected = np.array(selected, dtype=np.float32, copy=True)
+    next_latched = list(latched)
+    for side_index, side in enumerate(("left", "right")):
+        action_width = float(vla_action[_GRIPPER_ACTION_INDICES[side_index]])
+        close = float(np.float32(getattr(config, f"{side}_close_threshold")))
+        reopen = float(np.float32(getattr(config, f"{side}_reopen_threshold")))
+        if next_latched[side_index]:
+            if action_width >= reopen:
+                next_latched[side_index] = False
+        elif action_width <= close:
+            next_latched[side_index] = True
+        if next_latched[side_index]:
+            position = _POSITION_ACTION_SLICES[side_index]
+            protected[position] = vla_normalized[position]
+    return protected, (bool(next_latched[0]), bool(next_latched[1]))
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -338,8 +373,10 @@ class FRSRuntime:
         config_path: Path,
         policy: Pi05RemotePolicy,
         source_sample_steps: int,
+        gripper_hysteresis: GripperHysteresisConfig,
     ) -> None:
         self.policy = policy
+        self.gripper_hysteresis = gripper_hysteresis
         self.config = parse_frs_config(raw_config, config_path=config_path)
         self.model, self.metadata = load_frs_checkpoint(self.config.checkpoint)
         self.encoder = load_tactile_encoder(self.config.tactile_encoder_checkpoint)
@@ -368,6 +405,7 @@ class FRSRuntime:
         )
         self.baseline: np.ndarray | None = None
         self._episode_baseline: np.ndarray | None = None
+        self._vla_translation_latched = (False, False)
         self._clear_chunk_state()
 
     @property
@@ -537,6 +575,7 @@ class FRSRuntime:
         self._episode_baseline = baseline
         self.baseline = self._readonly(baseline)
         self.history = history
+        self._vla_translation_latched = (False, False)
         self._clear_chunk_state()
 
     def warmup(
@@ -734,6 +773,13 @@ class FRSRuntime:
         selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla_normalized[
             0, action_index, list(_GRIPPER_ACTION_INDICES)
         ]
+        selected, self._vla_translation_latched = _select_latched_vla_translation(
+            selected,
+            self._action_vla_normalized[0, action_index],
+            self._action_vla[0, action_index],
+            self._vla_translation_latched,
+            self.gripper_hysteresis,
+        )
         selected_normalized = self._public(selected)
         robot_selected = np.asarray(self.policy.unnormalize_actions(selected_normalized), dtype=np.float32)
         expected_robot = (self.policy.config.robot_action_dim,)

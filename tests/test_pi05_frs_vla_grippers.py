@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from deploy_pi05.frs_runtime import FRSRuntime
+from deploy_pi05.frs_config import GripperHysteresisConfig
 
 
 def _runtime() -> FRSRuntime:
@@ -67,6 +68,15 @@ def test_steer_action_keeps_robot_space_vla_grippers_and_ignores_legacy_gain() -
     runtime.last_diagnostics = None
     runtime.last_vla_normalized = None
     runtime.last_frs_normalized = None
+    runtime.gripper_hysteresis = GripperHysteresisConfig(
+        left_close_threshold=0.08,
+        left_reopen_threshold=0.10,
+        left_closed_command=0.01,
+        right_close_threshold=0.09,
+        right_reopen_threshold=0.10,
+        right_closed_command=0.01,
+    )
+    runtime._vla_translation_latched = (True, False)
     decoded = np.full((1, 3, 20), 0.5, dtype=np.float32)
     decoded[..., 9] = -0.8
     decoded[..., 19] = -0.9
@@ -86,3 +96,49 @@ def test_steer_action_keeps_robot_space_vla_grippers_and_ignores_legacy_gain() -
         runtime._action_vla[0, 1, [9, 19]],
     )
     assert result.selected_action[0] == 5.0
+
+
+def test_steer_action_uses_vla_translation_for_only_the_latched_arm() -> None:
+    runtime = _runtime()
+    runtime.config.temporal_ensemble_coeff = None
+    runtime.config.decode_steps = 1
+    runtime.config.decode_solver = "euler"
+    runtime.policy.config.robot_action_dim = 20
+    runtime.policy.unnormalize_actions = lambda action: np.asarray(action) * 10.0
+    runtime._active_chunk_id = 4
+    runtime._action_vla_normalized[0, 1, 0:3] = (0.1, 0.2, 0.3)
+    runtime._action_vla_normalized[0, 1, 10:13] = (0.4, 0.5, 0.6)
+    runtime._action_vla = runtime._action_vla_normalized * 10.0
+    runtime._action_vla[0, 1, [9, 19]] = (0.09, 0.11)
+    runtime._x_base = np.zeros((1, 3, 20), dtype=np.float32)
+    runtime._x_base_device = runtime._x_base
+    runtime._episode_baseline = np.zeros((4, 1), dtype=np.float32)
+    runtime.history = _History()
+    runtime._request_results = {}
+    runtime._last_action_index = None
+    runtime.last_diagnostics = None
+    runtime.last_vla_normalized = None
+    runtime.last_frs_normalized = None
+    runtime.gripper_hysteresis = GripperHysteresisConfig(
+        left_close_threshold=0.08,
+        left_reopen_threshold=0.10,
+        left_closed_command=0.01,
+        right_close_threshold=0.09,
+        right_reopen_threshold=0.10,
+        right_closed_command=0.01,
+    )
+    runtime._vla_translation_latched = (True, False)
+    decoded = np.full((1, 3, 20), 0.5, dtype=np.float32)
+    runtime._payload_hash = lambda _observation: b"tactile"
+    runtime._encode_observation = lambda _observation: np.zeros((4, 1), dtype=np.float32)
+    runtime._normalized_state = lambda _observation: None
+    runtime._decode_action_chunk = lambda *_args, **_kwargs: decoded
+
+    result = runtime.steer_action(4, 10, {}, 1)
+
+    np.testing.assert_array_equal(
+        result.selected_normalized[0:3], runtime._action_vla_normalized[0, 1, 0:3]
+    )
+    np.testing.assert_array_equal(result.selected_normalized[3:9], decoded[0, 1, 3:9])
+    np.testing.assert_array_equal(result.selected_normalized[10:19], decoded[0, 1, 10:19])
+    assert runtime._vla_translation_latched == (True, False)

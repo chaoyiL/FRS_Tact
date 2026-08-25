@@ -4,11 +4,13 @@ import hashlib
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -157,6 +159,227 @@ def test_plain_pi05_client_starts_without_config_handshake(
         ("predict", 2, "move the block", 7, 2),
         ("action", (2, 2), 20),
         "cleanup",
+    ]
+
+
+def test_frs_pi05_client_starts_without_config_handshake(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    policy_module = ModuleType("deploy_pi05.policy")
+    policy_module.Pi05RemotePolicy = object
+    monkeypatch.setitem(sys.modules, "deploy_pi05.policy", policy_module)
+    from deploy_pi05 import remote_client
+    from deploy_pi05.frs_protocol import FRSChunkEnd, FRSChunkStart
+    from deploy_pi05.frs_runtime import FRSChunkReady
+
+    events: list[object] = []
+    config_path = tmp_path / "deploy_pi05_frs.yaml"
+    raw_config = b"FRS YAML bytes are hashed and parsed exactly once\n"
+    config_path.write_bytes(raw_config)
+    config = {
+        "connection": {
+            "address": "robot.example",
+            "port": 8000,
+            "observation_timeout_s": 1.25,
+            "action_ack_timeout_s": 0.5,
+        },
+        "observation": {"language_prompt": "move the block"},
+        "runtime": {"warmup_runs": 1, "auto_start": False},
+        "seed": 7,
+        "num_steps": 2,
+        "frs": {},
+        "gripper": {
+            "left_close_threshold": 0.08,
+            "left_reopen_threshold": 0.10,
+            "left_closed_command": 0.01,
+            "right_close_threshold": 0.09,
+            "right_reopen_threshold": 0.10,
+            "right_closed_command": 0.01,
+        },
+        "logging": {},
+    }
+    observation = {"source": "robot"}
+
+    class FakeBridge:
+        def __init__(self, **kwargs) -> None:
+            events.append(("connect", kwargs["address"], kwargs["port"]))
+            self.frs_messages = 0
+
+        def receive_observation(self, *, timeout: float) -> tuple[int, dict[str, object]]:
+            events.append(("receive_warmup", timeout))
+            return 10, observation
+
+        def send_state(self, state: str, obs_seq: int | None = None) -> None:
+            events.append(("state", state, obs_seq))
+
+        def receive_frs_message(self, timeout: float) -> object:
+            self.frs_messages += 1
+            events.append(("receive_frs", self.frs_messages, timeout))
+            if self.frs_messages == 1:
+                return FRSChunkStart(
+                    obs_seq=11,
+                    chunk_id=5,
+                    observation=observation,
+                    observation_timestamp=100.0,
+                    control_dt=0.05,
+                    action_horizon=2,
+                    execution_mode="block",
+                    action_timestamps=None,
+                    nominal_chunk_end=None,
+                )
+            return FRSChunkEnd(5, "exhausted", 0, 0)
+
+        def send_frs_chunk_ready(
+            self, obs_seq: int, chunk_id: int, prediction_trace: object
+        ) -> None:
+            del prediction_trace
+            events.append(("ready", obs_seq, chunk_id))
+
+    class FakePolicy:
+        config = SimpleNamespace(state_dim=2, action_horizon=2, robot_action_dim=2)
+        robot_image_keys = ("camera",)
+
+        def __init__(self, policy_config: object) -> None:
+            del policy_config
+
+    class FakeFRS:
+        tactile_keys = ("tactile",)
+
+        def __init__(
+            self,
+            _config,
+            *,
+            config_path,
+            policy,
+            source_sample_steps,
+            gripper_hysteresis,
+        ) -> None:
+            del config_path, source_sample_steps
+            assert gripper_hysteresis.left_close_threshold == pytest.approx(0.08)
+            assert gripper_hysteresis.right_close_threshold == pytest.approx(0.09)
+            self.policy = policy
+
+        @staticmethod
+        def reset_episode(warmup: object) -> None:
+            del warmup
+            events.append("reset_episode")
+
+        @staticmethod
+        def warmup(warmup: object, task: str, *, seed: int, sample_steps: int) -> None:
+            del warmup
+            events.append(("warmup", task, seed, sample_steps))
+
+        @staticmethod
+        def begin_chunk(
+            chunk_id: int, initial_observation: object, task: str, *, seed: int, num_steps: int
+        ) -> FRSChunkReady:
+            del initial_observation, task, seed, num_steps
+            events.append(("begin_chunk", chunk_id))
+            chunk = np.zeros((1, 2, 2), dtype=np.float32)
+            return FRSChunkReady(chunk_id, chunk, chunk, chunk, 1.0, 2.0)
+
+        @staticmethod
+        def end_chunk(chunk_id: int) -> None:
+            events.append(("end_chunk", chunk_id))
+
+    read_paths: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def record_read_bytes(path: Path) -> bytes:
+        read_paths.append(path)
+        return original_read_bytes(path)
+
+    loaded_payloads: list[tuple[bytes, str]] = []
+
+    def load_from_bytes(payload: bytes, mode: str) -> dict[str, object]:
+        loaded_payloads.append((payload, mode))
+        if payload != raw_config:
+            raise AssertionError("FRS config loader received bytes different from the hash input")
+        return config
+
+    server_config_calls: list[object] = []
+
+    def record_server_config(*args: object, **kwargs: object) -> dict[str, object]:
+        server_config_calls.append((args, kwargs))
+        return {}
+
+    monkeypatch.setattr(Path, "read_bytes", record_read_bytes)
+    monkeypatch.setattr(remote_client, "load_config", lambda _path: config, raising=False)
+    monkeypatch.setattr(
+        remote_client,
+        "load_deployment_config_bytes",
+        load_from_bytes,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        remote_client, "make_policy_config", lambda *args: SimpleNamespace(state_dim=2)
+    )
+    monkeypatch.setattr(remote_client, "make_server_config", record_server_config, raising=False)
+    monkeypatch.setattr(remote_client, "_jax_runtime", lambda: ("cpu", ()))
+    monkeypatch.setattr(remote_client, "print_startup_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(remote_client, "Pi05RemotePolicy", FakePolicy)
+    monkeypatch.setattr(remote_client, "FRSRuntime", FakeFRS)
+    monkeypatch.setattr(remote_client, "RobotBridgeClient", FakeBridge)
+    monkeypatch.setattr(remote_client, "prepare_observation", lambda value, **kwargs: value)
+    monkeypatch.setattr(remote_client, "start_observation_saver", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        "builtins.input",
+        lambda prompt: events.append(("confirm_start", prompt)) or "",
+    )
+    monkeypatch.setattr(
+        remote_client,
+        "cleanup_deployment_resources",
+        lambda *args, **kwargs: events.append("cleanup"),
+    )
+
+    remote_client.run(config_path, max_iterations_override=1)
+
+    output = capsys.readouterr().out
+    assert f"[startup] deploy config path: {config_path.resolve()}" in output
+    assert f"[startup] deploy config sha256: {hashlib.sha256(raw_config).hexdigest()}" in output
+    assert read_paths == [config_path.resolve()]
+    assert loaded_payloads == [(raw_config, "frs")]
+    assert server_config_calls == []
+    assert events == [
+        ("connect", "robot.example", 8000),
+        ("receive_warmup", 1.25),
+        "reset_episode",
+        ("warmup", "move the block", 7, 2),
+        ("confirm_start", "[client] Ready. Press Enter to send START to the robot server... "),
+        ("state", "start", 10),
+        ("receive_frs", 1, 1.25),
+        ("begin_chunk", 5),
+        ("ready", 11, 5),
+        ("receive_frs", 2, 1.25),
+        ("end_chunk", 5),
+        "cleanup",
+    ]
+
+
+def test_frs_deployment_rejects_auto_start_true() -> None:
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config_path = ROOT / "deploy_pi05" / "configs" / "deploy_pi05_frs.yaml"
+    config = yaml.safe_load(config_path.read_bytes())
+    config["runtime"]["auto_start"] = True
+
+    with pytest.raises(ValueError, match="FRS.*auto_start.*false"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), "frs")
+
+
+def test_pi05_bridge_state_obs_seq_extension_preserves_legacy_payload() -> None:
+    from deploy_pi05.bridge_client import RobotBridgeClient
+
+    bridge = object.__new__(RobotBridgeClient)
+    sent: list[dict[str, object]] = []
+    bridge._send = sent.append
+
+    bridge.send_state("start", obs_seq=7)
+    bridge.send_state("stop")
+
+    assert sent == [
+        {"type": "state", "state": "start", "obs_seq": 7},
+        {"type": "state", "state": "stop"},
     ]
 
 

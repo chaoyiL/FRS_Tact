@@ -3,8 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+import math
 from numbers import Integral
+from numbers import Real
 from typing import Any
+
+
+@dataclass(frozen=True)
+class GripperHysteresisConfig:
+    left_close_threshold: float
+    left_reopen_threshold: float
+    left_closed_command: float
+    right_close_threshold: float
+    right_reopen_threshold: float
+    right_closed_command: float
 
 
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
@@ -25,11 +38,57 @@ def _integer(value: Any, name: str) -> int:
     return int(value)
 
 
+def _bounded_float(value: Any, name: str, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
+    return parsed
+
+
+def parse_gripper_hysteresis_config(
+    config: Mapping[str, Any],
+) -> GripperHysteresisConfig:
+    raw = _mapping(config.get("gripper"), "gripper")
+    values: dict[str, float] = {}
+    for side in ("left", "right"):
+        close_name = f"{side}_close_threshold"
+        reopen_name = f"{side}_reopen_threshold"
+        closed_name = f"{side}_closed_command"
+        close = _bounded_float(
+            raw.get(close_name),
+            f"gripper.{close_name}",
+            minimum=0.0,
+            maximum=1.05,
+        )
+        reopen = _bounded_float(
+            raw.get(reopen_name),
+            f"gripper.{reopen_name}",
+            minimum=0.0,
+            maximum=1.05,
+        )
+        if close >= reopen:
+            raise ValueError(
+                f"gripper.{close_name} must be less than gripper.{reopen_name}"
+            )
+        values[close_name] = close
+        values[reopen_name] = reopen
+        values[closed_name] = _bounded_float(
+            raw.get(closed_name),
+            f"gripper.{closed_name}",
+            minimum=0.01,
+            maximum=0.04,
+        )
+    return GripperHysteresisConfig(**values)
+
+
 def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     """Validate the FRS profile without importing JAX or training modules."""
     raw = _mapping(config.get("frs"), "frs")
     if not _boolean(raw.get("enabled", True), "frs.enabled"):
         raise ValueError("deploy_pi05 requires frs.enabled=true")
+    parse_gripper_hysteresis_config(config)
     _boolean(
         raw.get("verify_source_checkpoint_fingerprint", False),
         "frs.verify_source_checkpoint_fingerprint",

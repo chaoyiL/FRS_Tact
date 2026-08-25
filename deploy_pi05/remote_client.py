@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import time
 from collections.abc import Sequence
@@ -17,9 +18,8 @@ from .deployment import (
     ObservationSaver,
     cleanup_deployment_resources,
     configure_deployment_logging,
-    load_deployment_config,
+    load_deployment_config_bytes,
     make_policy_config,
-    make_server_config,
     optional_bool,
     prepare_observation,
     print_startup_summary,
@@ -30,6 +30,7 @@ from .deployment import (
 )
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
+from .frs_config import parse_gripper_hysteresis_config
 from .policy import Pi05RemotePolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05_frs.yaml"
@@ -42,7 +43,7 @@ def _jax_runtime() -> tuple[str, tuple[Any, ...]]:
 
 def load_config(path: Path) -> dict[str, Any]:
     """Load the FRS profile from the shared deployment configuration."""
-    return load_deployment_config(path, "frs")
+    return load_deployment_config_bytes(path.read_bytes(), "frs")
 
 
 def _immutable(value: Any) -> np.ndarray:
@@ -179,7 +180,11 @@ def _run_frs(
 
 def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     config_path = config_path.expanduser().resolve()
-    config = load_config(config_path)
+    config_bytes = config_path.read_bytes()
+    config_sha256 = hashlib.sha256(config_bytes).hexdigest()
+    print(f"[startup] deploy config path: {config_path}")
+    print(f"[startup] deploy config sha256: {config_sha256}")
+    config = load_deployment_config_bytes(config_bytes, "frs")
     connection = section(config, "connection")
     observation_config = section(config, "observation")
     runtime = section(config, "runtime")
@@ -217,9 +222,9 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         config_path=config_path,
         policy=policy,
         source_sample_steps=sample_steps,
+        gripper_hysteresis=parse_gripper_hysteresis_config(config),
     )
     image_keys = tuple(dict.fromkeys((*policy.robot_image_keys, *frs.tactile_keys)))
-    server_config = make_server_config(config, mode="frs", frs_runtime=frs)
     bridge: RobotBridgeClient | None = None
     saver: ObservationSaver | None = None
     try:
@@ -232,7 +237,6 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             ping_interval_s=float(connection.get("ping_interval_s", 20.0)),
             ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
         )
-        bridge.send_config(server_config)
         saver = start_observation_saver(
             config.get("logging", {}) or {},
             image_keys,
@@ -254,7 +258,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         print(f"[client] Warmup observation sequence: {obs_seq}")
         if runtime.get("auto_start", False) is False:
             input("[client] Ready. Press Enter to send START to the robot server... ")
-        bridge.send_state("start")
+        bridge.send_state("start", obs_seq=obs_seq)
         _run_frs(
             bridge,
             frs,

@@ -36,7 +36,7 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   #Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   #Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   single_arm_mode: false
@@ -47,6 +47,23 @@ control:
   controller_frequency: 80.0
   action_horizon: 50
   steps_per_inference: 50
+  # Reject one unsafe model chunk and immediately re-infer while holding position.
+  # Stop the policy safely only after this many consecutive unsafe chunks.
+  max_consecutive_unsafe_chunks: 3
+
+gripper:
+  # VLA <= 0.08 locks the left gripper closed through return noise.
+  # Reopening is allowed only once the VLA width reaches 0.10.
+  left_close_threshold: 0.08
+  left_reopen_threshold: 0.10
+  left_closed_command: 0.01
+
+  # VLA 预测宽度 <= 0.09：右夹爪指令强制为 0.01
+  # 预测处于 0.09～0.10：保持当前闭合状态，防止抖动
+  # 预测 >= 0.10：解除闭合锁存，恢复 VLA 原始宽度
+  right_close_threshold: 0.09
+  right_reopen_threshold: 0.10
+  right_closed_command: 0.01
 
 runtime:
   auto_start: false
@@ -55,6 +72,6 @@ runtime:
 
 logging:
   save_observations: true
-  output_dir: outputs/pi05_task1
+  output_dir: outputs/0825_check_frs
   save_every: 1
   queue_size: 32
