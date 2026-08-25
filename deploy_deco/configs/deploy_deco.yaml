@@ -1,6 +1,6 @@
 # Standalone DECO Stage 1 deployment. The current artifact is latest, not best;
 # switch to deco_stage1_best.ts once that artifact is recovered from the trainer.
-checkpoint: /home/hillbot/deco/deco/deco_stage1_latest.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/deco/deco/deco_stage1_latest.ts
 device: cuda:0
 seed: 0
 
@@ -12,7 +12,6 @@ connection:
   ping_interval_s: 20.0
   ping_timeout_s: 20.0
   observation_timeout_s: 30.0
-  action_ack_timeout_s: 30.0
   token: null
   token_env: VB_ROBOT_TOKEN
   require_token: true

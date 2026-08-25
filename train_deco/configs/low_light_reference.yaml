@@ -1,0 +1,27 @@
+# Unlabeled deployment brightness reference for low-light-v1.
+# This file is provenance/calibration only and is not loaded as training data.
+metric: rgb_channel_mean_0_255
+training_reference:
+  camera0: 91.8
+  camera1: 97.6
+deployment_runs:
+  - id: eval_obs_20260825_215123
+    frames_per_camera: 40
+    camera0: {mean: 67.403, q05: 66.333, median: 67.114, q95: 68.699}
+    camera1: {mean: 62.590, q05: 61.923, median: 62.137, q95: 64.414}
+  - id: eval_obs_20260825_222435
+    frames_per_camera: 38
+    camera0: {mean: 74.182, q05: 70.956, median: 73.494, q95: 80.137}
+    camera1: {mean: 71.134, q05: 69.419, median: 71.623, q95: 72.274}
+  - id: eval_obs_20260825_231751
+    frames_per_camera: 27
+    camera0: {mean: 60.776, q05: 59.597, median: 60.462, q95: 63.595}
+    camera1: {mean: 58.736, q05: 58.409, median: 58.660, q95: 59.150}
+  - id: eval_obs_20260825_232329
+    frames_per_camera: 55
+    camera0: {mean: 78.717, q05: 77.235, median: 78.576, q95: 80.276}
+    camera1: {mean: 72.247, q05: 71.284, median: 71.934, q95: 73.958}
+calibrated_augmentation:
+  exposure_range: [0.58, 0.90]
+  gamma_range: [1.10, 1.50]
+

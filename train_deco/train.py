@@ -5,6 +5,7 @@ import os
 import random
 import time
 from contextlib import nullcontext
+from dataclasses import asdict
 from pathlib import Path
 
 import numpy as np
@@ -22,9 +23,11 @@ from .checkpoint import (
 )
 from .export_torchscript import copy_torchscript_artifact, export_policy
 from .input_adapter import (
+    LowLightAugmentationConfig,
     augment_training_images,
     letterbox_and_normalize,
     select_deco_observation,
+    validate_augmentation_config,
 )
 from .metrics import MetricsLogger
 from .model_factory import MODEL_TYPE, build_model, observation_indices
@@ -72,6 +75,33 @@ def cleanup_dist():
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.environ.get(name)
     return default if value is None else value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def env_tuple(name: str, default: tuple, value_type=float) -> tuple:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return tuple(value_type(item.strip()) for item in value.split(","))
+
+
+def augmentation_config_from_args(args) -> LowLightAugmentationConfig:
+    config = LowLightAugmentationConfig(
+        enabled=args.augmentation_enabled,
+        identity_probability=args.augmentation_identity_probability,
+        low_light_probability=args.augmentation_low_light_probability,
+        mild_probability=args.augmentation_mild_probability,
+        exposure_probability=args.augmentation_exposure_probability,
+        exposure_range=tuple(args.augmentation_exposure_range),
+        gamma_range=tuple(args.augmentation_gamma_range),
+        mild_brightness_range=tuple(args.augmentation_mild_brightness_range),
+        contrast_range=tuple(args.augmentation_contrast_range),
+        saturation_range=tuple(args.augmentation_saturation_range),
+        blur_probability=args.augmentation_blur_probability,
+        blur_kernel_sizes=tuple(args.augmentation_blur_kernel_sizes),
+        blur_sigma_range=tuple(args.augmentation_blur_sigma_range),
+    )
+    validate_augmentation_config(config)
+    return config
 
 
 def jsonable_stats(stats: dict) -> dict:
@@ -275,6 +305,7 @@ def run_epoch(
     metric_callback=None,
     validation_seed=12345,
     rank=0,
+    augmentation_config=None,
 ):
     model.train(train)
     raw_model = model.module if isinstance(model, DDP) else model
@@ -297,7 +328,7 @@ def run_epoch(
                 observation = select_deco_observation(source_observation, observation_index)
                 images = batch["images"].to(device, non_blocking=True)
                 if train:
-                    images = augment_training_images(images)
+                    images = augment_training_images(images, augmentation_config)
                 images = letterbox_and_normalize(images, image_size)
                 actions = batch["action"].to(device, non_blocking=True)
                 is_pad = batch["is_pad"].to(device, non_blocking=True)
@@ -495,6 +526,59 @@ def main():
     parser.add_argument("--rope-width", type=int, default=int(os.environ.get("DECO_ROPE_WIDTH", "256")))
     parser.add_argument("--use-task-condition", action=argparse.BooleanOptionalAction,
                         default=env_bool("DECO_USE_TASK_CONDITION", False))
+    parser.add_argument(
+        "--augmentation-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("DECO_AUGMENTATION_ENABLED", True),
+    )
+    parser.add_argument(
+        "--augmentation-identity-probability", type=float,
+        default=float(os.environ.get("DECO_AUGMENTATION_IDENTITY_PROBABILITY", "0.25")),
+    )
+    parser.add_argument(
+        "--augmentation-low-light-probability", type=float,
+        default=float(os.environ.get("DECO_AUGMENTATION_LOW_LIGHT_PROBABILITY", "0.55")),
+    )
+    parser.add_argument(
+        "--augmentation-mild-probability", type=float,
+        default=float(os.environ.get("DECO_AUGMENTATION_MILD_PROBABILITY", "0.20")),
+    )
+    parser.add_argument(
+        "--augmentation-exposure-probability", type=float,
+        default=float(os.environ.get("DECO_AUGMENTATION_EXPOSURE_PROBABILITY", "0.5")),
+    )
+    parser.add_argument(
+        "--augmentation-exposure-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_EXPOSURE_RANGE", (0.58, 0.90)),
+    )
+    parser.add_argument(
+        "--augmentation-gamma-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_GAMMA_RANGE", (1.10, 1.50)),
+    )
+    parser.add_argument(
+        "--augmentation-mild-brightness-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_MILD_BRIGHTNESS_RANGE", (0.90, 1.10)),
+    )
+    parser.add_argument(
+        "--augmentation-contrast-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_CONTRAST_RANGE", (0.85, 1.10)),
+    )
+    parser.add_argument(
+        "--augmentation-saturation-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_SATURATION_RANGE", (0.90, 1.10)),
+    )
+    parser.add_argument(
+        "--augmentation-blur-probability", type=float,
+        default=float(os.environ.get("DECO_AUGMENTATION_BLUR_PROBABILITY", "0.20")),
+    )
+    parser.add_argument(
+        "--augmentation-blur-kernel-sizes", type=int, nargs="+",
+        default=env_tuple("DECO_AUGMENTATION_BLUR_KERNEL_SIZES", (3, 5), int),
+    )
+    parser.add_argument(
+        "--augmentation-blur-sigma-range", type=float, nargs=2,
+        default=env_tuple("DECO_AUGMENTATION_BLUR_SIGMA_RANGE", (0.1, 1.0)),
+    )
     parser.add_argument("--workers", type=int, default=int(os.environ.get("DATALOADER_WORKERS", "2")))
     parser.add_argument("--limit-samples", type=int, default=None)
     parser.add_argument(
@@ -542,6 +626,7 @@ def main():
     parser.add_argument("--torchscript-image-height", type=int, default=int(os.environ.get("TORCHSCRIPT_IMAGE_HEIGHT", "208")))
     parser.add_argument("--torchscript-image-width", type=int, default=int(os.environ.get("TORCHSCRIPT_IMAGE_WIDTH", "320")))
     args = parser.parse_args()
+    augmentation_config = augmentation_config_from_args(args)
     dataset_source = training_dataset_source(args)
     if args.action_chunk_size is not None and args.action_chunk_size <= 0:
         raise ValueError("ACTION_CHUNK_SIZE must be positive")
@@ -710,6 +795,7 @@ def main():
             else "per-step-warmup-cosine-v1"
         ),
         "rank_seed_scheme": "base-plus-rank-v1",
+        "augmentation": asdict(augmentation_config),
     }
     model = build_model(config).to(device)
     if world_size > 1:
@@ -906,6 +992,7 @@ def main():
             log_every_steps=args.log_every_steps,
             metric_callback=log_step,
             rank=rank,
+            augmentation_config=augmentation_config,
         )
         sync_model_buffers(raw_model, world_size)
         validation_metrics = {}

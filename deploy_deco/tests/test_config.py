@@ -6,6 +6,7 @@ from deploy_deco.artifact import load_sidecar
 from deploy_deco.config import (
     load_config,
     make_server_config,
+    validate_config,
     validate_artifact_contract,
 )
 
@@ -30,3 +31,9 @@ def test_training_frequency_mismatch_is_rejected():
     metadata = load_sidecar(config["checkpoint"])
     with pytest.raises(ValueError, match="training frequency"):
         validate_artifact_contract(config, metadata)
+
+
+def test_legacy_config_does_not_require_action_ack_timeout():
+    config = load_config(CONFIG)
+    config["connection"].pop("action_ack_timeout_s", None)
+    validate_config(config)

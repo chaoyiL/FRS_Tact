@@ -52,7 +52,6 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     if max_iterations < 0:
         raise ValueError("max_iterations must be nonnegative")
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
-    action_ack_timeout = float(connection["action_ack_timeout_s"])
 
     print(f"[startup] Loading DECO TorchScript on {config['device']}...")
     started = time.perf_counter()
@@ -101,7 +100,6 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             action = policy.predict(observation, seed=seed + warmup_runs + iteration)
             inference_ms = (time.perf_counter() - inference_started) * 1000.0
             bridge.send_action(action, obs_seq)
-            bridge.receive_action_ack(obs_seq, timeout=action_ack_timeout)
             iteration += 1
             print(
                 f"[client] iteration={iteration} obs_seq={obs_seq} "

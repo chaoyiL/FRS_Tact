@@ -43,6 +43,7 @@ RESUME_CONFIG_KEYS = (
     "scheduler_type",
     "optimizer_group_names",
     "rank_seed_scheme",
+    "augmentation",
     "early_stopping_min_delta",
 )
 

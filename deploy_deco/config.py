@@ -68,11 +68,10 @@ def validate_config(config: Mapping[str, Any]) -> None:
     observation = section(config, "observation")
     control = section(config, "control")
     runtime = section(config, "runtime")
-    for key in ("address", "port", "action_ack_timeout_s"):
+    for key in ("address", "port"):
         if key not in connection:
             raise ValueError(f"missing connection.{key}")
     _integer(connection["port"], "connection.port")
-    _positive_float(connection["action_ack_timeout_s"], "connection.action_ack_timeout_s")
     if "add_port" in connection and connection["add_port"] is not None:
         _boolean(connection["add_port"], "connection.add_port")
     _boolean(connection.get("require_token", True), "connection.require_token")

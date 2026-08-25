@@ -16,6 +16,22 @@ model:
   inference_steps: 5
   rope_height: 256
   rope_width: 256
+augmentation:
+  version: low-light-v1
+  enabled: true
+  identity_probability: 0.25
+  low_light_probability: 0.55
+  mild_probability: 0.20
+  exposure_probability: 0.5
+  exposure_range: [0.58, 0.90]
+  gamma_range: [1.10, 1.50]
+  mild_brightness_range: [0.90, 1.10]
+  contrast_range: [0.85, 1.10]
+  saturation_range: [0.90, 1.10]
+  blur_probability: 0.20
+  blur_kernel_sizes: [3, 5]
+  blur_sigma_range: [0.1, 1.0]
+  shared_across_cameras: true
 export:
   torchscript_image_height: 224
   torchscript_image_width: 224

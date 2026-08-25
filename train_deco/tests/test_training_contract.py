@@ -1,12 +1,18 @@
 import pytest
 
+from dataclasses import asdict
+import os
+from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 from train_deco.train import (
     action_mode_config_fields,
+    augmentation_config_from_args,
     resolve_dataset_action_mode,
     training_dataset_source,
 )
+from train_deco.resume import validate_resume_config
 
 
 def test_accepts_precomputed_tcp_delta_with_absolute_gripper():
@@ -46,3 +52,77 @@ def test_preprocessed_training_rejects_multiroot_manifest():
     )
     with pytest.raises(ValueError, match="dataset-manifest"):
         training_dataset_source(args)
+
+
+def test_training_arguments_build_approved_low_light_config():
+    args = SimpleNamespace(
+        augmentation_enabled=True,
+        augmentation_identity_probability=0.25,
+        augmentation_low_light_probability=0.55,
+        augmentation_mild_probability=0.20,
+        augmentation_exposure_probability=0.5,
+        augmentation_exposure_range=(0.58, 0.90),
+        augmentation_gamma_range=(1.10, 1.50),
+        augmentation_mild_brightness_range=(0.90, 1.10),
+        augmentation_contrast_range=(0.85, 1.10),
+        augmentation_saturation_range=(0.90, 1.10),
+        augmentation_blur_probability=0.20,
+        augmentation_blur_kernel_sizes=(3, 5),
+        augmentation_blur_sigma_range=(0.1, 1.0),
+    )
+
+    config = asdict(augmentation_config_from_args(args))
+
+    assert config["version"] == "low-light-v1"
+    assert config["enabled"] is True
+    assert config["exposure_range"] == (0.58, 0.90)
+    assert config["gamma_range"] == (1.10, 1.50)
+    assert config["shared_across_cameras"] is True
+
+
+def test_exact_resume_rejects_changed_augmentation_config():
+    checkpoint = {
+        "training_state_version": 2,
+        "augmentation": {"version": "low-light-v1", "exposure_range": (0.58, 0.90)},
+    }
+    current = {
+        **checkpoint,
+        "augmentation": {"version": "low-light-v1", "exposure_range": (0.70, 0.90)},
+    }
+
+    with pytest.raises(ValueError, match="augmentation"):
+        validate_resume_config(checkpoint, current, resume_mode="exact")
+
+
+def test_train_launcher_passes_low_light_augmentation_contract():
+    launcher = (
+        Path(__file__).parents[1] / "scripts" / "train.sh"
+    ).read_text()
+
+    assert "--augmentation-enabled" in launcher
+    assert '--augmentation-identity-probability "${AUGMENTATION_IDENTITY_PROBABILITY}"' in launcher
+    assert '--augmentation-low-light-probability "${AUGMENTATION_LOW_LIGHT_PROBABILITY}"' in launcher
+    assert '--augmentation-mild-probability "${AUGMENTATION_MILD_PROBABILITY}"' in launcher
+    assert '--augmentation-exposure-range "${AUGMENTATION_EXPOSURE_MIN}" "${AUGMENTATION_EXPOSURE_MAX}"' in launcher
+    assert '--augmentation-gamma-range "${AUGMENTATION_GAMMA_MIN}" "${AUGMENTATION_GAMMA_MAX}"' in launcher
+
+
+def test_train_launcher_preserves_run_id_and_accepts_yes_for_augmentation():
+    launcher = Path(__file__).parents[1] / "scripts" / "train.sh"
+
+    result = subprocess.run(
+        ["bash", str(launcher), "--mode", "local-smoke", "--dry-run"],
+        cwd=Path(__file__).parents[2],
+        env={
+            **os.environ,
+            "RUN_ID": "deco_low_light_test",
+            "AUGMENTATION_ENABLED": "yes",
+        },
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert "--run-id deco_low_light_test" in result.stdout
+    assert "--augmentation-enabled" in result.stdout
+    assert "--no-augmentation-enabled" not in result.stdout
