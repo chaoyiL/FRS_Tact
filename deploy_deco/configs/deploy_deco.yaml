@@ -1,0 +1,41 @@
+# Standalone DECO Stage 1 deployment. The current artifact is latest, not best;
+# switch to deco_stage1_best.ts once that artifact is recovered from the trainer.
+checkpoint: /home/hillbot/deco/deco/deco_stage1_latest.ts
+device: cuda:0
+seed: 0
+
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  action_ack_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+observation:
+  data_type: vision
+  # Existing robot server profile: two 224x224 RGB wrist cameras.
+  observation_profile: deco_vision_224
+  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  single_arm_mode: false
+  no_state_obs_mode: false
+
+control:
+  # Must match artifact expected_sample_hz. The current weight was trained at 30Hz.
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  # Must match artifact output [1,32,20].
+  action_horizon: 32
+  # Execute eight actions (0.267s) before obtaining a new observation and replanning.
+  steps_per_inference: 8
+
+runtime:
+  auto_start: false
+  warmup_runs: 5
+  # 0 runs until Ctrl+C; use a positive value for an integration smoke test.
+  max_iterations: 0
