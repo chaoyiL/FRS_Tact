@@ -367,3 +367,31 @@ def test_tactile_cache_encoder_failure_publishes_no_complete_cache(tmp_path: Pat
     assert not (config.cache.tactile_root / "manifest.json").exists()
     assert not (config.cache.tactile_root / "embeddings.npy").exists()
     assert not list(config.cache.tactile_root.glob(".*.npy"))
+
+
+def test_tactile_cache_writer_lock_rejects_second_process_then_reuses_complete(tmp_path: Path) -> None:
+    from train_baseline_pi05.tactile_cache import prepare_tactile_cache
+
+    class Dataset:
+        def __len__(self): return 1
+        def __getitem__(self, index):
+            return {key: np.zeros((4, 4, 3), np.uint8) for key in (
+                "observation.images.tactile_left_0", "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1", "observation.images.tactile_right_1",
+            )}
+
+    config = _config(tmp_path)
+    output = prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda images: np.ones((4, 512), np.float32)})
+    lock_code = """import fcntl, os, sys, time
+root = sys.argv[1]
+fd = os.open(os.path.join(root, '.writer.lock'), os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+print('locked', flush=True)
+time.sleep(2)
+"""
+    holder = subprocess.Popen([sys.executable, "-c", lock_code, str(output)], stdout=subprocess.PIPE, text=True)
+    assert holder.stdout is not None and holder.stdout.readline().strip() == "locked"
+    with np.testing.assert_raises_regex(RuntimeError, "writer is locked"):
+        prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda _images: (_ for _ in ()).throw(AssertionError("must not encode"))})
+    assert holder.wait(timeout=5) == 0
+    assert prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda _images: (_ for _ in ()).throw(AssertionError("must not encode"))}) == output

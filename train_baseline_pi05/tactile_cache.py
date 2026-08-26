@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -17,6 +18,7 @@ from .config import TACTILE_KEYS
 
 EMBEDDINGS_NAME = "embeddings.npy"
 MANIFEST_NAME = "manifest.json"
+WRITER_LOCK_NAME = ".writer.lock"
 PREPROCESS_VERSION = "resize_with_pad_uint8_to_unit_v1"
 
 
@@ -37,6 +39,16 @@ def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def _acquire_writer_lock(cache_dir: Path) -> int:
+    lock_fd = os.open(cache_dir / WRITER_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        os.close(lock_fd)
+        raise RuntimeError(f"tactile cache writer is locked: {cache_dir}") from error
+    return lock_fd
 
 
 class TactileEmbeddingCache:
@@ -189,18 +201,19 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
     )
     manifest_path = output / MANIFEST_NAME
     embeddings_path = output / EMBEDDINGS_NAME
-    if manifest_path.exists():
-        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing != contract:
-            raise ValueError("complete tactile cache does not match requested encoder, dataset, count, or selection contract")
-        TactileEmbeddingCache.open(output, tactile_keys=keys, encoder_path=checkpoint)
-        return output
-    if output.exists() and any(output.iterdir()):
-        raise ValueError("tactile cache root contains files without a matching complete manifest")
     output.mkdir(parents=True, exist_ok=True)
-    temporary = output / f".{EMBEDDINGS_NAME}.{uuid.uuid4().hex}.npy"
-    published = False
+    lock_fd = _acquire_writer_lock(output)
     try:
+        if manifest_path.exists():
+            existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if existing != contract:
+                raise ValueError("complete tactile cache does not match requested encoder, dataset, count, or selection contract")
+            TactileEmbeddingCache.open(output, tactile_keys=keys, encoder_path=checkpoint)
+            return output
+        if any(entry.name != WRITER_LOCK_NAME for entry in output.iterdir()):
+            raise ValueError("tactile cache root contains files without a matching complete manifest")
+        temporary = output / f".{EMBEDDINGS_NAME}.{uuid.uuid4().hex}.npy"
+        published = manifest_published = False
         encoder = deps.get("encoder") or _default_encoder(checkpoint)
         from .tactile_encoder.preprocess import parse_image_to_unit
         embeddings = np.lib.format.open_memmap(temporary, mode="w+", dtype=np.float32, shape=(count, 4, dim))
@@ -221,12 +234,17 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         os.replace(temporary, embeddings_path)
         published = True
         _atomic_json(manifest_path, contract)
+        manifest_published = True
     except BaseException:
-        temporary.unlink(missing_ok=True)
+        if "temporary" in locals():
+            temporary.unlink(missing_ok=True)
         (manifest_path.with_suffix(".tmp")).unlink(missing_ok=True)
-        if published:
+        if "published" in locals() and published and not manifest_published:
             embeddings_path.unlink(missing_ok=True)
         raise
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
     return output
 
 
