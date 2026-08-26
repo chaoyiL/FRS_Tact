@@ -1,6 +1,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 from pathlib import Path
@@ -8,11 +9,26 @@ from pathlib import Path
 import torch
 from torch import nn
 
-from .input_adapter import letterbox_and_normalize, select_deco_observation
-from .model_factory import MODEL_TYPE, build_model
+from .input_adapter import (
+    IMAGE_MEAN,
+    IMAGE_STD,
+    letterbox_and_normalize,
+    letterbox_tactile_images,
+    select_deco_observation,
+)
+from .lerobot_vision_dataset import TACTILE_NAMES
+from .model_factory import (
+    MODEL_TYPE,
+    STAGE2_MODEL_TYPE,
+    build_model,
+    build_stage2_model,
+)
 
 
 EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
+STAGE2_EXPORT_FORMAT = "sudo-upstream-deco-stage2-torchscript-v1"
+STAGE2_CHECKPOINT_SCHEMA_VERSION = 1
+TACTILE_TARGET_SIZE = (224, 224)
 
 
 class UpstreamDECODeployment(nn.Module):
@@ -68,6 +84,35 @@ class UpstreamDECODeployment(nn.Module):
         return normalized_action * self.action_std + self.action_mean
 
 
+class Stage2DECODeployment(UpstreamDECODeployment):
+    """Raw six-image boundary around the tactile-image Stage2 policy."""
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        tactile_images: torch.Tensor,
+        observation: torch.Tensor,
+    ) -> torch.Tensor:
+        normalized_source = (
+            observation - self.observation_mean
+        ) / self.observation_std
+        deco_observation = select_deco_observation(
+            normalized_source, self.observation_indices
+        )
+        normalized_images = letterbox_and_normalize(images, self.image_size)
+        normalized_tactile = letterbox_tactile_images(
+            tactile_images, TACTILE_TARGET_SIZE
+        )
+        normalized_action = self.policy(
+            normalized_images[:, 0],
+            normalized_images[:, 1],
+            obs=deco_observation,
+            training=False,
+            tactile_images=normalized_tactile,
+        )
+        return normalized_action * self.action_std + self.action_mean
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -77,16 +122,20 @@ def sha256_file(path: Path) -> str:
 
 
 def _validate_config(config: dict) -> None:
-    if config.get("model_type") != MODEL_TYPE:
+    model_type = config.get("model_type")
+    if model_type not in (MODEL_TYPE, STAGE2_MODEL_TYPE):
         raise ValueError(
-            f"Expected {MODEL_TYPE!r}, got {config.get('model_type')!r}"
+            f"Expected {MODEL_TYPE!r} or {STAGE2_MODEL_TYPE!r}, got {model_type!r}"
         )
     if config.get("use_task_condition", False):
         raise ValueError(
-            "The two-input TorchScript deployment contract does not support "
+            "The TorchScript deployment contract does not support "
             "task-conditioned policies"
         )
-    if len(config.get("camera_names", [])) not in (2, 3):
+    camera_count = len(config.get("camera_names", []))
+    if model_type == STAGE2_MODEL_TYPE and camera_count != 2:
+        raise ValueError("Stage2 TorchScript export requires exactly two cameras")
+    if model_type == MODEL_TYPE and camera_count not in (2, 3):
         raise ValueError("TorchScript export requires two or three camera names")
     action_mode = config.get("action_mode", "absolute")
     if action_mode not in {
@@ -97,6 +146,161 @@ def _validate_config(config: dict) -> None:
         raise ValueError(
             f"Unsupported TorchScript action_mode: {config.get('action_mode')!r}"
         )
+
+
+def _validate_stage2_checkpoint(checkpoint: dict, config: dict) -> dict:
+    if (
+        checkpoint.get("stage") != 2
+        or checkpoint.get("model_type") != STAGE2_MODEL_TYPE
+        or config.get("model_type") != STAGE2_MODEL_TYPE
+    ):
+        raise ValueError("Stage2 export requires a Stage2 tactile-image checkpoint")
+    schema = checkpoint.get("checkpoint_schema_version")
+    if schema != STAGE2_CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError(
+            "Stage2 checkpoint schema is incompatible: "
+            f"expected {STAGE2_CHECKPOINT_SCHEMA_VERSION}, got {schema!r}"
+        )
+    metadata = checkpoint.get("stage2_metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("Stage2 checkpoint is missing stage2_metadata")
+    required = {
+        "model_type",
+        "tactile_field_order",
+        "tactile_encoder",
+        "tactile_adapter_rank",
+        "gate_values",
+        "parameter_categories",
+        "parameter_counts",
+        "stage1_checkpoint",
+    }
+    missing = sorted(required - set(metadata))
+    if missing:
+        raise ValueError(f"Stage2 checkpoint metadata is missing: {missing}")
+    if metadata["model_type"] != STAGE2_MODEL_TYPE:
+        raise ValueError("Stage2 checkpoint metadata model_type is incompatible")
+    tactile_order = list(TACTILE_NAMES)
+    if (
+        metadata["tactile_field_order"] != tactile_order
+        or config.get("tactile_field_order") != tactile_order
+    ):
+        raise ValueError("Stage2 checkpoint tactile field order is incompatible")
+    adapter_rank = metadata["tactile_adapter_rank"]
+    if (
+        isinstance(adapter_rank, bool)
+        or not isinstance(adapter_rank, int)
+        or adapter_rank <= 0
+        or int(config.get("tactile_adapter_rank", 0)) != adapter_rank
+    ):
+        raise ValueError("Stage2 checkpoint adapter rank is incompatible")
+    encoder = metadata["tactile_encoder"]
+    if (
+        not isinstance(encoder, dict)
+        or encoder.get("architecture") != "resnet18"
+        or encoder.get("embedding_dim") != 512
+    ):
+        raise ValueError("Stage2 checkpoint tactile encoder contract is incompatible")
+    for name in ("source_sha256", "artifact_sha256"):
+        digest = encoder.get(name)
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(f"Stage2 checkpoint tactile encoder {name} is invalid")
+    for name in ("artifact_path", "metadata_path"):
+        path = encoder.get(name)
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(
+                f"Stage2 checkpoint tactile encoder {name} is invalid"
+            )
+    gates = metadata["gate_values"]
+    if not isinstance(gates, dict) or not gates:
+        raise ValueError("Stage2 checkpoint gate values are missing")
+    if any(
+        not isinstance(name, str)
+        or not name.endswith(".tactile_gate")
+        or isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for name, value in gates.items()
+    ):
+        raise ValueError("Stage2 checkpoint gate values are invalid")
+    stage1 = metadata["stage1_checkpoint"]
+    if not isinstance(stage1, dict):
+        raise ValueError("Stage2 checkpoint Stage1 provenance is invalid")
+    stage1_path = stage1.get("path")
+    stage1_digest = stage1.get("sha256")
+    if not isinstance(stage1_path, str) or not stage1_path.strip():
+        raise ValueError("Stage2 checkpoint Stage1 provenance path is invalid")
+    if (
+        not isinstance(stage1_digest, str)
+        or len(stage1_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in stage1_digest
+        )
+    ):
+        raise ValueError("Stage2 checkpoint Stage1 provenance digest is invalid")
+    categories = metadata["parameter_categories"]
+    if not isinstance(categories, dict):
+        raise ValueError("Stage2 checkpoint parameter_categories is invalid")
+    for boundary in ("trainable", "frozen"):
+        grouped = categories.get(boundary)
+        if not isinstance(grouped, dict):
+            raise ValueError(
+                f"Stage2 checkpoint parameter_categories.{boundary} is invalid"
+            )
+        for names in grouped.values():
+            if (
+                not isinstance(names, list)
+                or not all(isinstance(name, str) and name for name in names)
+                or len(names) != len(set(names))
+            ):
+                raise ValueError(
+                    f"Stage2 checkpoint parameter_categories.{boundary} is invalid"
+                )
+    counts = metadata["parameter_counts"]
+    if not isinstance(counts, dict):
+        raise ValueError("Stage2 checkpoint parameter_counts is invalid")
+    total = counts.get("total")
+    trainable = counts.get("trainable")
+    if (
+        isinstance(total, bool)
+        or isinstance(trainable, bool)
+        or not isinstance(total, int)
+        or not isinstance(trainable, int)
+        or total <= 0
+        or trainable <= 0
+        or trainable >= total
+    ):
+        raise ValueError("Stage2 checkpoint parameter_counts is invalid")
+    return metadata
+
+
+def _build_policy(config: dict) -> nn.Module:
+    if config.get("model_type") == STAGE2_MODEL_TYPE:
+        return build_stage2_model(config, load_backbone=False)
+    return build_model(config, load_backbone=False)
+
+
+def _validate_stage2_gates(policy: nn.Module, metadata: dict) -> None:
+    actual = {
+        name: float(parameter.detach().cpu())
+        for name, parameter in policy.named_parameters()
+        if name.endswith(".tactile_gate")
+    }
+    expected = metadata["gate_values"]
+    if set(actual) != set(expected):
+        raise ValueError("Stage2 checkpoint gate names disagree with the model")
+    for name, value in expected.items():
+        if not isinstance(value, (int, float)) or not torch.isclose(
+            torch.tensor(actual[name]),
+            torch.tensor(float(value)),
+            rtol=1e-6,
+            atol=1e-7,
+        ):
+            raise ValueError(f"Stage2 checkpoint gate value disagrees for {name!r}")
 
 
 def _atomic_save_torchscript(module, output_path: Path, extra_files: dict) -> None:
@@ -124,40 +328,57 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 def _snapshot(policy: nn.Module, config: dict) -> nn.Module:
-    # Build a clean eval copy on the SAME device as the training policy so the
-    # exported TorchScript keeps GPU-resident weights (the previous .cpu() call
-    # forced every tensor to CPU during save, so loading always landed on CPU).
-    device = next(policy.parameters()).device
-    snapshot = build_model(config, load_backbone=False).to(device)
+    # Build, load, and trace an independent CPU copy. In particular, do not move
+    # or switch the mode of the live training policy.
+    snapshot = _build_policy(config).cpu()
     snapshot.load_state_dict(
-        {key: value for key, value in policy.state_dict().items()},
+        {
+            key: value.detach().cpu()
+            for key, value in policy.state_dict().items()
+        },
         strict=True,
     )
     return snapshot.eval()
 
 
 def _trace(policy, stats, config, image_height, image_width):
-    # Place trace inputs on the same device as the policy so the traced graph and
-    # its saved tensors stay on GPU (CPU inputs would force the traced module to CPU).
-    device = next(policy.parameters()).device
-    deployment = UpstreamDECODeployment(policy, stats, config).eval().to(device)
+    if next(policy.parameters()).device.type != "cpu":
+        raise ValueError("TorchScript export snapshot must be on CPU")
+    stage2 = config.get("model_type") == STAGE2_MODEL_TYPE
+    deployment_type = Stage2DECODeployment if stage2 else UpstreamDECODeployment
+    deployment = deployment_type(policy, stats, config).eval().cpu()
     images = torch.zeros(
-        1, len(config["camera_names"]), 3, image_height, image_width,
-        device=device,
+        1, len(config["camera_names"]), 3, image_height, image_width
     )
-    observation = torch.zeros(1, int(config["source_obs_dim"]), device=device)
+    observation = torch.zeros(1, int(config["source_obs_dim"]))
+    inputs = (images, observation)
+    if stage2:
+        tactile_images = torch.zeros(1, 4, 3, image_height, image_width)
+        inputs = (images, tactile_images, observation)
     with torch.inference_mode():
         traced = torch.jit.trace(
-            deployment, (images, observation), check_trace=False, strict=True
+            deployment, inputs, check_trace=False, strict=True
         )
         traced = torch.jit.freeze(traced.eval())
-    return traced, images, observation
+    return traced, inputs
 
 
-def _metadata(config, image_height, image_width, epoch, val_loss, source):
+def _metadata(
+    config,
+    stats,
+    image_height,
+    image_width,
+    epoch,
+    val_loss,
+    source,
+    *,
+    checkpoint_schema_version=None,
+    stage2_metadata=None,
+):
     action_mode = config.get("action_mode", "absolute")
-    return {
-        "format": EXPORT_FORMAT,
+    stage2 = config.get("model_type") == STAGE2_MODEL_TYPE
+    metadata = {
+        "format": STAGE2_EXPORT_FORMAT if stage2 else EXPORT_FORMAT,
         "source": source,
         "epoch": int(epoch),
         "val_loss": float(val_loss),
@@ -194,26 +415,64 @@ def _metadata(config, image_height, image_width, epoch, val_loss, source):
         "normalization": {
             "embedded": True,
             "statistics_source": config.get("statistics_source"),
+            "statistics": stats,
         },
         "expected_sample_hz": config.get("expected_sample_hz"),
         "inference_steps": int(config["inference_steps"]),
         "stochastic": True,
     }
+    if stage2:
+        if stage2_metadata is None:
+            raise ValueError("Stage2 export requires checkpoint provenance metadata")
+        metadata["input"]["tactile_images"] = [
+            1, 4, 3, image_height, image_width
+        ]
+        metadata["input"]["tactile_images_dtype"] = "float32"
+        metadata["input"]["tactile_images_range"] = [0.0, 1.0]
+        metadata["input"]["stream_order"] = [
+            *config["camera_names"],
+            *stage2_metadata["tactile_field_order"],
+        ]
+        metadata["preprocessing"] = {
+            "visual": {
+                "resize": "aspect-preserving-letterbox",
+                "target_size": [int(config["image_size"])] * 2,
+                "padding_value": 128.0 / 255.0,
+                "normalization": "imagenet",
+                "mean": list(IMAGE_MEAN),
+                "std": list(IMAGE_STD),
+            },
+            "tactile": {
+                "resize": "aspect-preserving-letterbox",
+                "target_size": list(TACTILE_TARGET_SIZE),
+                "padding_value": 0.0,
+                "normalization": None,
+                "range": [0.0, 1.0],
+            },
+        }
+        metadata["checkpoint_schema_version"] = int(checkpoint_schema_version)
+        for name in (
+            "tactile_field_order",
+            "tactile_encoder",
+            "tactile_adapter_rank",
+            "gate_values",
+            "stage1_checkpoint",
+        ):
+            metadata[name] = stage2_metadata[name]
+    return metadata
 
 
-def _save_and_validate(traced, output_path, metadata, images, observation):
+def _save_and_validate(traced, output_path, metadata, inputs):
     metadata_json = json.dumps(metadata, indent=2, sort_keys=True)
     _atomic_save_torchscript(
         traced, output_path, {"deco_metadata.json": metadata_json}
     )
     extra = {"deco_metadata.json": ""}
-    # Map the reloaded TorchScript onto the same device as the validation inputs
-    # so GPU-resident weights stay on GPU (torch.jit.load defaults to CPU, which
-    # would mismatch the GPU images/observation used for validation).
-    device = images.device
-    loaded = torch.jit.load(str(output_path), _extra_files=extra, map_location=device).eval()
+    loaded = torch.jit.load(
+        str(output_path), _extra_files=extra, map_location="cpu"
+    ).eval()
     with torch.inference_mode():
-        output = loaded(images, observation)
+        output = loaded(*inputs)
     expected = tuple(metadata["output"]["action"])
     if tuple(output.shape) != expected or not torch.isfinite(output).all():
         raise ValueError(
@@ -237,6 +496,9 @@ def export_policy(
     image_width: int,
     epoch: int,
     val_loss: float,
+    *,
+    checkpoint_schema_version: int | None = None,
+    stage2_metadata: dict | None = None,
 ) -> dict:
     _validate_config(config)
     if image_height <= 0 or image_width <= 0:
@@ -244,14 +506,22 @@ def export_policy(
     output_path = Path(output_path)
     snapshot = _snapshot(policy, config)
     try:
-        traced, images, observation = _trace(
+        traced, inputs = _trace(
             snapshot, stats, config, image_height, image_width
         )
         metadata = _metadata(
-            config, image_height, image_width, epoch, val_loss, "training_loop"
+            config,
+            stats,
+            image_height,
+            image_width,
+            epoch,
+            val_loss,
+            "training_loop",
+            checkpoint_schema_version=checkpoint_schema_version,
+            stage2_metadata=stage2_metadata,
         )
         return _save_and_validate(
-            traced, output_path, metadata, images, observation
+            traced, output_path, metadata, inputs
         )
     finally:
         del snapshot
@@ -285,8 +555,12 @@ def export_checkpoint(
     device: str = "cpu",
 ) -> dict:
     checkpoint_path = Path(checkpoint_path)
+    # The device argument is retained for CLI/API compatibility. Export is
+    # deliberately CPU-only so the archive is portable regardless of the
+    # training/checkpoint device.
+    del device
     checkpoint = torch.load(
-        checkpoint_path, map_location=device, weights_only=True
+        checkpoint_path, map_location="cpu", weights_only=True
     )
     required = {"model", "config", "stats"}
     missing = required.difference(checkpoint)
@@ -294,26 +568,30 @@ def export_checkpoint(
         raise ValueError(f"Checkpoint is missing required keys: {sorted(missing)}")
     config = checkpoint["config"]
     _validate_config(config)
-    policy = build_model(config, load_backbone=False)
+    stage2_metadata = None
+    if config.get("model_type") == STAGE2_MODEL_TYPE:
+        stage2_metadata = _validate_stage2_checkpoint(checkpoint, config)
+    policy = _build_policy(config).cpu()
     policy.load_state_dict(checkpoint["model"], strict=True)
-    # Keep the policy on GPU when available so the exported TorchScript carries
-    # GPU-resident tensors (the previous path left it on CPU after load).
-    if torch.cuda.is_available():
-        policy = policy.cuda()
-    traced, images, observation = _trace(
+    if stage2_metadata is not None:
+        _validate_stage2_gates(policy, stage2_metadata)
+    traced, inputs = _trace(
         policy.eval(), checkpoint["stats"], config, image_height, image_width
     )
     metadata = _metadata(
         config,
+        checkpoint["stats"],
         image_height,
         image_width,
         checkpoint.get("epoch", 0),
         checkpoint.get("val_loss", float("nan")),
         checkpoint_path.name,
+        checkpoint_schema_version=checkpoint.get("checkpoint_schema_version"),
+        stage2_metadata=stage2_metadata,
     )
     metadata["source_checkpoint_sha256"] = sha256_file(checkpoint_path)
     return _save_and_validate(
-        traced, Path(output_path), metadata, images, observation
+        traced, Path(output_path), metadata, inputs
     )
 
 
