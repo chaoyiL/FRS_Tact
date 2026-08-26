@@ -69,6 +69,13 @@ def test_record_builder_rejects_invalid_fractions(metadata: _Metadata, fractions
         build_records(metadata, split_seed=42, fractions=fractions, frame_stride=1)
 
 
+def test_record_builder_allows_zero_fraction_and_omits_that_split(metadata: _Metadata) -> None:
+    records = build_records(metadata, split_seed=42, fractions=(1.0, 0.0, 0.0), frame_stride=1)
+
+    assert {record.split_id for record in records} == {0}
+    assert {record.episode_index for record in records} == set(range(metadata.total_episodes))
+
+
 def test_action_cache_schema_tail_mask_and_reader_indices(
     tmp_path: Path, manifest: dict[str, object], records: tuple[SampleRecord, ...]
 ) -> None:
@@ -92,6 +99,7 @@ def test_action_cache_schema_tail_mask_and_reader_indices(
         "episode_indices.npy",
         "split_ids.npy",
         "manifest.json",
+        ".writer.lock",
     }
     assert not (tmp_path / "x_base.npy").exists()
     cache = ActionCache.open(tmp_path)
@@ -124,6 +132,7 @@ def test_writer_persists_progress_resumes_only_matching_manifest_and_finalizes(
     progress = json.loads((tmp_path / "manifest.json").read_text())
     assert progress["status"] == "incomplete"
     assert progress["completed_samples"] == 1
+    writer.close()
     with pytest.raises(ValueError, match="immutable"):
         ActionCacheWriter.resume(tmp_path, {**manifest, "noise_seed": 1})
 
@@ -140,6 +149,21 @@ def test_writer_persists_progress_resumes_only_matching_manifest_and_finalizes(
     assert finished["status"] == "complete"
     assert finished["completed_samples"] == 3
     assert isinstance(finished["records_sha256"], str)
+
+
+def test_writer_lock_rejects_concurrent_create_and_resume_then_releases(
+    tmp_path: Path, manifest: dict[str, object]
+) -> None:
+    writer = ActionCacheWriter.create(tmp_path, sample_count=3, horizon=2, action_dim=20, manifest=manifest)
+
+    with pytest.raises(RuntimeError, match="locked"):
+        ActionCacheWriter.create(tmp_path, sample_count=3, horizon=2, action_dim=20, manifest=manifest)
+    with pytest.raises(RuntimeError, match="locked"):
+        ActionCacheWriter.resume(tmp_path, manifest)
+
+    writer.close()
+    resumed = ActionCacheWriter.resume(tmp_path, manifest)
+    resumed.close()
 
 
 def test_writer_rejects_batch_bounds_shapes_and_nonfinite_values(

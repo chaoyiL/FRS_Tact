@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import hashlib
 import json
 import os
@@ -15,6 +16,7 @@ import numpy as np
 
 CACHE_VERSION = 1
 MANIFEST_NAME = "manifest.json"
+WRITER_LOCK_NAME = ".writer.lock"
 ARRAY_SPECS = {
     "coarse_actions": ("coarse_actions.npy", np.dtype(np.float32), 3),
     "expert_actions": ("expert_actions.npy", np.dtype(np.float32), 3),
@@ -61,26 +63,25 @@ def _episode_bounds(metadata: Any, episode_index: int) -> tuple[int, int]:
 
 
 def _split_episode_ids(episode_count: int, fractions: Sequence[float], seed: int) -> np.ndarray:
-    if episode_count < 3:
-        raise ValueError("at least three episodes are required for train/validation/test splitting")
     if len(fractions) != 3:
         raise ValueError("fractions must contain train, validation, and test values")
-    values = tuple(float(value) for value in fractions)
+    values = np.asarray(tuple(float(value) for value in fractions), dtype=np.float64)
     if any(value < 0 for value in values) or not np.isclose(sum(values), 1.0, rtol=0.0, atol=1e-9):
         raise ValueError("fractions must be nonnegative and sum to one")
-    if any(value == 0.0 for value in values):
-        raise ValueError("fractions must give train, validation, and test at least one episode")
+    nonzero_splits = np.flatnonzero(values > 0)
+    if episode_count < len(nonzero_splits):
+        raise ValueError("not enough episodes to represent every nonzero split")
 
-    counts = np.floor(np.asarray(values) * episode_count).astype(np.int64)
-    counts = np.maximum(counts, 1)
+    counts = np.floor(values * episode_count).astype(np.int64)
+    counts[nonzero_splits] = np.maximum(counts[nonzero_splits], 1)
     while int(counts.sum()) > episode_count:
-        for index in np.argsort(counts)[::-1]:
+        for index in nonzero_splits[np.argsort(counts[nonzero_splits])[::-1]]:
             if counts[index] > 1:
                 counts[index] -= 1
                 break
-    remainders = np.asarray(values) * episode_count - np.floor(np.asarray(values) * episode_count)
+    remainders = values * episode_count - np.floor(values * episode_count)
     while int(counts.sum()) < episode_count:
-        for index in np.argsort(remainders)[::-1]:
+        for index in nonzero_splits[np.argsort(remainders[nonzero_splits])[::-1]]:
             counts[index] += 1
             if int(counts.sum()) == episode_count:
                 break
@@ -215,11 +216,22 @@ def _open_arrays(cache_dir: Path, sample_count: int, horizon: int, action_dim: i
     return arrays
 
 
+def _acquire_writer_lock(cache_dir: Path) -> int:
+    lock_fd = os.open(cache_dir / WRITER_LOCK_NAME, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as error:
+        os.close(lock_fd)
+        raise RuntimeError(f"action cache writer is locked: {cache_dir}") from error
+    return lock_fd
+
+
 class ActionCacheWriter:
-    def __init__(self, cache_dir: Path, manifest: dict[str, Any], arrays: dict[str, np.ndarray]) -> None:
+    def __init__(self, cache_dir: Path, manifest: dict[str, Any], arrays: dict[str, np.ndarray], lock_fd: int) -> None:
         self.cache_dir = cache_dir
         self.manifest = manifest
         self.arrays = arrays
+        self._lock_fd: int | None = lock_fd
 
     @classmethod
     def create(
@@ -236,52 +248,64 @@ class ActionCacheWriter:
         _validate_manifest_input(manifest, action_dim)
         cache_dir = Path(path)
         cache_dir.mkdir(parents=True, exist_ok=True)
-        if any(cache_dir.iterdir()):
-            raise FileExistsError(f"cache directory is not empty: {cache_dir}")
-        arrays: dict[str, np.ndarray] = {}
-        for name, (filename, dtype, _) in ARRAY_SPECS.items():
-            arrays[name] = np.lib.format.open_memmap(
-                cache_dir / filename,
-                mode="w+",
-                dtype=dtype,
-                shape=_array_shapes(sample_count, horizon, action_dim)[name],
+        lock_fd = _acquire_writer_lock(cache_dir)
+        try:
+            if any(entry.name != WRITER_LOCK_NAME for entry in cache_dir.iterdir()):
+                raise FileExistsError(f"cache directory is not empty: {cache_dir}")
+            arrays: dict[str, np.ndarray] = {}
+            for name, (filename, dtype, _) in ARRAY_SPECS.items():
+                arrays[name] = np.lib.format.open_memmap(
+                    cache_dir / filename,
+                    mode="w+",
+                    dtype=dtype,
+                    shape=_array_shapes(sample_count, horizon, action_dim)[name],
+                )
+            for array in arrays.values():
+                array.flush()
+            immutable = _manifest_immutable(manifest, sample_count, horizon, action_dim)
+            cache_manifest = dict(manifest)
+            cache_manifest.update(
+                {
+                    "version": CACHE_VERSION,
+                    "status": "incomplete",
+                    "sample_count": sample_count,
+                    "completed_samples": 0,
+                    "horizon": horizon,
+                    "action_dim": action_dim,
+                    "immutable_manifest": immutable,
+                    "records_sha256": None,
+                }
             )
-        for array in arrays.values():
-            array.flush()
-        immutable = _manifest_immutable(manifest, sample_count, horizon, action_dim)
-        cache_manifest = dict(manifest)
-        cache_manifest.update(
-            {
-                "version": CACHE_VERSION,
-                "status": "incomplete",
-                "sample_count": sample_count,
-                "completed_samples": 0,
-                "horizon": horizon,
-                "action_dim": action_dim,
-                "immutable_manifest": immutable,
-                "records_sha256": None,
-            }
-        )
-        _atomic_write_json(cache_dir / MANIFEST_NAME, cache_manifest)
-        return cls(cache_dir, cache_manifest, arrays)
+            _atomic_write_json(cache_dir / MANIFEST_NAME, cache_manifest)
+            return cls(cache_dir, cache_manifest, arrays, lock_fd)
+        except Exception:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            raise
 
     @classmethod
     def resume(cls, path: str | Path, manifest: Mapping[str, Any]) -> "ActionCacheWriter":
         cache_dir = Path(path)
-        cache_manifest = _load_manifest(cache_dir)
-        if cache_manifest.get("status") != "incomplete":
-            raise ValueError("only incomplete caches can be resumed")
-        sample_count = _positive_int(cache_manifest, "sample_count")
-        horizon = _positive_int(cache_manifest, "horizon")
-        action_dim = _positive_int(cache_manifest, "action_dim")
-        _validate_manifest_input(manifest, action_dim)
-        if cache_manifest.get("immutable_manifest") != _manifest_immutable(manifest, sample_count, horizon, action_dim):
-            raise ValueError("immutable manifest does not match cache")
-        completed = _completed_samples(cache_manifest, sample_count)
-        arrays = _open_arrays(cache_dir, sample_count, horizon, action_dim, "r+")
-        if completed and cache_manifest.get("completed_records_sha256") != _records_digest(_records_from_arrays(arrays, completed)):
-            raise ValueError("completed record digest does not match cache arrays")
-        return cls(cache_dir, cache_manifest, arrays)
+        lock_fd = _acquire_writer_lock(cache_dir)
+        try:
+            cache_manifest = _load_manifest(cache_dir)
+            if cache_manifest.get("status") != "incomplete":
+                raise ValueError("only incomplete caches can be resumed")
+            sample_count = _positive_int(cache_manifest, "sample_count")
+            horizon = _positive_int(cache_manifest, "horizon")
+            action_dim = _positive_int(cache_manifest, "action_dim")
+            _validate_manifest_input(manifest, action_dim)
+            if cache_manifest.get("immutable_manifest") != _manifest_immutable(manifest, sample_count, horizon, action_dim):
+                raise ValueError("immutable manifest does not match cache")
+            completed = _completed_samples(cache_manifest, sample_count)
+            arrays = _open_arrays(cache_dir, sample_count, horizon, action_dim, "r+")
+            if completed and cache_manifest.get("completed_records_sha256") != _records_digest(_records_from_arrays(arrays, completed)):
+                raise ValueError("completed record digest does not match cache arrays")
+            return cls(cache_dir, cache_manifest, arrays, lock_fd)
+        except Exception:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+            raise
 
     def write_batch(
         self,
@@ -292,6 +316,8 @@ class ActionCacheWriter:
         valid: np.ndarray,
         records: Sequence[SampleRecord],
     ) -> None:
+        if self._lock_fd is None:
+            raise RuntimeError("action cache writer is closed")
         sample_count = _positive_int(self.manifest, "sample_count")
         horizon = _positive_int(self.manifest, "horizon")
         action_dim = _positive_int(self.manifest, "action_dim")
@@ -328,15 +354,36 @@ class ActionCacheWriter:
         _atomic_write_json(self.cache_dir / MANIFEST_NAME, self.manifest)
 
     def finalize(self) -> None:
-        sample_count = _positive_int(self.manifest, "sample_count")
-        if _completed_samples(self.manifest, sample_count) != sample_count:
-            raise ValueError("cannot finalize cache before all samples are written")
-        for array in self.arrays.values():
-            array.flush()
-        records = _records_from_arrays(self.arrays, sample_count)
-        self.manifest["records_sha256"] = _records_digest(records)
-        self.manifest["status"] = "complete"
-        _atomic_write_json(self.cache_dir / MANIFEST_NAME, self.manifest)
+        try:
+            sample_count = _positive_int(self.manifest, "sample_count")
+            if _completed_samples(self.manifest, sample_count) != sample_count:
+                raise ValueError("cannot finalize cache before all samples are written")
+            for array in self.arrays.values():
+                array.flush()
+            records = _records_from_arrays(self.arrays, sample_count)
+            self.manifest["records_sha256"] = _records_digest(records)
+            self.manifest["status"] = "complete"
+            _atomic_write_json(self.cache_dir / MANIFEST_NAME, self.manifest)
+        finally:
+            self.close()
+
+    def close(self) -> None:
+        if self._lock_fd is not None:
+            fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            os.close(self._lock_fd)
+            self._lock_fd = None
+
+    def __enter__(self) -> "ActionCacheWriter":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _positive_int(manifest: Mapping[str, Any], name: str) -> int:
@@ -395,7 +442,7 @@ class ActionCache:
         cache_dir = Path(path)
         expected = {MANIFEST_NAME, *(spec[0] for spec in ARRAY_SPECS.values())}
         actual = {entry.name for entry in cache_dir.iterdir()} if cache_dir.exists() else set()
-        if actual != expected:
+        if actual not in (expected, expected | {WRITER_LOCK_NAME}):
             raise ValueError("cache contains missing or unexpected array files")
         manifest = _load_manifest(cache_dir)
         if manifest.get("status") != "complete":
