@@ -1,6 +1,6 @@
 # Standalone DECO Stage 1 deployment. The current artifact is latest, not best;
 # switch to deco_stage1_best.ts once that artifact is recovered from the trainer.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/deco/deco/deco_stage1_latest.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/deco/image_aug/deco_stage1_latest.ts
 device: cuda:0
 seed: 0
 

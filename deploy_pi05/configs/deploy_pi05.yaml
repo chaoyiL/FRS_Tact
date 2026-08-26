@@ -52,6 +52,7 @@ control:
   max_consecutive_unsafe_chunks: 3
 
 gripper:
+  hysteresis_enabled: true
   # VLA <= 0.08 locks the left gripper closed through return noise.
   # Reopening is allowed only once the VLA width reaches 0.10.
   left_close_threshold: 0.08
