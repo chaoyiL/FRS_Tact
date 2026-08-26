@@ -58,15 +58,17 @@ train_deco/.venv/bin/python -m pip install \
 目录后，第一次启动会自动转换并校验 encoder，然后写入内容寻址缓存：
 
 ```text
-/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/encoder.safetensors
-/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/encoder.json
+/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/current.json
+/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/generations/<generation>/encoder.safetensors
+/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/generations/<generation>/encoder.json
 ```
 
 可用 `--tactile-encoder-cache /absolute/cache/path` 改写缓存根目录。相同源内容的
 后续启动直接复用已验证的 artifact；源文件内容变化会产生新的 SHA256 目录。
-`server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换；rank 0 校验转换 metadata 和 SHA256
-后广播结果，barrier 后每个 rank 都 strict-load 同一个缓存
-artifact。非零 rank 不导入 JAX。
+`server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换并原子更新
+`current.json`，随后广播 immutable generation 路径。barrier 后每个 rank 都独立
+复核 source/artifact SHA256、转换 metadata 与 parity 记录，再 strict-load 同一个
+缓存 artifact；非零 rank 不导入 JAX。
 
 Stage 2 checkpoint 写入 `OUTPUT_DIR/RUN_ID/`：
 
