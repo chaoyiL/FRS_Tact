@@ -25,6 +25,88 @@ bash train_deco/scripts/train.sh --mode local-smoke
 所有脚本从 FRS_Tact 仓库根目录启动；虚拟环境、manifest 和输出默认位于
 `train_deco/` 下。
 
+## Stage 2 触觉图像训练
+
+Stage 2 从一个已经训练好的 Stage 1 checkpoint 初始化，冻结全部 Stage 1
+参数和触觉 ResNet18，只训练四路触觉 token 的 sensor embedding、cross-attention
+K/V 与 gate，以及 PI Adapter。首次本机启动可从仓库根目录运行：
+
+```bash
+ALLOW_CPU=1 bash train_deco/setup_environment.sh
+
+bash train_deco/scripts/train.sh \
+  --mode local-stage2 \
+  --manifest /absolute/path/to/pick_tube_01_06.json \
+  --run-id pick_tube_stage2_local \
+  --stage1-checkpoint /home/typhon/FRS_Tact/checkpoints/deco/image_aug/deco_stage1_latest.pt \
+  --tactile-encoder-checkpoint /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
+```
+
+`--manifest` 必须指向 `prepare_data.sh` 生成的 LeRobot v2.1 单根或多根
+manifest。`ALLOW_CPU=1` 只允许环境安装后的健康检查在没有 CUDA 的机器上
+完成，不会把正式训练改成 CPU 训练。如果虚拟环境已经存在，也可只补转换依赖：
+
+```bash
+train_deco/.venv/bin/python -m pip install \
+  'safetensors>=0.5,<1' \
+  'jax[cpu]>=0.4.30,<0.6' \
+  'flax>=0.10,<0.12'
+```
+
+`safetensors` 是加载已转换 encoder 的运行时依赖；JAX/Flax 只在转换时惰性
+导入，并在导入前强制选择 CPU，不进入训练 forward。给定上面的 JAX checkpoint
+目录后，第一次启动会自动转换并校验 encoder，然后写入内容寻址缓存：
+
+```text
+/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/encoder.safetensors
+/home/typhon/FRS_Tact/checkpoints/deco/tactile_encoder_cache/v1/<source_sha256>/encoder.json
+```
+
+可用 `--tactile-encoder-cache /absolute/cache/path` 改写缓存根目录。相同源内容的
+后续启动直接复用已验证的 artifact；源文件内容变化会产生新的 SHA256 目录。
+`server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换，随后广播结果并在
+barrier 后由每个 rank 独立校验、加载同一个缓存 artifact；非零 rank 不导入 JAX。
+
+Stage 2 checkpoint 写入 `OUTPUT_DIR/RUN_ID/`：
+
+- `deco_stage2_latest.pt`
+- `deco_stage2_best.pt`
+- `deco_stage2_epoch_<N>.pt`（到达 `SAVE_EVERY` 时）
+
+`--stage1-checkpoint` 只用于 fresh Stage 2：它严格加载并冻结 Stage 1 权重，
+同时创建新的 optimizer、scheduler、scaler、epoch、step 和 RNG 状态。精确恢复
+Stage 2 时改用 `--resume`，不要再传 Stage 1 或 encoder 源路径：
+
+```bash
+bash train_deco/scripts/train.sh \
+  --mode local-stage2 \
+  --manifest /absolute/path/to/pick_tube_01_06.json \
+  --run-id pick_tube_stage2_local \
+  --resume /absolute/output/pick_tube_stage2_local/deco_stage2_latest.pt
+```
+
+`--resume` 恢复完整 Stage 2 model、optimizer、scheduler、scaler、epoch/step、
+归一化统计、RNG 和 Stage 1/encoder provenance；它与 `--stage1-checkpoint`
+互斥，并会拒绝 Stage 1 checkpoint。
+
+### Stage 2 数据合同
+
+首版只支持 `--dataset-format lerobot-v21`，每个数据根必须在元数据和 Parquet
+中以如下固定顺序提供四个 RGB HWC 图像字段，且每个字段形状均为
+`[224, 224, 3]`：
+
+1. `observation.images.tactile_left_0`
+2. `observation.images.tactile_right_0`
+3. `observation.images.tactile_left_1`
+4. `observation.images.tactile_right_1`
+
+dataset sample 中它们被解码为 unit-space float32 `[4, 3, 224, 224]`，batch
+合同为 `[B, 4, 3, 224, 224]`。触觉图像只做保持长宽比的 224×224 黑边
+letterbox，不应用视觉 ImageNet normalization 或暗光增强。缺失字段、非 image
+类型、非 RGB、形状不一致或顺序合同不匹配会在训练前报出具体字段。选择旧的
+`preprocessed` backend 会明确报错
+`Stage2 currently requires --dataset-format lerobot-v21`，不会静默丢弃触觉输入。
+
 ## 暗光增强训练
 
 训练脚本默认启用 `low-light-v1`：25% 保留原始光照、55% 使用暗光曝光或
