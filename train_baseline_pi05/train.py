@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -75,12 +76,23 @@ def _load_norm_stats(config: Any) -> Mapping[str, Any]:
     return raw.get("norm_stats", raw)
 
 
+def _small_file_fingerprint(path: Path) -> dict[str, object] | None:
+    if not path.is_file():
+        return None
+    stat = path.stat()
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+
 def _source_contract(config: Any, action: ActionCache, tactile: Any) -> dict[str, Any]:
     source = _field(config, "source")
+    action_files = {name: _small_file_fingerprint(action.cache_dir / name) for name in ("manifest.json", "coarse_actions.npy", "expert_actions.npy", "valid_masks.npy")}
+    tactile_files = {name: _small_file_fingerprint(Path(tactile.cache_dir) / name) for name in ("manifest.json", "embeddings.npy")}
+    norm_path = Path(source.norm_stats_dir) / str(source.norm_stats_asset_id) / "norm_stats.json"
+    checkpoint = Path(source.checkpoint)
     return {
-        "action_cache": {"path": str(action.cache_dir.resolve()), "records_sha256": action.manifest.get("records_sha256"), "action_space": action.manifest.get("action_space")},
-        "tactile_cache": {"path": str(Path(tactile.cache_dir).resolve()), "encoder_identity": tactile.metadata.get("encoder_identity"), "tactile_keys": tactile.metadata.get("tactile_keys")},
-        "pi": {"checkpoint": str(Path(source.checkpoint).resolve()), "norm_stats_dir": str(Path(source.norm_stats_dir).resolve()), "norm_stats_asset_id": source.norm_stats_asset_id, "variant": {"paligemma": source.paligemma_variant, "action_expert": source.action_expert_variant}, "model_action_width": getattr(source, "model_action_dim", action.manifest.get("source_model_action_width")), "sample_steps": source.sample_steps},
+        "action_cache": {"path": str(action.cache_dir.resolve()), "records_sha256": action.manifest.get("records_sha256"), "action_space": action.manifest.get("action_space"), "files": action_files},
+        "tactile_cache": {"path": str(Path(tactile.cache_dir).resolve()), "encoder_identity": tactile.metadata.get("encoder_identity"), "tactile_keys": tactile.metadata.get("tactile_keys"), "files": tactile_files},
+        "pi": {"checkpoint": str(checkpoint.resolve()), "norm_stats_dir": str(Path(source.norm_stats_dir).resolve()), "norm_stats_asset_id": source.norm_stats_asset_id, "norm_stats": _small_file_fingerprint(norm_path), "metadata": {name: _small_file_fingerprint(checkpoint / name) for name in ("_CHECKPOINT_METADATA", "metadata", "params/metadata")}, "variant": {"paligemma": source.paligemma_variant, "action_expert": source.action_expert_variant}, "model_action_width": getattr(source, "model_action_dim", action.manifest.get("source_model_action_width")), "sample_steps": source.sample_steps},
         "encoder": {"checkpoint": str(Path(_field(config, "tactile.encoder_checkpoint")).resolve()), "key_order": list(_field(config, "decoder.tactile_keys"))},
     }
 
@@ -118,6 +130,8 @@ def train_decoder(config: Any, *, max_steps: int | None = None) -> Path:
         state = payload.get("best_state", {}); epoch = int(payload["epoch"]); global_step = int(payload["global_step"])
         batch_offset = int(state.get("batch_offset", 0)); best_metric = float(state.get("best_metric", float("inf"))); best_epoch = int(state.get("best_epoch", -1))
         _restore_rng(payload["rng_state"])
+        if max_steps is not None and global_step >= max_steps:
+            return save_last_checkpoint(output, model, spec, epoch=epoch, global_step=global_step, metrics=payload["metrics"], source_contract=contract, optimizer=optimizer, rng_state=_rng_state(), best_state={"best_metric": best_metric, "best_epoch": best_epoch, "batch_offset": batch_offset})
     workers = int(getattr(decoder_settings, "workers", 0)); pin_memory = bool(getattr(decoder_settings, "pin_memory", False))
     epochs = int(decoder_settings.epochs); stopped = False
     for current_epoch in range(epoch, epochs):
@@ -145,11 +159,12 @@ def train_decoder(config: Any, *, max_steps: int | None = None) -> Path:
         if validation < best_metric:
             best_metric, best_epoch = validation, current_epoch
             save_best_checkpoint(output, model, spec, epoch=epoch, global_step=global_step, metrics=metrics, source_contract=contract)
+        save_last_checkpoint(output, model, spec, epoch=epoch, global_step=global_step, metrics=metrics, source_contract=contract, optimizer=optimizer, rng_state=_rng_state(), best_state={"best_metric": best_metric, "best_epoch": best_epoch, "batch_offset": 0})
     validation_loader = make_loader(valid_set, batch_size=int(decoder_settings.batch_size), shuffle=False, seed=seed, workers=workers, pin_memory=pin_memory)
     metrics = evaluate_decoder(model, validation_loader, norm_stats)
     validation = metrics["decoder_smooth_l1"]
     if validation < best_metric:
-        best_metric, best_epoch = validation, epoch - 1
+        best_metric, best_epoch = validation, max(epoch - 1, 0)
         save_best_checkpoint(output, model, spec, epoch=epoch, global_step=global_step, metrics=metrics, source_contract=contract)
     return save_last_checkpoint(output, model, spec, epoch=epoch, global_step=global_step, metrics=metrics, source_contract=contract, optimizer=optimizer, rng_state=_rng_state(), best_state={"best_metric": best_metric, "best_epoch": best_epoch, "batch_offset": batch_offset})
 

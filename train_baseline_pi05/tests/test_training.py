@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import hashlib
 import json
 import subprocess
@@ -14,7 +15,7 @@ import pytest
 import torch
 
 from train_baseline_pi05.action_cache import ActionCache, ActionCacheWriter, SampleRecord
-from train_baseline_pi05.config import TACTILE_KEYS
+from train_baseline_pi05.config import TACTILE_KEYS, load_config
 from train_baseline_pi05.tactile_cache import TactileEmbeddingCache, _identity
 
 
@@ -115,7 +116,7 @@ def test_evaluation_masks_metrics_inverse_quantiles_and_deterministic_episode_sh
     assert metrics["shuffled_decoder_mse"] == pytest.approx(metrics["decoder_mse"])
 
 
-def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_path: Path):
+def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_path: Path, monkeypatch):
     from train_baseline_pi05.train import train_decoder
 
     action, tactile = _caches(tmp_path)
@@ -132,6 +133,11 @@ def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_
         norm_stats={"q01": np.zeros(20), "q99": np.ones(20)},
     )
     before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (source, encoder, action.cache_dir / "coarse_actions.npy", tactile.cache_dir / "embeddings.npy")}
+    import train_baseline_pi05.train as training
+    last_epochs = []
+    original_save_last = training.save_last_checkpoint
+    monkeypatch.setattr(training, "save_last_checkpoint", lambda *args, **kwargs: last_epochs.append(kwargs["epoch"]) or original_save_last(*args, **kwargs))
+
     result = train_decoder(config, max_steps=1)
     assert result == config.decoder.output / "last.pt"
     assert (config.decoder.output / "best.pt").exists()
@@ -145,7 +151,65 @@ def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_
     config.decoder.output = tmp_path / "uninterrupted"
     uninterrupted = torch.load(train_decoder(config, max_steps=2), weights_only=True)
     assert resumed_payload["decoder_state"].keys() == uninterrupted["decoder_state"].keys()
+
     assert all(torch.equal(resumed_payload["decoder_state"][key], uninterrupted["decoder_state"][key]) for key in resumed_payload["decoder_state"])
+    assert 1 in last_epochs and 2 in last_epochs
+    config.decoder.output = tmp_path / "output"
+    config.decoder.resume = True
+    os.utime(action.cache_dir / "coarse_actions.npy", None)
+    with pytest.raises(ValueError, match="source contract"):
+        train_decoder(config, max_steps=2)
+
+def test_training_config_exposes_loader_resume_and_evaluation_fields():
+    config = load_config(Path(__file__).resolve().parents[2] / "train_baseline_pi05/configs/train_baseline_pi05.yaml")
+
+    assert config.decoder.workers == 0
+    assert config.decoder.pin_memory is False
+    assert config.decoder.device == "cpu"
+    assert config.decoder.resume is False
+    assert config.evaluation.split == "test"
+    assert config.evaluation.batch_size == config.decoder.batch_size
+    assert config.evaluation.shuffle_tactile is True
+
+
+def test_episode_shuffle_uses_complete_cross_episode_permutation_when_available():
+    from train_baseline_pi05.evaluate import _episode_shuffle
+
+    episodes = torch.tensor([0, 0, 0, 1, 1, 1])
+    tactile = torch.arange(6, dtype=torch.float32).reshape(6, 1, 1)
+    shuffled = _episode_shuffle(tactile, episodes)
+
+    assert torch.all(shuffled[:, 0, 0] != tactile[:, 0, 0])
+    assert torch.all(episodes[shuffled[:, 0, 0].to(torch.int64)] != episodes)
+
+
+def test_evaluate_cli_opens_configured_caches_and_computes_current_metrics(monkeypatch, tmp_path: Path):
+    from train_baseline_pi05 import evaluate
+
+    config = SimpleNamespace(
+        cache=SimpleNamespace(action_root=tmp_path / "action", tactile_root=tmp_path / "tactile"),
+        tactile=SimpleNamespace(encoder_checkpoint=tmp_path / "encoder"),
+        decoder=SimpleNamespace(batch_size=3, device="cpu", seed=0, workers=0, pin_memory=False),
+        source=SimpleNamespace(norm_stats_dir=tmp_path, norm_stats_asset_id="stats"),
+        evaluation=SimpleNamespace(split="test", batch_size=2, shuffle_tactile=True, output=None),
+    )
+    observed = {}
+    monkeypatch.setattr(evaluate, "load_config", lambda path: config, raising=False)
+    monkeypatch.setattr(evaluate.ActionCache, "open", lambda path: "action")
+    monkeypatch.setattr(evaluate.TactileEmbeddingCache, "open", lambda *args, **kwargs: "tactile", raising=False)
+    monkeypatch.setattr(evaluate, "BaselineCacheDataset", lambda action, tactile, split: observed.setdefault("split", split) or "dataset", raising=False)
+    monkeypatch.setattr(evaluate, "make_loader", lambda dataset, **kwargs: observed.setdefault("loader", kwargs) or "loader", raising=False)
+    monkeypatch.setattr(evaluate, "load_decoder_checkpoint", lambda path, **kwargs: (torch.nn.Identity(), {}), raising=False)
+    monkeypatch.setattr(evaluate, "_load_norm_stats", lambda cfg: {"q01": np.zeros(20), "q99": np.ones(20)}, raising=False)
+    monkeypatch.setattr(evaluate, "evaluate_decoder", lambda *args, **kwargs: observed.setdefault("shuffle", kwargs["shuffle_tactile"]) or {"decoder_mse": 1.0})
+    monkeypatch.setattr(evaluate, "write_metrics", lambda metrics, path: observed.setdefault("output", path))
+    monkeypatch.setattr(sys, "argv", ["evaluate", "--config", "demo.yaml", "--checkpoint", "decoder.pt", "--split", "validation", "--output", "metrics.json"])
+    evaluate.main()
+
+    assert observed["split"] == "validation"
+    assert observed["loader"]["batch_size"] == 2
+    assert observed["shuffle"] is True
+    assert observed["output"] == Path("metrics.json")
 
 
 def test_training_modules_do_not_import_jax_flax_or_pi_runtime():

@@ -58,3 +58,13 @@ decoder:
   learning_rate: 3.0e-4
   weight_decay: 1.0e-4
   seed: 0
+  workers: 0
+  pin_memory: false
+  device: cpu
+  resume: false
+
+evaluation:
+  split: test
+  batch_size: 256
+  shuffle_tactile: true
+  output: null

@@ -64,6 +64,12 @@ def _positive_integer(value: object, name: str) -> int:
         raise ValueError(f"{name} must be positive.")
     return result
 
+def _nonnegative_integer(value: object, name: str) -> int:
+    result = _integer(value, name)
+    if result < 0:
+        raise ValueError(f"{name} must be non-negative.")
+    return result
+
 
 def _number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -213,6 +219,10 @@ class DecoderTrainConfig:
     learning_rate: float = 3e-4
     weight_decay: float = 1e-4
     seed: int = 0
+    workers: int = 0
+    pin_memory: bool = False
+    device: str = "cpu"
+    resume: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "DecoderTrainConfig":
@@ -236,6 +246,31 @@ class DecoderTrainConfig:
             learning_rate=_number(raw.get("learning_rate", 3e-4), "decoder.learning_rate"),
             weight_decay=_number(raw.get("weight_decay", 1e-4), "decoder.weight_decay"),
             seed=_integer(raw.get("seed", 0), "decoder.seed"),
+            workers=_nonnegative_integer(raw.get("workers", 0), "decoder.workers"),
+            pin_memory=_boolean(raw.get("pin_memory", False), "decoder.pin_memory"),
+            device=_string(raw.get("device", "cpu"), "decoder.device"),
+            resume=_boolean(raw.get("resume", False), "decoder.resume"),
+        )
+
+
+@dataclass(frozen=True)
+class EvaluationConfig:
+    split: str = "test"
+    batch_size: int = 256
+    shuffle_tactile: bool = True
+    output: Path | None = None
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any], *, default_batch_size: int) -> "EvaluationConfig":
+        split = _string(raw.get("split", "test"), "evaluation.split")
+        if split not in {"validation", "test"}:
+            raise ValueError("evaluation.split must be validation or test.")
+        output = raw.get("output")
+        return cls(
+            split=split,
+            batch_size=_positive_integer(raw.get("batch_size", default_batch_size), "evaluation.batch_size"),
+            shuffle_tactile=_boolean(raw.get("shuffle_tactile", True), "evaluation.shuffle_tactile"),
+            output=None if output is None else _path(output, "evaluation.output"),
         )
 
 
@@ -247,16 +282,19 @@ class BaselineTrainConfig:
     cache: CacheConfig
     decoder: DecoderTrainConfig
     config_path: Path
+    evaluation: EvaluationConfig
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any], *, config_path: Path) -> "BaselineTrainConfig":
         raw = _mapping(raw, "configuration")
+        decoder = DecoderTrainConfig.from_mapping(_mapping(_required(raw, "decoder", "configuration"), "decoder"))
         return cls(
             dataset=DatasetConfig.from_mapping(_mapping(_required(raw, "dataset", "configuration"), "dataset")),
             source=SourcePolicyConfig.from_mapping(_mapping(_required(raw, "source", "configuration"), "source")),
             tactile=TactileConfig.from_mapping(_mapping(_required(raw, "tactile", "configuration"), "tactile")),
             cache=CacheConfig.from_mapping(_mapping(_required(raw, "cache", "configuration"), "cache")),
-            decoder=DecoderTrainConfig.from_mapping(_mapping(_required(raw, "decoder", "configuration"), "decoder")),
+            decoder=decoder,
+            evaluation=EvaluationConfig.from_mapping(_mapping(raw.get("evaluation", {}), "evaluation"), default_batch_size=decoder.batch_size),
             config_path=config_path,
         )
 

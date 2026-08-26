@@ -10,6 +10,11 @@ from typing import Any, Mapping
 
 import numpy as np
 import torch
+from train_baseline_pi05.action_cache import ActionCache
+from train_baseline_pi05.checkpoint import load_decoder_checkpoint
+from train_baseline_pi05.config import load_config
+from train_baseline_pi05.data import BaselineCacheDataset, make_loader
+from train_baseline_pi05.tactile_cache import TactileEmbeddingCache
 from torch.nn import functional as F
 
 from train_baseline_pi05.model import DirectTactileActionDecoder
@@ -28,19 +33,23 @@ def _quantiles(norm_stats: Mapping[str, Any], dimension: int, device: torch.devi
 
 
 def _inverse_quantile(values: torch.Tensor, low: torch.Tensor, high: torch.Tensor) -> torch.Tensor:
-    return low + (values + 1.0) * 0.5 * (high - low)
+    return low + (values + 1.0) * 0.5 * (high - low + 1e-6)
 
 
 def _episode_shuffle(tactile: torch.Tensor, episodes: torch.Tensor) -> torch.Tensor:
     """Deterministically rotate batch tactile rows, avoiding same-episode rows when possible."""
     if tactile.shape[0] < 2:
         return tactile
-    order = torch.roll(torch.arange(tactile.shape[0], device=tactile.device), shifts=1)
-    if torch.any(episodes[order] == episodes):
-        candidates = [index for index in range(tactile.shape[0]) if torch.all(episodes[index] != episodes)]
-        if candidates:
-            order = torch.tensor(candidates[: tactile.shape[0]], device=tactile.device)
-    return tactile[order]
+    base = torch.arange(tactile.shape[0], device=tactile.device)
+    best_order, best_conflicts = base, tactile.shape[0] + 1
+    for shift in range(1, tactile.shape[0]):
+        order = torch.roll(base, shifts=shift)
+        conflicts = int((episodes[order] == episodes).sum().item())
+        if conflicts == 0:
+            return tactile[order]
+        if conflicts < best_conflicts:
+            best_order, best_conflicts = order, conflicts
+    return tactile[best_order]
 
 
 @torch.no_grad()
@@ -116,13 +125,35 @@ def write_metrics(metrics: Mapping[str, float], path: Path) -> Path:
     return path
 
 
+def _load_norm_stats(config: Any) -> Mapping[str, Any]:
+    path = Path(config.source.norm_stats_dir) / str(config.source.norm_stats_asset_id) / "norm_stats.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return raw.get("norm_stats", raw)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(); parser.add_argument("--checkpoint", required=True, type=Path); parser.add_argument("--output", type=Path)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--checkpoint", type=Path)
+    parser.add_argument("--split", choices=("validation", "test"))
+    parser.add_argument("--shuffle-tactile", action="store_true", default=None)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    from train_baseline_pi05.checkpoint import load_decoder_checkpoint
-    model, metadata = load_decoder_checkpoint(args.checkpoint)
-    if args.output is not None:
-        write_metrics({str(key): float(value) for key, value in metadata["metrics"].items()}, args.output)
+    config = load_config(args.config)
+    evaluation = config.evaluation
+    split = args.split or evaluation.split
+    checkpoint = args.checkpoint or (Path(config.decoder.output) / "best.pt")
+    output = args.output if args.output is not None else evaluation.output
+    shuffle = evaluation.shuffle_tactile if args.shuffle_tactile is None else args.shuffle_tactile
+    action = ActionCache.open(config.cache.action_root)
+    tactile = TactileEmbeddingCache.open(config.cache.tactile_root, encoder_path=config.tactile.encoder_checkpoint)
+    loader = make_loader(BaselineCacheDataset(action, tactile, split), batch_size=evaluation.batch_size, shuffle=False, seed=config.decoder.seed, workers=config.decoder.workers, pin_memory=config.decoder.pin_memory)
+    model, _ = load_decoder_checkpoint(checkpoint, map_location=config.decoder.device)
+    model.to(config.decoder.device)
+    metrics = evaluate_decoder(model, loader, _load_norm_stats(config), shuffle_tactile=shuffle)
+    if output is not None:
+        write_metrics(metrics, output)
+    print(json.dumps(metrics, sort_keys=True))
 
 
 if __name__ == "__main__":
