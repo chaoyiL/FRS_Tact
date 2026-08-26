@@ -176,6 +176,58 @@ def letterbox_and_normalize(images: torch.Tensor, image_size: int) -> torch.Tens
     )
 
 
+def letterbox_tactile_images(
+    images: torch.Tensor,
+    target_size: tuple[int, int],
+) -> torch.Tensor:
+    """Letterbox unit-space tactile RGB images with black padding.
+
+    Tactile images intentionally bypass visual ImageNet normalization and
+    low-light augmentation. The dataset supplies RGB float unit values, and
+    this routine leaves them in that space for the tactile encoder.
+    """
+    if images.ndim != 5 or images.shape[1] != 4 or images.shape[2] != 3:
+        raise ValueError(
+            "Tactile preprocessing expects [B,4,3,H,W], "
+            f"got {tuple(images.shape)}"
+        )
+    if len(target_size) != 2 or any(int(size) <= 0 for size in target_size):
+        raise ValueError(
+            f"target_size must contain two positive dimensions, got {target_size}"
+        )
+    if not images.is_floating_point():
+        raise ValueError(
+            f"Tactile images must be floating-point unit RGB, got {images.dtype}"
+        )
+    if not torch.isfinite(images).all() or images.min() < 0 or images.max() > 1:
+        raise ValueError("Tactile images must contain only finite values in [0, 1]")
+
+    batch, sensors, channels, height, width = images.shape
+    target_height, target_width = (int(size) for size in target_size)
+    scale = min(target_height / int(height), target_width / int(width))
+    resized_height = max(1, round(int(height) * scale))
+    resized_width = max(1, round(int(width) * scale))
+    flattened = images.reshape(batch * sensors, channels, height, width)
+    flattened = F.interpolate(
+        flattened,
+        size=(resized_height, resized_width),
+        mode="bilinear",
+        align_corners=False,
+    )
+    pad_height = target_height - resized_height
+    pad_width = target_width - resized_width
+    return F.pad(
+        flattened,
+        (
+            pad_width // 2,
+            pad_width - pad_width // 2,
+            pad_height // 2,
+            pad_height - pad_height // 2,
+        ),
+        value=0.0,
+    ).reshape(batch, sensors, channels, target_height, target_width)
+
+
 def select_deco_observation(
     observation: torch.Tensor, indices: torch.Tensor
 ) -> torch.Tensor:

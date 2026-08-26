@@ -1,8 +1,8 @@
-"""Strict vision-only adapter for the LeRobot v2.1 ``pick_tube_01`` layout.
+"""Strict LeRobot v2.1 image adapter for the ``pick_tube_01`` layout.
 
 The source state and action already carry the desired robot representation.
 This module therefore performs no state/action derivation: it only validates,
-normalizes, chunks and decodes the two RGB camera streams.
+normalizes, chunks and decodes two RGB camera streams plus optional tactile RGB streams.
 """
 
 from __future__ import annotations
@@ -27,6 +27,12 @@ DATASET_FORMAT = "lerobot-v2.1-parquet-vision-deco-v1"
 CAMERA_NAMES = (
     "observation.images.camera0",
     "observation.images.camera1",
+)
+TACTILE_NAMES = (
+    "observation.images.tactile_left_0",
+    "observation.images.tactile_right_0",
+    "observation.images.tactile_left_1",
+    "observation.images.tactile_right_1",
 )
 STATE_KEY = "observation.state"
 ACTION_KEY = "actions"
@@ -116,7 +122,26 @@ def _feature_shape(info: dict, key: str) -> tuple[int, ...]:
     return tuple(int(value) for value in feature.get("shape", ()))
 
 
-def _validate_info(root: Path, info: dict) -> tuple[int, int]:
+def _tactile_image_shape(info: dict) -> tuple[int, int]:
+    tactile_shapes = []
+    for name in TACTILE_NAMES:
+        feature = info.get("features", {}).get(name)
+        shape = _feature_shape(info, name)
+        if feature.get("dtype") != "image":
+            raise ValueError(f"{name} must be an image feature, got {feature.get('dtype')!r}")
+        if len(shape) != 3 or shape[0] <= 0 or shape[1] <= 0 or shape[2] != 3:
+            raise ValueError(
+                f"{name} must be an RGB HWC image feature [H, W, 3], got {shape}"
+            )
+        tactile_shapes.append(shape)
+    if len(set(tactile_shapes)) != 1:
+        raise ValueError(f"The four tactile image shapes must match, got {tactile_shapes}")
+    return tactile_shapes[0][0], tactile_shapes[0][1]
+
+
+def _validate_info(
+    root: Path, info: dict, *, include_tactile: bool = False
+) -> tuple[int, int]:
     if info.get("codebase_version") != "v2.1":
         raise ValueError(
             f"Expected LeRobot codebase_version='v2.1', got {info.get('codebase_version')!r}"
@@ -133,6 +158,8 @@ def _validate_info(root: Path, info: dict) -> tuple[int, int]:
     height, width, channels = camera_shapes[0]
     if channels != 3 or height <= 0 or width <= 0:
         raise ValueError(f"Expected RGB HWC camera images, got {camera_shapes[0]}")
+    if include_tactile:
+        _tactile_image_shape(info)
     fps = float(info.get("fps", 0))
     if fps <= 0:
         raise ValueError(f"LeRobot fps must be positive, got {fps}")
@@ -315,7 +342,7 @@ def _load_sources(dataset_source: Path) -> tuple[list[dict], str]:
 
 
 class LeRobotVisionDECODataset(Dataset):
-    """Lazy two-camera view over a validated LeRobot v2.1 episode split."""
+    """Lazy visual view with optional four-stream tactile images."""
 
     def __init__(
         self,
@@ -327,6 +354,9 @@ class LeRobotVisionDECODataset(Dataset):
         action_chunk_size: int,
         image_height: int,
         image_width: int,
+        tactile_image_height: int | None,
+        tactile_image_width: int | None,
+        include_tactile: bool,
         metadata: dict,
         stats: dict[str, np.ndarray],
         task_ids: list[str],
@@ -342,6 +372,17 @@ class LeRobotVisionDECODataset(Dataset):
         self.source_chunk_size = self.action_chunk_size
         self.image_height = int(image_height)
         self.image_width = int(image_width)
+        self.include_tactile = bool(include_tactile)
+        self.tactile_image_height = (
+            int(tactile_image_height) if tactile_image_height is not None else None
+        )
+        self.tactile_image_width = (
+            int(tactile_image_width) if tactile_image_width is not None else None
+        )
+        if self.include_tactile and (
+            self.tactile_image_height is None or self.tactile_image_width is None
+        ):
+            raise ValueError("Tactile image dimensions are required when include_tactile=True")
         self.metadata = metadata
         self.stats = stats
         self.task_ids = task_ids
@@ -381,6 +422,8 @@ class LeRobotVisionDECODataset(Dataset):
             return self._episode_lru[episode_id]
         spec = self._spec_by_id[episode_id]
         columns = [*CAMERA_NAMES, STATE_KEY, ACTION_KEY, "task_index"]
+        if self.include_tactile:
+            columns.extend(TACTILE_NAMES)
         try:
             table = pq.read_table(spec.path, columns=columns)
         except Exception as exc:
@@ -393,12 +436,21 @@ class LeRobotVisionDECODataset(Dataset):
             "task_indices": np.asarray(table["task_index"].to_numpy(), dtype=np.int64),
             "images": tuple(table[name] for name in CAMERA_NAMES),
         }
+        if self.include_tactile:
+            episode["tactile_images"] = tuple(table[name] for name in TACTILE_NAMES)
         self._episode_lru[episode_id] = episode
         while len(self._episode_lru) > self._episode_cache_size:
             self._episode_lru.popitem(last=False)
         return episode
 
-    def _decode_image(self, image_column, row: int, camera_name: str) -> torch.Tensor:
+    def _decode_image(
+        self,
+        image_column,
+        row: int,
+        camera_name: str,
+        expected_height: int | None = None,
+        expected_width: int | None = None,
+    ) -> torch.Tensor:
         encoded = image_column[row].as_py()
         if not isinstance(encoded, dict) or not encoded.get("bytes"):
             raise ValueError(f"Missing embedded JPEG bytes: camera={camera_name}, row={row}")
@@ -409,7 +461,11 @@ class LeRobotVisionDECODataset(Dataset):
             raise ValueError(
                 f"Cannot decode embedded JPEG: camera={camera_name}, row={row}"
             ) from exc
-        expected = (self.image_height, self.image_width, 3)
+        expected = (
+            self.image_height if expected_height is None else expected_height,
+            self.image_width if expected_width is None else expected_width,
+            3,
+        )
         if array.shape != expected:
             raise ValueError(
                 f"Decoded image shape mismatch: camera={camera_name}, got={array.shape}, expected={expected}"
@@ -453,7 +509,7 @@ class LeRobotVisionDECODataset(Dataset):
                 for column, camera_name in zip(episode["images"], CAMERA_NAMES)
             ]
         )
-        return {
+        sample = {
             "observation": torch.from_numpy(
                 normalized_observation.astype(np.float32)
             ),
@@ -464,6 +520,22 @@ class LeRobotVisionDECODataset(Dataset):
                 self._task_to_index[source_task_id], dtype=torch.long
             ),
         }
+        if self.include_tactile:
+            sample["tactile_images"] = torch.stack(
+                [
+                    self._decode_image(
+                        column,
+                        row,
+                        tactile_name,
+                        self.tactile_image_height,
+                        self.tactile_image_width,
+                    )
+                    for column, tactile_name in zip(
+                        episode["tactile_images"], TACTILE_NAMES
+                    )
+                ]
+            )
+        return sample
 
 
 def build_lerobot_vision_datasets(
@@ -474,6 +546,7 @@ def build_lerobot_vision_datasets(
     split_seed: int = 42,
     train_limit: int | None = None,
     val_limit: int | None = None,
+    include_tactile: bool = False,
 ) -> tuple[LeRobotVisionDECODataset, LeRobotVisionDECODataset]:
     """Build train/validation views with one shared train-only statistics set."""
 
@@ -486,6 +559,7 @@ def build_lerobot_vision_datasets(
     train_episode_ids = []
     val_episode_ids = []
     expected_image_shape = None
+    expected_tactile_image_shape = None
     expected_fps = None
     expected_tasks = None
     tasks = None
@@ -497,16 +571,21 @@ def build_lerobot_vision_datasets(
         if not info_path.is_file():
             raise ValueError(f"LeRobot info.json is missing: {info_path}")
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        image_shape = _validate_info(root, info)
+        image_shape = _validate_info(root, info, include_tactile=include_tactile)
+        tactile_image_shape = (
+            _tactile_image_shape(info) if include_tactile else None
+        )
         fps = float(info["fps"])
         source_tasks, task_rows = _task_ids(root, info)
         if expected_image_shape is None:
             expected_image_shape = image_shape
+            expected_tactile_image_shape = tactile_image_shape
             expected_fps = fps
             expected_tasks = task_rows
             tasks = source_tasks
-        elif (image_shape, fps, task_rows) != (
+        elif (image_shape, tactile_image_shape, fps, task_rows) != (
             expected_image_shape,
+            expected_tactile_image_shape,
             expected_fps,
             expected_tasks,
         ):
@@ -556,6 +635,8 @@ def build_lerobot_vision_datasets(
         "expected_sample_hz": expected_fps,
         "statistics_source": "train_episodes_nonterminal_rows_once",
     }
+    if include_tactile:
+        metadata["tactile_names"] = list(TACTILE_NAMES)
     manifest = {
         "format": DATASET_FORMAT,
         "dataset_id": dataset_id,
@@ -591,6 +672,13 @@ def build_lerobot_vision_datasets(
         "action_chunk_size": int(action_chunk_size),
         "image_height": expected_image_shape[0],
         "image_width": expected_image_shape[1],
+        "tactile_image_height": (
+            expected_tactile_image_shape[0] if include_tactile else None
+        ),
+        "tactile_image_width": (
+            expected_tactile_image_shape[1] if include_tactile else None
+        ),
+        "include_tactile": include_tactile,
         "metadata": metadata,
         "stats": stats,
         "task_ids": tasks,
