@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -277,10 +278,35 @@ def load_tactile_encoder_weights(module: torch.nn.Module, artifact: ResolvedTact
 def import_jax_flax_for_cpu() -> tuple[Any, Any]:
     """Lazily import conversion-only JAX/Flax with CPU selected before import."""
 
-    os.environ.setdefault("JAX_PLATFORMS", "cpu")
-    os.environ.setdefault("JAX_PLATFORM_NAME", "cpu")
-    import jax
-    import flax
+    existing_jax = sys.modules.get("jax")
+    if existing_jax is not None:
+        configured_platform = getattr(existing_jax.config, "jax_platform_name", "")
+        if configured_platform not in (None, "", "cpu"):
+            raise RuntimeError(
+                "JAX is already imported with a non-CPU platform setting "
+                f"({configured_platform!r}); cannot safely switch to CPU"
+            )
+        try:
+            existing_backend = existing_jax.default_backend()
+        except Exception as error:  # JAX may have failed while initializing elsewhere.
+            raise RuntimeError("JAX is already imported but its backend cannot be inspected") from error
+        if existing_backend != "cpu":
+            raise RuntimeError(
+                "JAX is already initialized on backend "
+                f"{existing_backend!r}; cannot safely switch to CPU"
+            )
 
-    jax.config.update("jax_platform_name", "cpu")
+    os.environ["JAX_PLATFORMS"] = "cpu"
+    os.environ["JAX_PLATFORM_NAME"] = "cpu"
+    try:
+        import jax
+
+        jax.config.update("jax_platform_name", "cpu")
+        if jax.default_backend() != "cpu":
+            raise RuntimeError("JAX did not initialize the requested CPU backend")
+    except ImportError:
+        raise
+    except Exception as error:
+        raise RuntimeError("failed to initialize JAX on CPU") from error
+    import flax
     return jax, flax

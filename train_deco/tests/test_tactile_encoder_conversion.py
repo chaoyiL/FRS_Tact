@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -163,6 +164,20 @@ def test_resolution_accepts_direct_converted_safetensors(tmp_path: Path) -> None
     module = TactileResNet18()
     load_tactile_encoder_weights(module, artifact)
 
+
+
+def test_cpu_jax_import_overrides_conflicting_platform_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JAX_PLATFORMS", "cuda")
+    monkeypatch.setenv("JAX_PLATFORM_NAME", "gpu")
+    from train_deco.tactile_encoder_conversion import import_jax_flax_for_cpu
+
+    jax, _ = import_jax_flax_for_cpu()
+
+    assert os.environ["JAX_PLATFORMS"] == "cpu"
+    assert os.environ["JAX_PLATFORM_NAME"] == "cpu"
+    assert jax.default_backend() == "cpu"
 
 @pytest.mark.skipif(
     not Path("/home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824").is_dir(),
