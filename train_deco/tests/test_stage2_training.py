@@ -16,12 +16,15 @@ from train_deco.model_factory import STAGE2_MODEL_TYPE
 from train_deco.stage2_initialization import configure_stage2_trainability
 from train_deco.tactile_encoder_conversion import ResolvedTactileEncoder
 from train_deco.train import (
+    build_argument_parser,
     STAGE2_CHECKPOINT_SCHEMA_VERSION,
     build_stage2_checkpoint_metadata,
+    export_stage2_torchscript_artifacts,
     create_training_datasets,
     apply_restored_dataset_stats,
     resolve_tactile_encoder_distributed,
     restore_stage2_training_state,
+    restore_stage2_resume_arguments,
     run_epoch,
     stage2_config_from_resume_checkpoint,
     validate_stage2_resume_checkpoint,
@@ -85,6 +88,23 @@ class _TrainPolicy(nn.Module):
         return torch.zeros(
             tactile_images.shape[0], 2, 1, device=tactile_images.device
         ) + self.weight * 0
+
+class _AblationBlock(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.tactile_gate = nn.Parameter(torch.tensor(0.75))
+
+
+class _AblationPolicy(_TrainPolicy):
+    def __init__(self) -> None:
+        super().__init__()
+        self.mmattn = nn.ModuleList([_AblationBlock()])
+        self.seen_gate_values: list[float] = []
+
+    def forward(self, *args, **kwargs):
+        self.seen_gate_values.append(float(self.mmattn[0].tactile_gate.detach()))
+        return super().forward(*args, **kwargs)
+
 
 
 def _batch() -> dict[str, torch.Tensor]:
@@ -385,6 +405,48 @@ def test_run_epoch_preprocesses_and_passes_tactile_images_in_both_paths(train) -
 
 
 
+
+def test_stage2_tactile_disabled_validation_temporarily_zeros_and_restores_gates() -> None:
+    model = _AblationPolicy()
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+
+    run_epoch(
+        model=model, loader=[_batch()], device=torch.device("cpu"),
+        optimizer=None, scheduler=None, scaler=scaler,
+        observation_index=torch.tensor([0]), image_size=4,
+        use_task_condition=False, train=False, world_size=1, stage=2,
+        tactile_ablation="disabled",
+    )
+
+    assert model.seen_gate_values == [0.0]
+    assert model.mmattn[0].tactile_gate.item() == pytest.approx(0.75)
+
+
+def test_stage2_shuffled_tactile_validation_rolls_batch_without_consuming_rng() -> None:
+    batch = {
+        key: value.repeat(2, *([1] * (value.ndim - 1)))
+        for key, value in _batch().items()
+    }
+    batch["tactile_images"][0].zero_()
+    batch["tactile_images"][1].fill_(1.0)
+    normal = _AblationPolicy()
+    shuffled = _AblationPolicy()
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    common = dict(
+        loader=[batch], device=torch.device("cpu"), optimizer=None,
+        scheduler=None, scaler=scaler, observation_index=torch.tensor([0]),
+        image_size=4, use_task_condition=False, train=False, world_size=1,
+        stage=2, validation_seed=17,
+    )
+    run_epoch(model=normal, **common)
+    rng_before = torch.get_rng_state().clone()
+    run_epoch(model=shuffled, tactile_ablation="shuffled", **common)
+
+    assert torch.equal(torch.get_rng_state(), rng_before)
+    assert torch.equal(
+        shuffled.seen_tactile[0], torch.roll(normal.seen_tactile[0], 1, dims=0)
+    )
+
 def test_stage2_gradient_diagnostics_are_recorded_after_amp_unscale() -> None:
     model = _TrainPolicy()
     optimizer, scheduler = _optimizer(model)
@@ -438,6 +500,57 @@ def test_stage2_metadata_records_provenance_categories_and_gate_values(tmp_path)
     assert metadata["parameter_categories"]["frozen"]
     assert metadata["stage1_checkpoint"]["sha256"] == hashlib.sha256(b"stage one").hexdigest()
 
+def test_stage2_post_save_export_creates_epoch_latest_best_and_sidecars(tmp_path) -> None:
+    pt = tmp_path / "deco_stage2_epoch_3.pt"
+    pt.write_bytes(b"durable checkpoint")
+
+    def fake_exporter(policy, stats, config, output, *args, **kwargs):
+        del policy, stats, config, args, kwargs
+        output.write_bytes(b"torchscript")
+        output.with_suffix(output.suffix + ".json").write_text(
+            json.dumps({"output_path": str(output)}), encoding="utf-8"
+        )
+        return {"output_path": str(output), "format": "fixture"}
+
+    events = export_stage2_torchscript_artifacts(
+        policy=object(), stats={}, config={}, stage2_metadata={},
+        output_dir=tmp_path, epoch=3, val_loss=0.2,
+        image_height=8, image_width=12, periodic=True, improved=True,
+        exporter=fake_exporter,
+    )
+
+    assert pt.read_bytes() == b"durable checkpoint"
+    for name in (
+        "deco_stage2_epoch_3.ts", "deco_stage2_latest.ts",
+        "deco_stage2_best.ts",
+    ):
+        assert (tmp_path / name).is_file()
+        assert (tmp_path / f"{name}.json").is_file()
+    assert events[0]["event"] == "torchscript_saved"
+
+
+def test_stage2_post_save_export_failure_preserves_pt_and_returns_explicit_event(tmp_path) -> None:
+    pt = tmp_path / "deco_stage2_latest.pt"
+    pt.write_bytes(b"durable checkpoint")
+
+    events = export_stage2_torchscript_artifacts(
+        policy=object(), stats={}, config={}, stage2_metadata={},
+        output_dir=tmp_path, epoch=4, val_loss=0.3,
+        image_height=8, image_width=12, periodic=True, improved=False,
+        exporter=lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("trace failed")
+        ),
+    )
+
+    assert pt.read_bytes() == b"durable checkpoint"
+    assert events == [{
+        "event": "torchscript_export_failed",
+        "stage": 2,
+        "epoch": 4,
+        "error": "RuntimeError: trace failed",
+    }]
+
+
 
 
 
@@ -457,6 +570,53 @@ def test_stage2_resume_model_config_is_checkpoint_driven_for_nondefault_rank() -
     assert resolved["tactile_adapter_rank"] == 64
     assert resolved["hidden_dim"] == checkpoint["config"]["hidden_dim"]
     assert resolved["use_task_condition"] is False
+
+
+def test_stage2_resume_restores_state_arguments_and_keeps_only_runtime_overrides() -> None:
+    checkpoint = _valid_resume_checkpoint(adapter_rank=64)
+    checkpoint["config"].update({
+        "dataset_manifest": "/saved/nondefault.json",
+        "dataset_format": "lerobot-v21",
+        "action_chunk_size": 17,
+        "batch_size": 3,
+        "lr": 7e-5,
+        "lr_final": 7e-5,
+        "lr_scheduler": "constant",
+        "weight_decay": 9e-6,
+        "warmup_epochs": 0,
+        "cosine_t_max_epochs": 23,
+        "seed": 91,
+        "augmentation_enabled": False,
+        "stage1_checkpoint": "/missing/stage1.pt",
+        "tactile_encoder_checkpoint": "/missing/encoder",
+    })
+    args = build_argument_parser().parse_args([
+        "--stage", "2", "--resume", "/runtime/stage2.pt",
+        "--output-dir", "/runtime/output", "--run-id", "runtime-run",
+        "--epochs", "99", "--workers", "6", "--validation-seed", "444",
+    ])
+
+    restored = restore_stage2_resume_arguments(
+        args, checkpoint_loader=lambda path, device: checkpoint
+    )
+
+    assert restored is checkpoint
+    assert args.dataset_manifest == "/saved/nondefault.json"
+    assert args.action_chunk_size == 17
+    assert args.batch_size == 3
+    assert args.lr == 7e-5
+    assert args.lr_scheduler == "constant"
+    assert args.weight_decay == 9e-6
+    assert args.seed == 91
+    assert args.augmentation_enabled is False
+    assert args.tactile_adapter_rank == 64
+    assert args.stage1_checkpoint is None
+    assert args.tactile_encoder_checkpoint is None
+    assert args.output_dir == "/runtime/output"
+    assert args.run_id == "runtime-run"
+    assert args.epochs == 99
+    assert args.workers == 6
+    assert args.validation_seed == 444
 
 
 @pytest.mark.parametrize(

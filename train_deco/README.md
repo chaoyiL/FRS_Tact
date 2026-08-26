@@ -73,22 +73,31 @@ Stage 2 checkpoint 写入 `OUTPUT_DIR/RUN_ID/`：
 - `deco_stage2_latest.pt`
 - `deco_stage2_best.pt`
 - `deco_stage2_epoch_<N>.pt`（到达 `SAVE_EVERY` 时）
+- `deco_stage2_latest.ts` / `deco_stage2_best.ts`
+- `deco_stage2_epoch_<N>.ts` 及各自的 `.ts.json` sidecar
 
-`--stage1-checkpoint` 只用于 fresh Stage 2：它严格加载并冻结 Stage 1 权重，
-同时创建新的 optimizer、scheduler、scaler、epoch、step 和 RNG 状态。精确恢复
-Stage 2 时改用 `--resume`，不要再传 Stage 1 或 encoder 源路径：
+Stage 2 模式默认训练 50 epochs；Stage 1 模式仍默认 100。每个 Stage 2
+`.pt` 成功落盘后才自动导出对应 TorchScript。导出失败不会删除或回滚
+checkpoint，而会记录明确的 `torchscript_export_failed` 事件。
+
+`--stage1-checkpoint` 只用于 fresh Stage 2：它严格校验 action/observation/chunk/
+camera、模型架构、task、action mode、objective、dataset id 与 normalization stats，
+再加载并冻结 Stage 1 权重。训练启动前还会独立构造并 strict-load Stage 1
+reference，用固定 RNG/noise 验证零 gate、零 adapter Stage 2 的确定性对齐；
+不一致立即终止。精确恢复 Stage 2 时改用 `--resume`：
 
 ```bash
 bash train_deco/scripts/train.sh \
   --mode local-stage2 \
-  --manifest /absolute/path/to/pick_tube_01_06.json \
-  --run-id pick_tube_stage2_local \
   --resume /absolute/output/pick_tube_stage2_local/deco_stage2_latest.pt
 ```
 
-`--resume` 恢复完整 Stage 2 model、optimizer、scheduler、scaler、epoch/step、
-归一化统计、RNG 和 Stage 1/encoder provenance；它与 `--stage1-checkpoint`
-互斥，并会拒绝 Stage 1 checkpoint。
+`--resume` 在 dataset/model/optimizer/scheduler 构造前恢复 checkpoint 保存的
+LR/scheduler/batch size/adapter rank 等所有训练状态参数，以及完整 model、
+optimizer、scheduler、scaler、epoch/step、归一化统计、RNG 和 provenance。
+命令行只保留 output/run-id/epochs/workers/log/save/keep、TorchScript 尺寸和
+验证 seed 等运行时覆盖。因此上面的仅 `--resume` 命令可恢复非默认训练配置，
+无需 Stage 1 或 encoder 源路径；它会拒绝 Stage 1 checkpoint。
 
 ### Stage 2 数据合同
 
@@ -110,6 +119,12 @@ dataset sample 中它们被解码为 unit-space float32 `[4, 3, H, W]`，batch
 选择旧的
 `preprocessed` backend 会明确报错
 `Stage2 currently requires --dataset-format lerobot-v21`，不会静默丢弃触觉输入。
+
+每个 train-subset 与 unseen validation 集、每个 validation noise seed 都记录三组
+loss 和 velocity MAE：正常触觉、临时将所有 tactile gate 置零的
+`tactile_disabled`、以及按 batch 确定性 roll 的 `shuffled_tactile`。gate
+在 forward 后恢复，shuffle 不消耗正常验证 RNG；best checkpoint 和 early
+stopping 始终只使用正常的 unseen loss。
 
 ## 暗光增强训练
 

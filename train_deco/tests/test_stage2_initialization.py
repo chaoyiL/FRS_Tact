@@ -9,7 +9,11 @@ from torch import nn
 from train_deco.model_factory import build_stage2_model
 from train_deco.models.deco.deco import DECO
 from train_deco.models.tactile_resnet import TactileResNet18
-from train_deco.stage2_initialization import initialize_stage2_from_stage1
+from train_deco.stage2_initialization import (
+    initialize_stage2_from_stage1,
+    validate_stage1_checkpoint_contract,
+    verify_stage2_stage1_parity,
+)
 
 
 class _TinyImageEncoder(nn.Module):
@@ -73,6 +77,108 @@ def _inputs() -> dict[str, torch.Tensor]:
 def _save_checkpoint(path: Path, state: dict[str, torch.Tensor]) -> Path:
     torch.save({"model": state, "config": {"model_type": "upstream-deco-stage1"}}, path)
     return path
+
+def _stage_contract() -> dict:
+    return {
+        "model_type": "upstream-deco-stage1",
+        "action_dim": 4,
+        "obs_dim": 4,
+        "source_obs_dim": 6,
+        "chunk_size": 3,
+        "camera_names": ["camera0", "camera1"],
+        "hidden_dim": 32,
+        "layers": 2,
+        "heads": 4,
+        "image_size": 8,
+        "inference_steps": 2,
+        "rope_height": 4,
+        "rope_width": 4,
+        "use_task_condition": False,
+        "num_tasks": 1,
+        "action_mode": "tcp_delta_absolute_gripper",
+        "objective_version": "masked-flow-mse-v1",
+        "dataset_id": "pick-tube-fixture",
+        "observation_indices": [0, 1, 2, 3],
+        "state_columns": ["s0", "s1", "s2", "s3", "s4", "s5"],
+        "action_columns": ["s0", "s1", "s2", "s3"],
+    }
+
+
+def _normalization_stats() -> dict:
+    return {
+        "observation_mean": [0.0, 0.1, 0.2, 0.3, 0.4, 0.5],
+        "observation_std": [1.0] * 6,
+        "action_mean": [0.0] * 4,
+        "action_std": [1.0] * 4,
+    }
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "model_type", "action_dim", "obs_dim", "source_obs_dim",
+        "chunk_size", "camera_names", "hidden_dim", "layers", "heads",
+        "image_size", "inference_steps", "rope_height", "rope_width",
+        "use_task_condition", "num_tasks", "action_mode",
+        "objective_version", "dataset_id", "observation_indices",
+        "state_columns", "action_columns",
+    ],
+)
+def test_fresh_stage1_checkpoint_rejects_every_state_contract_mismatch(key: str) -> None:
+    config = _stage_contract()
+    checkpoint = {
+        "model": {}, "config": dict(config), "stats": _normalization_stats()
+    }
+    current = {**config, "model_type": "upstream-deco-stage2-tactile-image"}
+    checkpoint["config"][key] = "wrong"
+
+    with pytest.raises(ValueError, match=key):
+        validate_stage1_checkpoint_contract(
+            checkpoint, current_config=current, current_stats=_normalization_stats()
+        )
+
+
+def test_fresh_stage1_checkpoint_rejects_normalization_stats_mismatch() -> None:
+    config = _stage_contract()
+    checkpoint = {
+        "model": {}, "config": config, "stats": _normalization_stats()
+    }
+    current = _normalization_stats()
+    current["action_std"] = [2.0] * 4
+
+    with pytest.raises(ValueError, match="normalization.*action_std"):
+        validate_stage1_checkpoint_contract(
+            checkpoint,
+            current_config={**config, "model_type": "upstream-deco-stage2-tactile-image"},
+            current_stats=current,
+        )
+
+
+def test_production_parity_check_aborts_if_zero_adapter_contract_is_broken() -> None:
+    stage1, stage2 = _models()
+    stage2.load_state_dict({**stage2.state_dict(), **stage1.state_dict()}, strict=True)
+    with torch.no_grad():
+        stage2.mmattn[0].img_qkv_pi.up.weight.fill_(0.5)
+
+    with pytest.raises(ValueError, match="zero-initialized PI adapter"):
+        verify_stage2_stage1_parity(
+            stage1, stage2, inputs=_inputs(),
+            tactile_images=torch.rand(2, 4, 3, 224, 224), seed=101,
+        )
+
+
+def test_production_parity_check_uses_fixed_noise_and_accepts_zero_gate_adapter() -> None:
+    stage1, stage2 = _models()
+    stage2.load_state_dict({**stage2.state_dict(), **stage1.state_dict()}, strict=True)
+
+    report = verify_stage2_stage1_parity(
+        stage1, stage2, inputs=_inputs(),
+        tactile_images=torch.rand(2, 4, 3, 224, 224), seed=101,
+    )
+
+    assert report["seed"] == 101
+    assert report["max_abs_prediction"] <= 1e-6
+
 
 
 def test_factory_builds_explicit_stage2_with_shared_encoder_and_rank32_default() -> None:

@@ -152,7 +152,7 @@ case "${MODE}" in
     OUTPUT_DIR="${OUTPUT_DIR:-${PACKAGE_ROOT}/outputs}"
     BATCH_SIZE="${BATCH_SIZE:-8}"
     WORKERS="${WORKERS:-4}"
-    EPOCHS="${EPOCHS:-100}"
+    EPOCHS="${EPOCHS:-50}"
     ACTION_CHUNK_SIZE="${ACTION_CHUNK_SIZE:-32}"
     HIDDEN_DIM="${HIDDEN_DIM:-512}"
     LAYERS="${LAYERS:-6}"
@@ -170,14 +170,15 @@ case "${MODE}" in
     if [[ "${MODE}" == "server-stage2" ]]; then
       STAGE=2
       RUN_ID="${RUN_ID:-pick_tube_stage2_01_06_ddp2_${TIMESTAMP}}"
+      EPOCHS="${EPOCHS:-50}"
     else
       RUN_ID="${RUN_ID:-pick_tube_vision_01_06_ddp2_${TIMESTAMP}}"
+      EPOCHS="${EPOCHS:-100}"
     fi
     MANIFEST="${MANIFEST:-${PACKAGE_ROOT}/data_manifests/pick_tube_01_06.json}"
     OUTPUT_DIR="${OUTPUT_DIR:-/DATA/ljl/substage/deco_runs}"
     BATCH_SIZE="${BATCH_SIZE:-16}"
     WORKERS="${WORKERS:-4}"
-    EPOCHS="${EPOCHS:-100}"
     ACTION_CHUNK_SIZE="${ACTION_CHUNK_SIZE:-32}"
     HIDDEN_DIM="${HIDDEN_DIM:-512}"
     LAYERS="${LAYERS:-6}"

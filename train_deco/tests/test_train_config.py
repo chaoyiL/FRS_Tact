@@ -22,6 +22,7 @@ def test_stage1_cli_defaults_remain_vision_only() -> None:
     assert args.tactile_encoder_cache == "checkpoints/deco/tactile_encoder_cache"
     assert args.tactile_adapter_rank == 32
     assert args.resume_from is None
+    assert args.epochs == 100
     validate_stage_arguments(args)
 
 
@@ -130,6 +131,7 @@ def test_stage2_shell_mode_passes_source_paths_without_hardcoded_artifact() -> N
     assert "--stage1-checkpoint /tmp/stage1.pt" in result.stdout
     assert "--tactile-encoder-checkpoint /tmp/encoder" in result.stdout
     assert ".safetensors" not in result.stdout
+    assert "--epochs 50" in result.stdout
 
 
 def test_server_stage2_shell_mode_uses_ddp_and_source_directory() -> None:
@@ -157,4 +159,5 @@ def test_server_stage2_shell_mode_uses_ddp_and_source_directory() -> None:
     assert "--nproc_per_node=2" in result.stdout
     assert "--stage 2" in result.stdout
     assert "--tactile-encoder-checkpoint /tmp/encoder" in result.stdout
+    assert "--epochs 50" in result.stdout
 

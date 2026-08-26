@@ -18,6 +18,17 @@ _TRAINABLE_CATEGORIES = (
     "tactile_gates",
     "pi_adapters",
 )
+_STAGE1_MODEL_TYPE = "upstream-deco-stage1"
+_STAGE1_CONTRACT_KEYS = (
+    "action_dim", "obs_dim", "source_obs_dim", "chunk_size", "camera_names",
+    "hidden_dim", "layers", "heads", "image_size", "inference_steps",
+    "rope_height", "rope_width", "use_task_condition", "num_tasks",
+    "action_mode", "objective_version", "dataset_id", "observation_indices",
+    "state_columns", "action_columns",
+)
+_NORMALIZATION_STAT_KEYS = (
+    "observation_mean", "observation_std", "action_mean", "action_std",
+)
 
 
 @dataclass(frozen=True)
@@ -93,6 +104,136 @@ def _checkpoint_payload(
     if not all(isinstance(name, str) for name in model_state):
         raise ValueError("Stage1 training checkpoint model keys must be strings")
     return model_state
+
+def _training_checkpoint_payload(
+    checkpoint: str | Path | Mapping[str, Any],
+    map_location: str | torch.device,
+) -> Mapping[str, Any]:
+    if isinstance(checkpoint, (str, Path)):
+        payload = torch.load(
+            Path(checkpoint), map_location=map_location, weights_only=True
+        )
+    else:
+        payload = checkpoint
+    if not isinstance(payload, Mapping) or "model" not in payload:
+        raise ValueError(
+            "Stage1 initialization requires a training checkpoint containing a 'model' state dict"
+        )
+    return payload
+
+
+def validate_stage1_checkpoint_contract(
+    checkpoint: str | Path | Mapping[str, Any],
+    *,
+    current_config: Mapping[str, Any],
+    current_stats: Mapping[str, Any],
+    map_location: str | torch.device = "cpu",
+) -> Mapping[str, Any]:
+    """Reject a fresh Stage1 wrapper that differs from the Stage2 contract."""
+    payload = _training_checkpoint_payload(checkpoint, map_location)
+    saved_config = payload.get("config")
+    if not isinstance(saved_config, Mapping):
+        raise ValueError("Stage1 checkpoint config must be a mapping")
+    if saved_config.get("model_type") != _STAGE1_MODEL_TYPE:
+        raise ValueError("Stage1 checkpoint model_type is not upstream-deco-stage1")
+    mismatches = [
+        key for key in _STAGE1_CONTRACT_KEYS
+        if key not in saved_config or saved_config.get(key) != current_config.get(key)
+    ]
+    if mismatches:
+        details = {
+            key: {"stage1": saved_config.get(key), "stage2": current_config.get(key)}
+            for key in mismatches
+        }
+        raise ValueError(f"Stage1 checkpoint contract mismatch: {details}")
+    saved_stats = payload.get("stats")
+    if not isinstance(saved_stats, Mapping):
+        raise ValueError("Stage1 checkpoint normalization stats must be a mapping")
+    for key in _NORMALIZATION_STAT_KEYS:
+        if key not in saved_stats or key not in current_stats:
+            raise ValueError(f"Stage1 checkpoint normalization stat {key} is missing")
+        saved = torch.as_tensor(saved_stats[key], dtype=torch.float64)
+        current = torch.as_tensor(current_stats[key], dtype=torch.float64)
+        if saved.shape != current.shape or not torch.equal(saved, current):
+            raise ValueError(f"Stage1 checkpoint normalization stat {key} mismatch")
+    return payload
+
+
+def load_stage1_reference(
+    model: nn.Module,
+    checkpoint: str | Path | Mapping[str, Any],
+    *,
+    map_location: str | torch.device = "cpu",
+) -> None:
+    """Strictly load an independent Stage1 reference from its wrapper."""
+    source = _strip_known_wrapper_prefixes(_checkpoint_payload(checkpoint, map_location))
+    model.load_state_dict(source, strict=True)
+
+
+def verify_stage2_stage1_parity(
+    stage1: nn.Module,
+    stage2: nn.Module,
+    *,
+    inputs: Mapping[str, torch.Tensor],
+    tactile_images: torch.Tensor,
+    seed: int,
+    rtol: float = 1e-6,
+    atol: float = 1e-7,
+) -> dict[str, float | int]:
+    """Abort unless fresh zero-gate/zero-adapter Stage2 matches Stage1."""
+    named = dict(stage2.named_parameters())
+    nonzero_gates = [
+        name for name, value in named.items()
+        if name.endswith(".tactile_gate")
+        and int(torch.count_nonzero(value.detach()).item()) != 0
+    ]
+    if nonzero_gates:
+        raise ValueError(f"Fresh Stage2 requires zero tactile gates: {nonzero_gates}")
+    nonzero_adapters = [
+        name for name, value in named.items()
+        if "_pi.up." in name
+        and int(torch.count_nonzero(value.detach()).item()) != 0
+    ]
+    if nonzero_adapters:
+        raise ValueError(
+            "Fresh Stage2 requires every zero-initialized PI adapter output to be zero: "
+            f"{nonzero_adapters}"
+        )
+
+    stage1_was_training = stage1.training
+    stage2_was_training = stage2.training
+    stage1.eval()
+    stage2.eval()
+    input_device = next(iter(inputs.values())).device
+    devices = [input_device.index or 0] if input_device.type == "cuda" else []
+    try:
+        with torch.no_grad(), torch.random.fork_rng(devices=devices):
+            torch.manual_seed(seed)
+            if input_device.type == "cuda":
+                torch.cuda.manual_seed(seed)
+            stage1_prediction, stage1_noise = stage1(**inputs, training=True)
+            torch.manual_seed(seed)
+            if input_device.type == "cuda":
+                torch.cuda.manual_seed(seed)
+            stage2_prediction, stage2_noise = stage2(
+                **inputs, tactile_images=tactile_images, training=True
+            )
+    finally:
+        stage1.train(stage1_was_training)
+        stage2.train(stage2_was_training)
+    if not torch.equal(stage2_noise, stage1_noise):
+        raise ValueError("Fresh Stage2 parity failed: fixed RNG produced different noise")
+    max_abs = float(
+        (stage2_prediction - stage1_prediction).detach().abs().max().item()
+    )
+    if not torch.allclose(
+        stage2_prediction, stage1_prediction, rtol=rtol, atol=atol
+    ):
+        raise ValueError(
+            f"Fresh Stage2 deterministic parity failed: max_abs={max_abs}"
+        )
+    return {"seed": int(seed), "max_abs_prediction": max_abs}
+
 
 
 def _stage2_state_partition(

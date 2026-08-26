@@ -5,7 +5,7 @@ import math
 import os
 import random
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
 
@@ -42,7 +42,13 @@ from .model_factory import (
 )
 from .preprocessed_dataset import PreprocessedDECODataset, verify_preprocessed_dataset
 from .resume import validate_resume_config
-from .stage2_initialization import configure_stage2_trainability, initialize_stage2_from_stage1
+from .stage2_initialization import (
+    configure_stage2_trainability,
+    initialize_stage2_from_stage1,
+    load_stage1_reference,
+    validate_stage1_checkpoint_contract,
+    verify_stage2_stage1_parity,
+)
 from .tactile_encoder_conversion import ResolvedTactileEncoder, load_tactile_encoder_weights
 from .training_utils import (
     DistributedEvalSampler,
@@ -322,6 +328,87 @@ def build_stage2_checkpoint_metadata(
         },
     }
 
+def build_stage2_parity_inputs(
+    config: dict, device: torch.device, *, seed: int = 20260827
+) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
+    """Create fixed production-shaped inputs without changing training RNG."""
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    camera_count = len(config["camera_names"])
+    image_size = int(config["image_size"])
+    images = [
+        torch.randn(1, 3, image_size, image_size, generator=generator).to(device)
+        for _ in range(camera_count)
+    ]
+    inputs = {
+        "img1": images[0],
+        "img2": images[1],
+        "obs": torch.randn(
+            1, int(config["action_dim"]), generator=generator
+        ).to(device),
+        "act": torch.randn(
+            1, int(config["chunk_size"]), int(config["action_dim"]),
+            generator=generator,
+        ).to(device),
+    }
+    if camera_count == 3:
+        inputs["img3"] = images[2]
+    if config.get("use_task_condition", False):
+        inputs["task_idx"] = torch.zeros(1, dtype=torch.long, device=device)
+    tactile = torch.rand(1, 4, 3, 224, 224, generator=generator).to(device)
+    return inputs, tactile
+
+
+
+def export_stage2_torchscript_artifacts(
+    *,
+    policy,
+    stats: dict,
+    config: dict,
+    stage2_metadata: dict,
+    output_dir: str | Path,
+    epoch: int,
+    val_loss: float,
+    image_height: int,
+    image_width: int,
+    periodic: bool,
+    improved: bool,
+    exporter=export_policy,
+    copier=copy_torchscript_artifact,
+) -> list[dict]:
+    """Export Stage2 aliases after PT durability; report failures without raising."""
+    if not (periodic or improved):
+        return []
+    output_dir = Path(output_dir)
+    epoch_ts = output_dir / f"deco_stage2_epoch_{epoch}.ts"
+    artifact_rng = capture_rng_state()
+    try:
+        metadata = exporter(
+            policy,
+            stats,
+            config,
+            epoch_ts,
+            image_height,
+            image_width,
+            epoch,
+            val_loss,
+            checkpoint_schema_version=STAGE2_CHECKPOINT_SCHEMA_VERSION,
+            stage2_metadata=stage2_metadata,
+        )
+        if periodic:
+            copier(epoch_ts, output_dir / "deco_stage2_latest.ts")
+        if improved:
+            copier(epoch_ts, output_dir / "deco_stage2_best.ts")
+        return [{"event": "torchscript_saved", "stage": 2, **metadata}]
+    except Exception as error:
+        return [{
+            "event": "torchscript_export_failed",
+            "stage": 2,
+            "epoch": int(epoch),
+            "error": f"{type(error).__name__}: {error}",
+        }]
+    finally:
+        restore_rng_state(artifact_rng)
+
 
 def _require_metadata_mapping(value, label: str) -> dict:
     if not isinstance(value, dict):
@@ -457,6 +544,48 @@ def stage2_config_from_resume_checkpoint(
     for key in _STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS:
         resolved[key] = saved_config[key]
     return resolved
+
+_STAGE2_RESUME_RUNTIME_ARGUMENT_KEYS = frozenset(
+    {
+        "resume_from",
+        "resume_mode",
+        "output_dir",
+        "run_id",
+        "epochs",
+        "workers",
+        "log_every_steps",
+        "save_every",
+        "keep_last_checkpoints",
+        "torchscript_image_height",
+        "torchscript_image_width",
+        "validation_seed",
+        "validation_noise_seeds",
+        "train_subset_validation_samples",
+        "train_subset_validation_seed",
+        "stage1_checkpoint",
+        "tactile_encoder_checkpoint",
+        "tactile_encoder_cache",
+    }
+)
+
+
+def restore_stage2_resume_arguments(args, *, checkpoint_loader=load_checkpoint) -> dict | None:
+    """Load Stage2 exact-resume config before constructing stateful objects."""
+    if args.stage != 2 or not args.resume_from:
+        return None
+    checkpoint = checkpoint_loader(args.resume_from, "cpu")
+    validate_stage2_resume_checkpoint(checkpoint)
+    saved_config = checkpoint["config"]
+    for name in vars(args):
+        if name in _STAGE2_RESUME_RUNTIME_ARGUMENT_KEYS:
+            continue
+        if name in saved_config:
+            setattr(args, name, saved_config[name])
+    # Fresh-initialization sources are provenance only during exact resume.
+    args.stage1_checkpoint = None
+    args.tactile_encoder_checkpoint = None
+    return checkpoint
+
 
 
 def apply_restored_dataset_stats(stats: dict, *datasets) -> dict[str, np.ndarray]:
@@ -654,6 +783,30 @@ def average_validation_metrics(records: list[dict]) -> dict:
     }
 
 
+@contextmanager
+def temporarily_zero_tactile_gates(model, enabled: bool):
+    if not enabled:
+        yield
+        return
+    raw_model = model.module if isinstance(model, DDP) else model
+    gates = [
+        parameter for name, parameter in raw_model.named_parameters()
+        if name.endswith(".tactile_gate")
+    ]
+    if not gates:
+        raise ValueError("tactile-disabled validation found no tactile gates")
+    saved = [gate.detach().clone() for gate in gates]
+    try:
+        with torch.no_grad():
+            for gate in gates:
+                gate.zero_()
+        yield
+    finally:
+        with torch.no_grad():
+            for gate, value in zip(gates, saved):
+                gate.copy_(value)
+
+
 def run_epoch(
     model,
     loader,
@@ -679,7 +832,14 @@ def run_epoch(
     augmentation_config=None,
     stage=1,
     stage2_parameter_report=None,
+    tactile_ablation=None,
 ):
+    if tactile_ablation not in (None, "disabled", "shuffled"):
+        raise ValueError(f"Unknown tactile ablation: {tactile_ablation!r}")
+    if tactile_ablation is not None and (train or stage != 2):
+        raise ValueError(
+            "Tactile ablations are only valid for Stage2 validation"
+        )
     model.train(train)
     raw_model = model.module if isinstance(model, DDP) else model
     if train and (backbone_bn_eval or stage == 2):
@@ -711,6 +871,12 @@ def run_epoch(
                         (224, 224),
                     )
                 actions = batch["action"].to(device, non_blocking=True)
+                if tactile_ablation == "shuffled" and tactile_images.shape[0] > 1:
+                    shift = 1 + (
+                        (validation_seed + batch_index - 1)
+                        % (tactile_images.shape[0] - 1)
+                    )
+                    tactile_images = torch.roll(tactile_images, shift, dims=0)
                 is_pad = batch["is_pad"].to(device, non_blocking=True)
                 task_index = (
                     batch["task_index"].to(device, non_blocking=True)
@@ -766,11 +932,14 @@ def run_epoch(
                         )
                     else:
                         if stage == 2:
-                            prediction = model(
-                                *camera_images, obs=observation,
-                                task_idx=task_index, training=False,
-                                tactile_images=tactile_images,
-                            )
+                            with temporarily_zero_tactile_gates(
+                                model, tactile_ablation == "disabled"
+                            ):
+                                prediction = model(
+                                    *camera_images, obs=observation,
+                                    task_idx=task_index, training=False,
+                                    tactile_images=tactile_images,
+                                )
                         else:
                             prediction = model(
                                 *camera_images, obs=observation,
@@ -1087,6 +1256,7 @@ def validate_stage_arguments(args) -> None:
 
 def main(argv=None):
     args = build_argument_parser().parse_args(argv)
+    resumed_stage2 = restore_stage2_resume_arguments(args)
     validate_stage_arguments(args)
     augmentation_config = augmentation_config_from_args(args)
     dataset_source = training_dataset_source(args)
@@ -1261,17 +1431,22 @@ def main(argv=None):
         "augmentation": asdict(augmentation_config),
     }
     tactile_artifact = None
+    stage1_payload = None
     stage2_parameter_report = None
     stage2_metadata = None
-    resumed_stage2 = None
     if args.stage == 2:
         if args.resume_from:
-            resumed_stage2 = load_checkpoint(args.resume_from, device)
             stage2_metadata = validate_stage2_resume_checkpoint(resumed_stage2)
             config = stage2_config_from_resume_checkpoint(resumed_stage2, config)
             for key in _STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS:
                 setattr(args, key, config[key])
         else:
+            stage1_payload = validate_stage1_checkpoint_contract(
+                args.stage1_checkpoint,
+                current_config=config,
+                current_stats=train_dataset.stats,
+                map_location="cpu",
+            )
             tactile_artifact = resolve_tactile_encoder_distributed(
                 args.tactile_encoder_checkpoint,
                 args.tactile_encoder_cache,
@@ -1283,9 +1458,22 @@ def main(argv=None):
         if tactile_artifact is not None:
             load_tactile_encoder_weights(model.tactile_encoder, tactile_artifact)
             initialization = initialize_stage2_from_stage1(
-                model, args.stage1_checkpoint, map_location="cpu"
+                model, stage1_payload, map_location="cpu"
             )
             stage2_parameter_report = initialization.parameters
+            stage1_reference = build_model(config, load_backbone=False).to(device)
+            load_stage1_reference(stage1_reference, stage1_payload)
+            parity_inputs, parity_tactile = build_stage2_parity_inputs(config, device)
+            parity_report = verify_stage2_stage1_parity(
+                stage1_reference,
+                model,
+                inputs=parity_inputs,
+                tactile_images=parity_tactile,
+                seed=20260827,
+            )
+            del stage1_reference, parity_inputs, parity_tactile
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
             stage2_metadata = build_stage2_checkpoint_metadata(
                 model,
                 stage2_parameter_report,
@@ -1293,6 +1481,7 @@ def main(argv=None):
                 tactile_artifact=tactile_artifact,
                 tactile_adapter_rank=args.tactile_adapter_rank,
             )
+            stage2_metadata["stage1_parity"] = parity_report
         else:
             stage2_parameter_report = configure_stage2_trainability(model)
         config["parameter_counts"] = {
@@ -1543,37 +1732,65 @@ def main(argv=None):
         )
         sync_model_buffers(raw_model, world_size)
         validation_metrics = {}
+        validation_ablation_metrics = {}
         for validation_name, validation_loader in (
             ("train", train_subset_val_loader),
             ("unseen", val_loader),
         ):
-            validation_records = []
-            for seed_index in range(args.validation_noise_seeds):
-                seed_metrics, _ = run_epoch(
-                    model=raw_model,
-                    loader=validation_loader,
-                    device=device,
-                    optimizer=None,
-                    scheduler=None,
-                    scaler=scaler,
-                    observation_index=observation_index,
-                    image_size=args.image_size,
-                    use_task_condition=args.use_task_condition,
-                    train=False,
-                    world_size=world_size,
-                    validation_seed=args.validation_seed + seed_index * 100_003,
-                    rank=rank,
-                    stage=args.stage,
+            ablation_modes = (("normal", None),)
+            if args.stage == 2:
+                ablation_modes += (
+                    ("tactile_disabled", "disabled"),
+                    ("shuffled_tactile", "shuffled"),
                 )
-                validation_records.append(seed_metrics)
+            validation_records = {name: [] for name, _ in ablation_modes}
+            for seed_index in range(args.validation_noise_seeds):
+                validation_noise_seed = (
+                    args.validation_seed + seed_index * 100_003
+                )
+                for ablation_name, tactile_ablation in ablation_modes:
+                    seed_metrics, _ = run_epoch(
+                        model=raw_model,
+                        loader=validation_loader,
+                        device=device,
+                        optimizer=None,
+                        scheduler=None,
+                        scaler=scaler,
+                        observation_index=observation_index,
+                        image_size=args.image_size,
+                        use_task_condition=args.use_task_condition,
+                        train=False,
+                        world_size=world_size,
+                        validation_seed=validation_noise_seed,
+                        rank=rank,
+                        stage=args.stage,
+                        tactile_ablation=tactile_ablation,
+                    )
+                    validation_records[ablation_name].append(seed_metrics)
             validation_metrics[validation_name] = average_validation_metrics(
-                validation_records
+                validation_records["normal"]
             )
+            if args.stage == 2:
+                validation_ablation_metrics[validation_name] = {
+                    name: average_validation_metrics(records)
+                    for name, records in validation_records.items()
+                    if name != "normal"
+                }
         val_train_metrics = validation_metrics["train"]
         val_unseen_metrics = validation_metrics["unseen"]
+        ablation_record = {}
+        all_validation_metrics = [val_train_metrics, val_unseen_metrics]
+        if args.stage == 2:
+            ablation_record = {
+                "val_train_tactile_disabled": validation_ablation_metrics["train"]["tactile_disabled"],
+                "val_train_shuffled_tactile": validation_ablation_metrics["train"]["shuffled_tactile"],
+                "val_unseen_tactile_disabled": validation_ablation_metrics["unseen"]["tactile_disabled"],
+                "val_unseen_shuffled_tactile": validation_ablation_metrics["unseen"]["shuffled_tactile"],
+            }
+            all_validation_metrics.extend(ablation_record.values())
         if not all(
             math.isfinite(metrics["loss"])
-            for metrics in (val_train_metrics, val_unseen_metrics)
+            for metrics in all_validation_metrics
         ):
             cleanup_dist()
             raise FloatingPointError(
@@ -1618,6 +1835,7 @@ def main(argv=None):
                 "backbone_frozen": backbone_frozen,
                 "elapsed_seconds": time.monotonic() - started,
             }
+            record.update(ablation_record)
             metrics_logger.log_epoch(record)
             print(json.dumps(record), flush=True)
             checkpoint = {
@@ -1634,6 +1852,11 @@ def main(argv=None):
                 "global_step": global_step,
             }
             checkpoint_stem = f"deco_stage{args.stage}"
+            if args.stage == 2:
+                checkpoint.update({
+                    f"{name}_loss": metrics["loss"]
+                    for name, metrics in ablation_record.items()
+                })
             if args.stage == 2:
                 stage2_metadata = {
                     **stage2_metadata,
@@ -1653,6 +1876,23 @@ def main(argv=None):
                 atomic_torch_save(checkpoint, output_dir / f"{checkpoint_stem}_latest.pt")
             if absolute_improved:
                 atomic_torch_save(checkpoint, output_dir / f"{checkpoint_stem}_best.pt")
+            if args.stage == 2 and (periodic or absolute_improved):
+                export_events = export_stage2_torchscript_artifacts(
+                    policy=raw_model,
+                    stats=jsonable_stats(stats),
+                    config=config,
+                    stage2_metadata=stage2_metadata,
+                    output_dir=output_dir,
+                    epoch=epoch + 1,
+                    val_loss=val_unseen_metrics["loss"],
+                    image_height=args.torchscript_image_height,
+                    image_width=args.torchscript_image_width,
+                    periodic=periodic,
+                    improved=absolute_improved,
+                )
+                for export_event in export_events:
+                    metrics_logger.log(export_event)
+                    print(json.dumps(export_event), flush=True)
             if args.stage == 1 and (periodic or absolute_improved):
                 epoch_ts = output_dir / f"deco_stage1_epoch_{epoch + 1}.ts"
                 artifact_rng = capture_rng_state()
