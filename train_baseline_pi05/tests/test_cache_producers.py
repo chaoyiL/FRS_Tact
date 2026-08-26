@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 import sys
 import types
 
@@ -33,6 +35,26 @@ def test_fixed_noise_is_seed_zero_batch_one_sample_repeated_exactly() -> None:
 
     assert noise.shape == (3, 50, 32)
     np.testing.assert_array_equal(np.asarray(noise), np.repeat(np.asarray(reference), 3, axis=0))
+
+
+def test_runtime_bootstrap_prefers_vendored_lerobot_from_repository_root() -> None:
+    root = Path(__file__).resolve().parents[2]
+    code = """
+from importlib.util import find_spec
+from pathlib import Path
+from train_baseline_pi05.runtime_path import activate_vendored_lerobot
+activate_vendored_lerobot()
+import lerobot
+vendor = Path('train_baseline_pi05/src').resolve()
+assert vendor in Path(lerobot.__file__).resolve().parents
+assert vendor in Path(find_spec('lerobot.policies.pi05_jax').origin).resolve().parents
+"""
+    for safe_path in (None, "1"):
+        environment = dict(os.environ, PYTHONPATH="train_baseline_pi05/src:.")
+        if safe_path is not None:
+            environment["PYTHONSAFEPATH"] = safe_path
+        completed = subprocess.run([os.sys.executable, "-c", code], cwd=root, env=environment, check=False)
+        assert completed.returncode == 0
 
 
 def test_forward_sampler_uses_only_native_sample_actions() -> None:
@@ -78,6 +100,8 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
     class Model:
         action_dim = 32
 
+    from train_baseline_pi05.runtime_path import activate_vendored_lerobot
+    activate_vendored_lerobot()
     import lerobot.datasets
     monkeypatch.setattr(lerobot.datasets, "LeRobotDatasetMetadata", lambda *args, **kwargs: Metadata())
     monkeypatch.setattr(lerobot.datasets, "LeRobotDataset", lambda *args, **kwargs: Dataset())

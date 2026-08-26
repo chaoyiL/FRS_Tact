@@ -91,6 +91,8 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         raise ValueError("tactile keys must use the canonical four-current-frame order")
     dataset = deps.get("dataset")
     if dataset is None:
+        from .runtime_path import activate_vendored_lerobot
+        activate_vendored_lerobot()
         from lerobot.datasets import LeRobotDataset
         dataset = LeRobotDataset(dataset_info.repo_id, root=dataset_info.root, revision=getattr(dataset_info, "revision", None))
     encoder = deps.get("encoder") or _default_encoder(checkpoint)

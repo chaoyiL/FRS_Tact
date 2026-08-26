@@ -41,6 +41,8 @@ def _window(dataset: Any, record: SampleRecord, metadata: Any, action_key: str, 
 
 
 def _default_dependencies(config: Any) -> dict[str, Any]:
+    from .runtime_path import activate_vendored_lerobot
+    activate_vendored_lerobot()
     from lerobot.datasets import LeRobotDataset, LeRobotDatasetMetadata
     from lerobot.policies.pi05_jax import load_norm_stats
     from .policy_inputs import Pi05SampleProcessor
