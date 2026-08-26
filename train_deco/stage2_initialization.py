@@ -23,7 +23,7 @@ _STAGE1_CONTRACT_KEYS = (
     "action_dim", "obs_dim", "source_obs_dim", "chunk_size", "camera_names",
     "hidden_dim", "layers", "heads", "image_size", "inference_steps",
     "rope_height", "rope_width", "use_task_condition", "num_tasks",
-    "action_mode", "objective_version", "dataset_id", "observation_indices",
+    "task_ids", "action_mode", "objective_version", "dataset_id", "observation_indices",
     "state_columns", "action_columns",
 )
 _NORMALIZATION_STAT_KEYS = (

@@ -94,7 +94,8 @@ def _stage_contract() -> dict:
         "rope_height": 4,
         "rope_width": 4,
         "use_task_condition": False,
-        "num_tasks": 1,
+        "num_tasks": 2,
+        "task_ids": ["pick", "place"],
         "action_mode": "tcp_delta_absolute_gripper",
         "objective_version": "masked-flow-mse-v1",
         "dataset_id": "pick-tube-fixture",
@@ -119,7 +120,7 @@ def _normalization_stats() -> dict:
         "model_type", "action_dim", "obs_dim", "source_obs_dim",
         "chunk_size", "camera_names", "hidden_dim", "layers", "heads",
         "image_size", "inference_steps", "rope_height", "rope_width",
-        "use_task_condition", "num_tasks", "action_mode",
+        "use_task_condition", "num_tasks", "task_ids", "action_mode",
         "objective_version", "dataset_id", "observation_indices",
         "state_columns", "action_columns",
     ],
@@ -135,6 +136,34 @@ def test_fresh_stage1_checkpoint_rejects_every_state_contract_mismatch(key: str)
     with pytest.raises(ValueError, match=key):
         validate_stage1_checkpoint_contract(
             checkpoint, current_config=current, current_stats=_normalization_stats()
+        )
+
+
+@pytest.mark.parametrize(
+    "saved_task_ids",
+    [
+        ["pick", "insert"],
+        ["place", "pick"],
+    ],
+)
+def test_fresh_stage1_checkpoint_rejects_different_task_id_mapping_with_same_count(
+    saved_task_ids: list[str],
+) -> None:
+    config = _stage_contract()
+    checkpoint = {
+        "model": {},
+        "config": {**config, "task_ids": saved_task_ids},
+        "stats": _normalization_stats(),
+    }
+
+    with pytest.raises(ValueError, match="task_ids"):
+        validate_stage1_checkpoint_contract(
+            checkpoint,
+            current_config={
+                **config,
+                "model_type": "upstream-deco-stage2-tactile-image",
+            },
+            current_stats=_normalization_stats(),
         )
 
 

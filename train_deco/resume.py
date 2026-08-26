@@ -65,6 +65,7 @@ def validate_resume_config(
     current_config: dict,
     resume_mode: str = "exact",
     expected_training_state_version: int = 2,
+    allowed_overrides: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     if checkpoint_config.get("training_state_version") != expected_training_state_version:
         raise ValueError(
@@ -74,11 +75,12 @@ def validate_resume_config(
         )
     if resume_mode not in {"exact", "finetune"}:
         raise ValueError(f"Unknown resume mode: {resume_mode!r}")
-    allowed_overrides = (
+    mode_allowed_overrides = (
         FINETUNE_RESUME_OVERRIDE_KEYS
         if resume_mode == "finetune"
         else frozenset()
     )
+    allowed_overrides = frozenset(allowed_overrides) | mode_allowed_overrides
     mismatches = [
         key
         for key in RESUME_CONFIG_KEYS

@@ -664,6 +664,7 @@ def restore_stage2_training_state(
         current_config,
         resume_mode="exact",
         expected_training_state_version=3,
+        allowed_overrides={"validation_seed"},
     )
     if len(checkpoint.get("rng_states", [])) != world_size:
         raise ValueError("Cannot restore per-rank RNG with a different world size")

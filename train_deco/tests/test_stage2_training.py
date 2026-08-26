@@ -666,7 +666,7 @@ def test_stage2_resume_rejects_stage1_checkpoint() -> None:
         )
 
 
-def test_cpu_synthetic_step_checkpoint_and_exact_resume_continue_state(tmp_path) -> None:
+def test_runtime_validation_seed_override_restores_complete_stage2_state(tmp_path) -> None:
     torch.manual_seed(17)
     model = _TrainPolicy()
     frozen_before = model.frozen.detach().clone()
@@ -692,6 +692,7 @@ def test_cpu_synthetic_step_checkpoint_and_exact_resume_continue_state(tmp_path)
 
     payload = _valid_resume_checkpoint()
     config = payload["config"]
+    config["validation_seed"] = 111
     payload.update(
         {
             "model": model.state_dict(),
@@ -709,22 +710,36 @@ def test_cpu_synthetic_step_checkpoint_and_exact_resume_continue_state(tmp_path)
     checkpoint_path = tmp_path / "deco_stage2_latest.pt"
     atomic_torch_save(payload, checkpoint_path)
 
+    args = build_argument_parser().parse_args([
+        "--stage", "2",
+        "--resume", str(checkpoint_path),
+        "--validation-seed", "444",
+    ])
+    checkpoint = restore_stage2_resume_arguments(args)
+
+    assert checkpoint is not None
+    assert checkpoint["config"]["validation_seed"] == 111
+    assert args.validation_seed == 444
+
     resumed_model = _TrainPolicy()
     resumed_optimizer, resumed_scheduler = _optimizer(resumed_model)
     resumed_scaler = torch.amp.GradScaler("cuda", enabled=False)
     state = restore_stage2_training_state(
-        load_checkpoint(checkpoint_path, "cpu"),
+        checkpoint,
         model=resumed_model,
         optimizer=resumed_optimizer,
         scheduler=resumed_scheduler,
         scaler=resumed_scaler,
-        current_config=config,
+        current_config={**config, "validation_seed": args.validation_seed},
         world_size=1,
         rank=0,
     )
 
     assert state["epoch"] == 1
     assert state["global_step"] == 1
+    assert state["best_val"] == 0.4
+    assert state["patience_best_val"] == 0.4
+    assert state["stale_epochs"] == 0
     assert state["stats"] == payload["stats"]
     assert state["config"] == config
     assert torch.equal(resumed_model.weight, model.weight)
