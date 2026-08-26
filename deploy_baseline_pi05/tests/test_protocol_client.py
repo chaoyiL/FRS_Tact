@@ -173,7 +173,7 @@ def test_schedule_lifecycle_preserves_order_and_duplicate_runtime_idempotence() 
 
         def steer_action(self, chunk_id, request_id, observation, action_index):
             events.append(("steer", chunk_id, request_id, action_index, observation))
-            return SimpleNamespace(chunk_id=chunk_id, request_id=request_id, action_index=action_index, decoded_normalized=np.ones((1, 50, 20), dtype=np.float32), selected_normalized=np.ones(20, dtype=np.float32), selected_action=np.zeros(20, dtype=np.float32), diagnostics=SimpleNamespace(delta_rms=0.25, max_normalized_action_abs=1.0), encode_started_at=1.2, encode_finished_at=1.3, decode_started_at=1.4, decode_finished_at=1.5)
+            return SimpleNamespace(chunk_id=chunk_id, request_id=request_id, action_index=action_index, action_vla_normalized=np.zeros((1, 50, 20), dtype=np.float32), decoded_normalized=np.ones((1, 50, 20), dtype=np.float32), selected_normalized=np.ones(20, dtype=np.float32), selected_action=np.zeros(20, dtype=np.float32), diagnostics=SimpleNamespace(delta_rms=0.25, max_normalized_action_abs=1.0), encode_started_at=1.2, encode_finished_at=1.3, decode_started_at=1.4, decode_finished_at=1.5)
 
         def end_chunk(self, chunk_id):
             events.append(("end", chunk_id))
@@ -192,6 +192,7 @@ def test_schedule_lifecycle_preserves_order_and_duplicate_runtime_idempotence() 
     ready = next(event for event in events if isinstance(event, tuple) and event[0] == "ready")
     action = next(event for event in events if isinstance(event, tuple) and event[0] == "action")
     assert ready[3]["coarse_normalized_action"].shape == (1, 50, 20)
+    assert action[5]["coarse_normalized_action"].shape == (1, 50, 20)
     assert action[5]["selected_action"].shape == (20,)
     assert action[5]["delta_rms"] == 0.25
 

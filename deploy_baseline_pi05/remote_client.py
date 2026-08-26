@@ -72,6 +72,7 @@ def _steer_trace(result: Any, identity: Mapping[str, Any] | None = None) -> dict
         "chunk_id": result.chunk_id,
         "request_id": result.request_id,
         "action_index": result.action_index,
+        "coarse_normalized_action": _array_copy(result.action_vla_normalized),
         "corrected_normalized_action": _array_copy(result.decoded_normalized),
         "selected_normalized_action": _array_copy(result.selected_normalized),
         "selected_action": _array_copy(result.selected_action),
