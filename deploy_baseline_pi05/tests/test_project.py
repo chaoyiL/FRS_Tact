@@ -15,6 +15,7 @@ from deploy_baseline_pi05.direct_decoder import DirectDecoderConfig as DeployDec
 from deploy_baseline_pi05.direct_decoder import DirectTactileActionDecoder as DeployDecoder
 from train_baseline_pi05.model import DirectDecoderConfig as TrainDecoderConfig
 from train_baseline_pi05.model import DirectTactileActionDecoder as TrainDecoder
+from deploy_baseline_pi05.tests.test_config_checkpoint import _fake_asset_config
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -106,12 +107,39 @@ def test_train_and_deploy_decoder_are_bit_exact_on_cpu() -> None:
     assert torch.equal(train_output, deploy_output)
 
 
-def test_remote_check_is_a_fresh_dependency_light_process() -> None:
+def test_remote_check_is_a_fresh_dependency_light_process(tmp_path: Path) -> None:
+    config, _paths = _fake_asset_config(tmp_path)
     environment = os.environ.copy()
     environment["PYTHONPATH"] = os.pathsep.join(
         (str(DEPLOY_ROOT / "src"), str(REPO_ROOT))
     )
     environment["PYTHONPROFILEIMPORTTIME"] = "1"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deploy_baseline_pi05.remote_client",
+            "--config",
+            str(config),
+            "--check",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "deploy config sha256" in result.stdout
+    imported = result.stderr.lower()
+    assert not re.search(r"import time:.*\b(jax|torch|websockets)(?:\.|\b)", imported)
+
+
+def test_committed_server_placeholder_config_fails_real_preflight() -> None:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(DEPLOY_ROOT / "src"), str(REPO_ROOT))
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -127,10 +155,8 @@ def test_remote_check_is_a_fresh_dependency_light_process() -> None:
         capture_output=True,
         check=False,
     )
-    assert result.returncode == 0, result.stderr
-    assert "deploy config sha256" in result.stdout
-    imported = result.stderr.lower()
-    assert not re.search(r"import time:.*\b(jax|torch|websockets)(?:\.|\b)", imported)
+    assert result.returncode != 0
+    assert "best.pt" in result.stderr
 
 
 def _fake_launcher_project(tmp_path: Path) -> tuple[Path, Path, Path]:

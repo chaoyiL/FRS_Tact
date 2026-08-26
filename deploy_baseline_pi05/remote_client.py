@@ -16,7 +16,13 @@ from typing import Any
 
 import numpy as np
 
-from .deployment import TACTILE_KEYS, DeploymentConfig, load_deployment_config
+from .deployment import (
+    TACTILE_KEYS,
+    DeploymentConfig,
+    load_deployment_config,
+    make_server_config,
+    preflight_deployment_assets,
+)
 from .protocol import ScheduleChunkEnd, ScheduleChunkStart, ScheduleSteerAck, ScheduleSteerRequest
 
 
@@ -221,13 +227,15 @@ def _make_trace_saver(config: DeploymentConfig) -> BoundedTraceSaver | None:
 
 
 def check(config_path: Path) -> DeploymentConfig:
-    """Parse the configuration and print its immutable input digest without connecting."""
+    """Parse config and preflight local assets without heavyweight imports or connecting."""
     path = Path(config_path).expanduser().resolve()
     contents = path.read_bytes()
     digest = hashlib.sha256(contents).hexdigest()
     print(f"[check] deploy config path: {path}")
     print(f"[check] deploy config sha256: {digest}")
-    return load_deployment_config(path)
+    config = load_deployment_config(path)
+    preflight_deployment_assets(config)
+    return config
 
 
 def _make_runtime(config: DeploymentConfig) -> Any:
@@ -254,11 +262,10 @@ def _warmup_observation() -> dict[str, np.ndarray]:
     return observation
 
 
-def warmup(runtime: Any, config: DeploymentConfig) -> None:
+def warmup(runtime: Any, config: DeploymentConfig, observation: Mapping[str, Any]) -> None:
     """Warm every direct runtime stage without constructing a robot bridge or action message."""
     for index in range(config.runtime.warmup_runs):
         warmup_id = -(index + 1)
-        observation = _warmup_observation()
         begun = False
         try:
             ready = runtime.begin_chunk(warmup_id, observation, config.observation.language_prompt, seed=config.source.seed, num_steps=config.source.sample_steps)
@@ -365,12 +372,14 @@ def run(config_path: Path, max_iterations_override: int | None = None, *, bridge
     bridge: Any | None = None
     saver: BoundedTraceSaver | None = None
     try:
-        warmup(runtime, config)
         saver = _make_trace_saver(config)
         bridge = bridge_factory(config.connection.address, config.connection.port, _token(config), retry_interval_s=config.connection.retry_interval_s, ping_interval_s=config.connection.ping_interval_s, ping_timeout_s=config.connection.ping_timeout_s)
+        bridge.send_config(make_server_config(config))
+        obs_seq, observation = bridge.receive_observation(config.connection.observation_timeout_s)
+        warmup(runtime, config, observation)
         if not config.runtime.auto_start:
             input("[client] Ready. Press Enter to send START to the robot server... ")
-        bridge.send_state("start")
+        bridge.send_state("start", obs_seq=obs_seq)
         run_schedule(bridge, runtime, task=config.observation.language_prompt, observation_timeout_s=config.connection.observation_timeout_s, action_ack_timeout_s=config.connection.action_ack_timeout_s, seed=config.source.seed, sample_steps=config.source.sample_steps, max_iterations=max_iterations, trace_identity=_trace_identity(config), saver=saver, save_every=config.logging.save_every)
     finally:
         active_error = sys.exception()

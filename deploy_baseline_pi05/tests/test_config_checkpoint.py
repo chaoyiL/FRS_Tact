@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import yaml
 
 from train_baseline_pi05.checkpoint import save_best_checkpoint, save_last_checkpoint
 from train_baseline_pi05.model import DirectDecoderConfig as TrainDecoderConfig
@@ -16,6 +18,52 @@ from train_baseline_pi05.model import DirectTactileActionDecoder as TrainDecoder
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "deploy_baseline_pi05.yaml"
+TRAINED_PROMPT = (
+    "Firstly, use the left hand to pick up the blue tube, and then use the right hand to "
+    "pick up the green tube. Next, use the left hand to place the blue tube back firstly, "
+    "and then use the right hand to place the green tube back."
+)
+
+
+def _fake_asset_config(tmp_path: Path, *, missing: str | None = None) -> tuple[Path, dict[str, Path]]:
+    config_dir = tmp_path / "config"
+    assets = tmp_path / "assets"
+    config_dir.mkdir()
+    paths = {
+        "source": assets / "pi05",
+        "params": assets / "pi05" / "params",
+        "norm_stats": assets / "norm" / "two_tubes_0102" / "norm_stats.json",
+        "encoder_metadata": assets / "encoder" / "checkpoint.json",
+        "encoder_params": assets / "encoder" / "custom-params.npz",
+        "decoder": assets / "decoder" / "best.pt",
+    }
+    if missing != "source":
+        paths["source"].mkdir(parents=True)
+    if missing != "params" and missing != "source":
+        paths["params"].mkdir()
+    if missing != "norm_stats":
+        paths["norm_stats"].parent.mkdir(parents=True)
+        paths["norm_stats"].write_text("{}\n", encoding="utf-8")
+    if missing != "encoder_metadata":
+        paths["encoder_metadata"].parent.mkdir(parents=True)
+        paths["encoder_metadata"].write_text(
+            json.dumps({"params_file": paths["encoder_params"].name}), encoding="utf-8"
+        )
+    if missing != "encoder_params":
+        paths["encoder_params"].parent.mkdir(parents=True, exist_ok=True)
+        paths["encoder_params"].write_bytes(b"fake encoder params")
+    if missing != "decoder":
+        paths["decoder"].parent.mkdir(parents=True)
+        paths["decoder"].write_bytes(b"fake decoder")
+
+    raw = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    raw["source"]["checkpoint"] = "../assets/pi05"
+    raw["norm_stats"]["dir"] = "../assets/norm"
+    raw["tactile_encoder"]["checkpoint"] = "../assets/encoder"
+    raw["direct_decoder"]["checkpoint"] = "../assets/decoder/best.pt"
+    config_path = config_dir / "deploy.yaml"
+    config_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return config_path, paths
 
 
 def _expected_source(tmp_path: Path) -> dict[str, object]:
@@ -73,7 +121,128 @@ def test_default_config_locks_direct_pi05_contract():
     assert config.direct_decoder.dim_feedforward == 256
     assert config.direct_decoder.dropout == 0.1
     assert config.observation.data_type == "vitac"
+    assert config.observation.language_prompt == TRAINED_PROMPT
     assert len(config.model.camera_map) == 2
+
+
+def test_relative_asset_paths_resolve_once_against_yaml_directory_from_any_cwd(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from deploy_baseline_pi05.deployment import expected_source_contract, load_deployment_config
+    from deploy_baseline_pi05.remote_client import _trace_identity
+
+    config_path, paths = _fake_asset_config(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    config = load_deployment_config(config_path)
+    assert config.source.checkpoint == paths["source"].resolve()
+    assert config.norm_stats.directory == (tmp_path / "assets/norm").resolve()
+    assert config.tactile_encoder.checkpoint == paths["encoder_metadata"].parent.resolve()
+    assert config.direct_decoder.checkpoint == paths["decoder"].resolve()
+    expected = expected_source_contract(config)
+    identity = _trace_identity(config)
+    assert expected["pi"]["checkpoint"] == identity["source_checkpoint"]
+    assert expected["encoder"]["checkpoint"] == identity["tactile_encoder_checkpoint"]
+    assert identity["direct_decoder_checkpoint"] == str(paths["decoder"].resolve())
+
+    captured: dict[str, object] = {}
+
+    class Policy:
+        def __init__(self, received):
+            captured["policy_source"] = received.source.checkpoint
+
+    class Encoder:
+        def __init__(self, checkpoint, *, tactile_keys):
+            captured["encoder"] = checkpoint
+            self.tactile_keys = tactile_keys
+
+    def load_decoder(checkpoint, *, device, expected_source):
+        captured["decoder"] = checkpoint
+        captured["expected_source"] = expected_source
+        return object()
+
+    class Runtime:
+        def __init__(self, **kwargs):
+            captured["runtime"] = kwargs
+
+    monkeypatch.setitem(
+        sys.modules,
+        "deploy_baseline_pi05.policy",
+        type("PolicyModule", (), {"Pi05VisualPolicy": Policy}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deploy_baseline_pi05.tactile_encoder",
+        type("EncoderModule", (), {"FrozenTactileEncoder": Encoder}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deploy_baseline_pi05.checkpoint",
+        type("CheckpointModule", (), {"load_decoder": staticmethod(load_decoder)}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "deploy_baseline_pi05.runtime",
+        type("RuntimeModule", (), {"DirectDecoderRuntime": Runtime}),
+    )
+    from deploy_baseline_pi05.remote_client import _make_runtime
+
+    _make_runtime(config)
+    assert captured["policy_source"] == paths["source"].resolve()
+    assert captured["encoder"] == paths["encoder_metadata"].parent.resolve()
+    assert captured["decoder"] == paths["decoder"].resolve()
+    assert captured["expected_source"] == expected
+
+
+def test_check_accepts_a_complete_lightweight_asset_tree(tmp_path: Path) -> None:
+    from deploy_baseline_pi05.remote_client import check
+
+    config_path, _paths = _fake_asset_config(tmp_path)
+    config = check(config_path)
+    assert config.config_path == config_path.resolve()
+
+
+@pytest.mark.parametrize(
+    ("missing", "expected"),
+    [
+        ("source", "source checkpoint"),
+        ("params", "params"),
+        ("norm_stats", "norm_stats.json"),
+        ("encoder_metadata", "checkpoint.json"),
+        ("encoder_params", "custom-params.npz"),
+        ("decoder", "best.pt"),
+    ],
+)
+def test_check_cli_fails_for_each_missing_asset_without_heavy_imports(
+    tmp_path: Path, missing: str, expected: str
+) -> None:
+    config_path, _paths = _fake_asset_config(tmp_path, missing=missing)
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(ROOT / "src"), str(ROOT.parent))),
+        "PYTHONPROFILEIMPORTTIME": "1",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "deploy_baseline_pi05.remote_client",
+            "--config",
+            str(config_path),
+            "--check",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert expected in result.stderr
+    imported = result.stderr.lower()
+    assert not any(f"import time:" in line and module in line for line in imported.splitlines() for module in ("jax", "torch", "websockets"))
 
 
 def test_config_import_does_not_import_torch_or_jax():

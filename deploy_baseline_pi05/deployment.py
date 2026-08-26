@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,6 +43,10 @@ def _string(value: object, name: str) -> str:
 
 def _path(value: object, name: str) -> Path:
     return Path(_string(value, name))
+
+
+def _resolved_path(value: Path, base: Path) -> Path:
+    return (value if value.is_absolute() else base / value).expanduser().resolve()
 
 
 def _integer(value: object, name: str) -> int:
@@ -222,6 +228,8 @@ def _keys(value: object, name: str) -> tuple[str, ...]:
 
 
 def _from_mapping(raw: Mapping[str, Any], config_path: Path) -> DeploymentConfig:
+    config_path = config_path.expanduser().resolve()
+    base = config_path.parent
     source = _source(_mapping(_required(raw, "source", "configuration"), "source"))
     norm_raw = _mapping(_required(raw, "norm_stats", "configuration"), "norm_stats")
     tactile_raw = _mapping(_required(raw, "tactile_encoder", "configuration"), "tactile_encoder")
@@ -249,6 +257,10 @@ def _from_mapping(raw: Mapping[str, Any], config_path: Path) -> DeploymentConfig
         raise ValueError("observation must be bimanual vitac.")
     if runtime.max_iterations < 0:
         raise ValueError("runtime.max_iterations must be non-negative.")
+    source = replace(source, checkpoint=_resolved_path(source.checkpoint, base))
+    norm_stats = replace(norm_stats, directory=_resolved_path(norm_stats.directory, base))
+    tactile = replace(tactile, checkpoint=_resolved_path(tactile.checkpoint, base))
+    decoder = replace(decoder, checkpoint=_resolved_path(decoder.checkpoint, base))
     return DeploymentConfig(source, norm_stats, tactile, decoder, connection, observation, control, runtime, logging, config_path)
 
 
@@ -257,14 +269,86 @@ def load_deployment_config(path: Path) -> DeploymentConfig:
     path = Path(path)
     if not path.is_file():
         raise FileNotFoundError(f"config not found: {path}")
-    return _from_mapping(_mapping(yaml.safe_load(path.read_text(encoding="utf-8")) or {}, "configuration"), path.resolve())
+    return _from_mapping(_mapping(yaml.safe_load(path.read_text(encoding="utf-8")) or {}, "configuration"), path)
+
+
+def make_server_config(config: DeploymentConfig) -> dict[str, Any]:
+    """Build the exact robot-server config for direct tactile scheduling."""
+    return {
+        "data_type": config.observation.data_type,
+        "language_prompt": config.observation.language_prompt,
+        "control_frequency": config.control.control_frequency,
+        "controller_frequency": config.control.controller_frequency,
+        "single_arm_mode": config.observation.single_arm_mode,
+        "no_state_obs_mode": config.observation.no_state_obs_mode,
+        "steps_per_inference": config.control.steps_per_inference,
+        "action_horizon": config.control.action_horizon,
+        "observation_profile": "pi05_vitac_224",
+        "execution_protocol": "frs_steering_v1",
+        "steering_protection_interval_s": None,
+        "frs_tactile_keys": list(config.tactile_encoder.tactile_keys),
+    }
+
+
+def _readable_directory(path: Path, label: str) -> None:
+    if not path.is_dir():
+        raise FileNotFoundError(f"{label} directory is missing: {path}")
+    try:
+        with os.scandir(path) as entries:
+            next(entries, None)
+    except OSError as error:
+        raise OSError(f"{label} directory is not readable: {path}") from error
+
+
+def _readable_file(path: Path, label: str) -> None:
+    if not path.is_file():
+        raise FileNotFoundError(f"{label} is missing: {path}")
+    try:
+        with path.open("rb") as file:
+            file.read(1)
+    except OSError as error:
+        raise OSError(f"{label} is not readable: {path}") from error
+
+
+def preflight_deployment_assets(config: DeploymentConfig) -> None:
+    """Check deployment asset presence/readability without JAX, Torch, or network access."""
+    _readable_directory(config.source.checkpoint, "source checkpoint")
+    _readable_directory(config.source.checkpoint / "params", "source checkpoint params")
+    _readable_file(
+        config.norm_stats.directory / config.norm_stats.asset_id / "norm_stats.json",
+        "norm stats norm_stats.json",
+    )
+
+    encoder_directory = config.tactile_encoder.checkpoint
+    metadata_path = encoder_directory / "checkpoint.json"
+    _readable_file(metadata_path, "tactile encoder checkpoint.json")
+    try:
+        with metadata_path.open(encoding="utf-8") as file:
+            metadata = json.load(file)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"tactile encoder checkpoint.json is invalid: {metadata_path}") from error
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"tactile encoder checkpoint.json must contain a mapping: {metadata_path}")
+    params_file = metadata.get("params_file", "params.npz")
+    if not isinstance(params_file, str) or not params_file.strip() or "\x00" in params_file:
+        raise ValueError("tactile encoder params_file must be a non-empty relative path")
+    relative_params = Path(params_file)
+    if relative_params.is_absolute():
+        raise ValueError("tactile encoder params_file must remain within the checkpoint directory")
+    params_path = (encoder_directory / relative_params).resolve()
+    try:
+        params_path.relative_to(encoder_directory)
+    except ValueError as error:
+        raise ValueError(
+            "tactile encoder params_file must remain within the checkpoint directory"
+        ) from error
+    _readable_file(params_path, f"tactile encoder parameter file {params_file}")
+    _readable_file(config.direct_decoder.checkpoint, "direct decoder best.pt")
 
 
 def expected_source_contract(config: DeploymentConfig) -> dict[str, object]:
     """Return the resolved source identity required from a training checkpoint."""
-    base = config.config_path.parent
-    resolve = lambda value: str((value if value.is_absolute() else base / value).resolve())
     return {
-        "pi": {"checkpoint": resolve(config.source.checkpoint), "norm_stats_dir": resolve(config.norm_stats.directory), "norm_stats_asset_id": config.norm_stats.asset_id, "variant": {"paligemma": config.source.paligemma_variant, "action_expert": config.source.action_expert_variant}, "model_action_width": config.source.model_action_dim, "sample_steps": config.source.sample_steps},
-        "encoder": {"checkpoint": resolve(config.tactile_encoder.checkpoint), "key_order": list(config.tactile_encoder.tactile_keys)},
+        "pi": {"checkpoint": str(config.source.checkpoint), "norm_stats_dir": str(config.norm_stats.directory), "norm_stats_asset_id": config.norm_stats.asset_id, "variant": {"paligemma": config.source.paligemma_variant, "action_expert": config.source.action_expert_variant}, "model_action_width": config.source.model_action_dim, "sample_steps": config.source.sample_steps},
+        "encoder": {"checkpoint": str(config.tactile_encoder.checkpoint), "key_order": list(config.tactile_encoder.tactile_keys)},
     }

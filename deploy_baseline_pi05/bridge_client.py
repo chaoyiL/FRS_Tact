@@ -139,6 +139,23 @@ class RobotBridgeClient:
     def receive_schedule_message(self, timeout: float) -> ScheduleMessage:
         return parse_schedule_message(self._receive(timeout=timeout))
 
+    def send_config(self, config: dict[str, Any]) -> None:
+        if not isinstance(config, dict):
+            raise ValueError("robot server config must be a dictionary")
+        self._send({"type": "config", "config": dict(config)})
+
+    def receive_observation(self, timeout: float | None = None) -> tuple[int, dict[str, Any]]:
+        message = self._receive(timeout=timeout)
+        if message.get("type") != "obs":
+            raise RuntimeError(f"expected observation, received: {message.get('type')}")
+        obs_seq = message.get("obs_seq")
+        if not isinstance(obs_seq, int) or isinstance(obs_seq, bool) or obs_seq < 0:
+            raise RuntimeError("observation obs_seq must be a nonnegative integer")
+        observation = message.get("obs")
+        if not isinstance(observation, dict):
+            raise RuntimeError(f"observation must be a dictionary, got {type(observation)}")
+        return obs_seq, observation
+
     def send_state(self, state: str, obs_seq: int | None = None) -> None:
         if state not in ("start", "stop"):
             raise ValueError("bridge state must be start or stop")

@@ -48,7 +48,7 @@ connection:
   require_token: true
 observation:
   data_type: vitac
-  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube.
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   single_arm_mode: false
   no_state_obs_mode: false
 control:

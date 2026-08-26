@@ -14,7 +14,7 @@ usage() {
 Usage: bash deploy_baseline_pi05/scripts/start_baseline_pi05.sh [--config PATH] [--check] [--max-iterations N]
 
 Robot authentication may be supplied with VB_ROBOT_TOKEN or a VB3_TOKEN_FILE.
-The --check path validates the deployment config without requiring either token.
+The --check path validates the deployment config and local assets without requiring either token.
 EOF
 }
 
