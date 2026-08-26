@@ -289,3 +289,81 @@ def test_tactile_producer_writes_current_four_sensor_rms_tokens_and_mmap_reader(
     assert reader.embeddings.dtype == np.float32
     assert reader.embeddings.shape == (2, 4, 512)
     np.testing.assert_allclose(np.sqrt(np.mean(reader.embeddings[0, 0] ** 2)), 1.0, atol=1e-6)
+
+
+def test_tactile_cache_reuses_matching_complete_cap_without_reencoding(tmp_path: Path) -> None:
+    from train_baseline_pi05.tactile_cache import prepare_tactile_cache
+
+    class Metadata:
+        total_episodes = 1
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 4}]
+
+    class Dataset:
+        meta = Metadata()
+        def __len__(self): return 4
+        def __getitem__(self, index):
+            return {key: np.full((4, 4, 3), index, np.uint8) for key in (
+                "observation.images.tactile_left_0", "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1", "observation.images.tactile_right_1",
+            )}
+
+    config = _config(tmp_path)
+    config.dataset.frame_stride = 1; config.dataset.split_seed = 0
+    config.dataset.train_fraction = 1.0; config.dataset.validation_fraction = 0.0; config.dataset.test_fraction = 0.0
+    calls = []
+    def encoder(images):
+        calls.append(images.shape)
+        return np.ones((4, 512), dtype=np.float32)
+
+    output = prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": encoder}, max_samples=2)
+    before = {name: (output / name).read_bytes() for name in ("embeddings.npy", "manifest.json")}
+    assert calls == [(4, 224, 224, 3), (4, 224, 224, 3)]
+    assert prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": encoder}, max_samples=2) == output
+    assert calls == [(4, 224, 224, 3), (4, 224, 224, 3)]
+    assert before == {name: (output / name).read_bytes() for name in before}
+
+
+def test_tactile_cache_rejects_cap_change_without_mutating_complete_cache(tmp_path: Path) -> None:
+    from train_baseline_pi05.tactile_cache import prepare_tactile_cache
+
+    class Metadata:
+        total_episodes = 1
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 2}]
+
+    class Dataset:
+        meta = Metadata()
+        def __len__(self): return 2
+        def __getitem__(self, index):
+            return {key: np.full((4, 4, 3), index, np.uint8) for key in (
+                "observation.images.tactile_left_0", "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1", "observation.images.tactile_right_1",
+            )}
+
+    config = _config(tmp_path)
+    config.dataset.frame_stride = 1; config.dataset.split_seed = 0
+    config.dataset.train_fraction = 1.0; config.dataset.validation_fraction = 0.0; config.dataset.test_fraction = 0.0
+    encoder = lambda images: np.ones((4, 512), dtype=np.float32)
+    output = prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": encoder}, max_samples=1)
+    before = {name: (output / name).read_bytes() for name in ("embeddings.npy", "manifest.json")}
+    with np.testing.assert_raises_regex(ValueError, "selection|count|complete"):
+        prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": encoder}, max_samples=None)
+    assert before == {name: (output / name).read_bytes() for name in before}
+
+
+def test_tactile_cache_encoder_failure_publishes_no_complete_cache(tmp_path: Path) -> None:
+    from train_baseline_pi05.tactile_cache import prepare_tactile_cache
+
+    class Dataset:
+        def __len__(self): return 1
+        def __getitem__(self, index):
+            return {key: np.zeros((4, 4, 3), np.uint8) for key in (
+                "observation.images.tactile_left_0", "observation.images.tactile_right_0",
+                "observation.images.tactile_left_1", "observation.images.tactile_right_1",
+            )}
+
+    config = _config(tmp_path)
+    with np.testing.assert_raises_regex(RuntimeError, "encoder failed"):
+        prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda _images: (_ for _ in ()).throw(RuntimeError("encoder failed"))})
+    assert not (config.cache.tactile_root / "manifest.json").exists()
+    assert not (config.cache.tactile_root / "embeddings.npy").exists()
+    assert not list(config.cache.tactile_root.glob(".*.npy"))

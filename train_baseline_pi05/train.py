@@ -114,6 +114,8 @@ def _open_caches(config: Any) -> tuple[ActionCache, Any]:
 
 def train_decoder(config: Any, *, max_steps: int | None = None) -> Path:
     """Train only ``DirectTactileActionDecoder`` with AdamW and exact resumable state."""
+    if max_steps is not None and max_steps <= 0:
+        raise ValueError("max_steps must be positive when provided")
     decoder_settings = _field(config, "decoder")
     output = Path(decoder_settings.output); device = torch.device(getattr(decoder_settings, "device", "cpu"))
     action, tactile = _open_caches(config)
@@ -179,6 +181,8 @@ def train_decoder(config: Any, *, max_steps: int | None = None) -> Path:
 def main() -> None:
     parser = argparse.ArgumentParser(); parser.add_argument("--config", required=True, type=Path); parser.add_argument("--max-steps", type=int)
     args = parser.parse_args()
+    if args.max_steps is not None and args.max_steps <= 0:
+        raise ValueError("max_steps must be positive when provided")
     from train_baseline_pi05.config import load_config
     print(train_decoder(load_config(args.config), max_steps=args.max_steps))
 

@@ -172,6 +172,23 @@ def test_training_config_exposes_loader_resume_and_evaluation_fields():
     assert config.evaluation.shuffle_tactile is True
 
 
+@pytest.mark.parametrize("max_steps", (0, -1))
+def test_train_decoder_rejects_nonpositive_max_steps_before_opening_caches(monkeypatch, max_steps: int):
+    from train_baseline_pi05 import train
+
+    monkeypatch.setattr(train, "_open_caches", lambda _config: pytest.fail("must not open caches"))
+    with pytest.raises(ValueError, match="max_steps must be positive"):
+        train.train_decoder(object(), max_steps=max_steps)
+
+
+def test_train_cli_rejects_nonpositive_max_steps_before_loading_config(monkeypatch):
+    from train_baseline_pi05 import train
+
+    monkeypatch.setattr(sys, "argv", ["train", "--config", "missing.yaml", "--max-steps", "0"])
+    with pytest.raises(ValueError, match="max_steps must be positive"):
+        train.main()
+
+
 def test_episode_shuffle_uses_complete_cross_episode_permutation_when_available():
     from train_baseline_pi05.evaluate import _episode_shuffle
 

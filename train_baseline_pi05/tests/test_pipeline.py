@@ -164,3 +164,9 @@ def test_scripts_readme_and_lock_keep_standalone_contract() -> None:
     lock = ROOT / "train_baseline_pi05/uv.lock"
     assert setup.is_file() and start.is_file() and readme.is_file() and lock.is_file()
     assert subprocess.run(["bash", "-n", str(setup)], check=False).returncode == 0
+    source = readme.read_text(encoding="utf-8")
+    assert "SMOKE_CONFIG=/workspace/baseline_pi05/smoke/train_baseline_pi05_smoke.yaml" in source
+    assert "cp train_baseline_pi05/configs/train_baseline_pi05.yaml" in source
+    assert source.count("--max-samples 128") >= 2
+    assert "--max-steps 1" in source
+    assert "不要把 capped cache 扩成 full" in source

@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Callable
@@ -99,6 +100,47 @@ def _required_tactile_frames(
     return int(records[-1].dataset_index) + 1
 
 
+def _selection_contract(dataset_info: Any, max_samples: int | None) -> dict[str, object]:
+    return {
+        "max_samples": max_samples,
+        "frame_stride": int(getattr(dataset_info, "frame_stride", 1)),
+        "split_seed": int(getattr(dataset_info, "split_seed", 0)),
+        "fractions": [
+            float(getattr(dataset_info, "train_fraction", 0.8)),
+            float(getattr(dataset_info, "validation_fraction", 0.1)),
+            float(getattr(dataset_info, "test_fraction", 0.1)),
+        ],
+    }
+
+
+def _manifest_contract(
+    *,
+    count: int,
+    dim: int,
+    keys: Sequence[str],
+    checkpoint: Path,
+    dataset_info: Any,
+    selection: Mapping[str, object],
+) -> dict[str, object]:
+    return {
+        "version": 1,
+        "status": "complete",
+        "total_frames": count,
+        "tactile_keys": list(keys),
+        "embedding_dim": dim,
+        "dtype": "float32",
+        "image_size": 224,
+        "preprocess_version": PREPROCESS_VERSION,
+        "encoder_identity": _identity(checkpoint),
+        "dataset_identity": {
+            "repo_id": getattr(dataset_info, "repo_id", "injected"),
+            "root": str(Path(getattr(dataset_info, "root", "injected")).expanduser().resolve()),
+            "revision": getattr(dataset_info, "revision", None),
+        },
+        "selection": dict(selection),
+    }
+
+
 def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = None, *, max_samples: int | None = None) -> Path:
     """Encode four current tactile frames into RMS-normalized float32 tokens."""
     deps = dict(dependencies or {})
@@ -115,10 +157,9 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         activate_vendored_lerobot()
         from lerobot.datasets import LeRobotDataset
         dataset = LeRobotDataset(dataset_info.repo_id, root=dataset_info.root, revision=getattr(dataset_info, "revision", None))
-    encoder = deps.get("encoder") or _default_encoder(checkpoint)
-    from .tactile_encoder.preprocess import parse_image_to_unit
     if max_samples is not None and max_samples <= 0:
         raise ValueError("max_samples must be positive when provided")
+    selection = _selection_contract(dataset_info, max_samples)
     if max_samples is None:
         count = len(dataset)
     else:
@@ -129,38 +170,63 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
             len(dataset),
             _required_tactile_frames(
                 metadata,
-                frame_stride=int(getattr(dataset_info, "frame_stride", 1)),
+                frame_stride=int(selection["frame_stride"]),
                 max_samples=max_samples,
-                split_seed=int(getattr(dataset_info, "split_seed", 0)),
-                fractions=(
-                    float(getattr(dataset_info, "train_fraction", 0.8)),
-                    float(getattr(dataset_info, "validation_fraction", 0.1)),
-                    float(getattr(dataset_info, "test_fraction", 0.1)),
-                ),
+                split_seed=int(selection["split_seed"]),
+                fractions=tuple(selection["fractions"]),
             ),
         )
     dim = int(tactile.embedding_dim)
     if dim != 512:
         raise ValueError("frozen ResNet18 cache embedding_dim must be 512")
+    contract = _manifest_contract(
+        count=count,
+        dim=dim,
+        keys=keys,
+        checkpoint=checkpoint,
+        dataset_info=dataset_info,
+        selection=selection,
+    )
+    manifest_path = output / MANIFEST_NAME
+    embeddings_path = output / EMBEDDINGS_NAME
+    if manifest_path.exists():
+        existing = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if existing != contract:
+            raise ValueError("complete tactile cache does not match requested encoder, dataset, count, or selection contract")
+        TactileEmbeddingCache.open(output, tactile_keys=keys, encoder_path=checkpoint)
+        return output
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("tactile cache root contains files without a matching complete manifest")
     output.mkdir(parents=True, exist_ok=True)
-    embeddings = np.lib.format.open_memmap(output / EMBEDDINGS_NAME, mode="w+", dtype=np.float32, shape=(count, 4, dim))
-    for index in range(count):
-        sample = dataset[index]
-        images = np.stack([parse_image_to_unit(sample[key], image_size=224) for key in keys])
-        tokens = np.asarray(encoder(images), dtype=np.float32)
-        if tokens.shape != (4, dim) or not np.isfinite(tokens).all():
-            raise ValueError("shared ResNet18 encoder must return finite [4, 512] tokens")
-        rms = np.sqrt(np.mean(np.square(tokens), axis=-1, keepdims=True))
-        if np.any(rms == 0):
-            raise ValueError("tactile encoder produced a zero RMS token")
-        embeddings[index] = tokens / rms
-    embeddings.flush()
-    _atomic_json(output / MANIFEST_NAME, {
-        "version": 1, "status": "complete", "total_frames": count, "tactile_keys": list(keys),
-        "embedding_dim": dim, "dtype": "float32", "image_size": 224,
-        "preprocess_version": PREPROCESS_VERSION, "encoder_identity": _identity(checkpoint),
-        "dataset_identity": {"repo_id": getattr(dataset_info, "repo_id", "injected"), "revision": getattr(dataset_info, "revision", None)},
-    })
+    temporary = output / f".{EMBEDDINGS_NAME}.{uuid.uuid4().hex}.npy"
+    published = False
+    try:
+        encoder = deps.get("encoder") or _default_encoder(checkpoint)
+        from .tactile_encoder.preprocess import parse_image_to_unit
+        embeddings = np.lib.format.open_memmap(temporary, mode="w+", dtype=np.float32, shape=(count, 4, dim))
+        for index in range(count):
+            sample = dataset[index]
+            images = np.stack([parse_image_to_unit(sample[key], image_size=224) for key in keys])
+            tokens = np.asarray(encoder(images), dtype=np.float32)
+            if tokens.shape != (4, dim) or not np.isfinite(tokens).all():
+                raise ValueError("shared ResNet18 encoder must return finite [4, 512] tokens")
+            rms = np.sqrt(np.mean(np.square(tokens), axis=-1, keepdims=True))
+            if np.any(rms == 0):
+                raise ValueError("tactile encoder produced a zero RMS token")
+            embeddings[index] = tokens / rms
+        embeddings.flush()
+        del embeddings
+        with temporary.open("rb") as handle:
+            os.fsync(handle.fileno())
+        os.replace(temporary, embeddings_path)
+        published = True
+        _atomic_json(manifest_path, contract)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        (manifest_path.with_suffix(".tmp")).unlink(missing_ok=True)
+        if published:
+            embeddings_path.unlink(missing_ok=True)
+        raise
     return output
 
 

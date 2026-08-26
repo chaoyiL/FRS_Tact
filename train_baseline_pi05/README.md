@@ -36,30 +36,44 @@ bash train_baseline_pi05/scripts/start_train.sh \
   --config train_baseline_pi05/configs/train_baseline_pi05.yaml --check
 ```
 
-小型 cache smoke 只运行两个 producer，并明确限制样本数：
+小型 smoke 必须使用独立 YAML 和独立 cache/output roots，绝不改动正式 YAML：
 
 ```bash
-train_baseline_pi05/.venv/bin/python -m train_baseline_pi05.tactile_cache \
-  --config train_baseline_pi05/configs/train_baseline_pi05.yaml --max-samples 128
-train_baseline_pi05/.venv/bin/python -m train_baseline_pi05.prepare_action_cache \
-  --config train_baseline_pi05/configs/train_baseline_pi05.yaml --max-samples 128
+SMOKE_CONFIG=/workspace/baseline_pi05/smoke/train_baseline_pi05_smoke.yaml
+mkdir -p "$(dirname "$SMOKE_CONFIG")"
+cp train_baseline_pi05/configs/train_baseline_pi05.yaml "$SMOKE_CONFIG"
+sed -i \
+  -e 's|/workspace/baseline_pi05/action_cache|/workspace/baseline_pi05/smoke/action_cache|' \
+  -e 's|/workspace/baseline_pi05/tactile_embedding_cache|/workspace/baseline_pi05/smoke/tactile_embedding_cache|' \
+  -e 's|/workspace/baseline_pi05/decoder|/workspace/baseline_pi05/smoke/decoder|' \
+  "$SMOKE_CONFIG"
 ```
 
-使用完整、对齐的缓存做一步训练 smoke（`--max-steps` 不改写 YAML）：
-
-```bash
-bash train_baseline_pi05/scripts/start_train.sh \
-  --config train_baseline_pi05/configs/train_baseline_pi05.yaml --max-steps 1
-```
-
-一 epoch 验证时把 YAML 的 `decoder.epochs` 临时设为 `1`，然后运行：
+对该 YAML 先做只读检查，再用一次完整三阶段管线同时生成匹配的 capped caches 并训练一步（两个 override 都不改写 YAML）：
 
 ```bash
 bash train_baseline_pi05/scripts/start_train.sh \
-  --config train_baseline_pi05/configs/train_baseline_pi05.yaml
+  --config "$SMOKE_CONFIG" --check
+bash train_baseline_pi05/scripts/start_train.sh \
+  --config "$SMOKE_CONFIG" --max-samples 128 --max-steps 1
 ```
 
-正式训练前恢复所需 `decoder.epochs`（默认 50），使用相同命令。恢复训练时把 YAML 的 `decoder.resume` 设为 `true`，保留现有 `last.pt`，再运行同一条正式命令。评估独立于三阶段训练管线：
+一 epoch smoke 仍使用同一独立 YAML 和同一 capped cache selection：
+
+```bash
+sed -i -e 's/^  epochs: 50$/  epochs: 1/' "$SMOKE_CONFIG"
+bash train_baseline_pi05/scripts/start_train.sh \
+  --config "$SMOKE_CONFIG" --max-samples 128
+```
+
+正式训练使用原始 YAML（或另复制一份并把三个 roots 都改为新的 formal roots），默认 50 epochs：
+
+```bash
+FORMAL_CONFIG=train_baseline_pi05/configs/train_baseline_pi05.yaml
+bash train_baseline_pi05/scripts/start_train.sh --config "$FORMAL_CONFIG"
+```
+
+不要把 capped cache 扩成 full：完整训练必须使用新的 formal cache/output roots，不能以相同 root 重跑不带 `--max-samples` 的 smoke YAML。恢复训练时把 formal YAML 的 `decoder.resume` 设为 `true`，保留 formal `last.pt`，再运行同一条正式命令。评估独立于三阶段训练管线：
 
 ```bash
 train_baseline_pi05/.venv/bin/python -m train_baseline_pi05.evaluate \
@@ -67,7 +81,7 @@ train_baseline_pi05/.venv/bin/python -m train_baseline_pi05.evaluate \
   --checkpoint /workspace/baseline_pi05/decoder/best.pt
 ```
 
-`--max-samples` 只传给两个 cache producer，表示相同的前 N 个动作记录；触觉缓存会扩展到这些 strided records 的最大帧索引以维持对齐。`--max-steps` 只传给训练器；它们会记录到 `decoder/pipeline_run.json`，不会悄悄修改正式 YAML。
+`--max-samples` 只传给两个 cache producer，表示相同的前 N 个动作记录；触觉缓存会扩展到这些 strided records 的最大帧索引以维持对齐。已完成的 tactile cache 对 encoder、dataset、sensor order、预处理、帧数与 selection contract 均不可变；相同合同只复用，不同合同必须换 root。`--max-steps` 只传给训练器；它们会记录到 `decoder/pipeline_run.json`，不会悄悄修改正式 YAML。
 
 ## 产物与部署交接
 
