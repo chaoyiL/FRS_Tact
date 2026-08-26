@@ -106,3 +106,29 @@ def test_load_config_rejects_strict_contract_violations(
 
     with pytest.raises(ValueError, match=expected_error):
         load_config(bad_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("action_horizon", 49),
+        ("action_dim", 19),
+        ("tactile_dim", 256),
+        ("d_model", 64),
+        ("nhead", 3),
+        ("num_layers", 3),
+        ("dim_feedforward", 128),
+        ("dropout", 0.2),
+    ],
+)
+def test_load_config_rejects_any_noncanonical_decoder_architecture(
+    tmp_path: Path, field: str, invalid_value: int | float
+) -> None:
+    default_path = ROOT / "train_baseline_pi05/configs/train_baseline_pi05.yaml"
+    raw = yaml.safe_load(default_path.read_text(encoding="utf-8"))
+    raw["decoder"][field] = invalid_value
+    bad_path = tmp_path / f"bad-{field}.yaml"
+    bad_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"decoder\.{field}"):
+        load_config(bad_path)

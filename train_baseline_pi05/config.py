@@ -301,6 +301,19 @@ class BaselineTrainConfig:
     def validate_contract(self) -> None:
         if self.source.action_horizon != 50:
             raise ValueError("source.action_horizon must be 50 for the direct decoder contract.")
+        decoder_contract = {
+            "action_horizon": 50,
+            "action_dim": 20,
+            "tactile_dim": 512,
+            "d_model": 128,
+            "nhead": 4,
+            "num_layers": 2,
+            "dim_feedforward": 256,
+            "dropout": 0.1,
+        }
+        for field, expected in decoder_contract.items():
+            if getattr(self.decoder, field) != expected:
+                raise ValueError(f"decoder.{field} must be {expected} for the direct decoder contract.")
         if self.source.model_action_dim < self.decoder.action_dim:
             raise ValueError("source.model_action_dim must be at least decoder.action_dim.")
         if self.source.seed != 0:
@@ -313,10 +326,6 @@ class BaselineTrainConfig:
             raise ValueError("decoder.action_horizon must match source.action_horizon.")
         if self.decoder.tactile_dim != self.tactile.embedding_dim:
             raise ValueError("decoder.tactile_dim must match tactile.embedding_dim.")
-        if self.decoder.num_layers != 2:
-            raise ValueError("decoder.num_layers must be 2.")
-        if not 0.0 <= self.decoder.dropout < 1.0:
-            raise ValueError("decoder.dropout must be in [0, 1).")
         if self.decoder.learning_rate <= 0 or self.decoder.weight_decay < 0:
             raise ValueError("decoder learning_rate must be positive and weight_decay non-negative.")
         fractions = (

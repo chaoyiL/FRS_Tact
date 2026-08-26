@@ -19,9 +19,13 @@ from train_baseline_pi05.config import TACTILE_KEYS, load_config
 from train_baseline_pi05.tactile_cache import TactileEmbeddingCache, _identity
 
 
-def _manifest() -> dict[str, object]:
+def _manifest(dataset_root: Path) -> dict[str, object]:
     return {
-        "dataset_identity": {"repo_id": "synthetic", "revision": "one"},
+        "dataset_identity": {
+            "repo_id": "synthetic",
+            "root": str(dataset_root.resolve()),
+            "revision": "one",
+        },
         "split": {"seed": 0}, "source_checkpoint": "frozen/pi05",
         "source_variant": {"name": "pi05"}, "norm_stats": {"asset_id": "synthetic"},
         "sample_steps": 10, "noise_seed": 0, "source_model_action_width": 20,
@@ -29,11 +33,25 @@ def _manifest() -> dict[str, object]:
     }
 
 
-def _caches(tmp_path: Path, *, indices: tuple[int, ...] = (1, 4, 7, 9), tactile_keys=TACTILE_KEYS):
+def _caches(
+    tmp_path: Path,
+    *,
+    indices: tuple[int, ...] = (1, 4, 7, 9),
+    episode_indices: tuple[int, ...] | None = None,
+    tactile_keys=TACTILE_KEYS,
+):
     action_dir, tactile_dir, encoder = tmp_path / "action", tmp_path / "tactile", tmp_path / "encoder"
+    dataset_root = tmp_path / "dataset"
     encoder.mkdir(); (encoder / "weights").write_bytes(b"frozen")
-    writer = ActionCacheWriter.create(action_dir, sample_count=len(indices), horizon=50, action_dim=20, manifest=_manifest())
-    records = [SampleRecord(index, i // 2, index, 0 if i < 2 else 1) for i, index in enumerate(indices)]
+    writer = ActionCacheWriter.create(
+        action_dir,
+        sample_count=len(indices),
+        horizon=50,
+        action_dim=20,
+        manifest=_manifest(dataset_root),
+    )
+    episodes = episode_indices or tuple(range(len(indices)))
+    records = [SampleRecord(index, episodes[i], index, 0 if i < 2 else 1) for i, index in enumerate(indices)]
     coarse = np.zeros((len(indices), 50, 20), dtype=np.float32)
     expert = np.ones((len(indices), 50, 20), dtype=np.float32)
     writer.write_batch(0, coarse=coarse, expert=expert, valid=np.ones((len(indices), 50), dtype=np.bool_), records=records)
@@ -44,7 +62,12 @@ def _caches(tmp_path: Path, *, indices: tuple[int, ...] = (1, 4, 7, 9), tactile_
     (tactile_dir / "manifest.json").write_text(json.dumps({
         "status": "complete", "total_frames": 10, "tactile_keys": list(tactile_keys),
         "embedding_dim": 512, "preprocess_version": "resize_with_pad_uint8_to_unit_v1",
-        "encoder_identity": _identity(encoder), "dataset_identity": {"repo_id": "synthetic", "revision": "one"},
+        "encoder_identity": _identity(encoder),
+        "dataset_identity": {
+            "repo_id": "synthetic",
+            "root": str(dataset_root.resolve()),
+            "revision": "one",
+        },
     }), encoding="utf-8")
     return ActionCache.open(action_dir), TactileEmbeddingCache.open(tactile_dir, encoder_path=encoder)
 
@@ -82,6 +105,19 @@ def test_dataset_rejects_invalid_alignment_contract(tmp_path: Path, case: str):
         BaselineCacheDataset(action, tactile, "train")
 
 
+def test_dataset_compares_canonical_dataset_roots(tmp_path: Path) -> None:
+    from train_baseline_pi05.data import BaselineCacheDataset
+
+    action, tactile = _caches(tmp_path)
+    canonical = tmp_path / "dataset"
+    action.manifest["dataset_identity"]["root"] = str(canonical / ".." / "dataset")
+    BaselineCacheDataset(action, tactile, "train")
+
+    tactile.metadata["dataset_identity"]["root"] = str(tmp_path / "different-dataset")
+    with pytest.raises(ValueError, match="dataset provenance"):
+        BaselineCacheDataset(action, tactile, "train")
+
+
 def test_seeded_train_loader_shuffles_reproducibly_while_evaluation_loaders_are_ordered(tmp_path: Path):
     from train_baseline_pi05.data import BaselineCacheDataset, make_loader
 
@@ -114,6 +150,58 @@ def test_evaluation_masks_metrics_inverse_quantiles_and_deterministic_episode_sh
     assert metrics["normalized_gripper_mae_9"] == pytest.approx(1.0)
     assert metrics["normalized_gripper_mae_19"] == pytest.approx(1.0)
     assert metrics["shuffled_decoder_mse"] == pytest.approx(metrics["decoder_mse"])
+
+
+def test_evaluation_uses_cross_episode_tactile_donors_across_batch_boundaries(tmp_path: Path) -> None:
+    from train_baseline_pi05.data import BaselineCacheDataset, make_loader
+    from train_baseline_pi05.evaluate import evaluate_decoder
+
+    action, tactile = _caches(tmp_path)
+    dataset = BaselineCacheDataset(action, tactile, "validation")
+    loader = make_loader(dataset, batch_size=1, shuffle=False, seed=0)
+
+    class Capture(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.tactile_frames: list[int] = []
+
+        def forward(self, coarse, tactile):
+            self.tactile_frames.extend(int(value) for value in tactile[:, 0, 0].tolist())
+            return torch.zeros_like(coarse)
+
+    model = Capture()
+    evaluate_decoder(
+        model,
+        loader,
+        {"q01": np.zeros(20), "q99": np.full(20, 2.0)},
+        shuffle_tactile=True,
+    )
+
+    assert model.tactile_frames[0::2] == [7, 9]
+    assert model.tactile_frames[1::2] == [9, 7]
+
+
+def test_evaluation_rejects_single_episode_shuffled_tactile_split(tmp_path: Path) -> None:
+    from train_baseline_pi05.data import BaselineCacheDataset, make_loader
+    from train_baseline_pi05.evaluate import evaluate_decoder
+
+    action, tactile = _caches(tmp_path, episode_indices=(0, 1, 2, 2))
+    loader = make_loader(
+        BaselineCacheDataset(action, tactile, "validation"),
+        batch_size=1,
+        shuffle=False,
+        seed=0,
+    )
+
+    model = torch.nn.Identity()
+    with pytest.raises(ValueError, match="cross-episode.*impossible"):
+        evaluate_decoder(
+            model,
+            loader,
+            {"q01": np.zeros(20), "q99": np.full(20, 2.0)},
+            shuffle_tactile=True,
+        )
+    assert model.training is True
 
 
 def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_path: Path, monkeypatch):
@@ -207,6 +295,15 @@ def test_episode_shuffle_deranges_non_cyclic_episode_order():
     shuffled = _episode_shuffle(tactile, episodes)
 
     assert torch.all(episodes[shuffled[:, 0, 0].to(torch.int64)] != episodes)
+
+
+@pytest.mark.parametrize("episodes", ([], [0], [0, 0], [0, 0, 0, 1]))
+def test_episode_shuffle_rejects_impossible_cross_episode_permutation(episodes: list[int]) -> None:
+    from train_baseline_pi05.evaluate import _episode_shuffle
+
+    tactile = torch.arange(len(episodes), dtype=torch.float32).reshape(-1, 1, 1)
+    with pytest.raises(ValueError, match="cross-episode.*impossible"):
+        _episode_shuffle(tactile, torch.tensor(episodes))
 
 
 def test_large_cache_fingerprint_uses_only_stat(monkeypatch, tmp_path: Path):

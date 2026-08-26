@@ -36,17 +36,48 @@ def _inverse_quantile(values: torch.Tensor, low: torch.Tensor, high: torch.Tenso
     return low + (values + 1.0) * 0.5 * (high - low + 1e-6)
 
 
-def _episode_shuffle(tactile: torch.Tensor, episodes: torch.Tensor) -> torch.Tensor:
-    """Deterministically rotate batch tactile rows, avoiding same-episode rows when possible."""
-    if tactile.shape[0] < 2:
-        return tactile
+def _cross_episode_order(episodes: torch.Tensor) -> torch.Tensor:
+    """Return a deterministic complete permutation whose donors are from other episodes."""
+    if episodes.ndim != 1:
+        raise ValueError("episode indices must be one-dimensional")
     episode_values = episodes.detach().cpu().tolist()
-    targets = sorted(range(tactile.shape[0]), key=lambda index: (episode_values[index], index))
+    if not episode_values:
+        raise ValueError("cross-episode tactile permutation is impossible for this evaluation split")
+    targets = sorted(range(len(episode_values)), key=lambda index: (episode_values[index], index))
     largest_group = max(episode_values.count(episode) for episode in set(episode_values))
+    if largest_group > len(episode_values) - largest_group:
+        raise ValueError("cross-episode tactile permutation is impossible for this evaluation split")
     sources = targets[largest_group:] + targets[:largest_group]
-    order = torch.empty(tactile.shape[0], dtype=torch.int64, device=tactile.device)
-    order[torch.tensor(targets, device=tactile.device)] = torch.tensor(sources, device=tactile.device)
+    order = torch.empty(len(episode_values), dtype=torch.int64, device=episodes.device)
+    order[torch.tensor(targets, device=episodes.device)] = torch.tensor(sources, device=episodes.device)
+    if torch.any(episodes[order] == episodes):
+        raise ValueError("cross-episode tactile permutation is impossible for this evaluation split")
+    return order
+
+
+def _episode_shuffle(tactile: torch.Tensor, episodes: torch.Tensor) -> torch.Tensor:
+    """Apply a strict complete cross-episode permutation to tactile rows."""
+    if tactile.shape[0] != episodes.shape[0]:
+        raise ValueError("tactile rows and episode indices must have the same length")
+    order = _cross_episode_order(episodes.to(tactile.device))
     return tactile[order]
+
+
+def _tactile_donor_lookup(loader: Any) -> tuple[dict[int, int], Any]:
+    """Plan global donors from cache indices while keeping tactile tokens on disk."""
+    dataset = getattr(loader, "dataset", None)
+    action_cache = getattr(dataset, "action_cache", None)
+    tactile_cache = getattr(dataset, "tactile_cache", None)
+    rows = getattr(dataset, "rows", None)
+    if action_cache is None or tactile_cache is None or rows is None:
+        raise ValueError("shuffled tactile evaluation requires a cache-backed evaluation dataset")
+    rows_array = np.asarray(rows, dtype=np.int64)
+    episodes = np.asarray(action_cache.episode_indices[rows_array], dtype=np.int64)
+    frames = np.asarray(action_cache.dataset_indices[rows_array], dtype=np.int64)
+    if len(set(frames.tolist())) != len(frames):
+        raise ValueError("evaluation dataset contains duplicate frame indices")
+    order = _cross_episode_order(torch.from_numpy(episodes)).cpu().numpy()
+    return {int(frame): int(frames[source]) for frame, source in zip(frames, order, strict=True)}, tactile_cache
 
 
 @torch.no_grad()
@@ -54,6 +85,7 @@ def evaluate_decoder(
     model: torch.nn.Module, loader: Any, norm_stats: Mapping[str, Any], *, shuffle_tactile: bool = False
 ) -> dict[str, float]:
     """Evaluate masked normalized and inverse-quantile physical action metrics."""
+    donor_lookup, donor_cache = _tactile_donor_lookup(loader) if shuffle_tactile else ({}, None)
     was_training = model.training
     model.eval()
     totals = {name: 0.0 for name in ("decoder_smooth_l1", "coarse_smooth_l1", "decoder_mse", "coarse_mse", "delta_sq", "physical_abs", "physical_sq", "gripper_9", "gripper_19", "shuffled_decoder_mse")}
@@ -88,7 +120,13 @@ def evaluate_decoder(
         totals["gripper_19"] += float((error[..., 19].abs() * valid).sum().item())
         count += elements; physical_count += elements; gripper_count += int(gripper_valid)
         if shuffle_tactile:
-            shuffled = model(coarse, _episode_shuffle(tactile, batch["episode_index"].to(device)))
+            try:
+                donor_frames = [donor_lookup[int(frame)] for frame in batch["dataset_index"].tolist()]
+            except KeyError as exc:
+                raise ValueError("evaluation batch contains a frame outside the donor plan") from exc
+            donor_tokens = np.array(donor_cache.get_many(donor_frames), copy=True)
+            shuffled_tactile = torch.from_numpy(donor_tokens).to(device=device, dtype=torch.float32)
+            shuffled = model(coarse, shuffled_tactile)
             totals["shuffled_decoder_mse"] += float(((shuffled - target).square() * expanded).sum().item())
     if was_training:
         model.train()

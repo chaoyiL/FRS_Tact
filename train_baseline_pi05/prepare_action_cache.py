@@ -26,18 +26,28 @@ def _field(value: Any, path: str, default: Any = None) -> Any:
     return current
 
 
-def _stack(values: Sequence[Any]) -> Any:
+def _stack_mapping(values: Sequence[Any]) -> Any:
     first = values[0]
     if isinstance(first, Mapping):
-        return {key: _stack([value[key] for value in values]) for key in first}
+        return {key: _stack_mapping([value[key] for value in values]) for key in first}
     return np.stack([np.asarray(value) for value in values], axis=0)
+
+
+def _stack(values: Sequence[Any]) -> Any:
+    if isinstance(values[0], Mapping):
+        return _stack_mapping(values)
+    from .policy_inputs import stack_observations
+
+    return stack_observations(list(values))
 
 
 def _window(dataset: Any, record: SampleRecord, metadata: Any, action_key: str, horizon: int) -> tuple[np.ndarray, np.ndarray]:
     end = int(metadata.episodes[record.episode_index]["dataset_to_index"])
     rows = [np.asarray(dataset[min(record.dataset_index + step, end - 1)][action_key]) for step in range(horizon)]
-    valid = np.arange(horizon) < (end - record.dataset_index)
-    return np.stack(rows).astype(np.float32), valid.astype(np.bool_)
+    actions = np.stack(rows).astype(np.float32)
+    within_episode = np.arange(horizon) < (end - record.dataset_index)
+    non_terminal = np.any(actions != 0, axis=-1)
+    return actions, (within_episode & non_terminal).astype(np.bool_)
 
 
 def _default_dependencies(config: Any) -> dict[str, Any]:
@@ -96,7 +106,11 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
     fractions = [float(_field(config, "dataset.train_fraction", 0.8)), float(_field(config, "dataset.validation_fraction", 0.1)), float(_field(config, "dataset.test_fraction", 0.1))]
     frame_stride = int(_field(config, "dataset.frame_stride", 1))
     manifest = {
-        "dataset_identity": {"repo_id": str(_field(config, "dataset.repo_id", "injected")), "root": str(_field(config, "dataset.root", "injected")), "revision": _field(config, "dataset.revision")},
+        "dataset_identity": {
+            "repo_id": str(_field(config, "dataset.repo_id", "injected")),
+            "root": str(Path(_field(config, "dataset.root", "injected")).expanduser().resolve()),
+            "revision": _field(config, "dataset.revision"),
+        },
         "split": {"seed": int(_field(config, "dataset.split_seed", 0)), "fractions": fractions, "frame_stride": frame_stride},
         "source_checkpoint": str(_field(config, "source.checkpoint", "injected")),
         "source_variant": {"paligemma_variant": _field(config, "source.paligemma_variant"), "action_expert_variant": _field(config, "source.action_expert_variant")},

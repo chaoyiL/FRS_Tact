@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import importlib.machinery
+import importlib.util
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -164,12 +166,13 @@ def test_action_producer_writes_sliced_forward_actions_and_preserves_records(tmp
 
     class Metadata:
         total_episodes = 1
-        episodes = [{"dataset_from_index": 0, "dataset_to_index": 2}]
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 3}]
 
     class Dataset:
         def __getitem__(self, index: int) -> dict[str, object]:
+            action = np.zeros(20, dtype=np.float32) if index == 2 else np.full(20, index + 1)
             return {
-                "observation.state": np.full(3, index), "task": "pick", "actions": np.full(20, index),
+                "observation.state": np.full(3, index), "task": "pick", "actions": action,
                 "observation.images.tactile_left_0": np.zeros((3, 3, 3), dtype=np.uint8),
             }
 
@@ -187,6 +190,7 @@ def test_action_producer_writes_sliced_forward_actions_and_preserves_records(tmp
             return np.broadcast_to(np.arange(32, dtype=np.float32), noise.shape)
 
     config = _config(tmp_path)
+    config.dataset.root = tmp_path / "dataset" / ".." / "dataset"
     config.source.model_action_dim = 32
     records = build_records(Metadata(), split_seed=7, frame_stride=1, fractions=(1, 0, 0))
     result = prepare_action_cache(
@@ -204,8 +208,115 @@ def test_action_producer_writes_sliced_forward_actions_and_preserves_records(tmp
     np.testing.assert_array_equal(cache.valid_masks[0], np.r_[np.ones(2, dtype=bool), np.zeros(48, dtype=bool)])
     np.testing.assert_array_equal(cache.valid_masks[1], np.r_[True, np.zeros(49, dtype=bool)])
     manifest = json.loads((result / "manifest.json").read_text())
+    assert manifest["dataset_identity"]["root"] == str(config.dataset.root.resolve())
     assert manifest["source_model_action_width"] == 32
     assert manifest["decoder_action_width"] == 20
+
+
+def test_action_producer_batches_real_pi05_observation_pytrees(monkeypatch, tmp_path: Path) -> None:
+    from train_baseline_pi05.action_cache import SampleRecord
+    from train_baseline_pi05.prepare_action_cache import prepare_action_cache
+    from train_baseline_pi05.runtime_path import activate_vendored_lerobot
+
+    activate_vendored_lerobot()
+    if importlib.util.find_spec("augmax") is None:
+        augmax = types.ModuleType("augmax")
+        augmax.__spec__ = importlib.machinery.ModuleSpec("augmax", loader=None)
+        monkeypatch.setitem(sys.modules, "augmax", augmax)
+    if importlib.util.find_spec("beartype") is None:
+        beartype = types.ModuleType("beartype")
+        beartype.__spec__ = importlib.machinery.ModuleSpec("beartype", loader=None)
+        beartype.beartype = lambda function: function
+        monkeypatch.setitem(sys.modules, "beartype", beartype)
+    import jaxtyping._decorator
+    if not hasattr(jaxtyping._decorator, "_check_dataclass_annotations"):
+        monkeypatch.setattr(
+            jaxtyping._decorator,
+            "_check_dataclass_annotations",
+            lambda *_args, **_kwargs: None,
+            raising=False,
+        )
+    package_name = "lerobot.policies.pi05_jax"
+    package = types.ModuleType(package_name)
+    package.__path__ = [str(Path(__file__).parents[1] / "src/lerobot/policies/pi05_jax")]
+    monkeypatch.setitem(sys.modules, package_name, package)
+    from lerobot.policies.pi05_jax.model import Observation
+
+    package.Observation = Observation
+    package.PaligemmaTokenizer = object
+    package.Pi0 = object
+    package.Pi0Config = object
+    package.load_pi0 = lambda *_args, **_kwargs: None
+    package.transforms = SimpleNamespace()
+    normalize = types.ModuleType(f"{package_name}.normalize")
+    normalize.NormStats = object
+    monkeypatch.setitem(sys.modules, normalize.__name__, normalize)
+    policies = types.ModuleType(f"{package_name}.policies")
+    policies.__path__ = []
+    monkeypatch.setitem(sys.modules, policies.__name__, policies)
+    pick_tube = types.ModuleType(f"{policies.__name__}.pick_tube_policy")
+    pick_tube.PickTubeInputs = object
+    monkeypatch.setitem(sys.modules, pick_tube.__name__, pick_tube)
+
+    class Metadata:
+        total_episodes = 1
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 3}]
+
+    class Dataset:
+        def __getitem__(self, index: int) -> dict[str, object]:
+            action = np.zeros(20, dtype=np.float32) if index == 2 else np.full(20, index + 1, np.float32)
+            return {"observation.state": np.full(3, index, np.float32), "task": "pick", "actions": action}
+
+    class Processor:
+        def prepare_sample(self, sample):
+            index = int(sample["observation.state"][0])
+            observation = Observation(
+                images={"base_0_rgb": np.full((2, 3, 3), index, np.float32)},
+                image_masks={"base_0_rgb": np.asarray(index == 0)},
+                state=np.full(3, index, np.float32),
+                tokenized_prompt=np.arange(4, dtype=np.int32) + index,
+                tokenized_prompt_mask=np.asarray([True, True, index == 0, False]),
+            )
+            return observation, np.zeros((50, 20), np.float32), "pick"
+
+    class Source:
+        action_dim = 20
+
+        def sample_actions(self, params, observation, *, noise, num_steps):
+            assert isinstance(observation, Observation)
+            assert observation.state.shape == (2, 3)
+            assert observation.images["base_0_rgb"].shape == (2, 2, 3, 3)
+            assert observation.image_masks["base_0_rgb"].shape == (2,)
+            assert observation.tokenized_prompt.shape == (2, 4)
+            assert observation.tokenized_prompt_mask.shape == (2, 4)
+            np.testing.assert_array_equal(np.asarray(observation.state[:, 0]), [0, 1])
+            np.testing.assert_array_equal(np.asarray(observation.tokenized_prompt[:, 0]), [0, 1])
+            return noise
+
+    config = _config(tmp_path)
+    records = (SampleRecord(0, 0, 0, 0), SampleRecord(1, 0, 1, 0))
+    prepare_action_cache(config, dependencies={
+        "metadata": Metadata(), "dataset": Dataset(), "records": records,
+        "processor": Processor(), "model": Source(), "params": "weights", "batch_size": 2,
+    })
+
+
+def test_action_window_masks_terminal_zero_row_and_padding() -> None:
+    from train_baseline_pi05.action_cache import SampleRecord
+    from train_baseline_pi05.prepare_action_cache import _window
+
+    class Metadata:
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 2}]
+
+    class Dataset:
+        def __getitem__(self, index: int) -> dict[str, np.ndarray]:
+            action = np.ones(20, dtype=np.float32) if index == 0 else np.zeros(20, dtype=np.float32)
+            return {"actions": action}
+
+    actions, valid = _window(Dataset(), SampleRecord(0, 0, 0, 0), Metadata(), "actions", 3)
+
+    np.testing.assert_array_equal(actions[:, 0], [1.0, 0.0, 0.0])
+    np.testing.assert_array_equal(valid, [True, False, False])
 
 
 def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
@@ -214,11 +325,12 @@ def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
 
     class Metadata:
         total_episodes = 1
-        episodes = [{"dataset_from_index": 0, "dataset_to_index": 2}]
+        episodes = [{"dataset_from_index": 0, "dataset_to_index": 3}]
 
     class Dataset:
         def __getitem__(self, index):
-            return {"observation.state": np.full(3, index), "task": "pick", "actions": np.full(20, index)}
+            action = np.zeros(20, dtype=np.float32) if index == 2 else np.full(20, index + 1)
+            return {"observation.state": np.full(3, index), "task": "pick", "actions": action}
 
     class Processor:
         def prepare_sample(self, sample):

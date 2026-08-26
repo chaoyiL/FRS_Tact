@@ -96,8 +96,9 @@ def build_records(
 ) -> tuple[SampleRecord, ...]:
     """Build deterministic, episode-disjoint current-frame records.
 
-    Every selected frame remains a record, including episode tails.  Producers
-    construct the matching action window and mark padded tail steps invalid.
+    The final frame of each episode is the all-zero terminal action and is never
+    selected as an anchor. Producers construct the matching action window and
+    mark terminal and padded tail steps invalid.
     """
 
     if frame_stride <= 0:
@@ -111,7 +112,7 @@ def build_records(
     records: list[SampleRecord] = []
     for episode_index in range(episode_count):
         start, end = _episode_bounds(metadata, episode_index)
-        for dataset_index in range(start, end, frame_stride):
+        for dataset_index in range(start, end - 1, frame_stride):
             records.append(
                 SampleRecord(
                     dataset_index=dataset_index,
@@ -125,7 +126,7 @@ def build_records(
             raise ValueError("max_samples must be nonnegative")
         records = records[: int(max_samples)]
     if not records:
-        raise ValueError("record selection produced no samples")
+        raise ValueError("record selection produced no non-terminal samples")
     return tuple(records)
 
 

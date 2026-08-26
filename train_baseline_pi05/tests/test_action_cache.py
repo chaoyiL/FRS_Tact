@@ -64,6 +64,22 @@ def test_episode_split_is_disjoint_deterministic_and_strided(metadata: _Metadata
     assert [record.frame_index for record in first if record.episode_index == 0] == [0, 3, 6]
 
 
+def test_record_builder_excludes_each_episode_terminal_frame() -> None:
+    records = build_records(_Metadata([3, 4]), split_seed=0, fractions=(1.0, 0.0, 0.0), frame_stride=1)
+
+    assert [record.dataset_index for record in records if record.episode_index == 0] == [0, 1]
+    assert [record.dataset_index for record in records if record.episode_index == 1] == [3, 4, 5]
+    assert all(record.dataset_index not in {2, 6} for record in records)
+
+
+def test_record_builder_skips_one_frame_episode_and_rejects_terminal_only_selection() -> None:
+    records = build_records(_Metadata([1, 3]), split_seed=0, fractions=(1.0, 0.0, 0.0), frame_stride=1)
+    assert [(record.episode_index, record.dataset_index) for record in records] == [(1, 1), (1, 2)]
+
+    with pytest.raises(ValueError, match="non-terminal"):
+        build_records(_Metadata([1]), split_seed=0, fractions=(1.0, 0.0, 0.0), frame_stride=1)
+
+
 @pytest.mark.parametrize("fractions", ((-0.1, 0.6, 0.5), (0.8, 0.1, 0.2)))
 def test_record_builder_rejects_invalid_fractions(metadata: _Metadata, fractions: tuple[float, ...]) -> None:
     with pytest.raises(ValueError, match="fractions"):
@@ -78,7 +94,7 @@ def test_record_builder_allows_zero_fraction_and_omits_that_split(metadata: _Met
 
 
 def test_episode_allocation_uses_each_largest_remainder_once() -> None:
-    records = build_records(_Metadata([1] * 4), split_seed=42, fractions=(0.4, 0.4, 0.2), frame_stride=1)
+    records = build_records(_Metadata([2] * 4), split_seed=42, fractions=(0.4, 0.4, 0.2), frame_stride=1)
 
     assert tuple(sum(record.split_id == split_id for record in records) for split_id in (0, 1, 2)) == (2, 1, 1)
 

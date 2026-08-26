@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -30,7 +31,15 @@ class BaselineCacheDataset(Dataset[dict[str, torch.Tensor]]):
         tactile_identity = tactile_manifest.get("dataset_identity")
         if not isinstance(action_identity, Mapping) or not isinstance(tactile_identity, Mapping):
             raise ValueError("action and tactile cache dataset provenance is invalid")
-        if any(action_identity.get(key) != tactile_identity.get(key) for key in ("repo_id", "revision")):
+        action_root = action_identity.get("root")
+        tactile_root = tactile_identity.get("root")
+        if not isinstance(action_root, (str, Path)) or not isinstance(tactile_root, (str, Path)):
+            raise ValueError("action and tactile cache dataset provenance is invalid")
+        identities_differ = any(
+            action_identity.get(key) != tactile_identity.get(key)
+            for key in ("repo_id", "revision")
+        ) or Path(action_root).expanduser().resolve() != Path(tactile_root).expanduser().resolve()
+        if identities_differ:
             raise ValueError("action and tactile cache dataset provenance does not match")
         indices = np.asarray(action_cache.dataset_indices, dtype=np.int64)
         total_frames = int(tactile_manifest.get("total_frames", -1))
