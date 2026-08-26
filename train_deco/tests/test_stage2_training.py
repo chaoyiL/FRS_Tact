@@ -19,9 +19,11 @@ from train_deco.train import (
     STAGE2_CHECKPOINT_SCHEMA_VERSION,
     build_stage2_checkpoint_metadata,
     create_training_datasets,
+    apply_restored_dataset_stats,
     resolve_tactile_encoder_distributed,
     restore_stage2_training_state,
     run_epoch,
+    stage2_config_from_resume_checkpoint,
     validate_stage2_resume_checkpoint,
 )
 from train_deco.training_utils import (
@@ -55,6 +57,10 @@ class _TrainPolicy(nn.Module):
         super().__init__()
         self.img_encoder = nn.BatchNorm2d(3)
         self.tactile_encoder = nn.BatchNorm2d(3)
+        for encoder in (self.img_encoder, self.tactile_encoder):
+            for parameter in encoder.parameters():
+                parameter.requires_grad_(False)
+
         self.weight = nn.Parameter(torch.tensor(0.5))
         self.frozen = nn.Parameter(torch.tensor(3.0), requires_grad=False)
         self.seen_tactile: list[torch.Tensor] = []
@@ -100,6 +106,34 @@ def _optimizer(model: nn.Module):
     return optimizer, constant_lr_scheduler(optimizer)
 
 
+
+
+class _RecordingGradScaler:
+    def __init__(self, scale: float = 8.0) -> None:
+        self.scale_value = scale
+        self.unscale_calls = 0
+
+    def scale(self, loss):
+        return loss * self.scale_value
+
+    def unscale_(self, optimizer) -> None:
+        self.unscale_calls += 1
+        for group in optimizer.param_groups:
+            for parameter in group["params"]:
+                if parameter.grad is not None:
+                    parameter.grad.div_(self.scale_value)
+
+    def step(self, optimizer) -> None:
+        optimizer.step()
+
+    def update(self) -> None:
+        return None
+
+    def get_scale(self) -> float:
+        return self.scale_value
+
+    def is_enabled(self) -> bool:
+        return True
 def _artifact(tmp_path: Path) -> ResolvedTactileEncoder:
     weights = tmp_path / "encoder.safetensors"
     weights.write_bytes(b"resolved tactile weights")
@@ -117,6 +151,65 @@ def _artifact(tmp_path: Path) -> ResolvedTactileEncoder:
     )
 
 
+
+
+def _valid_resume_checkpoint(adapter_rank: int = 32) -> dict:
+    return {
+        "checkpoint_schema_version": STAGE2_CHECKPOINT_SCHEMA_VERSION,
+        "stage": 2,
+        "model_type": STAGE2_MODEL_TYPE,
+        "config": {
+            "training_state_version": 3,
+            "model_type": STAGE2_MODEL_TYPE,
+            "stage": 2,
+            "hidden_dim": 64,
+            "layers": 2,
+            "heads": 4,
+            "image_size": 64,
+            "inference_steps": 3,
+            "rope_height": 64,
+            "rope_width": 64,
+            "use_task_condition": False,
+            "tactile_adapter_rank": adapter_rank,
+        },
+        "stage2_metadata": {
+            "model_type": STAGE2_MODEL_TYPE,
+            "tactile_field_order": list(TACTILE_NAMES),
+            "stage1_checkpoint": {
+                "path": "stage1.pt",
+                "sha256": "1" * 64,
+            },
+            "tactile_encoder": {
+                "source_sha256": "2" * 64,
+                "artifact_sha256": "3" * 64,
+                "artifact_path": "encoder.safetensors",
+                "metadata_path": "encoder.json",
+                "architecture": "resnet18",
+                "embedding_dim": 512,
+            },
+            "tactile_adapter_rank": adapter_rank,
+            "gate_values": {},
+            "parameter_categories": {
+                "trainable": {"test": ["weight"]},
+                "frozen": {
+                    "test": [
+                        "frozen",
+                        "img_encoder.weight",
+                        "img_encoder.bias",
+                        "tactile_encoder.weight",
+                        "tactile_encoder.bias",
+                    ]
+                },
+            },
+            "parameter_counts": {"total": 14, "trainable": 1},
+        },
+        "stats": {
+            "observation_mean": [0.0],
+            "observation_std": [1.0],
+            "action_mean": [0.0],
+            "action_std": [1.0],
+        },
+    }
 def test_stage2_dataset_mode_requests_tactile_streams_only_for_stage2(monkeypatch) -> None:
     calls: list[bool] = []
 
@@ -290,6 +383,36 @@ def test_run_epoch_preprocesses_and_passes_tactile_images_in_both_paths(train) -
         assert model.tactile_encoder.training is False
 
 
+
+
+def test_stage2_gradient_diagnostics_are_recorded_after_amp_unscale() -> None:
+    model = _TrainPolicy()
+    optimizer, scheduler = _optimizer(model)
+    scaler = _RecordingGradScaler(scale=8.0)
+    report = SimpleNamespace(
+        trainable_by_category={"test": ("weight",)},
+        frozen_by_category={"test": ("frozen",)},
+    )
+
+    metrics, _ = run_epoch(
+        model=model,
+        loader=[_batch()],
+        device=torch.device("cpu"),
+        optimizer=optimizer,
+        scheduler=scheduler,
+        scaler=scaler,
+        observation_index=torch.tensor([0]),
+        image_size=4,
+        use_task_condition=False,
+        train=True,
+        world_size=1,
+        stage=2,
+        stage2_parameter_report=report,
+    )
+
+    assert scaler.unscale_calls == 1
+    assert metrics["gradient_norms"]["trainable"] == pytest.approx(3.0)
+    assert metrics["gradient_norms"]["frozen"] == 0.0
 def test_stage2_metadata_records_provenance_categories_and_gate_values(tmp_path) -> None:
     model = _BoundaryModel()
     report = configure_stage2_trainability(model)
@@ -314,6 +437,66 @@ def test_stage2_metadata_records_provenance_categories_and_gate_values(tmp_path)
     assert metadata["parameter_categories"]["trainable"]
     assert metadata["parameter_categories"]["frozen"]
     assert metadata["stage1_checkpoint"]["sha256"] == hashlib.sha256(b"stage one").hexdigest()
+
+
+
+
+def test_stage2_resume_model_config_is_checkpoint_driven_for_nondefault_rank() -> None:
+    checkpoint = _valid_resume_checkpoint(adapter_rank=64)
+    current = {
+        key: 999
+        for key in (
+            "hidden_dim", "layers", "heads", "image_size", "inference_steps",
+            "rope_height", "rope_width", "tactile_adapter_rank",
+        )
+    }
+    current["use_task_condition"] = True
+
+    resolved = stage2_config_from_resume_checkpoint(checkpoint, current)
+
+    assert resolved["tactile_adapter_rank"] == 64
+    assert resolved["hidden_dim"] == checkpoint["config"]["hidden_dim"]
+    assert resolved["use_task_condition"] is False
+
+
+@pytest.mark.parametrize(
+    ("path", "bad_value", "message"),
+    [
+        (("stage2_metadata", "tactile_adapter_rank"), -1, "positive integer"),
+        (("stage2_metadata", "gate_values"), {"bad": "string"}, "gate_values"),
+        (("stage2_metadata", "stage1_checkpoint", "path"), "", "non-empty path"),
+        (("stage2_metadata", "tactile_encoder", "source_sha256"), "bad", "SHA256"),
+        (("stage2_metadata", "parameter_categories", "trainable"), [], "mapping"),
+    ],
+)
+def test_stage2_resume_rejects_corrupt_nested_metadata(
+    path, bad_value, message
+) -> None:
+    checkpoint = _valid_resume_checkpoint()
+    target = checkpoint
+    for key in path[:-1]:
+        target = target[key]
+    target[path[-1]] = bad_value
+    if path[-1] == "tactile_adapter_rank":
+        checkpoint["config"]["tactile_adapter_rank"] = bad_value
+
+    with pytest.raises(ValueError, match=message):
+        validate_stage2_resume_checkpoint(checkpoint)
+
+
+def test_restored_stats_replace_all_dataset_normalization_state() -> None:
+    train_dataset = SimpleNamespace(stats={"action_mean": torch.tensor([99.0])})
+    val_dataset = SimpleNamespace(stats={"action_mean": torch.tensor([88.0])})
+    checkpoint_stats = _valid_resume_checkpoint()["stats"]
+
+    restored = apply_restored_dataset_stats(
+        checkpoint_stats, train_dataset, val_dataset
+    )
+
+    assert restored["action_mean"].tolist() == [0.0]
+    assert train_dataset.stats["action_mean"].tolist() == [0.0]
+    assert val_dataset.stats["action_mean"].tolist() == [0.0]
+    assert train_dataset.stats["action_mean"] is not val_dataset.stats["action_mean"]
 
 
 def test_stage2_resume_rejects_stage1_checkpoint() -> None:
@@ -347,41 +530,22 @@ def test_cpu_synthetic_step_checkpoint_and_exact_resume_continue_state(tmp_path)
     assert not torch.equal(model.weight, weight_before)
     assert torch.equal(model.frozen, frozen_before)
 
-    config = {
-        "training_state_version": 3,
-        "model_type": STAGE2_MODEL_TYPE,
-        "stage": 2,
-    }
-    payload = {
-        "checkpoint_schema_version": STAGE2_CHECKPOINT_SCHEMA_VERSION,
-        "stage": 2,
-        "model_type": STAGE2_MODEL_TYPE,
-        "stage2_metadata": {
-            "model_type": STAGE2_MODEL_TYPE,
-            "tactile_field_order": list(TACTILE_NAMES),
-            "stage1_checkpoint": {"path": "stage1.pt", "sha256": "s1"},
-            "tactile_encoder": {
-                "source_sha256": "source",
-                "artifact_sha256": "artifact",
-                "artifact_path": "encoder.safetensors",
-            },
-            "tactile_adapter_rank": 32,
-            "gate_values": {},
-            "parameter_categories": {"trainable": {}, "frozen": {}},
-        },
-        "model": model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "scheduler": scheduler.state_dict(),
-        "scaler": scaler.state_dict(),
-        "epoch": 1,
-        "global_step": global_step,
-        "best_val": 0.4,
-        "patience_best_val": 0.4,
-        "stale_epochs": 0,
-        "stats": {"action_mean": [0.0]},
-        "config": config,
-        "rng_states": [capture_rng_state()],
-    }
+    payload = _valid_resume_checkpoint()
+    config = payload["config"]
+    payload.update(
+        {
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "scaler": scaler.state_dict(),
+            "epoch": 1,
+            "global_step": global_step,
+            "best_val": 0.4,
+            "patience_best_val": 0.4,
+            "stale_epochs": 0,
+            "rng_states": [capture_rng_state()],
+        }
+    )
     checkpoint_path = tmp_path / "deco_stage2_latest.pt"
     atomic_torch_save(payload, checkpoint_path)
 

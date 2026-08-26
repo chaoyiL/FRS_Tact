@@ -65,6 +65,18 @@ from .training_utils import (
 
 STAGE2_CHECKPOINT_SCHEMA_VERSION = 1
 
+_STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS = (
+    "hidden_dim",
+    "layers",
+    "heads",
+    "image_size",
+    "inference_steps",
+    "rope_height",
+    "rope_width",
+    "use_task_condition",
+    "tactile_adapter_rank",
+)
+
 def is_dist() -> bool:
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
 
@@ -311,8 +323,30 @@ def build_stage2_checkpoint_metadata(
     }
 
 
+def _require_metadata_mapping(value, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"Stage2 resume {label} must be a mapping")
+    return value
+
+
+def _require_sha256(value, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"Stage2 resume {label} must be a lowercase SHA256 digest")
+    return value
+
+
+def _require_nonempty_path(value, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"Stage2 resume {label} must be a non-empty path")
+    return value
+
+
 def validate_stage2_resume_checkpoint(checkpoint: dict) -> dict:
-    config = checkpoint.get("config", {})
+    config = _require_metadata_mapping(checkpoint.get("config"), "config")
     if (
         checkpoint.get("stage") != 2
         or checkpoint.get("model_type") != STAGE2_MODEL_TYPE
@@ -321,13 +355,13 @@ def validate_stage2_resume_checkpoint(checkpoint: dict) -> dict:
         raise ValueError("Stage2 exact resume rejected a Stage1 or non-Stage2 checkpoint")
     if checkpoint.get("checkpoint_schema_version") != STAGE2_CHECKPOINT_SCHEMA_VERSION:
         raise ValueError("Stage2 resume checkpoint schema/version is incompatible")
-    metadata = checkpoint.get("stage2_metadata")
-    if not isinstance(metadata, dict):
-        raise ValueError("Stage2 resume checkpoint is missing stage2_metadata")
+    metadata = _require_metadata_mapping(
+        checkpoint.get("stage2_metadata"), "stage2_metadata"
+    )
     required = {
         "model_type", "tactile_field_order", "tactile_encoder",
         "tactile_adapter_rank", "gate_values", "parameter_categories",
-        "stage1_checkpoint",
+        "parameter_counts", "stage1_checkpoint",
     }
     missing = sorted(required - set(metadata))
     if missing:
@@ -336,7 +370,150 @@ def validate_stage2_resume_checkpoint(checkpoint: dict) -> dict:
         raise ValueError("Stage2 resume metadata model_type is incompatible")
     if metadata["tactile_field_order"] != list(TACTILE_NAMES):
         raise ValueError("Stage2 resume tactile field order is incompatible")
+
+    adapter_rank = metadata["tactile_adapter_rank"]
+    if isinstance(adapter_rank, bool) or not isinstance(adapter_rank, int) or adapter_rank <= 0:
+        raise ValueError("Stage2 resume tactile_adapter_rank must be a positive integer")
+    if config.get("tactile_adapter_rank") != adapter_rank:
+        raise ValueError(
+            "Stage2 resume adapter rank disagrees between config and metadata"
+        )
+
+    encoder = _require_metadata_mapping(
+        metadata["tactile_encoder"], "tactile_encoder"
+    )
+    for key in ("source_sha256", "artifact_sha256"):
+        _require_sha256(encoder.get(key), f"tactile_encoder.{key}")
+    for key in ("artifact_path", "metadata_path"):
+        _require_nonempty_path(encoder.get(key), f"tactile_encoder.{key}")
+    if encoder.get("architecture") != "resnet18" or encoder.get("embedding_dim") != 512:
+        raise ValueError("Stage2 resume tactile encoder architecture is incompatible")
+
+    stage1 = _require_metadata_mapping(
+        metadata["stage1_checkpoint"], "stage1_checkpoint"
+    )
+    _require_nonempty_path(stage1.get("path"), "stage1_checkpoint.path")
+    _require_sha256(stage1.get("sha256"), "stage1_checkpoint.sha256")
+
+    gates = _require_metadata_mapping(metadata["gate_values"], "gate_values")
+    for name, value in gates.items():
+        if (
+            not isinstance(name, str)
+            or not name.endswith(".tactile_gate")
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError("Stage2 resume gate_values schema is invalid")
+
+    categories = _require_metadata_mapping(
+        metadata["parameter_categories"], "parameter_categories"
+    )
+    for boundary in ("trainable", "frozen"):
+        grouped = _require_metadata_mapping(
+            categories.get(boundary), f"parameter_categories.{boundary}"
+        )
+        for names in grouped.values():
+            if (
+                not isinstance(names, list)
+                or not all(isinstance(name, str) and name for name in names)
+                or len(names) != len(set(names))
+            ):
+                raise ValueError(
+                    f"Stage2 resume parameter_categories.{boundary} is invalid"
+                )
+
+    counts = _require_metadata_mapping(metadata["parameter_counts"], "parameter_counts")
+    total = counts.get("total")
+    trainable = counts.get("trainable")
+    if (
+        isinstance(total, bool)
+        or isinstance(trainable, bool)
+        or not isinstance(total, int)
+        or not isinstance(trainable, int)
+        or total <= 0
+        or trainable <= 0
+        or trainable >= total
+    ):
+        raise ValueError("Stage2 resume parameter_counts is invalid")
     return metadata
+
+
+def stage2_config_from_resume_checkpoint(
+    checkpoint: dict, current_config: dict
+) -> dict:
+    """Use checkpoint-owned architecture fields before constructing Stage2."""
+    validate_stage2_resume_checkpoint(checkpoint)
+    saved_config = checkpoint["config"]
+    resolved = dict(current_config)
+    missing = [
+        key for key in _STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS
+        if key not in saved_config
+    ]
+    if missing:
+        raise ValueError(
+            f"Stage2 resume config is missing model fields: {missing}"
+        )
+    for key in _STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS:
+        resolved[key] = saved_config[key]
+    return resolved
+
+
+def apply_restored_dataset_stats(stats: dict, *datasets) -> dict[str, np.ndarray]:
+    """Apply checkpoint normalization statistics to every resume dataset."""
+    required = {
+        "observation_mean", "observation_std", "action_mean", "action_std"
+    }
+    if not isinstance(stats, dict) or not required.issubset(stats):
+        raise ValueError("Stage2 resume checkpoint stats are incomplete")
+    restored = {
+        key: np.asarray(value, dtype=np.float32) for key, value in stats.items()
+    }
+    for key, value in restored.items():
+        if value.size == 0 or not np.isfinite(value).all():
+            raise ValueError(f"Stage2 resume checkpoint stat {key!r} is invalid")
+    for key in ("observation_std", "action_std"):
+        if np.any(restored[key] <= 0):
+            raise ValueError(f"Stage2 resume checkpoint stat {key!r} must be positive")
+    for dataset in datasets:
+        dataset.stats = {key: value.copy() for key, value in restored.items()}
+    return restored
+
+
+def _validate_stage2_model_metadata(model, metadata: dict) -> None:
+    named_parameters = dict(model.named_parameters())
+    saved_gates = metadata["gate_values"]
+    actual_gates = {
+        name: float(parameter.detach().float().item())
+        for name, parameter in named_parameters.items()
+        if name.endswith(".tactile_gate")
+    }
+    if set(saved_gates) != set(actual_gates):
+        raise ValueError("Stage2 resume gate names disagree with the model")
+    for name, value in saved_gates.items():
+        if not math.isclose(float(value), actual_gates[name], rel_tol=1e-6, abs_tol=1e-7):
+            raise ValueError(f"Stage2 resume gate value disagrees for {name!r}")
+
+    categories = metadata["parameter_categories"]
+    saved_trainable = {
+        name
+        for names in categories["trainable"].values()
+        for name in names
+    }
+    saved_frozen = {
+        name
+        for names in categories["frozen"].values()
+        for name in names
+    }
+    actual_trainable = {
+        name for name, parameter in named_parameters.items()
+        if parameter.requires_grad
+    }
+    actual_frozen = set(named_parameters) - actual_trainable
+    if saved_trainable != actual_trainable or saved_frozen != actual_frozen:
+        raise ValueError(
+            "Stage2 resume parameter categories disagree with the model"
+        )
 
 
 def restore_stage2_training_state(
@@ -362,6 +539,7 @@ def restore_stage2_training_state(
     if len(checkpoint.get("rng_states", [])) != world_size:
         raise ValueError("Cannot restore per-rank RNG with a different world size")
     model.load_state_dict(checkpoint["model"], strict=True)
+    _validate_stage2_model_metadata(model, metadata)
     optimizer.load_state_dict(checkpoint["optimizer"])
     scheduler.load_state_dict(checkpoint["scheduler"])
     scaler.load_state_dict(checkpoint["scaler"])
@@ -604,9 +782,18 @@ def run_epoch(
                 if train:
                     scaler.scale(loss).backward()
                     if stage == 2 and stage2_parameter_report is not None:
-                        stage2_diagnostics = stage2_gradient_diagnostics(
-                            raw_model, stage2_parameter_report
+                        scaler.unscale_(optimizer)
+                        collect_diagnostics = (
+                            batch_index == total_batches
+                            or (
+                                log_every_steps > 0
+                                and batch_index % log_every_steps == 0
+                            )
                         )
+                        if collect_diagnostics:
+                            stage2_diagnostics = stage2_gradient_diagnostics(
+                                raw_model, stage2_parameter_report
+                            )
                     if backbone_frozen:
                         for parameter in backbone_parameters:
                             parameter.grad = None
@@ -1081,6 +1268,9 @@ def main(argv=None):
         if args.resume_from:
             resumed_stage2 = load_checkpoint(args.resume_from, device)
             stage2_metadata = validate_stage2_resume_checkpoint(resumed_stage2)
+            config = stage2_config_from_resume_checkpoint(resumed_stage2, config)
+            for key in _STAGE2_CHECKPOINT_DRIVEN_CONFIG_KEYS:
+                setattr(args, key, config[key])
         else:
             tactile_artifact = resolve_tactile_encoder_distributed(
                 args.tactile_encoder_checkpoint,
@@ -1290,9 +1480,7 @@ def main(argv=None):
 
     stats = train_dataset.stats
     if restored_stats is not None:
-        stats = {
-            key: np.asarray(value) for key, value in restored_stats.items()
-        }
+        stats = apply_restored_dataset_stats(restored_stats, train_dataset, val_dataset)
     if main_rank:
         (output_dir / "config.json").write_text(json.dumps(config, indent=2))
         (output_dir / "dataset_stats.json").write_text(
