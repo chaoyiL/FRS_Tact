@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from train_baseline_pi05.checkpoint import save_best_checkpoint
+from train_baseline_pi05.checkpoint import save_best_checkpoint, save_last_checkpoint
 from train_baseline_pi05.model import DirectDecoderConfig as TrainDecoderConfig
 from train_baseline_pi05.model import DirectTactileActionDecoder as TrainDecoder
 
@@ -153,3 +153,72 @@ def test_loader_rejects_expected_source_mismatch(tmp_path: Path, field: str):
 
     with pytest.raises(ValueError, match="source_contract"):
         load_decoder(path, device="cpu", expected_source=changed)
+
+
+def test_loader_rejects_resume_checkpoint_even_when_the_decoder_state_is_valid(tmp_path: Path):
+    from deploy_baseline_pi05.checkpoint import load_decoder
+
+    _, expected, model = _training_checkpoint(tmp_path)
+    path = save_last_checkpoint(
+        tmp_path,
+        model,
+        model.config,
+        epoch=1,
+        global_step=3,
+        metrics={"validation_loss": 0.1},
+        source_contract=expected,
+        best_state={"validation_loss": 0.1},
+    )
+
+    with pytest.raises(ValueError, match="invalid schema"):
+        load_decoder(path, device="cpu", expected_source=expected)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("epoch", True),
+        ("global_step", -1),
+        ("metrics", {"validation_loss": float("nan")}),
+        ("metrics", {1: 0.1}),
+        ("metrics", {"validation_loss": False}),
+    ],
+)
+def test_loader_rejects_invalid_best_checkpoint_metadata(
+    tmp_path: Path, field: str, value: object
+):
+    from deploy_baseline_pi05.checkpoint import load_decoder
+
+    path, expected, _ = _training_checkpoint(tmp_path)
+    raw = torch.load(path, weights_only=True)
+    raw[field] = value
+    torch.save(raw, path)
+
+    with pytest.raises(ValueError, match=field):
+        load_decoder(path, device="cpu", expected_source=expected)
+
+
+@pytest.mark.parametrize(
+    ("group", "field", "actual_value", "expected_value"),
+    [
+        ("pi", "norm_stats_asset_id", "./asset", str((Path.cwd() / "asset").resolve())),
+        ("pi", "variant", {"paligemma": "./variant", "action_expert": "gemma_300m_lora"}, {"paligemma": str((Path.cwd() / "variant").resolve()), "action_expert": "gemma_300m_lora"}),
+        ("encoder", "key_order", ["./tactilekey", "observation.images.tactile_right_0", "observation.images.tactile_left_1", "observation.images.tactile_right_1"], [str((Path.cwd() / "tactilekey").resolve()), "observation.images.tactile_right_0", "observation.images.tactile_left_1", "observation.images.tactile_right_1"]),
+    ],
+)
+def test_loader_does_not_canonicalize_nonpath_source_contract_values(
+    tmp_path: Path, group: str, field: str, actual_value: object, expected_value: object
+):
+    from deploy_baseline_pi05.checkpoint import load_decoder
+
+    path, expected, _ = _training_checkpoint(tmp_path)
+    expected_group = expected[group]
+    assert isinstance(expected_group, dict)
+    expected_group[field] = expected_value
+    raw = torch.load(path, weights_only=True)
+    raw_group = raw["source_contract"][group]
+    raw_group[field] = actual_value
+    torch.save(raw, path)
+
+    with pytest.raises(ValueError, match="source_contract"):
+        load_decoder(path, device="cpu", expected_source=expected)
