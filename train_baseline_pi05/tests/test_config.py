@@ -48,6 +48,7 @@ def test_config_import_does_not_import_heavy_runtimes():
         ("nonpositive_dimension", "d_model"),
         ("wrong_decoder_layer_count", "num_layers"),
         ("wrong_action_dimension", "action_dim"),
+        ("wrong_action_horizon", "action_horizon"),
         ("wrong_tactile_dimension", "embedding_dim"),
         ("duplicate_tactile_key", "tactile_keys"),
         ("reordered_tactile_keys", "tactile_keys"),
@@ -68,6 +69,8 @@ def test_load_config_rejects_strict_contract_violations(
         raw["decoder"]["num_layers"] = 3
     elif case == "wrong_action_dimension":
         raw["source"]["action_dim"] = 19
+    elif case == "wrong_action_horizon":
+        raw["source"]["action_horizon"] = 49
     elif case == "wrong_tactile_dimension":
         raw["tactile"]["embedding_dim"] = 256
     elif case == "duplicate_tactile_key":
