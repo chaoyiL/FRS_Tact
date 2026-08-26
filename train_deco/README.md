@@ -64,8 +64,9 @@ train_deco/.venv/bin/python -m pip install \
 
 可用 `--tactile-encoder-cache /absolute/cache/path` 改写缓存根目录。相同源内容的
 后续启动直接复用已验证的 artifact；源文件内容变化会产生新的 SHA256 目录。
-`server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换，随后广播结果并在
-barrier 后由每个 rank 独立校验、加载同一个缓存 artifact；非零 rank 不导入 JAX。
+`server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换；rank 0 校验转换 metadata 和 SHA256
+后广播结果，barrier 后每个 rank 都 strict-load 同一个缓存
+artifact。非零 rank 不导入 JAX。
 
 Stage 2 checkpoint 写入 `OUTPUT_DIR/RUN_ID/`：
 
@@ -91,19 +92,22 @@ bash train_deco/scripts/train.sh \
 
 ### Stage 2 数据合同
 
-首版只支持 `--dataset-format lerobot-v21`，每个数据根必须在元数据和 Parquet
-中以如下固定顺序提供四个 RGB HWC 图像字段，且每个字段形状均为
-`[224, 224, 3]`：
+首版只支持 `--dataset-format lerobot-v21`。每个数据根必须在元数据和 Parquet
+中提供如下四个固定字段名；loader 总是按这组固定字段名读取，所以流顺序
+不依赖 Parquet 的物理列顺序。每个字段可以是任意但彼此一致的 RGB HWC `[H, W, 3]`
+图像；当前实际数据是 `[224, 224, 3]`：
 
 1. `observation.images.tactile_left_0`
 2. `observation.images.tactile_right_0`
 3. `observation.images.tactile_left_1`
 4. `observation.images.tactile_right_1`
 
-dataset sample 中它们被解码为 unit-space float32 `[4, 3, 224, 224]`，batch
-合同为 `[B, 4, 3, 224, 224]`。触觉图像只做保持长宽比的 224×224 黑边
-letterbox，不应用视觉 ImageNet normalization 或暗光增强。缺失字段、非 image
-类型、非 RGB、形状不一致或顺序合同不匹配会在训练前报出具体字段。选择旧的
+dataset sample 中它们被解码为 unit-space float32 `[4, 3, H, W]`，batch
+合同为 `[B, 4, 3, H, W]`；触觉预处理再把它们转换为
+`[B, 4, 3, 224, 224]`。触觉图像只做保持长宽比的 224×224 黑边 letterbox，
+不应用视觉 ImageNet normalization 或暗光增强。缺失字段、非 image 类型、非 RGB
+或四路形状不一致会在训练前报出具体字段；metadata/Parquet 列的排列不构成错误。
+选择旧的
 `preprocessed` backend 会明确报错
 `Stage2 currently requires --dataset-format lerobot-v21`，不会静默丢弃触觉输入。
 
