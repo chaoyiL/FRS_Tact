@@ -42,7 +42,7 @@ class DirectDecoderConfig:
         return result
 
     def validate(self) -> None:
-        expected = {
+        expected_integers = {
             "action_horizon": 50,
             "action_dim": 20,
             "tactile_dim": 512,
@@ -50,12 +50,23 @@ class DirectDecoderConfig:
             "nhead": 4,
             "num_layers": 2,
             "dim_feedforward": 256,
-            "dropout": 0.1,
-            "tactile_keys": TACTILE_KEYS,
         }
-        for name, required in expected.items():
-            if getattr(self, name) != required:
+        for name, required in expected_integers.items():
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"{name} must be an integer for the direct decoder contract.")
+            if value != required:
                 raise ValueError(f"{name} must be {required!r} for the direct decoder contract.")
+        if not isinstance(self.dropout, float):
+            raise ValueError("dropout must be a float for the direct decoder contract.")
+        if self.dropout != 0.1:
+            raise ValueError("dropout must be 0.1 for the direct decoder contract.")
+        if not isinstance(self.tactile_keys, tuple) or any(
+            not isinstance(key, str) for key in self.tactile_keys
+        ):
+            raise ValueError("tactile_keys must be a tuple of strings for the direct decoder contract.")
+        if self.tactile_keys != TACTILE_KEYS:
+            raise ValueError("tactile_keys must use canonical order for the direct decoder contract.")
 
     def to_primitive(self) -> dict[str, int | float | list[str]]:
         self.validate()
@@ -135,8 +146,9 @@ class DirectTactileActionDecoder(nn.Module):
     @staticmethod
     def normalize_tactile(tactile: Tensor) -> Tensor:
         """RMS-normalize each sensor token independently before projection."""
-        rms = tactile.square().mean(dim=-1, keepdim=True).add(1e-8).sqrt()
-        return tactile / rms
+        working = tactile.to(dtype=torch.float32)
+        rms = working.square().mean(dim=-1, keepdim=True).add(1e-8).sqrt()
+        return working / rms
 
     def forward(self, coarse: Tensor, tactile: Tensor) -> Tensor:
         if coarse.ndim != 3 or tuple(coarse.shape[1:]) != (
@@ -156,8 +168,10 @@ class DirectTactileActionDecoder(nn.Module):
         if coarse.shape[0] != tactile.shape[0]:
             raise ValueError("coarse and tactile batch dimensions must agree.")
 
-        target = self.coarse_projection(coarse) + self.action_position.unsqueeze(0)
-        memory = self.tactile_projection(self.normalize_tactile(tactile))
+        target = self.coarse_projection(coarse.to(dtype=self.coarse_projection.weight.dtype))
+        target = target + self.action_position.unsqueeze(0)
+        tactile_tokens = self.normalize_tactile(tactile).to(dtype=self.tactile_projection.weight.dtype)
+        memory = self.tactile_projection(tactile_tokens)
         memory = memory + self.sensor_identity.unsqueeze(0)
         predicted = self.output_head(self.output_norm(self.decoder(target, memory)))
         if not torch.isfinite(predicted).all():

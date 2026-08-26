@@ -28,6 +28,7 @@ _REQUIRED_KEYS = {
     "metrics",
     "source_contract",
 }
+_OPTIONAL_RESUME_KEYS = {"optimizer_state", "scheduler_state", "rng_state", "best_state"}
 
 
 def _checkpoint_path(directory_or_path: Path, filename: str) -> Path:
@@ -60,6 +61,24 @@ def _primitive(value: object) -> bool:
     if isinstance(value, Mapping):
         return all(isinstance(key, str) and _primitive(item) for key, item in value.items())
     return False
+
+
+def _weights_only_payload(value: object, name: str) -> Any:
+    """Copy a value into built-in containers accepted by ``torch.load(weights_only=True)``."""
+    if value is None or isinstance(value, (str, int, float, bool, Tensor)):
+        return value
+    if isinstance(value, list):
+        return [_weights_only_payload(item, name) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_weights_only_payload(item, name) for item in value)
+    if isinstance(value, Mapping):
+        result: dict[str | int, Any] = {}
+        for key, item in value.items():
+            if isinstance(key, bool) or not isinstance(key, (str, int)):
+                raise ValueError(f"{name} has a non-primitive mapping key.")
+            result[key] = _weights_only_payload(item, name)
+        return result
+    raise ValueError(f"{name} contains a value incompatible with weights_only loading.")
 
 
 def _source_contract(value: object) -> dict[str, Any]:
@@ -157,18 +176,22 @@ def save_last_checkpoint(
         source_contract=source_contract,
     )
     if optimizer is not None:
-        payload["optimizer_state"] = optimizer.state_dict()
+        payload["optimizer_state"] = _weights_only_payload(optimizer.state_dict(), "optimizer_state")
     if scheduler_state is not None:
-        payload["scheduler_state"] = dict(scheduler_state)
+        payload["scheduler_state"] = _weights_only_payload(scheduler_state, "scheduler_state")
     if rng_state is not None:
-        payload["rng_state"] = dict(rng_state)
+        payload["rng_state"] = _weights_only_payload(rng_state, "rng_state")
     if best_state is not None:
-        payload["best_state"] = dict(best_state)
+        payload["best_state"] = _weights_only_payload(best_state, "best_state")
     return _atomic_save(payload, _checkpoint_path(directory_or_path, "last.pt"))
 
 
 def _validate_payload(raw: object) -> dict[str, Any]:
-    if not isinstance(raw, dict) or not _REQUIRED_KEYS.issubset(raw):
+    if (
+        not isinstance(raw, dict)
+        or not _REQUIRED_KEYS.issubset(raw)
+        or not set(raw).issubset(_REQUIRED_KEYS | _OPTIONAL_RESUME_KEYS)
+    ):
         raise ValueError("checkpoint has an invalid schema.")
     if raw["schema"] != _SCHEMA or raw["version"] != _VERSION:
         raise ValueError("checkpoint schema/version is unsupported.")
@@ -184,6 +207,8 @@ def _validate_payload(raw: object) -> dict[str, Any]:
         isinstance(key, str) and isinstance(value, Tensor) for key, value in state.items()
     ):
         raise ValueError("decoder_state must be a tensor state dictionary.")
+    for name in _OPTIONAL_RESUME_KEYS & set(raw):
+        _weights_only_payload(raw[name], name)
     return raw
 
 

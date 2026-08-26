@@ -49,6 +49,18 @@ def test_decoder_predicts_full_finite_action_sequence(tmp_path: Path):
     assert torch.isfinite(result).all()
 
 
+def test_decoder_accepts_float16_zero_tactile_tokens_with_float32_parameters(tmp_path: Path):
+    model = DirectTactileActionDecoder(_config(tmp_path))
+
+    result = model(
+        torch.zeros(1, 50, 20, dtype=torch.float16),
+        torch.zeros(1, 4, 512, dtype=torch.float16),
+    )
+
+    assert result.shape == (1, 50, 20)
+    assert torch.isfinite(result).all()
+
+
 @pytest.mark.parametrize(
     ("coarse_shape", "tactile_shape", "error"),
     [
@@ -146,6 +158,36 @@ def test_loader_rejects_bad_checkpoint_contract(tmp_path: Path, mutation: str):
         load_decoder_checkpoint(path)
 
 
+def test_loader_rejects_wrong_type_in_fixed_decoder_config(tmp_path: Path):
+    config = _config(tmp_path)
+    path = save_best_checkpoint(
+        tmp_path, DirectTactileActionDecoder(config), config, epoch=0, global_step=0,
+        metrics={"validation_loss": 1.0}, source_contract=_source_contract(),
+    )
+    raw = torch.load(path, weights_only=True)
+    raw["decoder_config"]["num_layers"] = 2.0
+    torch.save(raw, path)
+
+    with pytest.raises(ValueError, match="num_layers"):
+        load_decoder_checkpoint(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("action_horizon", 50.0),
+        ("num_layers", 2.0),
+        ("nhead", True),
+        ("tactile_keys", list(TACTILE_KEYS)),
+    ],
+)
+def test_direct_decoder_config_rejects_wrong_fixed_field_types(field: str, value: object):
+    config = DirectDecoderConfig(**{field: value})
+
+    with pytest.raises(ValueError, match=field):
+        DirectTactileActionDecoder(config)
+
+
 def test_last_checkpoint_keeps_optimizer_and_resume_state(tmp_path: Path):
     config = _config(tmp_path)
     model = DirectTactileActionDecoder(config)
@@ -162,3 +204,15 @@ def test_last_checkpoint_keeps_optimizer_and_resume_state(tmp_path: Path):
     assert raw["optimizer_state"] == optimizer.state_dict()
     assert raw["scheduler_state"] == {"last_epoch": 2}
     assert raw["best_state"] == {"validation_loss": 0.25}
+
+
+@pytest.mark.parametrize("field", ["scheduler_state", "rng_state", "best_state"])
+def test_last_checkpoint_rejects_nested_non_weights_only_payloads(tmp_path: Path, field: str):
+    config = _config(tmp_path)
+    keyword = {field: {"nested": {"path": tmp_path}}}
+
+    with pytest.raises(ValueError, match=field):
+        save_last_checkpoint(
+            tmp_path, DirectTactileActionDecoder(config), config, epoch=2, global_step=9,
+            metrics={"validation_loss": 0.75}, source_contract=_source_contract(), **keyword,
+        )
