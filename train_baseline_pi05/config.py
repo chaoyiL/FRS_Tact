@@ -127,7 +127,7 @@ class SourcePolicyConfig:
     seed: int
     sample_steps: int
     action_horizon: int
-    action_dim: int
+    model_action_dim: int
     paligemma_variant: str
     action_expert_variant: str
     use_quantile_norm: bool
@@ -146,7 +146,9 @@ class SourcePolicyConfig:
             action_horizon=_positive_integer(
                 _required(raw, "action_horizon", "source"), "source.action_horizon"
             ),
-            action_dim=_positive_integer(_required(raw, "action_dim", "source"), "source.action_dim"),
+            model_action_dim=_positive_integer(
+                _required(raw, "model_action_dim", "source"), "source.model_action_dim"
+            ),
             paligemma_variant=_string(
                 _required(raw, "paligemma_variant", "source"), "source.paligemma_variant"
             ),
@@ -261,8 +263,8 @@ class BaselineTrainConfig:
     def validate_contract(self) -> None:
         if self.source.action_horizon != 50:
             raise ValueError("source.action_horizon must be 50 for the direct decoder contract.")
-        if self.source.action_dim != 20:
-            raise ValueError("source.action_dim must be 20 for the direct decoder contract.")
+        if self.source.model_action_dim < self.decoder.action_dim:
+            raise ValueError("source.model_action_dim must be at least decoder.action_dim.")
         if self.source.seed != 0:
             raise ValueError("source.seed must be 0 for the fixed Pi0.5 source policy.")
         if self.source.sample_steps != 10:
@@ -271,8 +273,6 @@ class BaselineTrainConfig:
             raise ValueError("tactile.embedding_dim must be 512.")
         if self.decoder.action_horizon != self.source.action_horizon:
             raise ValueError("decoder.action_horizon must match source.action_horizon.")
-        if self.decoder.action_dim != self.source.action_dim:
-            raise ValueError("decoder.action_dim must match source.action_dim.")
         if self.decoder.tactile_dim != self.tactile.embedding_dim:
             raise ValueError("decoder.tactile_dim must match tactile.embedding_dim.")
         if self.decoder.num_layers != 2:

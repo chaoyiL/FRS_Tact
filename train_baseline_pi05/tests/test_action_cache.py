@@ -39,6 +39,7 @@ def manifest() -> dict[str, object]:
         "dataset_identity": {"repo_id": "example/dataset", "revision": "abc123"},
         "split": {"fractions": [0.8, 0.1, 0.1], "seed": 42},
         "source_checkpoint": "pi05/checkpoint",
+        "source_variant": {"paligemma_variant": "gemma_2b_lora", "action_expert_variant": "gemma_300m_lora"},
         "norm_stats": "pi05/norm-stats",
         "sample_steps": 10,
         "noise_seed": 0,
@@ -141,6 +142,11 @@ def test_writer_persists_progress_resumes_only_matching_manifest_and_finalizes(
     writer.close()
     with pytest.raises(ValueError, match="immutable"):
         ActionCacheWriter.resume(tmp_path, {**manifest, "noise_seed": 1})
+    with pytest.raises(ValueError, match="immutable"):
+        ActionCacheWriter.resume(
+            tmp_path,
+            {**manifest, "source_variant": {"paligemma_variant": "gemma_2b", "action_expert_variant": "gemma_300m_lora"}},
+        )
 
     resumed = ActionCacheWriter.resume(tmp_path, manifest)
     resumed.write_batch(

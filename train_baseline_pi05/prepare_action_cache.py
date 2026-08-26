@@ -55,7 +55,7 @@ def _default_dependencies(config: Any) -> dict[str, Any]:
         rename_map=dataset_info.rename_map, camera_map=dataset_info.camera_map,
         state_stats=load_norm_stats(source_info.norm_stats_dir, source_info.norm_stats_asset_id)["state"],
         action_stats=load_norm_stats(source_info.norm_stats_dir, source_info.norm_stats_asset_id)["actions"],
-        use_quantile_norm=source_info.use_quantile_norm, action_dim=source_info.action_dim,
+        use_quantile_norm=source_info.use_quantile_norm, action_dim=source_info.model_action_dim,
         action_horizon=source_info.action_horizon, paligemma_variant=source_info.paligemma_variant,
         action_expert_variant=source_info.action_expert_variant,
     )
@@ -81,6 +81,9 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
         frame_stride=int(_field(config, "dataset.frame_stride", 1)),
     ))
     source_width = int(deps.get("source_width", validate_pi05_model(model, action_horizon=horizon)))
+    model_action_dim = int(getattr(source, "model_action_dim", source_width))
+    if source_width != model_action_dim:
+        raise ValueError("loaded source model width does not match source.model_action_dim")
     if source_width < action_dim:
         raise ValueError("source model is narrower than the decoder action width")
     action_key = str(_field(config, "dataset.action_key", "actions"))
@@ -130,7 +133,7 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
                 experts.append(np.asarray(expert, dtype=np.float32)[..., :action_dim])
                 valid.append(row_valid)
             observation_batch = _stack(observations)
-            noise = fixed_noise(len(batch), seed=manifest["noise_seed"], horizon=horizon, action_dim=source_width)
+            noise = fixed_noise(len(batch), seed=manifest["noise_seed"], horizon=horizon, action_dim=model_action_dim)
             coarse = sample_coarse_actions(model, deps.get("params"), observation_batch, noise, manifest["sample_steps"])[..., :action_dim]
             writer.write_batch(start, coarse=coarse.astype(np.float32), expert=np.stack(experts).astype(np.float32), valid=np.stack(valid), records=batch)
         writer.finalize()

@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_default_yaml_locks_direct_decoder_contract():
     config = load_config(ROOT / "train_baseline_pi05/configs/train_baseline_pi05.yaml")
     assert config.source.action_horizon == 50
-    assert config.source.action_dim == 20
+    assert config.source.model_action_dim == 20
     assert config.source.paligemma_variant == "gemma_2b_lora"
     assert config.source.action_expert_variant == "gemma_300m_lora"
     assert config.source.use_quantile_norm is True
@@ -82,7 +82,7 @@ def test_load_config_rejects_strict_contract_violations(
     elif case == "wrong_decoder_layer_count":
         raw["decoder"]["num_layers"] = 3
     elif case == "wrong_action_dimension":
-        raw["source"]["action_dim"] = 19
+        raw["source"]["model_action_dim"] = 19
     elif case == "wrong_action_horizon":
         raw["source"]["action_horizon"] = 49
     elif case == "wrong_tactile_dimension":

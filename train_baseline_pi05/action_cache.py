@@ -147,6 +147,7 @@ def _manifest_immutable(manifest: Mapping[str, Any], sample_count: int, horizon:
         "dataset_identity": manifest.get("dataset_identity"),
         "split": manifest.get("split"),
         "source_checkpoint": manifest.get("source_checkpoint"),
+        "source_variant": manifest.get("source_variant"),
         "norm_stats": manifest.get("norm_stats"),
         "sample_steps": manifest.get("sample_steps"),
         "noise_seed": manifest.get("noise_seed"),
@@ -161,6 +162,7 @@ def _validate_manifest_input(manifest: Mapping[str, Any], action_dim: int) -> No
         "dataset_identity",
         "split",
         "source_checkpoint",
+        "source_variant",
         "norm_stats",
         "sample_steps",
         "noise_seed",
@@ -173,6 +175,8 @@ def _validate_manifest_input(manifest: Mapping[str, Any], action_dim: int) -> No
         raise ValueError(f"manifest missing required fields: {', '.join(missing)}")
     if not isinstance(manifest["dataset_identity"], Mapping) or not isinstance(manifest["split"], Mapping):
         raise ValueError("manifest dataset_identity and split must be mappings")
+    if not isinstance(manifest["source_variant"], Mapping):
+        raise ValueError("manifest source_variant must be a mapping")
     if int(manifest["decoder_action_width"]) != action_dim:
         raise ValueError("manifest decoder_action_width must match action_dim")
     if int(manifest["source_model_action_width"]) < action_dim:

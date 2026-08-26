@@ -17,7 +17,7 @@ def _config(tmp_path: Path) -> SimpleNamespace:
         cache=SimpleNamespace(action_root=tmp_path / "actions", tactile_root=tmp_path / "tactile"),
         source=SimpleNamespace(
             checkpoint=tmp_path / "source", norm_stats_dir=tmp_path / "stats", norm_stats_asset_id="demo",
-            seed=0, sample_steps=3, action_horizon=50,
+            seed=0, sample_steps=3, action_horizon=50, model_action_dim=20,
         ),
         decoder=SimpleNamespace(action_dim=20),
         tactile=SimpleNamespace(encoder_checkpoint=tmp_path / "encoder", embedding_dim=512),
@@ -58,7 +58,7 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
     config.dataset.revision = None
     config.dataset.rename_map = {"observation.images.camera0": "observation.images.camera1"}
     config.dataset.camera_map = {"left_wrist_0_rgb": "observation.images.camera1"}
-    config.source.action_dim = 20
+    config.source.model_action_dim = 32
     config.source.paligemma_variant = "gemma_2b_lora"
     config.source.action_expert_variant = "gemma_300m_lora"
     config.source.use_quantile_norm = True
@@ -89,7 +89,7 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
 
     dependencies = _default_dependencies(config)
 
-    assert captured["action_dim"] == 20
+    assert captured["action_dim"] == 32
     assert captured["paligemma_variant"] == "gemma_2b_lora"
     assert captured["action_expert_variant"] == "gemma_300m_lora"
     assert captured["use_quantile_norm"] is True
@@ -159,9 +159,11 @@ def test_action_producer_writes_sliced_forward_actions_and_preserves_records(tmp
 
         def sample_actions(self, params, observation, *, noise, num_steps):
             assert observation["state"].shape == (2, 3)
+            assert noise.shape[-1] == 32
             return np.broadcast_to(np.arange(32, dtype=np.float32), noise.shape)
 
     config = _config(tmp_path)
+    config.source.model_action_dim = 32
     records = build_records(Metadata(), split_seed=7, frame_stride=1, fractions=(1, 0, 0))
     result = prepare_action_cache(
         config,
@@ -204,6 +206,7 @@ def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
             return np.broadcast_to(np.arange(32, dtype=np.float32), noise.shape)
 
     config = _config(tmp_path)
+    config.source.model_action_dim = 32
     records = (SampleRecord(0, 0, 0, 0), SampleRecord(1, 0, 1, 0))
     manifest = {
         "dataset_identity": {"repo_id": "org/demo", "root": str(config.dataset.root), "revision": "v1"},
