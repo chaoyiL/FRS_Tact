@@ -40,16 +40,13 @@ def _episode_shuffle(tactile: torch.Tensor, episodes: torch.Tensor) -> torch.Ten
     """Deterministically rotate batch tactile rows, avoiding same-episode rows when possible."""
     if tactile.shape[0] < 2:
         return tactile
-    base = torch.arange(tactile.shape[0], device=tactile.device)
-    best_order, best_conflicts = base, tactile.shape[0] + 1
-    for shift in range(1, tactile.shape[0]):
-        order = torch.roll(base, shifts=shift)
-        conflicts = int((episodes[order] == episodes).sum().item())
-        if conflicts == 0:
-            return tactile[order]
-        if conflicts < best_conflicts:
-            best_order, best_conflicts = order, conflicts
-    return tactile[best_order]
+    episode_values = episodes.detach().cpu().tolist()
+    targets = sorted(range(tactile.shape[0]), key=lambda index: (episode_values[index], index))
+    largest_group = max(episode_values.count(episode) for episode in set(episode_values))
+    sources = targets[largest_group:] + targets[:largest_group]
+    order = torch.empty(tactile.shape[0], dtype=torch.int64, device=tactile.device)
+    order[torch.tensor(targets, device=tactile.device)] = torch.tensor(sources, device=tactile.device)
+    return tactile[order]
 
 
 @torch.no_grad()

@@ -80,7 +80,14 @@ def _small_file_fingerprint(path: Path) -> dict[str, object] | None:
     if not path.is_file():
         return None
     stat = path.stat()
-    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+    result: dict[str, object] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+    if stat.st_size <= 16 * 1024 * 1024:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        result["sha256"] = digest.hexdigest()
+    return result
 
 
 def _source_contract(config: Any, action: ActionCache, tactile: Any) -> dict[str, Any]:

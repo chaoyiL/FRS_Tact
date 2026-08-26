@@ -176,11 +176,34 @@ def test_episode_shuffle_uses_complete_cross_episode_permutation_when_available(
     from train_baseline_pi05.evaluate import _episode_shuffle
 
     episodes = torch.tensor([0, 0, 0, 1, 1, 1])
+
     tactile = torch.arange(6, dtype=torch.float32).reshape(6, 1, 1)
     shuffled = _episode_shuffle(tactile, episodes)
 
     assert torch.all(shuffled[:, 0, 0] != tactile[:, 0, 0])
     assert torch.all(episodes[shuffled[:, 0, 0].to(torch.int64)] != episodes)
+def test_episode_shuffle_deranges_non_cyclic_episode_order():
+    from train_baseline_pi05.evaluate import _episode_shuffle
+
+    episodes = torch.tensor([0, 0, 1, 2, 1])
+    tactile = torch.arange(5, dtype=torch.float32).reshape(5, 1, 1)
+    shuffled = _episode_shuffle(tactile, episodes)
+
+    assert torch.all(episodes[shuffled[:, 0, 0].to(torch.int64)] != episodes)
+
+
+def test_large_cache_fingerprint_uses_only_stat(monkeypatch, tmp_path: Path):
+    from train_baseline_pi05.train import _small_file_fingerprint
+
+    path = tmp_path / "large.npy"
+    with path.open("wb") as handle:
+        handle.truncate(17 * 1024 * 1024)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: (_ for _ in ()).throw(AssertionError("whole-file read")))
+
+    fingerprint = _small_file_fingerprint(path)
+
+    assert fingerprint["size"] == 17 * 1024 * 1024
+    assert "sha256" not in fingerprint
 
 
 def test_evaluate_cli_opens_configured_caches_and_computes_current_metrics(monkeypatch, tmp_path: Path):
