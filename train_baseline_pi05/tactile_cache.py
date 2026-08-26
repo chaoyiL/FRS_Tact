@@ -78,7 +78,28 @@ def _default_encoder(checkpoint: Path) -> Callable[[np.ndarray], np.ndarray]:
     return encode
 
 
-def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = None) -> Path:
+def _required_tactile_frames(
+    metadata: Any,
+    *,
+    frame_stride: int,
+    max_samples: int,
+    split_seed: int = 0,
+    fractions: Sequence[float] = (0.8, 0.1, 0.1),
+) -> int:
+    """Cover every frame index selected by the matching capped action records."""
+    from .action_cache import build_records
+
+    records = build_records(
+        metadata,
+        split_seed=split_seed,
+        fractions=fractions,
+        frame_stride=frame_stride,
+        max_samples=max_samples,
+    )
+    return int(records[-1].dataset_index) + 1
+
+
+def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = None, *, max_samples: int | None = None) -> Path:
     """Encode four current tactile frames into RMS-normalized float32 tokens."""
     deps = dict(dependencies or {})
     tactile = getattr(config, "tactile", config)
@@ -96,7 +117,29 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         dataset = LeRobotDataset(dataset_info.repo_id, root=dataset_info.root, revision=getattr(dataset_info, "revision", None))
     encoder = deps.get("encoder") or _default_encoder(checkpoint)
     from .tactile_encoder.preprocess import parse_image_to_unit
-    count, dim = len(dataset), int(tactile.embedding_dim)
+    if max_samples is not None and max_samples <= 0:
+        raise ValueError("max_samples must be positive when provided")
+    if max_samples is None:
+        count = len(dataset)
+    else:
+        metadata = deps.get("metadata") or getattr(dataset, "meta", None)
+        if metadata is None:
+            raise ValueError("max_samples requires dataset metadata for action-cache alignment")
+        count = min(
+            len(dataset),
+            _required_tactile_frames(
+                metadata,
+                frame_stride=int(getattr(dataset_info, "frame_stride", 1)),
+                max_samples=max_samples,
+                split_seed=int(getattr(dataset_info, "split_seed", 0)),
+                fractions=(
+                    float(getattr(dataset_info, "train_fraction", 0.8)),
+                    float(getattr(dataset_info, "validation_fraction", 0.1)),
+                    float(getattr(dataset_info, "test_fraction", 0.1)),
+                ),
+            ),
+        )
+    dim = int(tactile.embedding_dim)
     if dim != 512:
         raise ValueError("frozen ResNet18 cache embedding_dim must be 512")
     output.mkdir(parents=True, exist_ok=True)
@@ -124,9 +167,10 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--max-samples", type=int)
     args = parser.parse_args()
     from .config import load_config
-    prepare_tactile_cache(load_config(args.config))
+    prepare_tactile_cache(load_config(args.config), max_samples=args.max_samples)
 
 
 if __name__ == "__main__":

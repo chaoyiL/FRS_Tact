@@ -66,7 +66,7 @@ def _default_dependencies(config: Any) -> dict[str, Any]:
     return {"metadata": metadata, "dataset": dataset, "processor": processor, "model": model, "params": jax.random.key(source_info.seed), "source_width": width}
 
 
-def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = None) -> Path:
+def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = None, *, max_samples: int | None = None) -> Path:
     """Write `[N, 50, 20]` normalized coarse/expert cache arrays and finalize them."""
     deps = dict(_default_dependencies(config) if dependencies is None else dependencies)
     metadata, dataset, processor, model = (deps[name] for name in ("metadata", "dataset", "processor", "model"))
@@ -82,6 +82,10 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
         fractions=(float(_field(config, "dataset.train_fraction", 0.8)), float(_field(config, "dataset.validation_fraction", 0.1)), float(_field(config, "dataset.test_fraction", 0.1))),
         frame_stride=int(_field(config, "dataset.frame_stride", 1)),
     ))
+    if max_samples is not None:
+        if max_samples <= 0:
+            raise ValueError("max_samples must be positive when provided")
+        records = records[:max_samples]
     source_width = int(deps.get("source_width", validate_pi05_model(model, action_horizon=horizon)))
     model_action_dim = int(getattr(source, "model_action_dim", source_width))
     if source_width != model_action_dim:
@@ -145,9 +149,10 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--max-samples", type=int)
     args = parser.parse_args()
     from .config import load_config
-    prepare_action_cache(load_config(args.config))
+    prepare_action_cache(load_config(args.config), max_samples=args.max_samples)
 
 
 if __name__ == "__main__":
