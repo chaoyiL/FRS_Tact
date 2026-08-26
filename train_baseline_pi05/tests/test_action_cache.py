@@ -76,6 +76,12 @@ def test_record_builder_allows_zero_fraction_and_omits_that_split(metadata: _Met
     assert {record.episode_index for record in records} == set(range(metadata.total_episodes))
 
 
+def test_episode_allocation_uses_each_largest_remainder_once() -> None:
+    records = build_records(_Metadata([1] * 4), split_seed=42, fractions=(0.4, 0.4, 0.2), frame_stride=1)
+
+    assert tuple(sum(record.split_id == split_id for record in records) for split_id in (0, 1, 2)) == (2, 1, 1)
+
+
 def test_action_cache_schema_tail_mask_and_reader_indices(
     tmp_path: Path, manifest: dict[str, object], records: tuple[SampleRecord, ...]
 ) -> None:
@@ -164,6 +170,23 @@ def test_writer_lock_rejects_concurrent_create_and_resume_then_releases(
     writer.close()
     resumed = ActionCacheWriter.resume(tmp_path, manifest)
     resumed.close()
+
+
+def test_closed_writer_cannot_finalize_after_writing_all_samples(
+    tmp_path: Path, manifest: dict[str, object], records: tuple[SampleRecord, ...]
+) -> None:
+    writer = ActionCacheWriter.create(tmp_path, sample_count=3, horizon=2, action_dim=20, manifest=manifest)
+    writer.write_batch(
+        0,
+        coarse=np.zeros((3, 2, 20), dtype=np.float32),
+        expert=np.zeros((3, 2, 20), dtype=np.float32),
+        valid=np.ones((3, 2), dtype=bool),
+        records=records,
+    )
+
+    writer.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        writer.finalize()
 
 
 def test_writer_rejects_batch_bounds_shapes_and_nonfinite_values(

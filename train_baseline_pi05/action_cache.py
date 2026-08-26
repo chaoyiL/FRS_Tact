@@ -68,23 +68,12 @@ def _split_episode_ids(episode_count: int, fractions: Sequence[float], seed: int
     values = np.asarray(tuple(float(value) for value in fractions), dtype=np.float64)
     if any(value < 0 for value in values) or not np.isclose(sum(values), 1.0, rtol=0.0, atol=1e-9):
         raise ValueError("fractions must be nonnegative and sum to one")
-    nonzero_splits = np.flatnonzero(values > 0)
-    if episode_count < len(nonzero_splits):
-        raise ValueError("not enough episodes to represent every nonzero split")
-
     counts = np.floor(values * episode_count).astype(np.int64)
-    counts[nonzero_splits] = np.maximum(counts[nonzero_splits], 1)
-    while int(counts.sum()) > episode_count:
-        for index in nonzero_splits[np.argsort(counts[nonzero_splits])[::-1]]:
-            if counts[index] > 1:
-                counts[index] -= 1
-                break
     remainders = values * episode_count - np.floor(values * episode_count)
-    while int(counts.sum()) < episode_count:
-        for index in nonzero_splits[np.argsort(remainders[nonzero_splits])[::-1]]:
-            counts[index] += 1
-            if int(counts.sum()) == episode_count:
-                break
+    remaining = episode_count - int(counts.sum())
+    ranked_remainders = sorted(range(len(values)), key=lambda split_id: (-remainders[split_id], split_id))
+    for index in ranked_remainders[:remaining]:
+        counts[index] += 1
 
     shuffled = np.arange(episode_count, dtype=np.int64)
     np.random.default_rng(seed).shuffle(shuffled)
@@ -354,6 +343,8 @@ class ActionCacheWriter:
         _atomic_write_json(self.cache_dir / MANIFEST_NAME, self.manifest)
 
     def finalize(self) -> None:
+        if self._lock_fd is None:
+            raise RuntimeError("action cache writer is closed")
         try:
             sample_count = _positive_int(self.manifest, "sample_count")
             if _completed_samples(self.manifest, sample_count) != sample_count:
