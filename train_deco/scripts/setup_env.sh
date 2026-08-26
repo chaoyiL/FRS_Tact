@@ -73,6 +73,9 @@ VENV_PYTHON="${VENV_PATH}/bin/python"
   einops==0.8.1 \
   tqdm==4.67.1 \
   pytest==9.1.1 \
+  safetensors==0.5.3 \
+  "jax[cpu]>=0.4.30,<0.6" \
+  "flax>=0.10,<0.12" \
   --index-url "${PYPI_INDEX}"
 
 ALLOW_CPU="${ALLOW_CPU:-0}" "${VENV_PYTHON}" - <<'PY'
