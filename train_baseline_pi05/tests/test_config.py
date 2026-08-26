@@ -17,6 +17,20 @@ def test_default_yaml_locks_direct_decoder_contract():
     config = load_config(ROOT / "train_baseline_pi05/configs/train_baseline_pi05.yaml")
     assert config.source.action_horizon == 50
     assert config.source.action_dim == 20
+    assert config.source.paligemma_variant == "gemma_2b_lora"
+    assert config.source.action_expert_variant == "gemma_300m_lora"
+    assert config.source.use_quantile_norm is True
+    assert config.dataset.revision is None
+    assert config.dataset.rename_map == {
+        "observation.images.camera0": "observation.images.camera1",
+        "observation.images.camera1": "observation.images.camera2",
+    }
+    assert config.dataset.camera_map == {
+        "left_wrist_0_rgb": "observation.images.camera1",
+        "right_wrist_0_rgb": "observation.images.camera2",
+    }
+    assert config.dataset.frame_stride == 5
+    assert config.cache.action_batch_size == 64
     assert config.decoder.num_layers == 2
     assert config.decoder.d_model == 128
     assert config.decoder.tactile_keys == (

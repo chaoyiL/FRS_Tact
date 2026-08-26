@@ -41,6 +41,17 @@ def _path(value: object, name: str) -> Path:
     return Path(_string(value, name))
 
 
+def _nullable_string(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _string(value, name)
+
+
+def _string_mapping(value: object, name: str) -> dict[str, str]:
+    raw = _mapping(value, name)
+    return {_string(key, f"{name} key"): _string(item, f"{name}[{key!r}]") for key, item in raw.items()}
+
+
 def _integer(value: object, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"{name} must be an integer.")
@@ -79,7 +90,11 @@ def _tactile_keys(value: object, name: str) -> tuple[str, ...]:
 class DatasetConfig:
     repo_id: str
     root: Path
+    revision: str | None
     action_key: str
+    rename_map: dict[str, str]
+    camera_map: dict[str, str]
+    frame_stride: int
     train_fraction: float
     validation_fraction: float
     test_fraction: float
@@ -90,7 +105,11 @@ class DatasetConfig:
         return cls(
             repo_id=_string(_required(raw, "repo_id", "dataset"), "dataset.repo_id"),
             root=_path(_required(raw, "root", "dataset"), "dataset.root"),
+            revision=_nullable_string(raw.get("revision"), "dataset.revision"),
             action_key=_string(_required(raw, "action_key", "dataset"), "dataset.action_key"),
+            rename_map=_string_mapping(raw.get("rename_map", {}), "dataset.rename_map"),
+            camera_map=_string_mapping(raw.get("camera_map", {}), "dataset.camera_map"),
+            frame_stride=_positive_integer(raw.get("frame_stride", 1), "dataset.frame_stride"),
             train_fraction=_number(_required(raw, "train_fraction", "dataset"), "dataset.train_fraction"),
             validation_fraction=_number(
                 _required(raw, "validation_fraction", "dataset"), "dataset.validation_fraction"
@@ -109,6 +128,9 @@ class SourcePolicyConfig:
     sample_steps: int
     action_horizon: int
     action_dim: int
+    paligemma_variant: str
+    action_expert_variant: str
+    use_quantile_norm: bool
     allow_download: bool
 
     @classmethod
@@ -125,6 +147,15 @@ class SourcePolicyConfig:
                 _required(raw, "action_horizon", "source"), "source.action_horizon"
             ),
             action_dim=_positive_integer(_required(raw, "action_dim", "source"), "source.action_dim"),
+            paligemma_variant=_string(
+                _required(raw, "paligemma_variant", "source"), "source.paligemma_variant"
+            ),
+            action_expert_variant=_string(
+                _required(raw, "action_expert_variant", "source"), "source.action_expert_variant"
+            ),
+            use_quantile_norm=_boolean(
+                _required(raw, "use_quantile_norm", "source"), "source.use_quantile_norm"
+            ),
             allow_download=_boolean(_required(raw, "allow_download", "source"), "source.allow_download"),
         )
 
@@ -152,12 +183,14 @@ class TactileConfig:
 class CacheConfig:
     action_root: Path
     tactile_root: Path
+    action_batch_size: int = 64
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CacheConfig":
         return cls(
             action_root=_path(_required(raw, "action_root", "cache"), "cache.action_root"),
             tactile_root=_path(_required(raw, "tactile_root", "cache"), "cache.tactile_root"),
+            action_batch_size=_positive_integer(raw.get("action_batch_size", 64), "cache.action_batch_size"),
         )
 
 

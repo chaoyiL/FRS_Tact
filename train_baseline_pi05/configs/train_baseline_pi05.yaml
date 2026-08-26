@@ -1,7 +1,15 @@
 dataset:
   repo_id: KaiyueChen/two_tubes_03
   root: /workspace/lerobot_v30/KaiyueChen/two_tubes_03
+  revision: null
   action_key: actions
+  rename_map:
+    observation.images.camera0: observation.images.camera1
+    observation.images.camera1: observation.images.camera2
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
+  frame_stride: 5
   train_fraction: 0.8
   validation_fraction: 0.1
   test_fraction: 0.1
@@ -15,6 +23,9 @@ source:
   sample_steps: 10
   action_horizon: 50
   action_dim: 20
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
+  use_quantile_norm: true
   allow_download: false
 
 tactile:
@@ -25,6 +36,7 @@ tactile:
 cache:
   action_root: /workspace/baseline_pi05/action_cache
   tactile_root: /workspace/baseline_pi05/tactile_embedding_cache
+  action_batch_size: 64
 
 decoder:
   output: /workspace/baseline_pi05/decoder

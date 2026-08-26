@@ -19,18 +19,15 @@ def fixed_noise(batch_size: int, *, seed: int, horizon: int, action_dim: int):
     return jnp.broadcast_to(one, (batch_size, horizon, action_dim))
 
 
-def sample_coarse_actions(model: Any, params: Any, observation: Any, noise: Any, num_steps: int) -> np.ndarray:
+def sample_coarse_actions(model: Any, rng: Any, observation: Any, noise: Any, num_steps: int) -> np.ndarray:
     """Run native Pi0.5 forward Euler sampling from supplied fixed noise."""
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
     sampler = getattr(model, "sample_actions", None)
     if not callable(sampler):
         raise TypeError("Pi0.5 model must provide sample_actions")
-    try:
-        actions = sampler(params, observation, noise=noise, num_steps=num_steps)
-    except TypeError:
-        # The native NNX module takes its RNG as the first positional argument.
-        actions = sampler(params, observation, noise=noise, num_steps=num_steps)
+    # Native Pi0.5 accepts an RNG first; supplied noise makes that RNG inert for this call.
+    actions = sampler(rng, observation, noise=noise, num_steps=num_steps)
     result = np.asarray(actions, dtype=np.float32)
     if result.ndim != 3 or not np.isfinite(result).all():
         raise ValueError("Pi0.5 sample_actions must return finite [batch, horizon, action] actions")

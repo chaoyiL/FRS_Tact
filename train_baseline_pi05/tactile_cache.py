@@ -70,7 +70,7 @@ def _default_encoder(checkpoint: Path) -> Callable[[np.ndarray], np.ndarray]:
     from .tactile_encoder.resnet import encode_resnet18
     import jax.numpy as jnp
 
-    variables = load_tactile_encoder(checkpoint).params.get("encoder")
+    variables = load_tactile_encoder(checkpoint).params.get("tactile_resnet")
     if not isinstance(variables, dict):
         raise ValueError("encoder checkpoint must contain the shared ResNet18 subtree")
     def encode(images: np.ndarray) -> np.ndarray:

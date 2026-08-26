@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from .action_cache import ActionCacheWriter, SampleRecord, build_records
+from .config import TACTILE_KEYS
 from .source_model import fixed_noise, load_pi05_source_model, sample_coarse_actions, validate_pi05_model
 
 
@@ -51,13 +52,16 @@ def _default_dependencies(config: Any) -> dict[str, Any]:
     processor = Pi05SampleProcessor(
         dataset_repo_id=dataset_info.repo_id, dataset_root=dataset_info.root,
         dataset_revision=getattr(dataset_info, "revision", None), action_key=dataset_info.action_key,
-        camera_map=getattr(dataset_info, "camera_map", {}),
+        rename_map=dataset_info.rename_map, camera_map=dataset_info.camera_map,
         state_stats=load_norm_stats(source_info.norm_stats_dir, source_info.norm_stats_asset_id)["state"],
         action_stats=load_norm_stats(source_info.norm_stats_dir, source_info.norm_stats_asset_id)["actions"],
-        action_horizon=source_info.action_horizon,
+        use_quantile_norm=source_info.use_quantile_norm, action_dim=source_info.action_dim,
+        action_horizon=source_info.action_horizon, paligemma_variant=source_info.paligemma_variant,
+        action_expert_variant=source_info.action_expert_variant,
     )
     model, width = load_pi05_source_model(source_info.checkpoint, config=processor.config)
-    return {"metadata": metadata, "dataset": dataset, "processor": processor, "model": model, "params": None, "source_width": width}
+    import jax
+    return {"metadata": metadata, "dataset": dataset, "processor": processor, "model": model, "params": jax.random.key(source_info.seed), "source_width": width}
 
 
 def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = None) -> Path:
@@ -80,20 +84,45 @@ def prepare_action_cache(config: Any, dependencies: Mapping[str, Any] | None = N
     if source_width < action_dim:
         raise ValueError("source model is narrower than the decoder action width")
     action_key = str(_field(config, "dataset.action_key", "actions"))
+    fractions = [float(_field(config, "dataset.train_fraction", 0.8)), float(_field(config, "dataset.validation_fraction", 0.1)), float(_field(config, "dataset.test_fraction", 0.1))]
+    frame_stride = int(_field(config, "dataset.frame_stride", 1))
     manifest = {
-        "dataset_identity": {"repo_id": str(_field(config, "dataset.repo_id", "injected")), "revision": _field(config, "dataset.revision")},
-        "split": {"seed": int(_field(config, "dataset.split_seed", 0))},
-        "source_checkpoint": str(_field(config, "source.checkpoint", "injected")), "norm_stats": {},
+        "dataset_identity": {"repo_id": str(_field(config, "dataset.repo_id", "injected")), "root": str(_field(config, "dataset.root", "injected")), "revision": _field(config, "dataset.revision")},
+        "split": {"seed": int(_field(config, "dataset.split_seed", 0)), "fractions": fractions, "frame_stride": frame_stride},
+        "source_checkpoint": str(_field(config, "source.checkpoint", "injected")),
+        "source_variant": {"paligemma_variant": _field(config, "source.paligemma_variant"), "action_expert_variant": _field(config, "source.action_expert_variant")},
+        "norm_stats": {"dir": str(_field(config, "source.norm_stats_dir")) if _field(config, "source.norm_stats_dir") is not None else None, "asset_id": _field(config, "source.norm_stats_asset_id"), "use_quantile_norm": bool(_field(config, "source.use_quantile_norm", True))},
         "sample_steps": int(getattr(source, "sample_steps", 10)), "noise_seed": int(getattr(source, "seed", 0)),
         "source_model_action_width": source_width, "decoder_action_width": action_dim, "action_space": "normalized_pi05",
     }
-    batch_size = int(deps.get("batch_size", 1))
-    with ActionCacheWriter.create(output, sample_count=len(records), horizon=horizon, action_dim=action_dim, manifest=manifest) as writer:
-        for start in range(0, len(records), batch_size):
+    batch_size = int(deps.get("batch_size", _field(config, "cache.action_batch_size", 64)))
+    manifest_path = output / "manifest.json"
+    if not manifest_path.exists():
+        writer = ActionCacheWriter.create(output, sample_count=len(records), horizon=horizon, action_dim=action_dim, manifest=manifest)
+    else:
+        status = __import__("json").load(manifest_path.open(encoding="utf-8")).get("status")
+        if status == "incomplete":
+            writer = ActionCacheWriter.resume(output, manifest)
+        elif status == "complete":
+            from .action_cache import ActionCache
+            cache = ActionCache.open(output)
+            if cache.manifest.get("immutable_manifest") != {
+                "cache_version": 1, "sample_count": len(records), "horizon": horizon, "action_dim": action_dim,
+                **manifest,
+            }:
+                raise ValueError("complete action cache does not match requested producer contract")
+            return output
+        else:
+            raise ValueError("action cache manifest has an invalid status")
+    with writer:
+        for start in range(int(writer.manifest["completed_samples"]), len(records), batch_size):
             batch = records[start : start + batch_size]
             observations, experts, valid = [], [], []
             for record in batch:
-                sample = dict(dataset[record.dataset_index])
+                sample = {
+                    key: value for key, value in dict(dataset[record.dataset_index]).items()
+                    if key not in TACTILE_KEYS
+                }
                 action_window, row_valid = _window(dataset, record, metadata, action_key, horizon)
                 sample[action_key] = action_window
                 observation, expert, _ = processor.prepare_sample(sample)
