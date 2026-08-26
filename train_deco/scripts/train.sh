@@ -12,6 +12,10 @@ MODE="local-smoke"
 MANIFEST=""
 RUN_ID="${RUN_ID:-}"
 RESUME_FROM="${RESUME_FROM:-}"
+STAGE1_CHECKPOINT="${STAGE1_CHECKPOINT:-}"
+TACTILE_ENCODER_CHECKPOINT="${TACTILE_ENCODER_CHECKPOINT:-}"
+TACTILE_ENCODER_CACHE="${TACTILE_ENCODER_CACHE:-${PROJECT_ROOT}/checkpoints/deco/tactile_encoder_cache}"
+STAGE=1
 DRY_RUN=0
 
 usage() {
@@ -20,16 +24,22 @@ usage() {
   bash scripts/pick_tube_vision/03_train.sh --mode local-smoke [选项]
   bash scripts/pick_tube_vision/03_train.sh --mode local-train [选项]
   bash scripts/pick_tube_vision/03_train.sh --mode server-train [选项]
+  bash scripts/pick_tube_vision/03_train.sh --mode local-stage2 [选项]
+  bash scripts/pick_tube_vision/03_train.sh --mode server-stage2 [选项]
 
 模式：
   local-smoke   本机 RTX 4090 单卡最小链路：16 samples、1 epoch、小模型
   local-train   本机 RTX 4090 单卡正式参数
   server-train  服务器第 3、4 张卡（CUDA 索引 2,3），torchrun/DDP 两进程
+  local-stage2  本机单卡 Stage2，从 Stage1 和触觉编码器初始化
+  server-stage2 服务器双卡 Stage2，rank 0 自动转换触觉编码器
 
 选项：
   --manifest PATH    02_prepare_data.sh 生成的 manifest
   --run-id ID        输出运行名；默认自动加入时间戳
   --resume-from PATH 从 checkpoint 恢复
+  --stage1-checkpoint PATH          Stage1 训练 checkpoint
+  --tactile-encoder-checkpoint PATH JAX目录或已转换 safetensors
   --dry-run          只打印命令，不启动训练
   -h, --help         显示帮助
 
@@ -57,8 +67,20 @@ while [[ $# -gt 0 ]]; do
       RUN_ID="$2"
       shift 2
       ;;
-    --resume-from)
+    --resume-from|--resume)
       RESUME_FROM="$2"
+      shift 2
+      ;;
+    --stage1-checkpoint)
+      STAGE1_CHECKPOINT="$2"
+      shift 2
+      ;;
+    --tactile-encoder-checkpoint)
+      TACTILE_ENCODER_CHECKPOINT="$2"
+      shift 2
+      ;;
+    --tactile-encoder-cache)
+      TACTILE_ENCODER_CACHE="$2"
       shift 2
       ;;
     --dry-run)
@@ -123,9 +145,35 @@ case "${MODE}" in
     LAUNCH=("${PYTHON_BIN}" -m train_deco.train)
     EXTRA_ARGS=()
     ;;
-  server-train)
+  local-stage2)
+    STAGE=2
+    MANIFEST="${MANIFEST:-${PACKAGE_ROOT}/data_manifests/pick_tube_local.json}"
+    RUN_ID="${RUN_ID:-pick_tube_stage2_local_${TIMESTAMP}}"
+    OUTPUT_DIR="${OUTPUT_DIR:-${PACKAGE_ROOT}/outputs}"
+    BATCH_SIZE="${BATCH_SIZE:-8}"
+    WORKERS="${WORKERS:-4}"
+    EPOCHS="${EPOCHS:-100}"
+    ACTION_CHUNK_SIZE="${ACTION_CHUNK_SIZE:-32}"
+    HIDDEN_DIM="${HIDDEN_DIM:-512}"
+    LAYERS="${LAYERS:-6}"
+    HEADS="${HEADS:-8}"
+    IMAGE_SIZE="${IMAGE_SIZE:-256}"
+    ROPE_HEIGHT="${ROPE_HEIGHT:-256}"
+    ROPE_WIDTH="${ROPE_WIDTH:-256}"
+    INFERENCE_STEPS="${INFERENCE_STEPS:-5}"
+    SAVE_EVERY="${SAVE_EVERY:-10}"
+    CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+    LAUNCH=("${PYTHON_BIN}" -m train_deco.train)
+    EXTRA_ARGS=()
+    ;;
+  server-train|server-stage2)
+    if [[ "${MODE}" == "server-stage2" ]]; then
+      STAGE=2
+      RUN_ID="${RUN_ID:-pick_tube_stage2_01_06_ddp2_${TIMESTAMP}}"
+    else
+      RUN_ID="${RUN_ID:-pick_tube_vision_01_06_ddp2_${TIMESTAMP}}"
+    fi
     MANIFEST="${MANIFEST:-${PACKAGE_ROOT}/data_manifests/pick_tube_01_06.json}"
-    RUN_ID="${RUN_ID:-pick_tube_vision_01_06_ddp2_${TIMESTAMP}}"
     OUTPUT_DIR="${OUTPUT_DIR:-/DATA/ljl/substage/deco_runs}"
     BATCH_SIZE="${BATCH_SIZE:-16}"
     WORKERS="${WORKERS:-4}"
@@ -144,7 +192,7 @@ case "${MODE}" in
     EXTRA_ARGS=()
     ;;
   *)
-    echo "--mode 只能是 local-smoke、local-train 或 server-train，当前为：${MODE}" >&2
+    echo "--mode 只能是 local-smoke、local-train、local-stage2、server-train 或 server-stage2，当前为：${MODE}" >&2
     exit 2
     ;;
 esac
@@ -183,6 +231,7 @@ COMMAND=(
   --dataset-manifest "${MANIFEST}"
   --output-dir "${OUTPUT_DIR}"
   --run-id "${RUN_ID}"
+  --stage "${STAGE}"
   --epochs "${EPOCHS}"
   --batch-size "${BATCH_SIZE}"
   --workers "${WORKERS}"
@@ -222,9 +271,21 @@ COMMAND=(
 )
 
 if [[ -n "${RESUME_FROM}" ]]; then
-  COMMAND+=(--resume-from "${RESUME_FROM}" --resume-mode exact)
+  COMMAND+=(--resume "${RESUME_FROM}" --resume-mode exact)
 fi
 
+
+if [[ ${STAGE} -eq 2 && -z "${RESUME_FROM}" ]]; then
+  if [[ -z "${STAGE1_CHECKPOINT}" || -z "${TACTILE_ENCODER_CHECKPOINT}" ]]; then
+    echo "Stage2 需要 --stage1-checkpoint 和 --tactile-encoder-checkpoint" >&2
+    exit 2
+  fi
+  COMMAND+=(
+    --stage1-checkpoint "${STAGE1_CHECKPOINT}"
+    --tactile-encoder-checkpoint "${TACTILE_ENCODER_CHECKPOINT}"
+    --tactile-encoder-cache "${TACTILE_ENCODER_CACHE}"
+  )
+fi
 printf 'CUDA_VISIBLE_DEVICES=%q ' "${CUDA_VISIBLE_DEVICES}"
 printf '%q ' "${COMMAND[@]}"
 printf '\n'
@@ -238,7 +299,7 @@ if [[ ! -f "${MANIFEST}" ]]; then
   echo "请先运行 02_prepare_data.sh。" >&2
   exit 1
 fi
-if [[ "${MODE}" == "server-train" ]]; then
+if [[ "${MODE}" == "server-train" || "${MODE}" == "server-stage2" ]]; then
   if [[ ! -x "${TORCHRUN_BIN}" ]]; then
     echo "找不到 torchrun：${TORCHRUN_BIN}" >&2
     exit 1

@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import random
 from collections.abc import Iterator, Sized
+from typing import Any
 
 import numpy as np
 import torch
@@ -204,6 +205,108 @@ def optimizer_parameter_groups(
     return groups, backbone_parameters
 
 
+def _is_stage2_trainable_name(name: str) -> bool:
+    return (
+        name == "sensor_embeddings.weight"
+        or (
+            name.startswith("mmattn.")
+            and (
+                ".tactile_key." in name
+                or ".tactile_value." in name
+                or name.endswith(".tactile_gate")
+                or "_pi." in name
+            )
+        )
+    )
+
+
+def stage2_optimizer_parameter_groups(
+    model: nn.Module,
+    learning_rate: float,
+    weight_decay: float,
+) -> list[dict[str, Any]]:
+    """Build AdamW groups from the exact Stage2 trainable allowlist only."""
+
+    if learning_rate <= 0:
+        raise ValueError("Stage2 learning rate must be positive")
+    if weight_decay < 0:
+        raise ValueError("Stage2 weight decay must be non-negative")
+    trainable = [
+        (name, parameter)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    if not trainable:
+        raise ValueError("Stage2 trainable parameter set is empty")
+    forbidden = [
+        name for name, _ in trainable if not _is_stage2_trainable_name(name)
+    ]
+    if forbidden:
+        raise ValueError(
+            "Stage2 optimizer received Stage1/tactile-encoder parameters: "
+            f"{forbidden}"
+        )
+
+    buckets: dict[str, list[nn.Parameter]] = {
+        "policy_decay": [],
+        "policy_no_decay": [],
+    }
+    for name, parameter in trainable:
+        bucket = (
+            "policy_no_decay"
+            if parameter.ndim <= 1 or name.endswith(".bias")
+            else "policy_decay"
+        )
+        buckets[bucket].append(parameter)
+    groups = []
+    for name, parameters in buckets.items():
+        if not parameters:
+            continue
+        groups.append(
+            {
+                "group_name": name,
+                "params": parameters,
+                "lr": learning_rate,
+                "weight_decay": 0.0 if name.endswith("no_decay") else weight_decay,
+            }
+        )
+    optimized = {id(parameter) for group in groups for parameter in group["params"]}
+    expected = {id(parameter) for _, parameter in trainable}
+    if optimized != expected:
+        raise ValueError(
+            "Stage2 optimizer groups do not cover every trainable parameter exactly once"
+        )
+    return groups
+
+
+def stage2_gradient_diagnostics(model: nn.Module, parameter_report) -> dict[str, Any]:
+    """Return cheap gate and gradient-norm diagnostics for the Stage2 boundary."""
+
+    named_parameters = dict(model.named_parameters())
+
+    def category_norm(categories: dict[str, tuple[str, ...]]) -> float:
+        squared = 0.0
+        for names in categories.values():
+            for name in names:
+                parameter = named_parameters.get(name)
+                if parameter is not None and parameter.grad is not None:
+                    squared += float(parameter.grad.detach().float().square().sum())
+        return math.sqrt(squared)
+
+    gates = {
+        name: float(parameter.detach().float().item())
+        for name, parameter in named_parameters.items()
+        if name.endswith(".tactile_gate")
+    }
+    return {
+        "gate_values": gates,
+        "gradient_norms": {
+            "trainable": category_norm(parameter_report.trainable_by_category),
+            "frozen": category_norm(parameter_report.frozen_by_category),
+        },
+    }
+
+
 def optimizer_partition_lr(optimizer: torch.optim.Optimizer, partition: str) -> float:
     """Return the common LR for one logical optimizer partition."""
 
@@ -290,6 +393,13 @@ def seed_training_rng(seed: int, rank: int) -> None:
 def set_backbone_batch_norm_eval(model: nn.Module) -> None:
     """Keep pretrained backbone BatchNorm statistics fixed for small local batches."""
 
-    for module in model.img_encoder.modules():
-        if isinstance(module, nn.modules.batchnorm._BatchNorm):
-            module.eval()
+    backbone_names = ["img_encoder"]
+    if getattr(model, "tactile_image_mode", False) or hasattr(model, "tactile_encoder"):
+        backbone_names.append("tactile_encoder")
+    for backbone_name in backbone_names:
+        backbone = getattr(model, backbone_name, None)
+        if backbone is None:
+            continue
+        for module in backbone.modules():
+            if isinstance(module, nn.modules.batchnorm._BatchNorm):
+                module.eval()

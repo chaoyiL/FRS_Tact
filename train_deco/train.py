@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -27,12 +28,22 @@ from .input_adapter import (
     augment_training_images,
     letterbox_and_normalize,
     select_deco_observation,
+    letterbox_tactile_images,
     validate_augmentation_config,
 )
+from .lerobot_vision_dataset import TACTILE_NAMES
 from .metrics import MetricsLogger
-from .model_factory import MODEL_TYPE, build_model, observation_indices
+from .model_factory import (
+    MODEL_TYPE,
+    STAGE2_MODEL_TYPE,
+    build_model,
+    build_stage2_model,
+    observation_indices,
+)
 from .preprocessed_dataset import PreprocessedDECODataset, verify_preprocessed_dataset
 from .resume import validate_resume_config
+from .stage2_initialization import configure_stage2_trainability, initialize_stage2_from_stage1
+from .tactile_encoder_conversion import ResolvedTactileEncoder, load_tactile_encoder_weights
 from .training_utils import (
     DistributedEvalSampler,
     backbone_cosine_multiplier,
@@ -46,8 +57,13 @@ from .training_utils import (
     seed_training_rng,
     set_backbone_batch_norm_eval,
     warmup_cosine_multiplier,
+    stage2_gradient_diagnostics,
+    stage2_optimizer_parameter_groups,
 )
 
+
+
+STAGE2_CHECKPOINT_SCHEMA_VERSION = 1
 
 def is_dist() -> bool:
     return int(os.environ.get("WORLD_SIZE", "1")) > 1
@@ -186,9 +202,186 @@ def create_training_datasets(args):
             split_seed=args.episode_split_seed,
             train_limit=args.limit_samples,
             val_limit=val_limit,
+            include_tactile=getattr(args, "stage", 1) == 2,
         )
     raise ValueError(f"Unsupported dataset format: {args.dataset_format!r}")
 
+
+
+def _sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_tactile_encoder_distributed(
+    source: str | Path,
+    cache_root: str | Path,
+    *,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    resolver=None,
+) -> ResolvedTactileEncoder:
+    """Resolve once on rank zero, then broadcast one immutable artifact contract."""
+
+    payload = [None]
+    if rank == 0:
+        try:
+            if resolver is None:
+                from .tactile_encoder_conversion import resolve_tactile_encoder
+
+                resolver = resolve_tactile_encoder
+            artifact = resolver(source, cache_root)
+            payload[0] = {
+                "ok": True,
+                "weights_path": str(artifact.weights_path),
+                "metadata_path": str(artifact.metadata_path),
+                "source_sha256": artifact.source_sha256,
+                "architecture": artifact.architecture,
+                "embedding_dim": artifact.embedding_dim,
+            }
+        except Exception as error:
+            payload[0] = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+    if world_size > 1:
+        dist.broadcast_object_list(payload, src=0, device=device)
+        dist.barrier()
+    result = payload[0]
+    if not isinstance(result, dict) or not result.get("ok"):
+        error = result.get("error", "unknown conversion error") if isinstance(result, dict) else "missing conversion result"
+        raise RuntimeError(f"Distributed tactile encoder resolution failed: {error}")
+    return ResolvedTactileEncoder(
+        weights_path=Path(result["weights_path"]),
+        metadata_path=Path(result["metadata_path"]),
+        source_sha256=str(result["source_sha256"]),
+        architecture=str(result["architecture"]),
+        embedding_dim=int(result["embedding_dim"]),
+    )
+
+
+def _parameter_categories(parameter_report) -> dict[str, dict[str, list[str]]]:
+    return {
+        "trainable": {
+            category: list(names)
+            for category, names in parameter_report.trainable_by_category.items()
+        },
+        "frozen": {
+            category: list(names)
+            for category, names in parameter_report.frozen_by_category.items()
+        },
+    }
+
+
+def build_stage2_checkpoint_metadata(
+    model,
+    parameter_report,
+    *,
+    stage1_checkpoint: str | Path,
+    tactile_artifact: ResolvedTactileEncoder,
+    tactile_adapter_rank: int,
+) -> dict:
+    artifact_metadata = json.loads(
+        tactile_artifact.metadata_path.read_text(encoding="utf-8")
+    )
+    return {
+        "model_type": STAGE2_MODEL_TYPE,
+        "tactile_field_order": list(TACTILE_NAMES),
+        "tactile_encoder": {
+            "source_sha256": tactile_artifact.source_sha256,
+            "artifact_sha256": artifact_metadata.get("weights_sha256")
+            or _sha256_file(tactile_artifact.weights_path),
+            "artifact_path": str(tactile_artifact.weights_path.resolve()),
+            "metadata_path": str(tactile_artifact.metadata_path.resolve()),
+            "architecture": tactile_artifact.architecture,
+            "embedding_dim": tactile_artifact.embedding_dim,
+        },
+        "tactile_adapter_rank": int(tactile_adapter_rank),
+        "gate_values": stage2_gradient_diagnostics(model, parameter_report)["gate_values"],
+        "parameter_categories": _parameter_categories(parameter_report),
+        "parameter_counts": {
+            "total": parameter_report.total_parameters,
+            "trainable": parameter_report.trainable_parameters,
+        },
+        "stage1_checkpoint": {
+            "path": str(Path(stage1_checkpoint).expanduser().resolve()),
+            "sha256": _sha256_file(stage1_checkpoint),
+        },
+    }
+
+
+def validate_stage2_resume_checkpoint(checkpoint: dict) -> dict:
+    config = checkpoint.get("config", {})
+    if (
+        checkpoint.get("stage") != 2
+        or checkpoint.get("model_type") != STAGE2_MODEL_TYPE
+        or config.get("model_type") != STAGE2_MODEL_TYPE
+    ):
+        raise ValueError("Stage2 exact resume rejected a Stage1 or non-Stage2 checkpoint")
+    if checkpoint.get("checkpoint_schema_version") != STAGE2_CHECKPOINT_SCHEMA_VERSION:
+        raise ValueError("Stage2 resume checkpoint schema/version is incompatible")
+    metadata = checkpoint.get("stage2_metadata")
+    if not isinstance(metadata, dict):
+        raise ValueError("Stage2 resume checkpoint is missing stage2_metadata")
+    required = {
+        "model_type", "tactile_field_order", "tactile_encoder",
+        "tactile_adapter_rank", "gate_values", "parameter_categories",
+        "stage1_checkpoint",
+    }
+    missing = sorted(required - set(metadata))
+    if missing:
+        raise ValueError(f"Stage2 resume checkpoint metadata is missing: {missing}")
+    if metadata["model_type"] != STAGE2_MODEL_TYPE:
+        raise ValueError("Stage2 resume metadata model_type is incompatible")
+    if metadata["tactile_field_order"] != list(TACTILE_NAMES):
+        raise ValueError("Stage2 resume tactile field order is incompatible")
+    return metadata
+
+
+def restore_stage2_training_state(
+    checkpoint: dict,
+    *,
+    model,
+    optimizer,
+    scheduler,
+    scaler,
+    current_config: dict,
+    world_size: int,
+    rank: int,
+) -> dict:
+    """Strictly restore every stateful component of an exact Stage2 resume."""
+
+    metadata = validate_stage2_resume_checkpoint(checkpoint)
+    validate_resume_config(
+        checkpoint.get("config", {}),
+        current_config,
+        resume_mode="exact",
+        expected_training_state_version=3,
+    )
+    if len(checkpoint.get("rng_states", [])) != world_size:
+        raise ValueError("Cannot restore per-rank RNG with a different world size")
+    model.load_state_dict(checkpoint["model"], strict=True)
+    optimizer.load_state_dict(checkpoint["optimizer"])
+    scheduler.load_state_dict(checkpoint["scheduler"])
+    scaler.load_state_dict(checkpoint["scaler"])
+    global_step = int(checkpoint.get("global_step", 0))
+    if scheduler.last_epoch != global_step:
+        raise ValueError(
+            "Checkpoint scheduler/global_step mismatch: "
+            f"{scheduler.last_epoch} != {global_step}"
+        )
+    restore_rng_state(checkpoint["rng_states"][rank])
+    return {
+        "epoch": int(checkpoint["epoch"]),
+        "global_step": global_step,
+        "best_val": float(checkpoint["best_val"]),
+        "patience_best_val": float(checkpoint.get("patience_best_val", checkpoint["best_val"])),
+        "stale_epochs": int(checkpoint.get("stale_epochs", 0)),
+        "stats": checkpoint["stats"],
+        "config": checkpoint["config"],
+        "stage2_metadata": metadata,
+    }
 
 def make_loader(dataset, batch_size, workers, rank, world_size, shuffle, seed):
     sampler = None
@@ -306,13 +499,16 @@ def run_epoch(
     validation_seed=12345,
     rank=0,
     augmentation_config=None,
+    stage=1,
+    stage2_parameter_report=None,
 ):
     model.train(train)
     raw_model = model.module if isinstance(model, DDP) else model
-    if train and backbone_bn_eval:
+    if train and (backbone_bn_eval or stage == 2):
         set_backbone_batch_norm_eval(raw_model)
     totals = torch.zeros(3, dtype=torch.float64, device=device)
     interval = torch.zeros(3, dtype=torch.float64, device=device)
+    stage2_diagnostics = {}
     total_batches = len(loader)
     devices = [device.index] if device.type == "cuda" else []
     rng_context = nullcontext() if train else torch.random.fork_rng(devices=devices)
@@ -330,6 +526,12 @@ def run_epoch(
                 if train:
                     images = augment_training_images(images, augmentation_config)
                 images = letterbox_and_normalize(images, image_size)
+                tactile_images = None
+                if stage == 2:
+                    tactile_images = letterbox_tactile_images(
+                        batch["tactile_images"].to(device, non_blocking=True),
+                        (224, 224),
+                    )
                 actions = batch["action"].to(device, non_blocking=True)
                 is_pad = batch["is_pad"].to(device, non_blocking=True)
                 task_index = (
@@ -339,10 +541,11 @@ def run_epoch(
                 if train:
                     optimizer.zero_grad(set_to_none=True)
                     step_policy_lr = optimizer_partition_lr(optimizer, "policy")
-                    step_backbone_lr = optimizer_partition_lr(
-                        optimizer, "backbone"
+                    step_backbone_lr = (
+                        0.0 if stage == 2
+                        else optimizer_partition_lr(optimizer, "backbone")
                     )
-                    backbone_frozen = global_step < backbone_freeze_steps
+                    backbone_frozen = stage == 2 or global_step < backbone_freeze_steps
                 with torch.amp.autocast("cuda", enabled=device.type == "cuda"):
                     camera_images = (
                         (images[:, 0], images[:, 1])
@@ -350,10 +553,17 @@ def run_epoch(
                         else (images[:, 0], images[:, 1], images[:, 2])
                     )
                     if train:
-                        predicted, noise = model(
-                            *camera_images, obs=observation,
-                            act=actions, task_idx=task_index, training=True,
-                        )
+                        if stage == 2:
+                            predicted, noise = model(
+                                *camera_images, obs=observation, act=actions,
+                                task_idx=task_index, training=True,
+                                tactile_images=tactile_images,
+                            )
+                        else:
+                            predicted, noise = model(
+                                *camera_images, obs=observation,
+                                act=actions, task_idx=task_index, training=True,
+                            )
                         target = noise - actions
                         squared_sum, absolute_sum, element_count = masked_error_sums(
                             predicted,
@@ -377,15 +587,26 @@ def run_epoch(
                             squared_sum * world_size / global_element_count
                         )
                     else:
-                        prediction = model(
-                            *camera_images, obs=observation,
-                            task_idx=task_index, training=False,
-                        )
+                        if stage == 2:
+                            prediction = model(
+                                *camera_images, obs=observation,
+                                task_idx=task_index, training=False,
+                                tactile_images=tactile_images,
+                            )
+                        else:
+                            prediction = model(
+                                *camera_images, obs=observation,
+                                task_idx=task_index, training=False,
+                            )
                         squared_sum, absolute_sum, element_count = masked_error_sums(
                             prediction, actions, is_pad
                         )
                 if train:
                     scaler.scale(loss).backward()
+                    if stage == 2 and stage2_parameter_report is not None:
+                        stage2_diagnostics = stage2_gradient_diagnostics(
+                            raw_model, stage2_parameter_report
+                        )
                     if backbone_frozen:
                         for parameter in backbone_parameters:
                             parameter.grad = None
@@ -417,6 +638,7 @@ def run_epoch(
                                 "lr": step_policy_lr,
                                 "backbone_lr": step_backbone_lr,
                                 "backbone_frozen": backbone_frozen,
+                                **stage2_diagnostics,
                                 **record,
                             })
                         interval.zero_()
@@ -427,13 +649,35 @@ def run_epoch(
                 "last_lr": step_policy_lr,
                 "last_backbone_lr": step_backbone_lr,
                 "last_backbone_frozen": backbone_frozen,
+                **stage2_diagnostics,
             }
         )
     return metrics, global_step
 
 
-def main():
+def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--stage", type=int, choices=(1, 2),
+        default=int(os.environ.get("DECO_STAGE", "1")),
+    )
+    parser.add_argument(
+        "--stage1-checkpoint", default=os.environ.get("STAGE1_CHECKPOINT")
+    )
+    parser.add_argument(
+        "--tactile-encoder-checkpoint",
+        default=os.environ.get("TACTILE_ENCODER_CHECKPOINT"),
+    )
+    parser.add_argument(
+        "--tactile-encoder-cache",
+        default=os.environ.get(
+            "TACTILE_ENCODER_CACHE", "checkpoints/deco/tactile_encoder_cache"
+        ),
+    )
+    parser.add_argument(
+        "--tactile-adapter-rank", type=int,
+        default=int(os.environ.get("TACTILE_ADAPTER_RANK", "32")),
+    )
     parser.add_argument("--dataset-dir", default=os.environ.get("PREPROCESSED_DATASET_DIR"))
     parser.add_argument(
         "--dataset-manifest",
@@ -462,7 +706,10 @@ def main():
     )
     parser.add_argument("--output-dir", default=os.environ.get("OUTPUT_DIR", "/workspace/output"))
     parser.add_argument("--run-id", default=os.environ.get("RUN_ID"))
-    parser.add_argument("--resume-from", default=os.environ.get("RESUME_FROM"))
+    parser.add_argument(
+        "--resume", "--resume-from", dest="resume_from",
+        default=os.environ.get("RESUME_FROM"),
+    )
     parser.add_argument(
         "--resume-mode",
         choices=("exact", "finetune"),
@@ -625,7 +872,35 @@ def main():
     )
     parser.add_argument("--torchscript-image-height", type=int, default=int(os.environ.get("TORCHSCRIPT_IMAGE_HEIGHT", "208")))
     parser.add_argument("--torchscript-image-width", type=int, default=int(os.environ.get("TORCHSCRIPT_IMAGE_WIDTH", "320")))
-    args = parser.parse_args()
+    return parser
+
+
+def validate_stage_arguments(args) -> None:
+    if args.tactile_adapter_rank <= 0:
+        raise ValueError("--tactile-adapter-rank must be positive")
+    if args.stage1_checkpoint and args.resume_from:
+        raise ValueError("--stage1-checkpoint and --resume are mutually exclusive")
+    if args.stage == 1:
+        return
+    if args.resume_from:
+        if args.resume_mode != "exact":
+            raise ValueError("Stage2 supports exact --resume only")
+        if args.dataset_format != "lerobot-v21":
+            raise ValueError("Stage2 currently requires --dataset-format lerobot-v21")
+        return
+    if not args.stage1_checkpoint:
+        raise ValueError("Fresh Stage2 training requires --stage1-checkpoint")
+    if not args.tactile_encoder_checkpoint:
+        raise ValueError(
+            "Fresh Stage2 training requires --tactile-encoder-checkpoint"
+        )
+    if args.dataset_format != "lerobot-v21":
+        raise ValueError("Stage2 currently requires --dataset-format lerobot-v21")
+
+
+def main(argv=None):
+    args = build_argument_parser().parse_args(argv)
+    validate_stage_arguments(args)
     augmentation_config = augmentation_config_from_args(args)
     dataset_source = training_dataset_source(args)
     if args.action_chunk_size is not None and args.action_chunk_size <= 0:
@@ -749,7 +1024,7 @@ def main():
     backbone_freeze_steps = args.backbone_freeze_epochs * steps_per_epoch
 
     config = vars(args) | {
-        "model_type": MODEL_TYPE,
+        "model_type": STAGE2_MODEL_TYPE if args.stage == 2 else MODEL_TYPE,
         "source_obs_dim": int(contract["obs_dim"]),
         "obs_dim": action_dim,
         "action_dim": action_dim,
@@ -769,6 +1044,7 @@ def main():
         "statistics_source": contract.get("statistics_source"),
         "world_size": world_size,
         "camera_names": contract["camera_names"],
+        "tactile_field_order": list(TACTILE_NAMES) if args.stage == 2 else None,
         "task_ids": train_dataset.task_ids,
         "num_tasks": num_tasks,
         "dataset_id": train_dataset.manifest["dataset_id"],
@@ -781,7 +1057,7 @@ def main():
         "warmup_steps": warmup_steps,
         "cosine_t_max_steps": cosine_t_max_steps,
         "backbone_freeze_steps": backbone_freeze_steps,
-        "training_state_version": 2,
+        "training_state_version": 3 if args.stage == 2 else 2,
         "objective_version": (
             "masked-flow-mse-v1"
             if args.mask_training_padding else "unmasked-flow-mse-v1"
@@ -797,7 +1073,47 @@ def main():
         "rank_seed_scheme": "base-plus-rank-v1",
         "augmentation": asdict(augmentation_config),
     }
-    model = build_model(config).to(device)
+    tactile_artifact = None
+    stage2_parameter_report = None
+    stage2_metadata = None
+    resumed_stage2 = None
+    if args.stage == 2:
+        if args.resume_from:
+            resumed_stage2 = load_checkpoint(args.resume_from, device)
+            stage2_metadata = validate_stage2_resume_checkpoint(resumed_stage2)
+        else:
+            tactile_artifact = resolve_tactile_encoder_distributed(
+                args.tactile_encoder_checkpoint,
+                args.tactile_encoder_cache,
+                rank=rank,
+                world_size=world_size,
+                device=device,
+            )
+        model = build_stage2_model(config).to(device)
+        if tactile_artifact is not None:
+            load_tactile_encoder_weights(model.tactile_encoder, tactile_artifact)
+            initialization = initialize_stage2_from_stage1(
+                model, args.stage1_checkpoint, map_location="cpu"
+            )
+            stage2_parameter_report = initialization.parameters
+            stage2_metadata = build_stage2_checkpoint_metadata(
+                model,
+                stage2_parameter_report,
+                stage1_checkpoint=args.stage1_checkpoint,
+                tactile_artifact=tactile_artifact,
+                tactile_adapter_rank=args.tactile_adapter_rank,
+            )
+        else:
+            stage2_parameter_report = configure_stage2_trainability(model)
+        config["parameter_counts"] = {
+            "total": stage2_parameter_report.total_parameters,
+            "trainable": stage2_parameter_report.trainable_parameters,
+        }
+        config["parameter_categories"] = _parameter_categories(
+            stage2_parameter_report
+        )
+    else:
+        model = build_model(config).to(device)
     if world_size > 1:
         model = DDP(
             model,
@@ -805,12 +1121,20 @@ def main():
             find_unused_parameters=True,
         )
     raw_model = model.module if isinstance(model, DDP) else model
-    parameter_groups, backbone_parameters = optimizer_parameter_groups(
-        raw_model,
-        policy_lr=args.lr,
-        backbone_lr=args.backbone_lr,
-        weight_decay=args.weight_decay,
-    )
+    if args.stage == 2:
+        parameter_groups = stage2_optimizer_parameter_groups(
+            raw_model,
+            learning_rate=args.lr,
+            weight_decay=args.weight_decay,
+        )
+        backbone_parameters = ()
+    else:
+        parameter_groups, backbone_parameters = optimizer_parameter_groups(
+            raw_model,
+            policy_lr=args.lr,
+            backbone_lr=args.backbone_lr,
+            weight_decay=args.weight_decay,
+        )
     optimizer = torch.optim.AdamW(
         parameter_groups,
         betas=(0.95, 0.999),
@@ -855,7 +1179,35 @@ def main():
     patience_best_val = float("inf")
     stale_epochs = 0
     resume_record = None
-    if args.resume_from:
+    restored_stats = None
+    if args.resume_from and args.stage == 2:
+        restored = restore_stage2_training_state(
+            resumed_stage2,
+            model=raw_model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            scaler=scaler,
+            current_config=config,
+            world_size=world_size,
+            rank=rank,
+        )
+        start_epoch = restored["epoch"]
+        global_step = restored["global_step"]
+        best_val = restored["best_val"]
+        patience_best_val = restored["patience_best_val"]
+        stale_epochs = restored["stale_epochs"]
+        restored_stats = restored["stats"]
+        stage2_metadata = restored["stage2_metadata"]
+        resume_record = {
+            "event": "resume", "mode": "exact", "source": args.resume_from,
+            "source_run_id": resumed_stage2.get("run_id"),
+            "source_epoch": start_epoch, "global_step": global_step,
+            "best_val": best_val, "stale_epochs": stale_epochs,
+            "lr": optimizer_partition_lr(optimizer, "policy"),
+            "backbone_lr": 0.0,
+            "scheduler_type": config["scheduler_type"],
+        }
+    elif args.resume_from:
         resumed = load_checkpoint(args.resume_from, device)
         validate_resume_config(
             resumed.get("config", {}),
@@ -937,6 +1289,10 @@ def main():
         )
 
     stats = train_dataset.stats
+    if restored_stats is not None:
+        stats = {
+            key: np.asarray(value) for key, value in restored_stats.items()
+        }
     if main_rank:
         (output_dir / "config.json").write_text(json.dumps(config, indent=2))
         (output_dir / "dataset_stats.json").write_text(
@@ -958,11 +1314,12 @@ def main():
             )
             record.setdefault(
                 "backbone_lr",
-                optimizer_partition_lr(optimizer, "backbone"),
+                0.0 if args.stage == 2
+                else optimizer_partition_lr(optimizer, "backbone"),
             )
             record.setdefault(
                 "backbone_frozen",
-                record["global_step"] < backbone_freeze_steps,
+                args.stage == 2 or record["global_step"] < backbone_freeze_steps,
             )
             record["elapsed_seconds"] = time.monotonic() - started
             metrics_logger.log(record)
@@ -993,6 +1350,8 @@ def main():
             metric_callback=log_step,
             rank=rank,
             augmentation_config=augmentation_config,
+            stage=args.stage,
+            stage2_parameter_report=stage2_parameter_report,
         )
         sync_model_buffers(raw_model, world_size)
         validation_metrics = {}
@@ -1016,6 +1375,7 @@ def main():
                     world_size=world_size,
                     validation_seed=args.validation_seed + seed_index * 100_003,
                     rank=rank,
+                    stage=args.stage,
                 )
                 validation_records.append(seed_metrics)
             validation_metrics[validation_name] = average_validation_metrics(
@@ -1085,13 +1445,27 @@ def main():
                 "rng_states": rng_states, "run_id": args.run_id,
                 "global_step": global_step,
             }
+            checkpoint_stem = f"deco_stage{args.stage}"
+            if args.stage == 2:
+                stage2_metadata = {
+                    **stage2_metadata,
+                    "gate_values": stage2_gradient_diagnostics(
+                        raw_model, stage2_parameter_report
+                    )["gate_values"],
+                }
+                checkpoint.update({
+                    "checkpoint_schema_version": STAGE2_CHECKPOINT_SCHEMA_VERSION,
+                    "stage": 2,
+                    "model_type": STAGE2_MODEL_TYPE,
+                    "stage2_metadata": stage2_metadata,
+                })
             periodic = (epoch + 1) % args.save_every == 0
             if periodic:
-                atomic_torch_save(checkpoint, output_dir / f"deco_stage1_epoch_{epoch + 1}.pt")
-                atomic_torch_save(checkpoint, output_dir / "deco_stage1_latest.pt")
+                atomic_torch_save(checkpoint, output_dir / f"{checkpoint_stem}_epoch_{epoch + 1}.pt")
+                atomic_torch_save(checkpoint, output_dir / f"{checkpoint_stem}_latest.pt")
             if absolute_improved:
-                atomic_torch_save(checkpoint, output_dir / "deco_stage1_best.pt")
-            if periodic or absolute_improved:
+                atomic_torch_save(checkpoint, output_dir / f"{checkpoint_stem}_best.pt")
+            if args.stage == 1 and (periodic or absolute_improved):
                 epoch_ts = output_dir / f"deco_stage1_epoch_{epoch + 1}.ts"
                 artifact_rng = capture_rng_state()
                 try:
@@ -1111,7 +1485,7 @@ def main():
                 finally:
                     restore_rng_state(artifact_rng)
                 print(json.dumps({"event": "torchscript_saved", **metadata}), flush=True)
-            if periodic:
+            if args.stage == 1 and periodic:
                 removed = prune_old_checkpoints(output_dir, args.keep_last_checkpoints)
                 if removed:
                     print(json.dumps({

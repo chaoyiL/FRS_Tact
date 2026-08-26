@@ -1,0 +1,8 @@
+# Stage2 tactile-image training reference. Runtime arguments are supplied by
+# scripts/train_deco.sh and train_deco.train.
+stage: 2
+stage1_checkpoint: checkpoints/deco/image_aug/deco_stage1_latest.pt
+tactile_encoder_checkpoint: checkpoints/encoder/encoder_ckpt_0824
+tactile_encoder_cache: checkpoints/deco/tactile_encoder_cache
+tactile_adapter_rank: 32
+

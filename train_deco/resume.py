@@ -64,10 +64,11 @@ def validate_resume_config(
     checkpoint_config: dict,
     current_config: dict,
     resume_mode: str = "exact",
+    expected_training_state_version: int = 2,
 ) -> None:
-    if checkpoint_config.get("training_state_version") != 2:
+    if checkpoint_config.get("training_state_version") != expected_training_state_version:
         raise ValueError(
-            "Checkpoint uses an incompatible training state. Legacy one-group/"
+            "Checkpoint uses an incompatible training state version. Legacy one-group/"
             "epoch-scheduler checkpoints may be used for inference, but cannot "
             "state-resume this optimizer."
         )
