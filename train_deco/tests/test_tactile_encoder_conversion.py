@@ -10,10 +10,13 @@ import torch
 from safetensors.torch import save_file
 
 from train_deco.models.tactile_resnet import TactileResNet18
+import train_deco.tactile_encoder_conversion as conversion
 from train_deco.tactile_encoder_conversion import (
     CONVERSION_VERSION,
+    create_trusted_tactile_encoder_sidecar,
     load_tactile_encoder_weights,
     resolve_tactile_encoder,
+    verify_resolved_tactile_encoder,
 )
 
 
@@ -118,7 +121,22 @@ def test_conversion_rejects_missing_and_shape_mismatched_flax_leaves(tmp_path: P
         resolve_tactile_encoder(source, tmp_path / "cache")
 
 
-def test_resolution_is_content_addressed_and_writes_complete_metadata(tmp_path: Path) -> None:
+def test_resolution_is_content_addressed_and_writes_complete_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversion,
+        "_verify_flax_pytorch_parity",
+        lambda source, state: {
+            "status": "passed",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        },
+    )
     source = _write_flax_checkpoint(tmp_path / "source")
     cache_root = tmp_path / "cache"
 
@@ -137,6 +155,8 @@ def test_resolution_is_content_addressed_and_writes_complete_metadata(tmp_path: 
     assert metadata["source_framework"] == "flax"
     assert metadata["target_framework"] == "pytorch"
     assert metadata["tensor_shapes"]["conv1.weight"] == [64, 3, 7, 7]
+    assert metadata["parity"]["status"] == "passed"
+    verify_resolved_tactile_encoder(first)
 
     _write_flax_checkpoint(source, seed=1)
     changed = resolve_tactile_encoder(source, cache_root)
@@ -153,15 +173,20 @@ def test_resolution_is_content_addressed_and_writes_complete_metadata(tmp_path: 
     )
 
 
-def test_resolution_accepts_direct_converted_safetensors(tmp_path: Path) -> None:
+def test_resolution_requires_explicit_trusted_sidecar_for_direct_safetensors(tmp_path: Path) -> None:
     source = tmp_path / "encoder.safetensors"
     save_file(TactileResNet18().state_dict(), str(source))
 
+    with pytest.raises(ValueError, match="trusted sidecar"):
+        resolve_tactile_encoder(source, tmp_path / "cache")
+
+    create_trusted_tactile_encoder_sidecar(source)
     artifact = resolve_tactile_encoder(source, tmp_path / "cache")
 
     assert artifact.weights_path.exists()
     assert artifact.metadata_path.exists()
     module = TactileResNet18()
+    verify_resolved_tactile_encoder(artifact)
     load_tactile_encoder_weights(module, artifact)
 
 
@@ -212,12 +237,14 @@ def test_local_jax_and_converted_pytorch_encoders_match(tmp_path: Path) -> None:
 def test_direct_safetensors_source_bytes_produce_a_new_cache_artifact(tmp_path: Path) -> None:
     source = tmp_path / "encoder.safetensors"
     save_file(TactileResNet18().state_dict(), str(source))
+    create_trusted_tactile_encoder_sidecar(source)
     first = resolve_tactile_encoder(source, tmp_path / "cache")
 
     changed_module = TactileResNet18()
     with torch.no_grad():
         changed_module.bn1.bias.fill_(1.0)
     save_file(changed_module.state_dict(), str(source))
+    create_trusted_tactile_encoder_sidecar(source)
     changed = resolve_tactile_encoder(source, tmp_path / "cache")
 
     assert changed.weights_path != first.weights_path
@@ -241,3 +268,109 @@ def test_checkpoint_directory_rejects_ambiguous_or_unsafe_parameter_discovery(
     )
     with pytest.raises(ValueError, match=r"simple params-\*\.npz filename"):
         resolve_tactile_encoder(source, tmp_path / "cache")
+
+
+
+def test_cache_hit_rebuilds_when_parity_provenance_is_invalid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    def fake_parity(source, state):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "passed",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        }
+
+    monkeypatch.setattr(conversion, "_verify_flax_pytorch_parity", fake_parity)
+    source = _write_flax_checkpoint(tmp_path / "source")
+    artifact = resolve_tactile_encoder(source, tmp_path / "cache")
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    metadata["parity"]["status"] = "missing"
+    artifact.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    repaired = resolve_tactile_encoder(source, tmp_path / "cache")
+
+    assert calls == 2
+    verify_resolved_tactile_encoder(repaired)
+
+
+def test_verify_rejects_artifact_when_its_source_digest_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversion,
+        "_verify_flax_pytorch_parity",
+        lambda source, state: {
+            "status": "passed",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        },
+    )
+    source = _write_flax_checkpoint(tmp_path / "source")
+    artifact = resolve_tactile_encoder(source, tmp_path / "cache")
+    _write_flax_checkpoint(source, seed=2)
+
+    with pytest.raises(ValueError, match="resolved source contract"):
+        verify_resolved_tactile_encoder(artifact)
+
+
+
+def test_direct_resolution_accepts_a_converted_artifacts_verified_encoder_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversion,
+        "_verify_flax_pytorch_parity",
+        lambda source, state: {
+            "status": "passed",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        },
+    )
+    converted = resolve_tactile_encoder(_write_flax_checkpoint(tmp_path / "source"), tmp_path / "cache")
+
+    direct = resolve_tactile_encoder(converted.weights_path, tmp_path / "direct-cache")
+
+    verify_resolved_tactile_encoder(direct)
+
+
+
+def test_verify_rejects_artifact_sha256_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversion,
+        "_verify_flax_pytorch_parity",
+        lambda source, state: {
+            "status": "passed",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        },
+    )
+    artifact = resolve_tactile_encoder(_write_flax_checkpoint(tmp_path / "source"), tmp_path / "cache")
+    metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    metadata["weights_sha256"] = "not-the-artifact-digest"
+    artifact.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="SHA256"):
+        verify_resolved_tactile_encoder(artifact)

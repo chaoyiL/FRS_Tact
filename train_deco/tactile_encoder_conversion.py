@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import sys
+from contextlib import contextmanager
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,11 @@ CONVERSION_VERSION = "1"
 ARCHITECTURE = "resnet18"
 _WEIGHTS_NAME = "encoder.safetensors"
 _METADATA_NAME = "encoder.json"
+_DIRECT_SIDECAR_SUFFIX = ".json"
+_PARITY_SEED = 1729
+_PARITY_INPUT_SHAPE = (4, 224, 224, 3)
+_PARITY_RTOL = 2e-3
+_PARITY_ATOL = 2e-4
 
 
 @dataclass(frozen=True)
@@ -199,81 +205,9 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
     os.replace(temporary, path)
 
 
-def _artifact_metadata(source: _Source, state: dict[str, torch.Tensor], weights_path: Path) -> dict[str, Any]:
-    return {
-        "architecture": ARCHITECTURE,
-        "conversion_version": CONVERSION_VERSION,
-        "embedding_dim": RESNET18_EMBEDDING_DIM,
-        "source_framework": source.framework,
-        "source_path": str(source.path),
-        "source_sha256": source.digest,
-        "target_framework": "pytorch",
-        "tensor_shapes": {name: list(tensor.shape) for name, tensor in state.items()},
-        "weights_sha256": _sha256_file(weights_path),
-    }
-
-
-def _cached_artifact(directory: Path, source: _Source) -> ResolvedTactileEncoder | None:
-    weights_path = directory / _WEIGHTS_NAME
-    metadata_path = directory / _METADATA_NAME
-    if not weights_path.is_file() or not metadata_path.is_file():
-        return None
-    try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        if (
-            metadata.get("source_sha256") != source.digest
-            or metadata.get("conversion_version") != CONVERSION_VERSION
-            or metadata.get("architecture") != ARCHITECTURE
-            or metadata.get("embedding_dim") != RESNET18_EMBEDDING_DIM
-            or metadata.get("weights_sha256") != _sha256_file(weights_path)
-        ):
-            return None
-        _validate_pytorch_state(load_file(str(weights_path)), source=weights_path)
-    except (OSError, ValueError, RuntimeError, json.JSONDecodeError):
-        return None
-    return ResolvedTactileEncoder(weights_path, metadata_path, source.digest, ARCHITECTURE, RESNET18_EMBEDDING_DIM)
-
-
-
 def _assert_source_unchanged(source: _Source) -> None:
     if _resolve_source(source.path).digest != source.digest:
         raise RuntimeError("tactile encoder source changed during conversion; retry resolution")
-
-def resolve_tactile_encoder(source: str | Path, cache_root: str | Path) -> ResolvedTactileEncoder:
-    """Resolve a validated, content-addressed PyTorch tactile encoder artifact."""
-
-    resolved_source = _resolve_source(source)
-    directory = Path(cache_root).expanduser().resolve() / f"v{CONVERSION_VERSION}" / resolved_source.digest
-    cached = _cached_artifact(directory, resolved_source)
-    if cached is not None:
-        return cached
-    directory.mkdir(parents=True, exist_ok=True)
-    weights_path = directory / _WEIGHTS_NAME
-    metadata_path = directory / _METADATA_NAME
-    if resolved_source.framework == "flax":
-        state = _load_flax_state(resolved_source)
-        temporary = directory / f".{_WEIGHTS_NAME}.{uuid.uuid4().hex}.tmp"
-        save_file(state, str(temporary))
-    else:
-        state = _validate_pytorch_state(load_file(str(resolved_source.path)), source=resolved_source.path)
-        temporary = directory / f".{_WEIGHTS_NAME}.{uuid.uuid4().hex}.tmp"
-        shutil.copyfile(resolved_source.path, temporary)
-    _validate_pytorch_state(load_file(str(temporary)), source=temporary)
-    _assert_source_unchanged(resolved_source)
-    os.replace(temporary, weights_path)
-    _atomic_json(metadata_path, _artifact_metadata(resolved_source, state, weights_path))
-    return ResolvedTactileEncoder(weights_path, metadata_path, resolved_source.digest, ARCHITECTURE, RESNET18_EMBEDDING_DIM)
-
-
-def load_tactile_encoder_weights(module: torch.nn.Module, artifact: ResolvedTactileEncoder) -> None:
-    """Strictly load a resolved tactile artifact into the supplied encoder module."""
-
-    try:
-        state = load_file(str(artifact.weights_path))
-        module.load_state_dict(state, strict=True)
-    except (OSError, RuntimeError) as error:
-        raise ValueError(f"failed to strictly load tactile encoder artifact: {artifact.weights_path}") from error
-
 
 def import_jax_flax_for_cpu() -> tuple[Any, Any]:
     """Lazily import conversion-only JAX/Flax with CPU selected before import."""
@@ -310,3 +244,296 @@ def import_jax_flax_for_cpu() -> tuple[Any, Any]:
         raise RuntimeError("failed to initialize JAX on CPU") from error
     import flax
     return jax, flax
+
+
+
+def _direct_sidecar_path(weights_path: Path) -> Path:
+    return weights_path.with_suffix(weights_path.suffix + _DIRECT_SIDECAR_SUFFIX)
+
+
+def _validated_parity_record(value: Any, *, allow_trusted: bool) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("tactile encoder metadata is missing a parity record")
+    expected_status = {"passed"}
+    if allow_trusted:
+        expected_status.add("trusted")
+    if value.get("status") not in expected_status:
+        raise ValueError("tactile encoder parity status must be passed or explicitly trusted")
+    if value.get("seed") != _PARITY_SEED:
+        raise ValueError("tactile encoder parity seed does not match the conversion contract")
+    if value.get("input_shape") != list(_PARITY_INPUT_SHAPE):
+        raise ValueError("tactile encoder parity input shape does not match [4,224,224,3]")
+    for key, expected in (("rtol", _PARITY_RTOL), ("atol", _PARITY_ATOL)):
+        if value.get(key) != expected:
+            raise ValueError(f"tactile encoder parity {key} does not match the conversion contract")
+    for key in ("max_abs", "max_rel"):
+        number = value.get(key)
+        if not isinstance(number, (int, float)) or not np.isfinite(number) or number < 0:
+            raise ValueError(f"tactile encoder parity {key} must be a finite non-negative number")
+    return dict(value)
+
+
+def _trusted_parity_record() -> dict[str, Any]:
+    return {
+        "status": "trusted",
+        "seed": _PARITY_SEED,
+        "input_shape": list(_PARITY_INPUT_SHAPE),
+        "rtol": _PARITY_RTOL,
+        "atol": _PARITY_ATOL,
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+    }
+
+
+def create_trusted_tactile_encoder_sidecar(weights_path: str | Path) -> Path:
+    """Explicitly mark a pre-converted artifact as trusted for direct use.
+
+    This is intentionally opt-in: it validates the complete PyTorch state and
+    writes a source-digest-bound sidecar rather than silently trusting arbitrary
+    ``.safetensors`` bytes.
+    """
+
+    source = _resolve_source(weights_path)
+    if source.framework != "pytorch":
+        raise ValueError("trusted tactile encoder sidecars require a .safetensors source")
+    state = _validate_pytorch_state(load_file(str(source.path)), source=source.path)
+    sidecar = _direct_sidecar_path(source.path)
+    _atomic_json(
+        sidecar,
+        {
+            "architecture": ARCHITECTURE,
+            "embedding_dim": RESNET18_EMBEDDING_DIM,
+            "source_sha256": source.digest,
+            "tensor_shapes": {name: list(tensor.shape) for name, tensor in state.items()},
+            "weights_sha256": source.digest,
+            "parity": _trusted_parity_record(),
+        },
+    )
+    return sidecar
+
+
+# Direct sidecar resolution is defined with compatibility handling below.
+
+def _verify_flax_pytorch_parity(source: _Source, state: dict[str, torch.Tensor]) -> dict[str, Any]:
+    """Run the conversion proof on a fixed CPU JAX/PyTorch input."""
+
+    if source.framework != "flax":
+        raise ValueError("Flax parity verification requires a checkpoint directory")
+    jax, _ = import_jax_flax_for_cpu()
+    import jax.numpy as jnp
+    from train_encoder.utils.checkpoint import load_checkpoint
+    from train_encoder.utils.resnet import encode_resnet18
+
+    rng = np.random.default_rng(_PARITY_SEED)
+    images = rng.random(_PARITY_INPUT_SHAPE, dtype=np.float32)
+    params, _ = load_checkpoint(source.path)
+    try:
+        jax_embeddings, _ = encode_resnet18(
+            params["tactile_resnet"], jnp.asarray(images), train=False
+        )
+    except (KeyError, ValueError, TypeError) as error:
+        raise ValueError("failed to run Flax tactile ResNet parity verification") from error
+    model = TactileResNet18().eval()
+    model.load_state_dict(state, strict=True)
+    with torch.inference_mode():
+        torch_embeddings = model(torch.from_numpy(images).permute(0, 3, 1, 2)).cpu().numpy()
+    jax_values = np.asarray(jax.device_get(jax_embeddings), dtype=np.float32)
+    difference = np.abs(torch_embeddings - jax_values)
+    max_abs = float(difference.max(initial=0.0))
+    max_rel = float((difference / np.maximum(np.abs(jax_values), np.finfo(np.float32).tiny)).max(initial=0.0))
+    if not np.allclose(torch_embeddings, jax_values, rtol=_PARITY_RTOL, atol=_PARITY_ATOL):
+        raise ValueError(
+            "JAX-to-PyTorch tactile encoder parity failed: "
+            f"max_abs={max_abs:.6g}, max_rel={max_rel:.6g}, "
+            f"rtol={_PARITY_RTOL}, atol={_PARITY_ATOL}"
+        )
+    return {
+        "status": "passed",
+        "seed": _PARITY_SEED,
+        "input_shape": list(_PARITY_INPUT_SHAPE),
+        "rtol": _PARITY_RTOL,
+        "atol": _PARITY_ATOL,
+        "max_abs": max_abs,
+        "max_rel": max_rel,
+    }
+
+
+@contextmanager
+def _cache_lock(path: Path):
+    """Hold an advisory cross-process lock for one content-addressed artifact."""
+
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _artifact_metadata_v2(
+    source: _Source,
+    state: dict[str, torch.Tensor],
+    weights_path: Path,
+    parity: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "architecture": ARCHITECTURE,
+        "conversion_version": CONVERSION_VERSION,
+        "embedding_dim": RESNET18_EMBEDDING_DIM,
+        "source_framework": source.framework,
+        "source_path": str(source.path),
+        "source_sha256": source.digest,
+        "target_framework": "pytorch",
+        "tensor_shapes": {name: list(tensor.shape) for name, tensor in state.items()},
+        "weights_sha256": _sha256_file(weights_path),
+        "parity": _validated_parity_record(parity, allow_trusted=True),
+    }
+
+
+def verify_resolved_tactile_encoder(artifact: ResolvedTactileEncoder) -> None:
+    """Verify provenance, parity evidence, hashes, shapes, and strict loadability."""
+
+    try:
+        metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid tactile encoder metadata: {artifact.metadata_path}") from error
+    if not isinstance(metadata, dict):
+        raise ValueError("tactile encoder metadata must contain a JSON object")
+    source_path = metadata.get("source_path")
+    if not isinstance(source_path, str):
+        raise ValueError("tactile encoder metadata is missing source_path")
+    source = _resolve_source(source_path)
+    if (
+        artifact.source_sha256 != source.digest
+        or metadata.get("source_sha256") != source.digest
+        or artifact.architecture != ARCHITECTURE
+        or metadata.get("architecture") != ARCHITECTURE
+        or metadata.get("conversion_version") != CONVERSION_VERSION
+        or metadata.get("source_framework") != source.framework
+        or metadata.get("target_framework") != "pytorch"
+        or artifact.embedding_dim != RESNET18_EMBEDDING_DIM
+        or metadata.get("embedding_dim") != RESNET18_EMBEDDING_DIM
+    ):
+        raise ValueError("tactile encoder metadata does not match the resolved source contract")
+    if metadata.get("weights_sha256") != _sha256_file(artifact.weights_path):
+        raise ValueError("tactile encoder artifact SHA256 does not match metadata")
+    parity = _validated_parity_record(metadata.get("parity"), allow_trusted=True)
+    if source.framework == "pytorch":
+        if parity != _direct_source_parity(source):
+            raise ValueError("tactile encoder metadata parity record does not match trusted sidecar")
+    try:
+        state = _validate_pytorch_state(load_file(str(artifact.weights_path)), source=artifact.weights_path)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"failed to load tactile encoder artifact: {artifact.weights_path}") from error
+    shapes = {name: list(tensor.shape) for name, tensor in state.items()}
+    if metadata.get("tensor_shapes") != shapes:
+        raise ValueError("tactile encoder tensor-shape inventory does not match artifact")
+
+
+def _cached_artifact(directory: Path, source: _Source) -> ResolvedTactileEncoder | None:
+    weights_path = directory / _WEIGHTS_NAME
+    metadata_path = directory / _METADATA_NAME
+    if not weights_path.is_file() or not metadata_path.is_file():
+        return None
+    artifact = ResolvedTactileEncoder(
+        weights_path, metadata_path, source.digest, ARCHITECTURE, RESNET18_EMBEDDING_DIM
+    )
+    try:
+        verify_resolved_tactile_encoder(artifact)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return artifact
+
+
+def resolve_tactile_encoder(source: str | Path, cache_root: str | Path) -> ResolvedTactileEncoder:
+    """Resolve one verified, atomically published, content-addressed artifact."""
+
+    initial = _resolve_source(source)
+    cache_version_root = Path(cache_root).expanduser().resolve() / f"v{CONVERSION_VERSION}"
+    directory = cache_version_root / initial.digest
+    with _cache_lock(cache_version_root / f".{initial.digest}.lock"):
+        resolved_source = _resolve_source(source)
+        if resolved_source.digest != initial.digest:
+            raise RuntimeError("tactile encoder source changed while waiting for conversion lock; retry resolution")
+        cached = _cached_artifact(directory, resolved_source)
+        if cached is not None:
+            return cached
+        if resolved_source.framework == "flax":
+            state = _load_flax_state(resolved_source)
+            parity = _verify_flax_pytorch_parity(resolved_source, state)
+        else:
+            parity = _direct_source_parity(resolved_source)
+            state = _validate_pytorch_state(load_file(str(resolved_source.path)), source=resolved_source.path)
+        _assert_source_unchanged(resolved_source)
+        staging = cache_version_root / f".{resolved_source.digest}.{uuid.uuid4().hex}.tmp"
+        staging.mkdir(parents=True, exist_ok=False)
+        try:
+            staging_weights = staging / _WEIGHTS_NAME
+            if resolved_source.framework == "flax":
+                save_file(state, str(staging_weights))
+            else:
+                shutil.copyfile(resolved_source.path, staging_weights)
+            _validate_pytorch_state(load_file(str(staging_weights)), source=staging_weights)
+            _atomic_json(staging / _METADATA_NAME, _artifact_metadata_v2(resolved_source, state, staging_weights, parity))
+            _assert_source_unchanged(resolved_source)
+            if directory.exists():
+                shutil.rmtree(directory)
+            os.replace(staging, directory)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+    artifact = ResolvedTactileEncoder(
+        directory / _WEIGHTS_NAME,
+        directory / _METADATA_NAME,
+        resolved_source.digest,
+        ARCHITECTURE,
+        RESNET18_EMBEDDING_DIM,
+    )
+    verify_resolved_tactile_encoder(artifact)
+    return artifact
+
+
+def load_tactile_encoder_weights(module: torch.nn.Module, artifact: ResolvedTactileEncoder) -> None:
+    """Verify then strictly load a resolved artifact into ``module``."""
+
+    verify_resolved_tactile_encoder(artifact)
+    try:
+        module.load_state_dict(load_file(str(artifact.weights_path)), strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(f"failed to strictly load tactile encoder artifact: {artifact.weights_path}") from error
+
+
+
+def _direct_source_parity(source: _Source) -> dict[str, Any]:
+    """Read an explicit direct-artifact sidecar, including converted ``encoder.json``."""
+
+    candidates = (_direct_sidecar_path(source.path), source.path.with_suffix(".json"))
+    invalid: list[Path] = []
+    for sidecar_path in dict.fromkeys(candidates):
+        if not sidecar_path.is_file():
+            continue
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError(f"invalid trusted tactile encoder sidecar: {sidecar_path}") from error
+        if not isinstance(sidecar, dict):
+            raise ValueError("trusted tactile encoder sidecar must contain a JSON object")
+        if (
+            sidecar.get("weights_sha256") != source.digest
+            or sidecar.get("architecture") != ARCHITECTURE
+            or sidecar.get("embedding_dim") != RESNET18_EMBEDDING_DIM
+            or not isinstance(sidecar.get("source_sha256"), str)
+            or not isinstance(sidecar.get("tensor_shapes"), dict)
+        ):
+            invalid.append(sidecar_path)
+            continue
+        return _validated_parity_record(sidecar.get("parity"), allow_trusted=True)
+    if invalid:
+        raise ValueError("tactile encoder sidecar does not match source bytes or architecture")
+    raise ValueError(
+        "direct tactile encoder .safetensors requires an explicit trusted sidecar; "
+        f"create one with create_trusted_tactile_encoder_sidecar({source.path!s})"
+    )
