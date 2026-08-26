@@ -6,6 +6,7 @@ from .models.deco.deco import DECO, modeling
 
 
 MODEL_TYPE = "upstream-deco-stage1"
+STAGE2_MODEL_TYPE = "upstream-deco-stage2-tactile-image"
 
 
 def observation_indices(contract: dict) -> list[int]:
@@ -50,6 +51,45 @@ def build_model(config: dict, load_backbone: bool = True) -> DECO:
         obs_state=True,
         use_tactile=False,
         plugin=False,
+        use_task_condition=bool(config.get("use_task_condition", False)),
+        num_tasks=int(config.get("num_tasks", 1)),
+        inf_step=int(config["inference_steps"]),
+        num_attn_blocks=int(config["layers"]),
+        heads=int(config["heads"]),
+        dim=int(config["hidden_dim"]),
+        rope_axes_dim=(int(config["rope_height"]), int(config["rope_width"])),
+        img_pretrain=backbone,
+        freeze_backbone=False,
+        pretrain_model_path=False,
+        adapter_model_path=False,
+        num_cameras=len(config.get("camera_names", ("camera_0", "camera_1"))),
+    )
+
+
+def build_stage2_model(
+    config: dict,
+    load_backbone: bool = False,
+    tactile_encoder=None,
+) -> DECO:
+    """Build the four-image tactile Stage2 policy without loading Stage1."""
+    backbone = config.get("backbone_weights") if load_backbone else None
+    if backbone and not Path(backbone).is_file():
+        raise FileNotFoundError(f"Upstream DECO ResNet34 weights not found: {backbone}")
+    adapter_config = config.get("adapter", {})
+    adapter_rank = int(
+        config.get("tactile_adapter_rank", adapter_config.get("rank", 32))
+    )
+    if adapter_rank < 1:
+        raise ValueError(f"Stage2 tactile adapter rank must be positive, got {adapter_rank}")
+    return modeling(
+        action_dim=int(config["action_dim"]),
+        chunk_size=int(config["chunk_size"]),
+        obs_state=True,
+        use_tactile=True,
+        tactile_image_mode=True,
+        tactile_encoder=tactile_encoder,
+        plugin=True,
+        plugin_rank=adapter_rank,
         use_task_condition=bool(config.get("use_task_condition", False)),
         num_tasks=int(config.get("num_tasks", 1)),
         inf_step=int(config["inference_steps"]),

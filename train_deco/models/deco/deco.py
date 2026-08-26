@@ -4,13 +4,14 @@ import einops
 import numpy as np
 from torch import Tensor, nn
 from torch.nn import functional as F
+from ..tactile_resnet import RESNET18_EMBEDDING_DIM, TactileResNet18
 from .img_encoder import ResNet34
 from .denoise_schedular import get_schedule
 from .rope import RotaryPosEmbed, apply_rotary_emb
 
 
 class DECO(nn.Module):
-    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True, num_cameras=2):
+    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = head_dim
@@ -18,6 +19,7 @@ class DECO(nn.Module):
         self.act_dim = act_dim
         self.obs_state = obs_state
         self.use_tactile = use_tactile
+        self.tactile_image_mode = tactile_image_mode
         self.use_task_condition = use_task_condition
         self.inference_step = inf_step
         if num_cameras not in (2, 3):
@@ -43,7 +45,20 @@ class DECO(nn.Module):
                 nn.Mish(),
                 nn.Linear(dim, dim)
             )
-        if self.use_tactile:
+        if self.tactile_image_mode and not self.use_tactile:
+            raise ValueError("tactile_image_mode requires use_tactile=True")
+        if self.use_tactile and self.tactile_image_mode:
+            if tactile_token_dim != RESNET18_EMBEDDING_DIM:
+                raise ValueError(
+                    "Stage2 tactile image tokens must use the 512-dimensional "
+                    f"ResNet18 contract, got {tactile_token_dim}"
+                )
+            self.tactile_encoder = tactile_encoder or TactileResNet18()
+            self.tactile_encoder.requires_grad_(False)
+            self.tactile_encoder.eval()
+            self.tactile_norm = RMSNorm(tactile_token_dim, elementwise_affine=False)
+            self.sensor_embeddings = nn.Embedding(4, tactile_token_dim)
+        elif self.use_tactile:
             # calculate the mean tactile data of each regions(17 regions in inspire hand) in forward pass
             # left: (batch, 1062) --> (batch, 17), right: (batch, 1062) --> (batch, 17)
             self.init_tac_regions()
@@ -83,7 +98,19 @@ class DECO(nn.Module):
             nn.Linear(dim, dim)
         )
 
-        self.mmattn = nn.ModuleList([MMAttention(heads, dim, use_tactile, plugin, plugin_rank, num_cameras) for _ in range(num_attn_blocks)])  # joint attention blocks
+        self.mmattn = nn.ModuleList([
+            MMAttention(
+                heads,
+                dim,
+                use_tactile,
+                plugin,
+                plugin_rank,
+                num_cameras,
+                tactile_image_mode=tactile_image_mode,
+                tactile_dim=tactile_token_dim if tactile_image_mode else dim,
+            )
+            for _ in range(num_attn_blocks)
+        ])  # joint attention blocks
         self.linear = nn.Linear(dim, act_dim) # final action prediction head
 
         if not plugin:
@@ -96,7 +123,7 @@ class DECO(nn.Module):
             if freeze_backbone:
                 self.freeze()
 
-    def forward(self, img1, img2, img3=None, obs=None, act=None, task_idx=None, tac1=None, tac2=None, action_mask=None, training=True):
+    def forward(self, img1, img2, img3=None, obs=None, act=None, task_idx=None, tac1=None, tac2=None, action_mask=None, training=True, tactile_images=None):
         """
         Args:
             img1: [B, C, H, W]
@@ -111,7 +138,11 @@ class DECO(nn.Module):
         """
         # image encoding 
         feat, image_rotary_emb = self.img_encoding(img1, img2, img3)
-        if self.use_tactile:
+        if self.use_tactile and self.tactile_image_mode:
+            if tactile_images is None:
+                raise ValueError("Stage2 tactile image mode requires tactile_images")
+            tactile = self.encode_tactile_images(tactile_images)
+        elif self.use_tactile:
             # calculate the mean tactile data of each regions(17 regions in inspire hand) in forward pass
             tac1_avg = torch.stack([tac1[:, s:e].mean(dim=1) for s, e in self.tactile_data_index.values()], dim=1)  # (batch, 17)
             tac2_avg = torch.stack([tac2[:, s:e].mean(dim=1) for s, e in self.tactile_data_index.values()], dim=1)  # (batch, 17)
@@ -159,6 +190,43 @@ class DECO(nn.Module):
                 sample = sample + (t_prev - t_curr) * denoise_act
 
             return sample
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.tactile_image_mode:
+            self.tactile_encoder.eval()
+        return self
+
+    def encode_tactile_images(self, tactile_images: Tensor) -> Tensor:
+        if not isinstance(tactile_images, Tensor) or tactile_images.ndim != 5:
+            shape = getattr(tactile_images, "shape", None)
+            raise ValueError(
+                "Stage2 tactile_images must be shaped [B, 4, 3, 224, 224], "
+                f"got {shape}"
+            )
+        if tactile_images.shape[1] != 4:
+            raise ValueError(
+                "Stage2 requires exactly 4 tactile sensors, "
+                f"got {tactile_images.shape[1]}"
+            )
+        if tuple(tactile_images.shape[2:]) != (3, 224, 224):
+            raise ValueError(
+                "Stage2 tactile_images must be shaped [B, 4, 3, 224, 224], "
+                f"got {tuple(tactile_images.shape)}"
+            )
+        batch_size = tactile_images.shape[0]
+        flattened = tactile_images.reshape(batch_size * 4, 3, 224, 224)
+        with torch.no_grad():
+            encoded = self.tactile_encoder(flattened)
+        if tuple(encoded.shape) != (batch_size * 4, RESNET18_EMBEDDING_DIM):
+            raise ValueError(
+                "tactile encoder must return [4B, 512], "
+                f"got {tuple(encoded.shape)}"
+            )
+        tokens = encoded.reshape(batch_size, 4, RESNET18_EMBEDDING_DIM)
+        tokens = self.tactile_norm(tokens)
+        sensor_ids = torch.arange(4, dtype=torch.long, device=tokens.device)
+        return tokens + self.sensor_embeddings(sensor_ids).unsqueeze(0)
 
     def img_encoding(self, img1, img2, img3=None):
         assert img1.shape == img2.shape, "img1 and img2 must have the same shape"
@@ -260,6 +328,7 @@ class PI_Adapter(nn.Module):
 
         nn.init.normal_(self.down.weight, std=1 / rank)
         nn.init.zeros_(self.up.weight)
+        nn.init.zeros_(self.up.bias)
 
     def forward(self, x):
         x = self.down(x)
@@ -268,7 +337,7 @@ class PI_Adapter(nn.Module):
 
 
 class MMAttention(nn.Module):
-    def __init__(self, heads=8, dim=512, use_tactile=False, plugin=False, plugin_rank=32, num_cameras=2):
+    def __init__(self, heads=8, dim=512, use_tactile=False, plugin=False, plugin_rank=32, num_cameras=2, tactile_image_mode=False, tactile_dim=None):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = dim // heads
@@ -276,6 +345,7 @@ class MMAttention(nn.Module):
         self.num_cameras = num_cameras
         self.use_tactile = use_tactile
         self.plugin = plugin
+        self.tactile_image_mode = tactile_image_mode
 
         ### img projection
         self.img_bais = adaLN(dim)  # adaLN for time conditioning
@@ -311,8 +381,11 @@ class MMAttention(nn.Module):
 
         ### cross attention for tactile
         if self.use_tactile:
-            self.tactile_key = nn.Linear(dim, dim)
-            self.tactile_value = nn.Linear(dim, dim)
+            tactile_dim = dim if tactile_dim is None else tactile_dim
+            self.tactile_key = nn.Linear(tactile_dim, dim)
+            self.tactile_value = nn.Linear(tactile_dim, dim)
+            if tactile_image_mode:
+                self.tactile_gate = nn.Parameter(torch.zeros(()))
         
             if plugin:  # adapter modules for finetuning vision-based model
                 self.img_qkv_pi = PI_Adapter(dim, dim*3, plugin_rank)
@@ -378,7 +451,10 @@ class MMAttention(nn.Module):
             tactile_v = einops.rearrange(tactile_v, "B L (H D) -> B H L D", H=self.head, D=self.head_dim)
 
             cross_attn = F.scaled_dot_product_attention(q, tactile_k, tactile_v)  # joint attention with tactile
-            attn = attn + cross_attn  # combine attention outputs
+            if self.tactile_image_mode:
+                attn = attn + torch.tanh(self.tactile_gate) * cross_attn
+            else:
+                attn = attn + cross_attn  # combine attention outputs
         
         attn = einops.rearrange(attn, "B H L D -> B L (H D)")
         img_attn, act_attn = attn[:, :total_img_len, :], attn[:, total_img_len:, :]  # split img and action
@@ -415,15 +491,18 @@ class adaLN(nn.Module):
         return scale1, shift1, gate1, scale2, shift2, gate2
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int):
+    def __init__(self, dim: int, elementwise_affine: bool = True):
         super().__init__()
-        self.scale = nn.Parameter(torch.ones(dim))
+        self.scale = nn.Parameter(torch.ones(dim)) if elementwise_affine else None
 
     def forward(self, x: Tensor):
         x_dtype = x.dtype
         x = x.float()
         rrms = torch.rsqrt(torch.mean(x**2, dim=-1, keepdim=True) + 1e-6)
-        return (x * rrms).to(dtype=x_dtype) * self.scale
+        normalized = (x * rrms).to(dtype=x_dtype)
+        if self.scale is not None:
+            normalized = normalized * self.scale
+        return normalized
 
 
 class QKNorm(nn.Module):
@@ -454,7 +533,7 @@ class timeEmb(nn.Module):
         return emb
     
 
-def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False, num_cameras=2):
+def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM):
     # def get_trainable_state_dict(model):
     #     return {
     #         name: param.detach().cpu()
@@ -478,6 +557,9 @@ def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False,
             img_pretrain=img_pretrain,
             freeze_backbone=freeze_backbone,
             num_cameras=num_cameras,
+            tactile_image_mode=tactile_image_mode,
+            tactile_encoder=tactile_encoder,
+            tactile_token_dim=tactile_token_dim,
         )
     
     if pretrain_model_path:  # load pretrained weights for finetuning or inference
