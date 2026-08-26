@@ -7,6 +7,7 @@ import pytest
 
 from deploy_baseline_pi05.deployment import TACTILE_KEYS
 from deploy_baseline_pi05.runtime import DirectDecoderRuntime
+from deploy_baseline_pi05.tactile_encoder import _rms_normalize_tokens
 
 
 def _observation(value: int) -> dict[str, np.ndarray]:
@@ -151,3 +152,8 @@ def test_result_arrays_are_immutable_copies(runtime, fakes):
     np.testing.assert_array_equal(ready.action_vla_normalized, np.arange(1_000, dtype=np.float32).reshape(1, 50, 20))
     with pytest.raises(ValueError):
         result.selected_action[0] = 0.0
+
+
+def test_tactile_encoder_rejects_zero_embedding_tokens() -> None:
+    with pytest.raises(ValueError, match="zero-RMS"):
+        _rms_normalize_tokens(np.zeros((4, 512), dtype=np.float32))

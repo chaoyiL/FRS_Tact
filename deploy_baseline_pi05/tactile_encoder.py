@@ -17,6 +17,14 @@ from .tactile_runtime.preprocess import parse_image_to_unit
 from .tactile_runtime.resnet import encode_resnet18
 
 
+def _rms_normalize_tokens(embeddings: np.ndarray) -> np.ndarray:
+    """Match training-cache per-token RMS normalization and reject zero tokens."""
+    rms = np.sqrt(np.mean(np.square(embeddings), axis=-1, keepdims=True))
+    if not np.isfinite(rms).all() or np.any(rms == 0.0):
+        raise ValueError("tactile encoder produced a zero-RMS embedding token")
+    return embeddings / rms
+
+
 class FrozenTactileEncoder:
     """Encode four canonical current HWC tactile images with frozen inference BN."""
 
@@ -59,7 +67,7 @@ class FrozenTactileEncoder:
         embeddings = np.asarray(jax.device_get(self._encode(self._variables, jnp.asarray(images))), dtype=np.float32)
         if embeddings.shape != (4, 512) or not np.isfinite(embeddings).all():
             raise ValueError("tactile ResNet must return finite [4,512] embeddings")
-        tokens = embeddings / np.sqrt(np.mean(np.square(embeddings), axis=-1, keepdims=True) + 1e-6)
+        tokens = _rms_normalize_tokens(embeddings)
         tokens = np.ascontiguousarray(tokens[None, ...], dtype=np.float32)
         if tokens.shape != (1, 4, 512) or not np.isfinite(tokens).all():
             raise ValueError("tactile encoder tokens must be finite [1,4,512]")
