@@ -13,7 +13,6 @@ from typing import Any, Callable
 import numpy as np
 
 from .config import TACTILE_KEYS
-from .tactile_encoder.preprocess import parse_image_to_unit
 
 EMBEDDINGS_NAME = "embeddings.npy"
 MANIFEST_NAME = "manifest.json"
@@ -96,6 +95,7 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         from lerobot.datasets import LeRobotDataset
         dataset = LeRobotDataset(dataset_info.repo_id, root=dataset_info.root, revision=getattr(dataset_info, "revision", None))
     encoder = deps.get("encoder") or _default_encoder(checkpoint)
+    from .tactile_encoder.preprocess import parse_image_to_unit
     count, dim = len(dataset), int(tactile.embedding_dim)
     if dim != 512:
         raise ValueError("frozen ResNet18 cache embedding_dim must be 512")
