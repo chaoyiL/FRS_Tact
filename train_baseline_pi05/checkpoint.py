@@ -53,14 +53,21 @@ def _scalar_mapping(value: object, name: str) -> dict[str, int | float]:
     return result
 
 
-def _primitive(value: object) -> bool:
+def _canonical_primitive(value: object, name: str) -> Any:
     if value is None or isinstance(value, (str, int, float, bool)):
-        return True
-    if isinstance(value, (list, tuple)):
-        return all(_primitive(item) for item in value)
+        return value
+    if isinstance(value, list):
+        return [_canonical_primitive(item, name) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_canonical_primitive(item, name) for item in value)
     if isinstance(value, Mapping):
-        return all(isinstance(key, str) and _primitive(item) for key, item in value.items())
-    return False
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"{name} must use string mapping keys.")
+            result[key] = _canonical_primitive(item, name)
+        return result
+    raise ValueError(f"{name} must contain only primitive values and built-in containers.")
 
 
 def _weights_only_payload(value: object, name: str) -> Any:
@@ -82,9 +89,9 @@ def _weights_only_payload(value: object, name: str) -> Any:
 
 
 def _source_contract(value: object) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or not _primitive(value):
+    if not isinstance(value, Mapping):
         raise ValueError("source_contract must be a primitive mapping.")
-    return dict(value)
+    return _canonical_primitive(value, "source_contract")
 
 
 def _cpu_state_dict(model: DirectTactileActionDecoder) -> dict[str, Tensor]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -136,6 +137,22 @@ def test_best_checkpoint_round_trips_with_weights_only_and_strict_state(tmp_path
     assert metadata["global_step"] == 12
     for key, value in model.state_dict().items():
         assert torch.equal(value.cpu(), loaded.state_dict()[key].cpu())
+
+
+def test_best_checkpoint_canonicalizes_nested_source_contract_containers(tmp_path: Path):
+    config = _config(tmp_path)
+    source_contract = {
+        "checkpoint": "reference/pi05",
+        "nested": defaultdict(int, {"count": 1}),
+    }
+    path = save_best_checkpoint(
+        tmp_path, DirectTactileActionDecoder(config), config, epoch=0, global_step=0,
+        metrics={"validation_loss": 1.0}, source_contract=source_contract,
+    )
+
+    raw = torch.load(path, weights_only=True)
+
+    assert raw["source_contract"] == {"checkpoint": "reference/pi05", "nested": {"count": 1}}
 
 
 @pytest.mark.parametrize("mutation", ["schema", "config", "state"])
