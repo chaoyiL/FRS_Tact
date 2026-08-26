@@ -767,4 +767,3 @@ def test_runtime_validation_seed_override_restores_complete_stage2_state(tmp_pat
     )
     assert next_step == 2
     assert int(next(iter(resumed_optimizer.state.values()))["step"].item()) == 2
-

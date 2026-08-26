@@ -160,4 +160,3 @@ def test_server_stage2_shell_mode_uses_ddp_and_source_directory() -> None:
     assert "--stage 2" in result.stdout
     assert "--tactile-encoder-checkpoint /tmp/encoder" in result.stdout
     assert "--epochs 50" in result.stdout
-
