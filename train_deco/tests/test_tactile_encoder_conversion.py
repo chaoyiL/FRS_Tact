@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import multiprocessing as mp
+import time
+from contextlib import contextmanager
 import os
 from pathlib import Path
 
@@ -13,7 +16,6 @@ from train_deco.models.tactile_resnet import TactileResNet18
 import train_deco.tactile_encoder_conversion as conversion
 from train_deco.tactile_encoder_conversion import (
     CONVERSION_VERSION,
-    create_trusted_tactile_encoder_sidecar,
     load_tactile_encoder_weights,
     resolve_tactile_encoder,
     verify_resolved_tactile_encoder,
@@ -156,6 +158,8 @@ def test_resolution_is_content_addressed_and_writes_complete_metadata(
     assert metadata["target_framework"] == "pytorch"
     assert metadata["tensor_shapes"]["conv1.weight"] == [64, 3, 7, 7]
     assert metadata["parity"]["status"] == "passed"
+    assert metadata["source_file_inventory"]
+    assert metadata["mapped_key_count"] > 0
     verify_resolved_tactile_encoder(first)
 
     _write_flax_checkpoint(source, seed=1)
@@ -173,21 +177,12 @@ def test_resolution_is_content_addressed_and_writes_complete_metadata(
     )
 
 
-def test_resolution_requires_explicit_trusted_sidecar_for_direct_safetensors(tmp_path: Path) -> None:
+def test_resolution_rejects_an_arbitrary_direct_safetensors_file(tmp_path: Path) -> None:
     source = tmp_path / "encoder.safetensors"
     save_file(TactileResNet18().state_dict(), str(source))
 
-    with pytest.raises(ValueError, match="trusted sidecar"):
+    with pytest.raises(ValueError, match="conversion sidecar"):
         resolve_tactile_encoder(source, tmp_path / "cache")
-
-    create_trusted_tactile_encoder_sidecar(source)
-    artifact = resolve_tactile_encoder(source, tmp_path / "cache")
-
-    assert artifact.weights_path.exists()
-    assert artifact.metadata_path.exists()
-    module = TactileResNet18()
-    verify_resolved_tactile_encoder(artifact)
-    load_tactile_encoder_weights(module, artifact)
 
 
 
@@ -234,21 +229,13 @@ def test_local_jax_and_converted_pytorch_encoders_match(tmp_path: Path) -> None:
 
 
 
-def test_direct_safetensors_source_bytes_produce_a_new_cache_artifact(tmp_path: Path) -> None:
+def test_direct_safetensors_without_a_conversion_sidecar_is_rejected(tmp_path: Path) -> None:
     source = tmp_path / "encoder.safetensors"
     save_file(TactileResNet18().state_dict(), str(source))
-    create_trusted_tactile_encoder_sidecar(source)
-    first = resolve_tactile_encoder(source, tmp_path / "cache")
+    (tmp_path / "encoder.safetensors.json").write_text("{}", encoding="utf-8")
 
-    changed_module = TactileResNet18()
-    with torch.no_grad():
-        changed_module.bn1.bias.fill_(1.0)
-    save_file(changed_module.state_dict(), str(source))
-    create_trusted_tactile_encoder_sidecar(source)
-    changed = resolve_tactile_encoder(source, tmp_path / "cache")
-
-    assert changed.weights_path != first.weights_path
-    assert changed.source_sha256 != first.source_sha256
+    with pytest.raises(ValueError, match="conversion sidecar"):
+        resolve_tactile_encoder(source, tmp_path / "cache")
 
 
 def test_checkpoint_directory_rejects_ambiguous_or_unsafe_parameter_discovery(
@@ -293,7 +280,7 @@ def test_cache_hit_rebuilds_when_parity_provenance_is_invalid(
     source = _write_flax_checkpoint(tmp_path / "source")
     artifact = resolve_tactile_encoder(source, tmp_path / "cache")
     metadata = json.loads(artifact.metadata_path.read_text(encoding="utf-8"))
-    metadata["parity"]["status"] = "missing"
+    metadata["parity"]["status"] = "trusted"
     artifact.metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
 
     repaired = resolve_tactile_encoder(source, tmp_path / "cache")
@@ -374,3 +361,165 @@ def test_verify_rejects_artifact_sha256_mismatch(
 
     with pytest.raises(ValueError, match="SHA256"):
         verify_resolved_tactile_encoder(artifact)
+
+
+
+def test_flax_conversion_rejects_trusted_parity_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        conversion,
+        "_verify_flax_pytorch_parity",
+        lambda source, state: {
+            "status": "trusted",
+            "seed": 1729,
+            "input_shape": [4, 224, 224, 3],
+            "rtol": 2e-3,
+            "atol": 2e-4,
+            "max_abs": 0.0,
+            "max_rel": 0.0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="status must be passed"):
+        resolve_tactile_encoder(_write_flax_checkpoint(tmp_path / "source"), tmp_path / "cache")
+
+
+
+def _resolve_encoder_in_process(
+    source: str, cache_root: str, result_queue, parity_count_path: str | None = None, waiting=None
+) -> None:
+    if parity_count_path is not None:
+        def counted_parity(source, state):
+            with Path(parity_count_path).open("a", encoding="utf-8") as file:
+                file.write("conversion\n")
+            time.sleep(0.2)
+            return _passed_parity_record()
+
+        conversion._verify_flax_pytorch_parity = counted_parity
+    if waiting is not None:
+        original_lock = conversion._cache_lock
+
+        @contextmanager
+
+        def signalling_lock(path: Path):
+            waiting.set()
+            with original_lock(path):
+                yield
+
+        conversion._cache_lock = signalling_lock
+    try:
+        artifact = resolve_tactile_encoder(source, cache_root)
+        result_queue.put(("ok", str(artifact.weights_path)))
+    except Exception as error:  # pragma: no cover - observed in parent process.
+        result_queue.put(("error", type(error).__name__, str(error)))
+
+
+def _passed_parity_record() -> dict[str, object]:
+    return {
+        "status": "passed",
+        "seed": 1729,
+        "input_shape": [4, 224, 224, 3],
+        "rtol": 2e-3,
+        "atol": 2e-4,
+        "max_abs": 0.0,
+        "max_rel": 0.0,
+    }
+
+
+def test_concurrent_same_digest_conversion_runs_once_under_file_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_flax_checkpoint(tmp_path / "source")
+    cache_root = tmp_path / "cache"
+    count_path = tmp_path / "parity-count.txt"
+
+    context = mp.get_context("spawn")
+    queue = context.Queue()
+    workers = [
+        context.Process(target=_resolve_encoder_in_process, args=(str(source), str(cache_root), queue, str(count_path)))
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    results = [queue.get(timeout=30) for _ in workers]
+    for worker in workers:
+        worker.join(timeout=30)
+        assert worker.exitcode == 0
+
+    assert results[0][0] == results[1][0] == "ok"
+    assert results[0][1] == results[1][1]
+    assert count_path.read_text(encoding="utf-8").splitlines() == ["conversion"]
+
+
+def test_lock_revalidates_source_after_waiting_for_another_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _write_flax_checkpoint(tmp_path / "source")
+    cache_root = tmp_path / "cache"
+    initial = conversion._resolve_source(source)
+    version_root = cache_root.resolve() / f"v{CONVERSION_VERSION}"
+    lock_path = version_root / f".{initial.digest}.lock"
+    context = mp.get_context("spawn")
+    waiting = context.Event()
+    queue = context.Queue()
+    with conversion._cache_lock(lock_path):
+        worker = context.Process(
+            target=_resolve_encoder_in_process,
+            args=(str(source), str(cache_root), queue, None, waiting),
+        )
+        worker.start()
+        assert waiting.wait(timeout=30)
+        _write_flax_checkpoint(source, seed=3)
+    result = queue.get(timeout=30)
+    worker.join(timeout=30)
+
+    assert worker.exitcode == 0
+    assert result[0] == "error"
+    assert result[1] == "RuntimeError"
+    assert "changed while waiting" in result[2]
+
+
+def test_current_pointer_publish_failure_preserves_old_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(conversion, "_verify_flax_pytorch_parity", lambda source, state: _passed_parity_record())
+    source = _write_flax_checkpoint(tmp_path / "source")
+    artifact = resolve_tactile_encoder(source, tmp_path / "cache")
+    slot = artifact.weights_path.parent.parent.parent
+    current_path = slot / "current.json"
+    old_current = current_path.read_text(encoding="utf-8")
+    old_generation = artifact.weights_path.parent
+    original_json = conversion._atomic_json
+    monkeypatch.setattr(conversion, "_generation_artifact", lambda slot, source: None)
+
+    def fail_current(path: Path, value: dict[str, object]) -> None:
+        if path.name == "current.json":
+            raise OSError("simulated pointer publication failure")
+        original_json(path, value)
+
+    monkeypatch.setattr(conversion, "_atomic_json", fail_current)
+    with pytest.raises(OSError, match="pointer publication"):
+        resolve_tactile_encoder(source, tmp_path / "cache")
+
+    assert artifact.weights_path.exists()
+    assert artifact.metadata_path.exists()
+    assert current_path.read_text(encoding="utf-8") == old_current
+    assert list((slot / "generations").iterdir()) == [old_generation]
+
+
+
+def test_atomic_json_cleans_temporary_file_when_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    destination = tmp_path / "current.json"
+
+    def fail_replace(source: Path, target: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(conversion.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace failure"):
+        conversion._atomic_json(destination, {"generation": "next"})
+
+    assert list(tmp_path.glob(".current.json.*.tmp")) == []
+    assert not destination.exists()
