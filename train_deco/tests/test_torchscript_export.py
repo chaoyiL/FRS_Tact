@@ -19,6 +19,7 @@ from train_deco.model_factory import (
     build_model,
     build_stage2_model,
 )
+from train_deco.stage2_initialization import configure_stage2_trainability
 
 
 def config(camera_names=None):
@@ -75,6 +76,7 @@ def stage2_config():
 
 
 def stage2_checkpoint(model):
+    parameter_report = configure_stage2_trainability(model)
     gate_values = {
         name: float(parameter.detach())
         for name, parameter in model.named_parameters()
@@ -102,8 +104,22 @@ def stage2_checkpoint(model):
             },
             "tactile_adapter_rank": 4,
             "gate_values": gate_values,
-            "parameter_categories": {"trainable": {}, "frozen": {}},
-            "parameter_counts": {"total": 2, "trainable": 1},
+            "parameter_categories": {
+                "trainable": {
+                    category: list(names)
+                    for category, names
+                    in parameter_report.trainable_by_category.items()
+                },
+                "frozen": {
+                    category: list(names)
+                    for category, names
+                    in parameter_report.frozen_by_category.items()
+                },
+            },
+            "parameter_counts": {
+                "total": parameter_report.total_parameters,
+                "trainable": parameter_report.trainable_parameters,
+            },
             "stage1_checkpoint": {"path": "/stage1.pt", "sha256": "3" * 64},
         },
     }
@@ -296,7 +312,7 @@ def test_stage2_checkpoint_exports_three_input_six_stream_cpu_contract(
     ).eval()
     embedded = json.loads(extra["deco_metadata.json"])
     visual = torch.rand(1, 2, 3, 32, 32)
-    tactile = torch.rand(1, 4, 3, 18, 24)
+    tactile = torch.rand(1, 4, 3, 32, 32)
     observation = torch.rand(1, 3)
     with torch.inference_mode():
         action = exported(visual, tactile, observation)
@@ -306,6 +322,7 @@ def test_stage2_checkpoint_exports_three_input_six_stream_cpu_contract(
     assert metadata["format"] == STAGE2_EXPORT_FORMAT
     assert embedded["input"]["images"] == [1, 2, 3, 32, 32]
     assert embedded["input"]["tactile_images"] == [1, 4, 3, 32, 32]
+    assert embedded["input"]["spatial_shape_contract"] == "fixed"
     assert embedded["input"]["stream_order"] == [
         "left",
         "right",
@@ -342,7 +359,7 @@ def test_stage2_export_matches_eager_and_keeps_tactile_in_graph(
     eager = Stage2DECODeployment(model, stats(), stage2_config()).eval()
     generator = torch.Generator().manual_seed(19)
     visual = torch.rand(1, 2, 3, 32, 32, generator=generator)
-    tactile = torch.rand(1, 4, 3, 20, 28, generator=generator)
+    tactile = torch.rand(1, 4, 3, 32, 32, generator=generator)
     observation = torch.rand(1, 3, generator=generator)
     with torch.inference_mode():
         torch.manual_seed(23)
@@ -364,6 +381,34 @@ def test_stage2_export_matches_eager_and_keeps_tactile_in_graph(
     assert not torch.allclose(
         tactile_action, zero_tactile_action, rtol=1e-6, atol=1e-7
     )
+
+
+def test_stage2_export_rejects_spatial_shapes_outside_trace_contract(
+    tmp_path, monkeypatch
+):
+    patch_tiny_stage2(monkeypatch)
+    model = make_stage2_model()
+    checkpoint = tmp_path / "stage2.pt"
+    torch.save(stage2_checkpoint(model), checkpoint)
+    output = tmp_path / "stage2.ts"
+    export_checkpoint(checkpoint, output, 32, 32)
+    exported = torch.jit.load(str(output), map_location="cpu").eval()
+    visual = torch.rand(1, 2, 3, 32, 32)
+    tactile = torch.rand(1, 4, 3, 32, 32)
+    observation = torch.rand(1, 3)
+
+    with pytest.raises(torch.jit.Error, match="visual spatial shape"):
+        exported(
+            torch.rand(1, 2, 3, 24, 32),
+            tactile,
+            observation,
+        )
+    with pytest.raises(torch.jit.Error, match="tactile spatial shape"):
+        exported(
+            visual,
+            torch.rand(1, 4, 3, 20, 28),
+            observation,
+        )
 
 
 def test_stage2_export_strictly_rejects_missing_model_state(
@@ -399,4 +444,30 @@ def test_stage2_export_rejects_incomplete_checkpoint_metadata(
     checkpoint = tmp_path / "incomplete-schema.pt"
     torch.save(payload, checkpoint)
     with pytest.raises(ValueError, match="parameter_counts"):
+        export_checkpoint(checkpoint, tmp_path / "policy.ts", 32, 32)
+
+
+def test_stage2_export_rejects_parameter_count_disagreement(
+    tmp_path, monkeypatch
+):
+    patch_tiny_stage2(monkeypatch)
+    payload = stage2_checkpoint(make_stage2_model())
+    payload["stage2_metadata"]["parameter_counts"]["total"] += 1
+    checkpoint = tmp_path / "wrong-counts.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="parameter counts"):
+        export_checkpoint(checkpoint, tmp_path / "policy.ts", 32, 32)
+
+
+def test_stage2_export_rejects_duplicate_or_misclassified_parameters(
+    tmp_path, monkeypatch
+):
+    patch_tiny_stage2(monkeypatch)
+    payload = stage2_checkpoint(make_stage2_model())
+    categories = payload["stage2_metadata"]["parameter_categories"]
+    duplicate = categories["trainable"]["sensor_embeddings"][0]
+    categories["trainable"]["tactile_gates"].append(duplicate)
+    checkpoint = tmp_path / "wrong-categories.pt"
+    torch.save(payload, checkpoint)
+    with pytest.raises(ValueError, match="parameter categories"):
         export_checkpoint(checkpoint, tmp_path / "policy.ts", 32, 32)

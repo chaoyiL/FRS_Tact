@@ -23,6 +23,7 @@ from .model_factory import (
     build_model,
     build_stage2_model,
 )
+from .stage2_initialization import configure_stage2_trainability
 
 
 EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
@@ -111,6 +112,58 @@ class Stage2DECODeployment(UpstreamDECODeployment):
             tactile_images=normalized_tactile,
         )
         return normalized_action * self.action_std + self.action_mean
+
+
+@torch.jit.interface
+class _Stage2DeploymentInterface(nn.Module):
+    def forward(
+        self,
+        images: torch.Tensor,
+        tactile_images: torch.Tensor,
+        observation: torch.Tensor,
+    ) -> torch.Tensor:
+        pass
+
+
+class _FixedShapeStage2Deployment(nn.Module):
+    """Scripted guard around a traced Stage2 deployment graph."""
+
+    deployment: _Stage2DeploymentInterface
+
+    def __init__(
+        self,
+        deployment: nn.Module,
+        image_height: int,
+        image_width: int,
+    ) -> None:
+        super().__init__()
+        self.deployment = deployment
+        self.image_height = image_height
+        self.image_width = image_width
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        tactile_images: torch.Tensor,
+        observation: torch.Tensor,
+    ) -> torch.Tensor:
+        if (
+            images.size(-2) != self.image_height
+            or images.size(-1) != self.image_width
+        ):
+            raise RuntimeError(
+                "Stage2 visual spatial shape does not match the fixed "
+                "TorchScript export contract"
+            )
+        if (
+            tactile_images.size(-2) != self.image_height
+            or tactile_images.size(-1) != self.image_width
+        ):
+            raise RuntimeError(
+                "Stage2 tactile spatial shape does not match the fixed "
+                "TorchScript export contract"
+            )
+        return self.deployment(images, tactile_images, observation)
 
 
 def sha256_file(path: Path) -> str:
@@ -303,6 +356,35 @@ def _validate_stage2_gates(policy: nn.Module, metadata: dict) -> None:
             raise ValueError(f"Stage2 checkpoint gate value disagrees for {name!r}")
 
 
+def _validate_stage2_parameter_inventory(
+    policy: nn.Module,
+    metadata: dict,
+) -> None:
+    report = configure_stage2_trainability(policy)
+    expected_categories = {
+        "trainable": {
+            category: list(names)
+            for category, names in report.trainable_by_category.items()
+        },
+        "frozen": {
+            category: list(names)
+            for category, names in report.frozen_by_category.items()
+        },
+    }
+    if metadata["parameter_categories"] != expected_categories:
+        raise ValueError(
+            "Stage2 checkpoint parameter categories disagree with the model"
+        )
+    expected_counts = {
+        "total": report.total_parameters,
+        "trainable": report.trainable_parameters,
+    }
+    if metadata["parameter_counts"] != expected_counts:
+        raise ValueError(
+            "Stage2 checkpoint parameter counts disagree with the model"
+        )
+
+
 def _atomic_save_torchscript(module, output_path: Path, extra_files: dict) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = output_path.with_name(f".{output_path.name}.{os.getpid()}.tmp")
@@ -360,6 +442,15 @@ def _trace(policy, stats, config, image_height, image_width):
             deployment, inputs, check_trace=False, strict=True
         )
         traced = torch.jit.freeze(traced.eval())
+        if stage2:
+            traced = torch.jit.script(
+                _FixedShapeStage2Deployment(
+                    traced,
+                    image_height,
+                    image_width,
+                )
+            )
+            traced = torch.jit.freeze(traced.eval())
     return traced, inputs
 
 
@@ -433,6 +524,7 @@ def _metadata(
             *config["camera_names"],
             *stage2_metadata["tactile_field_order"],
         ]
+        metadata["input"]["spatial_shape_contract"] = "fixed"
         metadata["preprocessing"] = {
             "visual": {
                 "resize": "aspect-preserving-letterbox",
@@ -575,6 +667,7 @@ def export_checkpoint(
     policy.load_state_dict(checkpoint["model"], strict=True)
     if stage2_metadata is not None:
         _validate_stage2_gates(policy, stage2_metadata)
+        _validate_stage2_parameter_inventory(policy, stage2_metadata)
     traced, inputs = _trace(
         policy.eval(), checkpoint["stats"], config, image_height, image_width
     )
