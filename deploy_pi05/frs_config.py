@@ -20,6 +20,13 @@ class GripperHysteresisConfig:
     right_closed_command: float
 
 
+@dataclass(frozen=True)
+class Task1MotionGainConfig:
+    approach_translation_gain: float
+    translation_gain: float
+    rotation_gain: float
+
+
 def _mapping(value: Any, name: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{name} must be a mapping")
@@ -36,6 +43,49 @@ def _integer(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, Integral):
         raise ValueError(f"{name} must be an integer")
     return int(value)
+
+
+def parse_task_switch(config: Mapping[str, Any]) -> int:
+    task = config.get("task", 0)
+    if (
+        isinstance(task, bool)
+        or not isinstance(task, Integral)
+        or int(task) not in (0, 1)
+    ):
+        raise ValueError("task must be 0 or 1")
+    return int(task)
+
+
+def parse_task1_motion_gain_config(
+    config: Mapping[str, Any],
+) -> Task1MotionGainConfig:
+    if parse_task_switch(config) != 1:
+        return Task1MotionGainConfig(
+            approach_translation_gain=1.0,
+            translation_gain=1.0,
+            rotation_gain=1.0,
+        )
+    raw = _mapping(config.get("task1"), "task1")
+    return Task1MotionGainConfig(
+        approach_translation_gain=_bounded_float(
+            raw.get("approach_translation_gain"),
+            "task1.approach_translation_gain",
+            minimum=0.1,
+            maximum=3.0,
+        ),
+        translation_gain=_bounded_float(
+            raw.get("translation_gain"),
+            "task1.translation_gain",
+            minimum=0.1,
+            maximum=3.0,
+        ),
+        rotation_gain=_bounded_float(
+            raw.get("rotation_gain"),
+            "task1.rotation_gain",
+            minimum=0.1,
+            maximum=2.0,
+        ),
+    )
 
 
 def _bounded_float(value: Any, name: str, *, minimum: float, maximum: float) -> float:
@@ -86,6 +136,8 @@ def parse_gripper_hysteresis_config(
 def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     """Validate the FRS profile without importing JAX or training modules."""
     raw = _mapping(config.get("frs"), "frs")
+    task = parse_task_switch(config)
+    parse_task1_motion_gain_config(config)
     if not _boolean(raw.get("enabled", True), "frs.enabled"):
         raise ValueError("deploy_pi05 requires frs.enabled=true")
     parse_gripper_hysteresis_config(config)
@@ -110,6 +162,15 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     if observation.get("data_type") != "vitac":
         raise ValueError("FRS deployment requires observation.data_type='vitac'")
     control = _mapping(config.get("control"), "control")
+    if task == 1:
+        controller_frequency = control.get("controller_frequency")
+        if (
+            isinstance(controller_frequency, bool)
+            or not isinstance(controller_frequency, Real)
+            or not math.isfinite(float(controller_frequency))
+            or float(controller_frequency) != 80.0
+        ):
+            raise ValueError("Task 1 control.controller_frequency must be 80.0")
     steps = _integer(control.get("steps_per_inference"), "control.steps_per_inference")
     horizon = _integer(control.get("action_horizon"), "control.action_horizon")
     if steps != horizon:

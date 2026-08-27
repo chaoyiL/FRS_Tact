@@ -253,8 +253,13 @@ def test_frs_pi05_client_starts_without_config_handshake(
             policy,
             source_sample_steps,
             gripper_hysteresis,
+            task,
+            task1_motion_gain,
         ) -> None:
             del config_path, source_sample_steps
+            assert task == 0
+            assert task1_motion_gain.translation_gain == pytest.approx(1.0)
+            assert task1_motion_gain.rotation_gain == pytest.approx(1.0)
             assert gripper_hysteresis.left_close_threshold == pytest.approx(0.08)
             assert gripper_hysteresis.right_close_threshold == pytest.approx(0.09)
             self.policy = policy

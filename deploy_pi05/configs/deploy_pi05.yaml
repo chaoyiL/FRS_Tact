@@ -1,5 +1,5 @@
 # Plain-vision pi0.5 deployment configuration.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_bread_all_step8000/checkpoint
 seed: 0
 num_steps: 10
 
@@ -17,8 +17,8 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets/
-  asset_id: two_tubes_0102
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_bread_all_step8000/checkpoint/assets/
+  asset_id: bread_all
   use_quantile_norm: true
 
 connection:
@@ -36,7 +36,8 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
+  language_prompt: Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
+  #Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
   #Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   #Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   single_arm_mode: false

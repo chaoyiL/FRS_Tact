@@ -15,8 +15,13 @@ from typing import TYPE_CHECKING, Any
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scipy.spatial.transform import Rotation
 
-from .frs_config import GripperHysteresisConfig, validate_frs_config_section
+from .frs_config import (
+    GripperHysteresisConfig,
+    Task1MotionGainConfig,
+    validate_frs_config_section,
+)
 from .frs_inference.decoder import (
     DECODER_INPUT_VERSION,
     decode_actions,
@@ -36,6 +41,7 @@ if TYPE_CHECKING:
 _BIMANUAL_STEERED_ACTION_DIM = 20
 _GRIPPER_ACTION_INDICES = (9, 19)
 _POSITION_ACTION_SLICES = (slice(0, 3), slice(10, 13))
+_ROTATION_ACTION_SLICES = (slice(3, 9), slice(13, 19))
 _BIMANUAL_TACTILE_KEY_BASENAMES = (
     "tactile_left_0",
     "tactile_right_0",
@@ -182,6 +188,50 @@ def _select_latched_vla_translation(
             position = _POSITION_ACTION_SLICES[side_index]
             protected[position] = vla_normalized[position]
     return protected, (bool(next_latched[0]), bool(next_latched[1]))
+
+
+def _apply_task1_motion_gain(
+    action: np.ndarray,
+    *,
+    latched: tuple[bool, bool],
+    config: Task1MotionGainConfig,
+) -> np.ndarray:
+    if action.shape != (20,) or not np.isfinite(action).all():
+        raise ValueError("task1 motion gain requires a finite 20D robot action")
+    adjusted = np.array(action, dtype=np.float32, copy=True)
+    for side_index, is_latched in enumerate(latched):
+        gain = (
+            config.translation_gain
+            if is_latched
+            else config.approach_translation_gain
+        )
+        adjusted[_POSITION_ACTION_SLICES[side_index]] *= gain
+        if not is_latched or config.rotation_gain == 1.0:
+            continue
+        rotation_slice = _ROTATION_ACTION_SLICES[side_index]
+        rotation_6d = np.asarray(adjusted[rotation_slice], dtype=np.float64)
+        first = rotation_6d[:3]
+        second = rotation_6d[3:]
+        first_norm = float(np.linalg.norm(first))
+        if first_norm <= 1e-8:
+            raise ValueError("task1 rotation gain received a degenerate 6D rotation")
+        first_unit = first / first_norm
+        second_orthogonal = second - np.dot(first_unit, second) * first_unit
+        second_norm = float(np.linalg.norm(second_orthogonal))
+        if second_norm <= 1e-8:
+            raise ValueError("task1 rotation gain received a degenerate 6D rotation")
+        second_unit = second_orthogonal / second_norm
+        matrix = np.stack(
+            (first_unit, second_unit, np.cross(first_unit, second_unit)),
+            axis=-1,
+        )
+        scaled_matrix = Rotation.from_rotvec(
+            Rotation.from_matrix(matrix).as_rotvec() * config.rotation_gain
+        ).as_matrix()
+        adjusted[rotation_slice] = np.concatenate(
+            (scaled_matrix[:, 0], scaled_matrix[:, 1])
+        )
+    return adjusted
 
 
 def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
@@ -374,9 +424,25 @@ class FRSRuntime:
         policy: Pi05RemotePolicy,
         source_sample_steps: int,
         gripper_hysteresis: GripperHysteresisConfig,
+        task: int = 0,
+        task1_motion_gain: Task1MotionGainConfig | None = None,
     ) -> None:
         self.policy = policy
         self.gripper_hysteresis = gripper_hysteresis
+        if isinstance(task, bool) or not isinstance(task, int) or task not in (0, 1):
+            raise ValueError("task must be 0 or 1")
+        self.task = task
+        if task == 1 and task1_motion_gain is None:
+            raise ValueError("task1_motion_gain is required when task is 1")
+        self.task1_motion_gain = (
+            Task1MotionGainConfig(
+                approach_translation_gain=1.0,
+                translation_gain=1.0,
+                rotation_gain=1.0,
+            )
+            if task1_motion_gain is None
+            else task1_motion_gain
+        )
         self.config = parse_frs_config(raw_config, config_path=config_path)
         self.model, self.metadata = load_frs_checkpoint(self.config.checkpoint)
         self.encoder = load_tactile_encoder(self.config.tactile_encoder_checkpoint)
@@ -773,19 +839,28 @@ class FRSRuntime:
         selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla_normalized[
             0, action_index, list(_GRIPPER_ACTION_INDICES)
         ]
-        selected, self._vla_translation_latched = _select_latched_vla_translation(
-            selected,
-            self._action_vla_normalized[0, action_index],
-            self._action_vla[0, action_index],
-            self._vla_translation_latched,
-            self.gripper_hysteresis,
-        )
+        if self.task == 1:
+            selected, self._vla_translation_latched = _select_latched_vla_translation(
+                selected,
+                self._action_vla_normalized[0, action_index],
+                self._action_vla[0, action_index],
+                self._vla_translation_latched,
+                self.gripper_hysteresis,
+            )
+        else:
+            self._vla_translation_latched = (False, False)
         selected_normalized = self._public(selected)
         robot_selected = np.asarray(self.policy.unnormalize_actions(selected_normalized), dtype=np.float32)
         expected_robot = (self.policy.config.robot_action_dim,)
         if robot_selected.shape != expected_robot or not np.isfinite(robot_selected).all():
             raise ValueError(f"selected robot action must be finite with shape {expected_robot}")
         robot_selected = np.array(robot_selected, copy=True)
+        if self.task == 1:
+            robot_selected = _apply_task1_motion_gain(
+                robot_selected,
+                latched=self._vla_translation_latched,
+                config=self.task1_motion_gain,
+            )
         robot_selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla[
             0, action_index, list(_GRIPPER_ACTION_INDICES)
         ]

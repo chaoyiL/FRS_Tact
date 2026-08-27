@@ -3,6 +3,30 @@ checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step1
 seed: 0
 num_steps: 10
 
+# Task-specific deployment switch.
+# 0: generic PI0.5 + FRS behavior
+# 1: tube extraction guard (VLA translation after grasp; world XY bounded during lift)
+task: 1
+task1:
+  # Maximum lateral distance from the grasp-time XY anchor during extraction.
+  max_world_xy_deviation_m: 0.005
+  # Each arm releases its XY extraction guard after this much actual world-Z lift.
+  left_release_height_m: 0.10
+  right_release_height_m: 0.04
+  # The left arm waits at its current pose while the right tube is extracted.
+  hold_left_during_right_lift: true
+  # Applied only after that arm's gripper latch switches translation to VLA.
+  approach_translation_gain: 1.2
+  translation_gain: 1.5
+  rotation_gain: 1.0
+  # Task 1 motion stages consumed by the robot-side sequencer.
+  left_min_lift_height_m: 0.10
+  left_lift_speed_m_s: 0.04
+  right_preclose_forward_m: 0.005
+  right_preclose_speed_m_s: 0.02
+  right_preclose_tolerance_m: 0.001
+  right_preclose_stable_steps: 3
+
 model:
   action_dim: 20
   action_horizon: 50
@@ -66,6 +90,7 @@ observation:
 control:
   control_frequency: 10.0
   controller_frequency: 80.0
+  dispatch_lead_time_s: 0.04
   action_horizon: 50
   steps_per_inference: 50
 

@@ -30,7 +30,11 @@ from .deployment import (
 )
 from .frs_protocol import FRSChunkEnd, FRSChunkStart, FRSSteerAck, FRSSteerRequest
 from .frs_runtime import FRSChunkReady, FRSRuntime, FRSSteerResult
-from .frs_config import parse_gripper_hysteresis_config
+from .frs_config import (
+    parse_gripper_hysteresis_config,
+    parse_task1_motion_gain_config,
+    parse_task_switch,
+)
 from .policy import Pi05RemotePolicy
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05_frs.yaml"
@@ -223,6 +227,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         policy=policy,
         source_sample_steps=sample_steps,
         gripper_hysteresis=parse_gripper_hysteresis_config(config),
+        task=parse_task_switch(config),
+        task1_motion_gain=parse_task1_motion_gain_config(config),
     )
     image_keys = tuple(dict.fromkeys((*policy.robot_image_keys, *frs.tactile_keys)))
     bridge: RobotBridgeClient | None = None
