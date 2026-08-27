@@ -2,7 +2,7 @@
 
 ## Goal
 
-Keep the Task 1 right gripper physically open to at least `0.035 m` while it
+Keep the Task 1 right gripper physically open to at least `0.045 m` while it
 approaches the green tube and before the VLA requests closure.
 
 ## Configuration
@@ -11,10 +11,10 @@ Add the following required Task 1 field to the shared FRS deployment YAML:
 
 ```yaml
 task1:
-  right_approach_min_open_m: 0.035
+  right_approach_min_open_m: 0.045
 ```
 
-The FRS server parser accepts finite values in `[0.01, 0.04] m`. Task 0 projects
+The FRS server parser accepts finite values in `[0.01, 0.045] m`. Task 0 projects
 the field as inactive. The ordinary plain-vision PI0.5 parser is unchanged.
 
 ## Runtime behavior
@@ -35,10 +35,9 @@ targets, and FRS action tensors remain unchanged.
 
 ## Validation
 
-Focused tests cover a small calibrated VLA approach command being raised to
-`0.035 m`, a larger command passing through unchanged, and a close request
-entering the existing pre-close path. Parser coverage checks the configured
-value and rejects values outside `[0.01, 0.04] m`.
+Focused tests cover calibrated VLA approach commands being raised to `0.045 m`
+and a close request entering the existing pre-close path. Parser coverage
+checks the configured value and rejects values outside `[0.01, 0.045] m`.
 
 Both the robot server and FRS client must be restarted after the shared YAML
 changes because they read it only during startup.
