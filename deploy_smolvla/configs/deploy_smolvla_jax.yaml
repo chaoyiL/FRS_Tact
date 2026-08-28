@@ -45,9 +45,12 @@ connection:
 # ---- 观测、提示词、模型类型 Vision/Tactile----
 # 纯视觉部署会自动请求服务器的 smolvla_vision_256 观测 profile；无需配置该字段。
 observation:
+  # single-right-arm-7x10 必须配套 7D state / 10D action 的右手 checkpoint。
+  state_action_profile: dual-arm-20x20
   data_type: vision
   language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   single_arm_mode: false
+  controlled_arm: null
   no_state_obs_mode: false
 
 # ---- 控制 ----

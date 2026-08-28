@@ -48,8 +48,14 @@ class Pi05DeploymentConfig:
     paligemma_variant: str = "gemma_2b_lora"
     action_expert_variant: str = "gemma_300m_lora"
     use_quantile_norm: bool = True
+    state_action_profile: str = "dual-arm-20x20"
 
     def __post_init__(self) -> None:
+        if self.state_action_profile not in {
+            "dual-arm-20x20",
+            "single-right-arm-7x10",
+        }:
+            raise ValueError(f"unsupported state/action profile: {self.state_action_profile!r}")
         if min(self.state_dim, self.robot_action_dim, self.action_dim, self.action_horizon) <= 0:
             raise ValueError("pi0.5 dimensions and action horizon must be positive")
         if self.state_dim > self.action_dim or self.robot_action_dim > self.action_dim:

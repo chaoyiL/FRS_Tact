@@ -50,6 +50,16 @@ _BIMANUAL_TACTILE_KEY_BASENAMES = (
 )
 
 
+def _physical_gripper_indices(robot_action_dim: int) -> tuple[int, ...]:
+    if robot_action_dim == 10:
+        return (9,)
+    if robot_action_dim == 20:
+        return (9, 19)
+    raise ValueError(
+        "FRS deployment supports only 10D single-arm or 20D dual-arm robot actions"
+    )
+
+
 @dataclass(frozen=True)
 class FRSDiagnostics:
     tactile_change: float
@@ -433,6 +443,11 @@ class FRSRuntime:
         if isinstance(task, bool) or not isinstance(task, int) or task not in (0, 1):
             raise ValueError("task must be 0 or 1")
         self.task = task
+        if policy.config.robot_action_dim == 10 and task != 0:
+            raise ValueError("single-right-arm FRS deployment requires task=0")
+        self._gripper_action_indices = _physical_gripper_indices(
+            policy.config.robot_action_dim
+        )
         if task == 1 and task1_motion_gain is None:
             raise ValueError("task1_motion_gain is required when task is 1")
         self.task1_motion_gain = (
@@ -753,14 +768,14 @@ class FRSRuntime:
             isinstance(extra, Mapping)
             and extra.get("loss_mode") == "bimanual_gated"
         )
-        safety_width = (
-            _BIMANUAL_STEERED_ACTION_DIM if bimanual else int(array.shape[-1])
-        )
+        safety_width = int(self.policy.config.robot_action_dim)
+        if bimanual and safety_width != _BIMANUAL_STEERED_ACTION_DIM:
+            raise ValueError("bimanual_gated FRS requires a 20D robot action contract")
         array = np.array(array, copy=True)
-        if bimanual and array.shape[-1] > safety_width:
+        if array.shape[-1] > safety_width:
             array[..., safety_width:] = self._action_vla_normalized[..., safety_width:]
-        array[..., _GRIPPER_ACTION_INDICES] = self._action_vla_normalized[
-            ..., _GRIPPER_ACTION_INDICES
+        array[..., self._gripper_action_indices] = self._action_vla_normalized[
+            ..., self._gripper_action_indices
         ]
         if not np.isfinite(array).all():
             raise ValueError(f"FRS output must be finite with shape {expected}, got {array.shape}")
@@ -838,8 +853,8 @@ class FRSRuntime:
             weights = np.exp(-self.config.temporal_ensemble_coeff * ages)
             selected = np.average(np.stack(candidates), axis=0, weights=weights)
         selected = np.array(selected, dtype=np.float32, copy=True)
-        selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla_normalized[
-            0, action_index, list(_GRIPPER_ACTION_INDICES)
+        selected[list(self._gripper_action_indices)] = self._action_vla_normalized[
+            0, action_index, list(self._gripper_action_indices)
         ]
         if self.task == 1:
             selected, self._vla_translation_latched = _select_latched_vla_translation(
@@ -863,8 +878,8 @@ class FRSRuntime:
                 latched=self._vla_translation_latched,
                 config=self.task1_motion_gain,
             )
-        robot_selected[list(_GRIPPER_ACTION_INDICES)] = self._action_vla[
-            0, action_index, list(_GRIPPER_ACTION_INDICES)
+        robot_selected[list(self._gripper_action_indices)] = self._action_vla[
+            0, action_index, list(self._gripper_action_indices)
         ]
         diagnostics = FRSDiagnostics(float(change[0]), delta, max_abs)
         result = FRSSteerResult(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import inspect
 import json
 from pathlib import Path
@@ -12,6 +13,68 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DEPLOY = ROOT / "deploy_pi05"
+
+
+def test_pi05_right_arm_profile_accepts_7d_state_and_10d_action() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load((DEPLOY / "configs/deploy_pi05.yaml").read_bytes())
+    config = copy.deepcopy(config)
+    config["model"].update(
+        state_action_profile="single-right-arm-7x10",
+        state_dim=7,
+        robot_action_dim=10,
+        action_dim=10,
+    )
+    config["observation"].update(single_arm_mode=True, controlled_arm="right")
+
+    loaded = load_deployment_config_bytes(
+        yaml.safe_dump(config).encode(), mode="pi05"
+    )
+
+    assert loaded["model"]["state_dim"] == 7
+    assert loaded["model"]["robot_action_dim"] == 10
+
+
+def test_pi05_right_arm_profile_rejects_dual_arm_dimensions() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load((DEPLOY / "configs/deploy_pi05.yaml").read_bytes())
+    config["model"]["state_action_profile"] = "single-right-arm-7x10"
+    config["observation"].update(single_arm_mode=True, controlled_arm="right")
+
+    with pytest.raises(ValueError, match="model.state_dim must be 7"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="pi05")
+
+
+def test_pi05_frs_right_arm_uses_only_right_tactile_inputs() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load((DEPLOY / "configs/deploy_pi05_frs.yaml").read_bytes())
+    config["task"] = 0
+    config["model"].update(
+        state_action_profile="single-right-arm-7x10",
+        state_dim=7,
+        robot_action_dim=10,
+        action_dim=10,
+    )
+    config["observation"].update(single_arm_mode=True, controlled_arm="right")
+    config["frs"]["tactile_keys"] = [
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_right_1",
+    ]
+
+    loaded = load_deployment_config_bytes(
+        yaml.safe_dump(config).encode(), mode="frs"
+    )
+
+    assert loaded["frs"]["tactile_keys"] == config["frs"]["tactile_keys"]
 
 
 def test_deploy_pi05_contains_no_training_or_analysis_trees() -> None:
@@ -38,6 +101,8 @@ def test_only_deployment_configs_and_launchers_remain() -> None:
     assert {path.name for path in (DEPLOY / "configs").glob("*.yaml")} == {
         "deploy_pi05.yaml",
         "deploy_pi05_frs.yaml",
+        "deploy_pi05_frs_right.yaml",
+        "deploy_pi05_right.yaml",
     }
     assert {path.name for path in (DEPLOY / "scripts").glob("*.sh")} == {
         "start_pi05.sh",

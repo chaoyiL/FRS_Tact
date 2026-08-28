@@ -319,6 +319,18 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         raise ValueError("frs.tactile_keys must be a non-empty list of strings")
     if len(set(keys)) != len(keys):
         raise ValueError("frs.tactile_keys must not contain duplicates")
+    observation = config.get("observation", {})
+    if observation.get("state_action_profile") == "single-right-arm-7x10":
+        tactile_basenames = tuple(str(key).rsplit(".", 1)[-1] for key in keys)
+        if tactile_basenames != ("tactile_right_0", "tactile_right_1"):
+            raise ValueError(
+                "single-right-arm FRS requires tactile_right_0 and tactile_right_1 "
+                "in that order"
+            )
+        if raw.get("inactive_arm_xyz_threshold_m") is not None:
+            raise ValueError(
+                "single-right-arm FRS requires inactive_arm_xyz_threshold_m=null"
+            )
     if (
         min(
             int(raw["tactile_window_divisor"]),
@@ -339,7 +351,7 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     _temporal_ensemble_coefficient(raw.get("temporal_ensemble_coeff"))
     _inactive_arm_xyz_threshold(raw.get("inactive_arm_xyz_threshold_m"))
     _gripper_gain_config(raw.get("gripper_gain"))
-    if config.get("observation", {}).get("data_type") != "vitac":
+    if observation.get("data_type") != "vitac":
         raise ValueError("FRS deployment requires observation.data_type='vitac'")
     control = config.get("control", {})
     if (
@@ -860,9 +872,12 @@ class FRSSteeringPolicy:
         )
         if decoded_array.shape != expected:
             raise ValueError(f"FRS output must have shape {expected}, got {decoded_array.shape}")
-        if expected[-1] == 20:
+        if expected[-1] in (10, 20):
             decoded_array = np.array(decoded_array, copy=True)
-            decoded_array[..., [9, 19]] = self._action_vla_normalized[..., [9, 19]]
+            gripper_indices = [9] if expected[-1] == 10 else [9, 19]
+            decoded_array[..., gripper_indices] = self._action_vla_normalized[
+                ..., gripper_indices
+            ]
         if not np.isfinite(decoded_array).all():
             raise ValueError("FRS action contains NaN or Inf")
         delta_rms = float(
@@ -982,12 +997,13 @@ class FRSSteeringPolicy:
                 self._action_vla[0, action_index],
                 inactive_threshold,
             )
-        if selected.shape == (20,):
+        if selected.shape in ((10,), (20,)):
             selected = np.array(selected, copy=True)
-            selected[[9, 19]] = self._action_vla_normalized[
+            gripper_indices = [9] if selected.shape == (10,) else [9, 19]
+            selected[gripper_indices] = self._action_vla_normalized[
                 0,
                 action_index,
-                [9, 19],
+                gripper_indices,
             ]
         selected_normalized = self._immutable_public_array(selected)
         robot_selected = np.asarray(
@@ -1002,9 +1018,12 @@ class FRSSteeringPolicy:
             )
         if not np.isfinite(robot_selected).all():
             raise ValueError("robot-space selected action must be finite")
-        if robot_selected.shape == (20,):
+        if robot_selected.shape in ((10,), (20,)):
             robot_selected = robot_selected.copy()
-            robot_selected[[9, 19]] = self._action_vla[0, action_index, [9, 19]]
+            gripper_indices = [9] if robot_selected.shape == (10,) else [9, 19]
+            robot_selected[gripper_indices] = self._action_vla[
+                0, action_index, gripper_indices
+            ]
         selected_action = self._immutable_public_array(robot_selected)
 
         result = FRSSteerResult(

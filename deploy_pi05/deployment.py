@@ -24,12 +24,24 @@ if TYPE_CHECKING:
 
 DeploymentMode = Literal["pi05", "frs"]
 LOGGER = logging.getLogger(__name__)
-_MODEL_CONTRACT = {
-    "state_dim": 20,
-    "robot_action_dim": 20,
-    "action_horizon": 50,
+DUAL_ARM_PROFILE = "dual-arm-20x20"
+SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
+_STATE_ACTION_PROFILES = {
+    DUAL_ARM_PROFILE: {
+        "state_dim": 20,
+        "robot_action_dim": 20,
+        "single_arm_mode": False,
+        "controlled_arm": None,
+    },
+    SINGLE_RIGHT_ARM_PROFILE: {
+        "state_dim": 7,
+        "robot_action_dim": 10,
+        "single_arm_mode": True,
+        "controlled_arm": "right",
+    },
 }
-_SUPPORTED_MODEL_ACTION_DIMS = frozenset({20, 32})
+_ACTION_HORIZON = 50
+_SUPPORTED_MODEL_ACTION_DIMS = frozenset({10, 20, 32})
 _CAMERA_MAP_CONTRACT = {
     "left_wrist_0_rgb": "observation.images.camera0",
     "right_wrist_0_rgb": "observation.images.camera1",
@@ -81,6 +93,7 @@ def print_startup_summary(
     print(f"[startup] norm_stats={stats_path}")
     print(
         "[startup] model "
+        f"profile={policy_config.state_action_profile} "
         f"state={policy_config.state_dim} model_action={policy_config.action_dim} "
         f"robot_action={policy_config.robot_action_dim} horizon={policy_config.action_horizon}"
     )
@@ -200,8 +213,8 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     no_state_obs_mode = _as_bool(
         observation["no_state_obs_mode"], "observation.no_state_obs_mode"
     )
-    if single_arm_mode or no_state_obs_mode:
-        raise ValueError("pi0.5 pick_tube requires bimanual state observations")
+    if no_state_obs_mode:
+        raise ValueError("pi0.5 deployment requires state observations")
     _as_bool(runtime.get("auto_start", False), "runtime.auto_start")
     if "add_port" in connection and connection["add_port"] is not None:
         _as_bool(connection["add_port"], "connection.add_port")
@@ -210,9 +223,31 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     if "save_observations" in logging_config:
         _as_bool(logging_config["save_observations"], "logging.save_observations")
 
-    for key, expected in _MODEL_CONTRACT.items():
+    profile_name = str(model.get("state_action_profile", DUAL_ARM_PROFILE))
+    try:
+        profile = _STATE_ACTION_PROFILES[profile_name]
+    except KeyError as error:
+        raise ValueError(
+            "model.state_action_profile must be one of "
+            f"{sorted(_STATE_ACTION_PROFILES)}"
+        ) from error
+    for key in ("state_dim", "robot_action_dim"):
+        expected = profile[key]
         if _as_int(model[key], f"model.{key}") != expected:
-            raise ValueError(f"model.{key} must be {expected} for this pi0.5 deployment")
+            raise ValueError(
+                f"model.{key} must be {expected} for state_action_profile={profile_name!r}"
+            )
+    if single_arm_mode is not profile["single_arm_mode"]:
+        raise ValueError(
+            "observation.single_arm_mode does not match "
+            f"model.state_action_profile={profile_name!r}"
+        )
+    controlled_arm = observation.get("controlled_arm")
+    if controlled_arm != profile["controlled_arm"]:
+        raise ValueError(
+            f"observation.controlled_arm must be {profile['controlled_arm']!r} for "
+            f"state_action_profile={profile_name!r}"
+        )
     action_dim = _as_int(model["action_dim"], "model.action_dim")
     if action_dim not in _SUPPORTED_MODEL_ACTION_DIMS:
         supported = ", ".join(
@@ -226,7 +261,7 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
     if model["empty_cameras"] != _EMPTY_CAMERAS_CONTRACT:
         raise ValueError("model.empty_cameras must be empty for this two-image pi0.5 deployment")
 
-    horizon = _MODEL_CONTRACT["action_horizon"]
+    horizon = _ACTION_HORIZON
     if _as_int(control["action_horizon"], "control.action_horizon") != horizon:
         raise ValueError("model/control action_horizon values must match")
     steps = _as_int(control["steps_per_inference"], "control.steps_per_inference")
@@ -320,6 +355,7 @@ def make_policy_config(config: Mapping[str, Any], config_path: Path) -> Pi05Depl
         asset_id=str(stats["asset_id"]),
         camera_map={str(key): str(value) for key, value in camera_map.items()},
         empty_cameras=tuple(str(value) for value in empty),
+        state_action_profile=str(model.get("state_action_profile", DUAL_ARM_PROFILE)),
         state_dim=_as_int(model["state_dim"], "model.state_dim"),
         robot_action_dim=_as_int(model["robot_action_dim"], "model.robot_action_dim"),
         action_dim=_as_int(model["action_dim"], "model.action_dim"),

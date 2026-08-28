@@ -145,6 +145,9 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     """Validate the FRS profile without importing JAX or training modules."""
     raw = _mapping(config.get("frs"), "frs")
     task = parse_task_switch(config)
+    model = _mapping(config.get("model"), "model")
+    if model.get("state_action_profile", "dual-arm-20x20") == "single-right-arm-7x10" and task != 0:
+        raise ValueError("single-right-arm FRS deployment requires task=0")
     parse_task1_motion_gain_config(config)
     if not _boolean(raw.get("enabled", True), "frs.enabled"):
         raise ValueError("deploy_pi05 requires frs.enabled=true")
@@ -166,6 +169,15 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     missing = [key for key in required if key not in raw]
     if missing:
         raise ValueError(f"missing FRS config values: {missing}")
+    if model.get("state_action_profile", "dual-arm-20x20") == "single-right-arm-7x10":
+        tactile_basenames = tuple(
+            str(key).rsplit(".", 1)[-1] for key in raw["tactile_keys"]
+        )
+        if tactile_basenames != ("tactile_right_0", "tactile_right_1"):
+            raise ValueError(
+                "single-right-arm FRS requires tactile_right_0 and tactile_right_1 "
+                "in that order"
+            )
     observation = _mapping(config.get("observation"), "observation")
     if observation.get("data_type") != "vitac":
         raise ValueError("FRS deployment requires observation.data_type='vitac'")

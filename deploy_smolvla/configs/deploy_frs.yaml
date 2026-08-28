@@ -74,10 +74,13 @@ connection:
   require_token: true
 
 observation:
+  # single-right-arm-7x10 必须配套右手 SmolVLA 与单手 FRS checkpoint。
+  state_action_profile: dual-arm-20x20
   # 基础 checkpoint 是 vision，但 FRS 还需要四路原始触觉图像，因此服务端必须发 vitac。
   data_type: vitac
   language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   single_arm_mode: false
+  controlled_arm: null
   no_state_obs_mode: false
 
 control:
