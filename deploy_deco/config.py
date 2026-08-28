@@ -9,7 +9,20 @@ from typing import Any
 
 import yaml
 
+from deploy_deco.artifact import (
+    DUAL_ARM_PROFILE,
+    SINGLE_RIGHT_ARM_PROFILE,
+    artifact_profile,
+)
+
 DECO_OBSERVATION_PROFILE = "deco_vision_224"
+
+
+def deployment_profile(config: Mapping[str, Any]) -> str:
+    model = config.get("model", {}) or {}
+    if not isinstance(model, Mapping):
+        raise ValueError("model must be a mapping")
+    return str(model.get("state_action_profile", DUAL_ARM_PROFILE))
 
 
 def section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -79,8 +92,19 @@ def validate_config(config: Mapping[str, Any]) -> None:
         raise ValueError("observation.data_type must be 'vision'")
     if observation.get("observation_profile", DECO_OBSERVATION_PROFILE) != DECO_OBSERVATION_PROFILE:
         raise ValueError(f"observation_profile must be {DECO_OBSERVATION_PROFILE!r}")
-    if _boolean(observation.get("single_arm_mode", False), "observation.single_arm_mode"):
-        raise ValueError("DECO requires bimanual observations")
+    profile = deployment_profile(config)
+    single_arm_mode = _boolean(
+        observation.get("single_arm_mode", False), "observation.single_arm_mode"
+    )
+    controlled_arm = observation.get("controlled_arm")
+    if profile == DUAL_ARM_PROFILE:
+        if single_arm_mode or controlled_arm is not None:
+            raise ValueError("dual-arm DECO requires bimanual observations")
+    elif profile == SINGLE_RIGHT_ARM_PROFILE:
+        if not single_arm_mode or controlled_arm != "right":
+            raise ValueError("single-right-arm DECO requires controlled_arm='right'")
+    else:
+        raise ValueError(f"unsupported DECO deployment profile: {profile!r}")
     if _boolean(observation.get("no_state_obs_mode", False), "observation.no_state_obs_mode"):
         raise ValueError("DECO requires the 20D state observation")
     horizon = _integer(control.get("action_horizon"), "control.action_horizon")
@@ -109,6 +133,12 @@ def resolve_checkpoint(config: Mapping[str, Any]) -> Path:
 
 
 def validate_artifact_contract(config: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
+    artifact = artifact_profile(metadata)
+    configured = deployment_profile(config)
+    if artifact != configured:
+        raise ValueError(
+            f"DECO config profile {configured!r} does not match artifact profile {artifact!r}"
+        )
     control = section(config, "control")
     horizon = int(metadata["output"]["action"][1])
     if control["action_horizon"] != horizon:
