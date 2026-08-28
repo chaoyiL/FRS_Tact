@@ -178,6 +178,42 @@ def test_export_contains_upstream_graph_weights_stats_and_metadata(tmp_path):
     assert torch.isfinite(action).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@torch.no_grad()
+def test_checkpoint_export_honors_cuda_device(tmp_path):
+    model = build_model(config(), load_backbone=False)
+    checkpoint = tmp_path / "checkpoint.pt"
+    torch.save(
+        {
+            "model": model.state_dict(),
+            "config": config(),
+            "stats": stats(),
+            "epoch": 7,
+            "val_loss": 0.125,
+        },
+        checkpoint,
+    )
+    output = tmp_path / "policy-cuda.ts"
+
+    metadata = export_checkpoint(
+        checkpoint,
+        output,
+        32,
+        32,
+        device="cuda:0",
+    )
+    exported = torch.jit.load(str(output), map_location="cuda:0").eval()
+    action = exported(
+        torch.zeros(1, 2, 3, 32, 32, device="cuda:0"),
+        torch.zeros(1, 3, device="cuda:0"),
+    )
+
+    assert action.device.type == "cuda"
+    assert action.shape == (1, 4, 2)
+    assert torch.isfinite(action).all()
+    assert metadata["source"] == checkpoint.name
+
+
 def test_live_policy_exports_without_intermediate_checkpoint(tmp_path):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(config(), load_backbone=False).to(device).train()
@@ -194,9 +230,12 @@ def test_live_policy_exports_without_intermediate_checkpoint(tmp_path):
     assert all(
         torch.equal(before[name], value) for name, value in model.state_dict().items()
     )
-    exported = torch.jit.load(str(output), map_location="cpu").eval()
+    exported = torch.jit.load(str(output), map_location=device).eval()
     with torch.inference_mode():
-        action = exported(torch.zeros(1, 2, 3, 32, 32), torch.zeros(1, 3))
+        action = exported(
+            torch.zeros(1, 2, 3, 32, 32, device=device),
+            torch.zeros(1, 3, device=device),
+        )
     assert action.shape == (1, 4, 2)
     assert all(value.device.type == "cpu" for value in exported.parameters())
 
@@ -329,7 +368,7 @@ def test_single_right_arm_export_accepts_7d_state_and_returns_10d_action(tmp_pat
 
 
 @torch.no_grad()
-def test_three_camera_cuda_policy_exports_for_cpu_when_available(tmp_path):
+def test_three_camera_cuda_policy_exports_for_cuda_when_available(tmp_path):
     if not torch.cuda.is_available():
         return
     three_camera_config = config(
@@ -342,11 +381,11 @@ def test_three_camera_cuda_policy_exports_for_cpu_when_available(tmp_path):
     )
     extra = {"deco_metadata.json": ""}
     exported = torch.jit.load(
-        str(output), _extra_files=extra, map_location="cpu"
+        str(output), _extra_files=extra, map_location="cuda"
     ).eval()
     action = exported(
-        torch.zeros(1, 3, 3, 32, 32),
-        torch.zeros(1, 3),
+        torch.zeros(1, 3, 3, 32, 32, device="cuda"),
+        torch.zeros(1, 3, device="cuda"),
     )
     assert action.shape == (1, 4, 2)
     assert torch.isfinite(action).all()
@@ -361,7 +400,7 @@ def test_stage2_checkpoint_exports_three_input_six_stream_cpu_contract(
     torch.save(stage2_checkpoint(model), checkpoint)
 
     output = tmp_path / "stage2.ts"
-    metadata = export_checkpoint(checkpoint, output, 32, 32, device="cuda")
+    metadata = export_checkpoint(checkpoint, output, 32, 32, device="cpu")
 
     extra = {"deco_metadata.json": ""}
     exported = torch.jit.load(

@@ -31,6 +31,31 @@ class LowLightAugmentationConfig:
     shared_across_cameras: bool = True
 
 
+AUGMENTATION_PRESET_NAMES = ("low-light-v1", "balanced-light-v2")
+
+
+def augmentation_preset(
+    name: str,
+    *,
+    enabled: bool = True,
+) -> LowLightAugmentationConfig:
+    if name == "low-light-v1":
+        return LowLightAugmentationConfig(enabled=enabled)
+    if name == "balanced-light-v2":
+        return LowLightAugmentationConfig(
+            version="balanced-light-v2",
+            enabled=enabled,
+            identity_probability=0.25,
+            low_light_probability=0.0,
+            mild_probability=0.75,
+            mild_brightness_range=(0.90, 1.20),
+        )
+    raise ValueError(
+        f"Unknown augmentation preset {name!r}; "
+        f"expected one of {AUGMENTATION_PRESET_NAMES}"
+    )
+
+
 def _validate_probability(name: str, value: float) -> None:
     if not 0.0 <= value <= 1.0:
         raise ValueError(f"{name} must be in [0, 1], got {value}")
@@ -47,6 +72,8 @@ def _validate_range(name: str, value: tuple[float, float]) -> None:
 
 
 def validate_augmentation_config(config: LowLightAugmentationConfig) -> None:
+    if config.version not in AUGMENTATION_PRESET_NAMES:
+        raise ValueError(f"Unknown augmentation version: {config.version!r}")
     for name in (
         "identity_probability",
         "low_light_probability",
@@ -79,7 +106,7 @@ def validate_augmentation_config(config: LowLightAugmentationConfig) -> None:
             f"got {config.blur_kernel_sizes}"
         )
     if not config.shared_across_cameras:
-        raise ValueError("low-light-v1 requires shared_across_cameras=True")
+        raise ValueError("DECO image augmentation requires shared_across_cameras=True")
 
 
 def _sample_range(value: tuple[float, float], device: torch.device) -> float:

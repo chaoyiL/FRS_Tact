@@ -1,0 +1,90 @@
+{
+  "eval_obs_20260828_172311": {
+    "steps": [
+      0,
+      24,
+      48,
+      72,
+      96,
+      120,
+      144,
+      168
+    ],
+    "max_abs_zscore": 2.4551143646240234,
+    "samples_over_3sigma": 0,
+    "total_state_values": 160,
+    "dimensions_over_3sigma": [],
+    "top_dimensions": [
+      {
+        "index": 14,
+        "name": "left_rel_right.x",
+        "max_abs_zscore": 2.4551143646240234
+      },
+      {
+        "index": 9,
+        "name": "right.rel_start.z",
+        "max_abs_zscore": 1.9553658962249756
+      },
+      {
+        "index": 12,
+        "name": "right.rel_start.rz",
+        "max_abs_zscore": 1.827128529548645
+      },
+      {
+        "index": 13,
+        "name": "right.gripper",
+        "max_abs_zscore": 1.7679418325424194
+      },
+      {
+        "index": 11,
+        "name": "right.rel_start.ry",
+        "max_abs_zscore": 1.5617679357528687
+      }
+    ]
+  },
+  "eval_obs_20260828_172525": {
+    "steps": [
+      0,
+      24,
+      48,
+      72,
+      96,
+      120,
+      144,
+      168,
+      192,
+      216
+    ],
+    "max_abs_zscore": 2.863340139389038,
+    "samples_over_3sigma": 0,
+    "total_state_values": 200,
+    "dimensions_over_3sigma": [],
+    "top_dimensions": [
+      {
+        "index": 9,
+        "name": "right.rel_start.z",
+        "max_abs_zscore": 2.863340139389038
+      },
+      {
+        "index": 11,
+        "name": "right.rel_start.ry",
+        "max_abs_zscore": 1.9988863468170166
+      },
+      {
+        "index": 12,
+        "name": "right.rel_start.rz",
+        "max_abs_zscore": 1.817434310913086
+      },
+      {
+        "index": 14,
+        "name": "left_rel_right.x",
+        "max_abs_zscore": 1.7762947082519531
+      },
+      {
+        "index": 13,
+        "name": "right.gripper",
+        "max_abs_zscore": 1.7679438591003418
+      }
+    ]
+  }
+}

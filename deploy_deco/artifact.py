@@ -11,6 +11,22 @@ EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
 ACTION_MODE = "tcp_delta_absolute_gripper"
 ROTATION_REPRESENTATION = "rotation_6d_matrix_columns"
 STATE_LAYOUT = "relative_start_pose6d_gripper_plus_left_relative_right"
+DUAL_ARM_PROFILE = "dual-arm-20x20"
+SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
+_PROFILE_CONTRACTS = {
+    DUAL_ARM_PROFILE: ((1, 20), 20, STATE_LAYOUT, None),
+    SINGLE_RIGHT_ARM_PROFILE: (
+        (1, 7),
+        10,
+        "single_right_relative_start_pose6d_gripper",
+        ["right"],
+    ),
+}
+
+
+def artifact_profile(metadata: Mapping[str, Any]) -> str:
+    value = metadata.get("state_action_profile")
+    return DUAL_ARM_PROFILE if value is None else str(value)
 
 
 def sha256_file(path: Path) -> str:
@@ -51,18 +67,27 @@ def validate_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     action = _shape(metadata, "output", "action")
     if len(images) != 5 or images[:3] != (1, 2, 3) or min(images[3:]) <= 0:
         raise ValueError(f"DECO images must have shape [1,2,3,H,W], got {images}")
-    if observation != (1, 20):
-        raise ValueError(f"DECO observation must have shape [1,20], got {observation}")
-    if len(action) != 3 or action[0] != 1 or action[1] <= 0 or action[2] != 20:
-        raise ValueError(f"DECO action must have shape [1,H,20], got {action}")
+    profile = artifact_profile(metadata)
+    try:
+        expected_observation, expected_action_width, expected_layout, expected_arms = (
+            _PROFILE_CONTRACTS[profile]
+        )
+    except KeyError as error:
+        raise ValueError(f"unsupported DECO state_action_profile: {profile!r}") from error
+    if observation != expected_observation:
+        raise ValueError(f"DECO {profile} observation must have shape {expected_observation}")
+    if len(action) != 3 or action[0] != 1 or action[1] <= 0 or action[2] != expected_action_width:
+        raise ValueError(f"DECO {profile} action width must be {expected_action_width}")
     input_contract = metadata["input"]
     output_contract = metadata["output"]
     if input_contract.get("images_dtype") != "float32":
         raise ValueError("DECO TorchScript images_dtype must be float32")
     if input_contract.get("images_range") != [0.0, 1.0]:
         raise ValueError("DECO TorchScript images_range must be [0.0, 1.0]")
-    if input_contract.get("state_layout") != STATE_LAYOUT:
-        raise ValueError("DECO state layout does not match the VB3 7+7+6 contract")
+    if input_contract.get("state_layout") != expected_layout:
+        raise ValueError(f"DECO {profile} state layout does not match")
+    if metadata.get("controlled_arms") != expected_arms:
+        raise ValueError(f"DECO {profile} controlled_arms must be {expected_arms!r}")
     if output_contract.get("action_mode") != ACTION_MODE:
         raise ValueError("DECO action_mode must be tcp_delta_absolute_gripper")
     if output_contract.get("rotation_representation") != ROTATION_REPRESENTATION:

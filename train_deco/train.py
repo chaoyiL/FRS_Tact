@@ -24,7 +24,9 @@ from .checkpoint import (
 )
 from .export_torchscript import copy_torchscript_artifact, export_policy
 from .input_adapter import (
+    AUGMENTATION_PRESET_NAMES,
     LowLightAugmentationConfig,
+    augmentation_preset,
     augment_training_images,
     letterbox_and_normalize,
     select_deco_observation,
@@ -119,7 +121,7 @@ def env_tuple(name: str, default: tuple, value_type=float) -> tuple:
 
 
 def augmentation_config_from_args(args) -> LowLightAugmentationConfig:
-    config = LowLightAugmentationConfig(
+    legacy_config = LowLightAugmentationConfig(
         enabled=args.augmentation_enabled,
         identity_probability=args.augmentation_identity_probability,
         low_light_probability=args.augmentation_low_light_probability,
@@ -134,8 +136,17 @@ def augmentation_config_from_args(args) -> LowLightAugmentationConfig:
         blur_kernel_sizes=tuple(args.augmentation_blur_kernel_sizes),
         blur_sigma_range=tuple(args.augmentation_blur_sigma_range),
     )
-    validate_augmentation_config(config)
-    return config
+    name = getattr(args, "augmentation_preset", None)
+    if name is None:
+        validate_augmentation_config(legacy_config)
+        return legacy_config
+    expected_legacy = LowLightAugmentationConfig(enabled=args.augmentation_enabled)
+    if legacy_config != expected_legacy:
+        raise ValueError(
+            "--augmentation-preset cannot be combined with fine-grained "
+            "augmentation overrides"
+        )
+    return augmentation_preset(name, enabled=args.augmentation_enabled)
 
 
 def jsonable_stats(stats: dict) -> dict:
@@ -581,6 +592,7 @@ def restore_stage2_resume_arguments(args, *, checkpoint_loader=load_checkpoint) 
             continue
         if name in saved_config:
             setattr(args, name, saved_config[name])
+    args.augmentation_preset = saved_config.get("augmentation_preset")
     # Fresh-initialization sources are provenance only during exact resume.
     args.stage1_checkpoint = None
     args.tactile_encoder_checkpoint = None
@@ -1131,6 +1143,11 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-task-condition", action=argparse.BooleanOptionalAction,
                         default=env_bool("DECO_USE_TASK_CONDITION", False))
     parser.add_argument(
+        "--augmentation-preset",
+        choices=AUGMENTATION_PRESET_NAMES,
+        default=None,
+    )
+    parser.add_argument(
         "--augmentation-enabled",
         action=argparse.BooleanOptionalAction,
         default=env_bool("DECO_AUGMENTATION_ENABLED", True),
@@ -1432,6 +1449,7 @@ def main(argv=None):
             else "per-step-warmup-cosine-v1"
         ),
         "rank_seed_scheme": "base-plus-rank-v1",
+        "augmentation_preset": augmentation_config.version,
         "augmentation": asdict(augmentation_config),
     }
     tactile_artifact = None

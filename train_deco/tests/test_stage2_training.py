@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +17,7 @@ from train_deco.model_factory import STAGE2_MODEL_TYPE
 from train_deco.stage2_initialization import configure_stage2_trainability
 from train_deco.tactile_encoder_conversion import ResolvedTactileEncoder
 from train_deco.train import (
+    augmentation_config_from_args,
     build_argument_parser,
     STAGE2_CHECKPOINT_SCHEMA_VERSION,
     build_stage2_checkpoint_metadata,
@@ -29,6 +31,8 @@ from train_deco.train import (
     stage2_config_from_resume_checkpoint,
     validate_stage2_resume_checkpoint,
 )
+from train_deco.input_adapter import augmentation_preset
+from train_deco.resume import validate_resume_config
 from train_deco.training_utils import (
     constant_lr_scheduler,
     stage2_gradient_diagnostics,
@@ -617,6 +621,49 @@ def test_stage2_resume_restores_state_arguments_and_keeps_only_runtime_overrides
     assert args.epochs == 99
     assert args.workers == 6
     assert args.validation_seed == 444
+
+
+def test_stage2_resume_restores_saved_augmentation_preset() -> None:
+    checkpoint = _valid_resume_checkpoint()
+    checkpoint["config"]["augmentation_preset"] = "balanced-light-v2"
+    args = build_argument_parser().parse_args([
+        "--stage", "2", "--resume", "/runtime/stage2.pt",
+    ])
+
+    restore_stage2_resume_arguments(
+        args, checkpoint_loader=lambda path, device: checkpoint
+    )
+
+    assert args.augmentation_preset == "balanced-light-v2"
+
+
+def test_legacy_stage2_resume_keeps_legacy_augmentation_path() -> None:
+    checkpoint = _valid_resume_checkpoint()
+    checkpoint["config"].pop("augmentation_preset", None)
+    checkpoint["config"]["augmentation"] = asdict(
+        augmentation_preset("low-light-v1")
+    )
+    args = build_argument_parser().parse_args([
+        "--stage", "2", "--resume", "/runtime/stage2.pt",
+        "--augmentation-preset", "balanced-light-v2",
+    ])
+
+    restore_stage2_resume_arguments(
+        args, checkpoint_loader=lambda path, device: checkpoint
+    )
+
+    assert args.augmentation_preset is None
+    resolved_augmentation = asdict(augmentation_config_from_args(args))
+    assert resolved_augmentation == checkpoint["config"]["augmentation"]
+    validate_resume_config(
+        checkpoint["config"],
+        {
+            **checkpoint["config"],
+            "augmentation": resolved_augmentation,
+        },
+        resume_mode="exact",
+        expected_training_state_version=3,
+    )
 
 
 @pytest.mark.parametrize(

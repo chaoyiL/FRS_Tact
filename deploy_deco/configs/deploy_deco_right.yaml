@@ -1,0 +1,34 @@
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0828/insert/deco_stage1_best_gpu.ts
+device: cuda:0
+seed: 0
+model:
+  state_action_profile: single-right-arm-7x10
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+observation:
+  data_type: vision
+  observation_profile: deco_vision_224
+  language_prompt: Use the right hand to insert the object.
+  single_arm_mode: true
+  controlled_arm: right
+  # camera0 was a constant black placeholder throughout this model's training data.
+  black_camera0: true
+  no_state_obs_mode: false
+control:
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  action_horizon: 32
+  steps_per_inference: 16
+runtime:
+  auto_start: false
+  warmup_runs: 5
+  max_iterations: 0

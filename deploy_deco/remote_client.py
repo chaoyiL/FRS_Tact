@@ -10,6 +10,8 @@ from typing import Any
 
 from .artifact import load_sidecar
 from .config import (
+    SINGLE_RIGHT_ARM_PROFILE,
+    deployment_profile,
     load_config,
     make_server_config,
     resolve_checkpoint,
@@ -17,6 +19,7 @@ from .config import (
     section,
     validate_artifact_contract,
 )
+from .right_arm_adapter import expand_right_action, project_right_observation
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_deco.yaml"
 
@@ -39,8 +42,10 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     from .bridge_client import RobotBridgeClient
     from .policy import DECOPolicy
     config = check(config_path)
+    profile = deployment_profile(config)
     checkpoint = resolve_checkpoint(config)
     connection = section(config, "connection")
+    observation_config = section(config, "observation")
     runtime = section(config, "runtime")
     seed = int(config.get("seed", 0))
     warmup_runs = int(runtime.get("warmup_runs", 1))
@@ -52,6 +57,21 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     if max_iterations < 0:
         raise ValueError("max_iterations must be nonnegative")
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
+    black_camera0 = bool(observation_config.get("black_camera0", False))
+
+    def policy_observation(observation: dict[str, Any]) -> dict[str, Any]:
+        return (
+            project_right_observation(observation, black_camera0=black_camera0)
+            if profile == SINGLE_RIGHT_ARM_PROFILE
+            else observation
+        )
+
+    def wire_action(action: Any, observation: dict[str, Any]) -> Any:
+        return (
+            expand_right_action(action, observation)
+            if profile == SINGLE_RIGHT_ARM_PROFILE
+            else action
+        )
 
     print(f"[startup] Loading DECO TorchScript on {config['device']}...")
     started = time.perf_counter()
@@ -66,6 +86,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         f"state={policy.state_dim} action={policy.action_dim} "
         f"horizon={policy.action_horizon} sample_hz={policy.expected_sample_hz:g}"
     )
+    if black_camera0:
+        print("[startup] camera0 input replaced with training-matched black frames")
 
     bridge: RobotBridgeClient | None = None
     try:
@@ -83,7 +105,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         warmup_seq, warmup = bridge.receive_observation(timeout=observation_timeout)
         for index in range(warmup_runs):
             warmup_started = time.perf_counter()
-            policy.predict(warmup, seed=seed + index)
+            warmup_policy_observation = policy_observation(warmup)
+            policy.predict(warmup_policy_observation, seed=seed + index)
             print(
                 f"[client] Warmup {index + 1}/{warmup_runs}: "
                 f"{(time.perf_counter() - warmup_started) * 1000:.1f}ms"
@@ -97,7 +120,11 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         while max_iterations <= 0 or iteration < max_iterations:
             obs_seq, observation = bridge.receive_observation(timeout=observation_timeout)
             inference_started = time.perf_counter()
-            action = policy.predict(observation, seed=seed + warmup_runs + iteration)
+            policy_input = policy_observation(observation)
+            policy_action = policy.predict(
+                policy_input, seed=seed + warmup_runs + iteration
+            )
+            action = wire_action(policy_action, observation)
             inference_ms = (time.perf_counter() - inference_started) * 1000.0
             bridge.send_action(action, obs_seq)
             iteration += 1
@@ -105,6 +132,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
                 f"[client] iteration={iteration} obs_seq={obs_seq} "
                 f"inference_ms={inference_ms:.1f} action_shape={action.shape}"
             )
+        if max_iterations > 0:
+            bridge.receive_observation(timeout=observation_timeout)
     except KeyboardInterrupt:
         print("[client] Interrupted")
     finally:
