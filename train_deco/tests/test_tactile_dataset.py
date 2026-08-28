@@ -69,6 +69,7 @@ def _write_fixture(
     *,
     state_dim: int = 20,
     action_dim: int = 20,
+    episode_tasks_as_text: bool = False,
 ) -> None:
     (root / "meta").mkdir(parents=True)
     info = _info(state_dim=state_dim, action_dim=action_dim)
@@ -80,7 +81,14 @@ def _write_fixture(
     episodes = []
     tactile_colors = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0))
     for episode_index in range(2):
-        episodes.append({"episode_index": episode_index, "length": 3, "tasks": [0]})
+        episode_tasks = ["pick tube"] if episode_tasks_as_text else [0]
+        episodes.append(
+            {
+                "episode_index": episode_index,
+                "length": 3,
+                "tasks": episode_tasks,
+            }
+        )
         columns = {
             "observation.state": [
                 np.full(state_dim, row, dtype=np.float32) for row in range(3)
@@ -158,7 +166,12 @@ def test_single_right_arm_manifest_is_explicit_and_builds_7x10_dataset(
 ) -> None:
     dataset_root = tmp_path / "insert_01"
     manifest_path = tmp_path / "insert_01.json"
-    _write_fixture(dataset_root, state_dim=7, action_dim=10)
+    _write_fixture(
+        dataset_root,
+        state_dim=7,
+        action_dim=10,
+        episode_tasks_as_text=True,
+    )
 
     with pytest.raises(ValueError, match="explicit handedness"):
         write_multiroot_manifest(

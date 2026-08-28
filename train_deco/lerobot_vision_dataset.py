@@ -169,6 +169,8 @@ def _episode_specs(
     source_name: str,
     global_offset: int,
     preserve_source_ids: bool,
+    task_indices: set[int],
+    task_index_by_text: dict[str, int],
 ) -> list[_EpisodeSpec]:
     rows = _read_jsonl(root / "meta/episodes.jsonl")
     specs = []
@@ -184,13 +186,43 @@ def _episode_specs(
             raise ValueError(
                 f"Episode must contain a transition and terminal row: episode={episode_id}, length={length}"
             )
+        raw_tasks = row.get("tasks", ())
+        if not isinstance(raw_tasks, (list, tuple)):
+            raise ValueError(
+                f"Episode tasks must be a list: episode={source_episode_id}, "
+                f"got={type(raw_tasks).__name__}"
+            )
+        resolved_task_ids = []
+        for value in raw_tasks:
+            if isinstance(value, bool):
+                raise ValueError(
+                    f"Invalid boolean task reference in episode {source_episode_id}"
+                )
+            if isinstance(value, int):
+                task_index = value
+            elif isinstance(value, str):
+                if value not in task_index_by_text:
+                    raise ValueError(
+                        f"Unknown task text in episode {source_episode_id}: {value!r}"
+                    )
+                task_index = task_index_by_text[value]
+            else:
+                raise ValueError(
+                    f"Unsupported task reference in episode {source_episode_id}: "
+                    f"{value!r}"
+                )
+            if task_index not in task_indices:
+                raise ValueError(
+                    f"Unknown task_index in episode {source_episode_id}: {task_index}"
+                )
+            resolved_task_ids.append(task_index)
         specs.append(
             _EpisodeSpec(
                 episode_id=episode_id,
                 source_episode_id=source_episode_id,
                 source_name=source_name,
                 length=length,
-                task_ids=tuple(int(value) for value in row.get("tasks", ())),
+                task_ids=tuple(resolved_task_ids),
                 path=_episode_path(root, info, source_episode_id),
             )
         )
@@ -297,12 +329,28 @@ def _compute_train_stats(
     }
 
 
-def _task_ids(root: Path, info: dict) -> tuple[list[str], list[dict]]:
+def _task_ids(
+    root: Path,
+    info: dict,
+) -> tuple[list[str], list[dict], set[int], dict[str, int]]:
     rows = _read_jsonl(root / "meta/tasks.jsonl")
-    ids = sorted({int(row["task_index"]) for row in rows})
+    ids = []
+    task_index_by_text = {}
+    for row in rows:
+        task_index = int(row["task_index"])
+        task_text = row.get("task")
+        if not isinstance(task_text, str) or not task_text:
+            raise ValueError("LeRobot task text must be a non-empty string")
+        if task_index in ids:
+            raise ValueError(f"Duplicate task_index in tasks.jsonl: {task_index}")
+        if task_text in task_index_by_text:
+            raise ValueError(f"Duplicate task text in tasks.jsonl: {task_text!r}")
+        ids.append(task_index)
+        task_index_by_text[task_text] = task_index
+    ids.sort()
     if len(ids) != int(info.get("total_tasks", -1)) or not ids:
         raise ValueError("LeRobot total_tasks disagrees with tasks.jsonl")
-    return [str(task_id) for task_id in ids], rows
+    return [str(task_id) for task_id in ids], rows, set(ids), task_index_by_text
 
 
 def _load_sources(dataset_source: Path) -> tuple[list[dict], str, str | None]:
@@ -580,7 +628,12 @@ def build_lerobot_vision_datasets(
             _tactile_image_shape(info) if include_tactile else None
         )
         fps = float(info["fps"])
-        source_tasks, task_rows = _task_ids(root, info)
+        (
+            source_tasks,
+            task_rows,
+            source_task_indices,
+            task_index_by_text,
+        ) = _task_ids(root, info)
         if expected_image_shape is None:
             expected_image_shape = image_shape
             expected_tactile_image_shape = tactile_image_shape
@@ -602,6 +655,8 @@ def build_lerobot_vision_datasets(
             source["name"],
             global_offset,
             preserve_source_ids,
+            source_task_indices,
+            task_index_by_text,
         )
         specs.extend(source_specs)
         source_episode_ids = [spec.episode_id for spec in source_specs]
