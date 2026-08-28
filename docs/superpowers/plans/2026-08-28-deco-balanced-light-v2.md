@@ -489,17 +489,23 @@ augmentation:
 Update the README to describe both presets and include the fresh Bread command:
 
 ```bash
+CUDA_VISIBLE_DEVICES=2 \
+OUTPUT_DIR=/DATA/ljl/substage/deco_runs \
+BATCH_SIZE=512 \
+WORKERS=16 \
 RUN_ID=bread-deco-stage1-balanced-light-v2 \
 AUGMENTATION_PRESET=balanced-light-v2 \
 RESUME_FROM= \
 bash train_deco/scripts/train.sh \
-  --mode server-train \
+  --mode local-train \
   --manifest /home/ljl/FRS_Tact/train_deco/data_manifests/bread_01_03.json
 ```
 
 State explicitly that this is the manifest path recorded by the original Bread
 checkpoint, that the file must exist on the target machine, and that old exact
-resume requires `AUGMENTATION_PRESET=low-light-v1`.
+resume requires `AUGMENTATION_PRESET=low-light-v1`. With the same manifest,
+this single-process topology reproduces world size 1, global batch 512, workers
+16, and the expected 1259 steps per epoch.
 
 - [ ] **Step 5: Run launcher and documentation checks**
 
@@ -574,16 +580,22 @@ On the original target training machine, after verifying the recorded manifest
 exists, run:
 
 ```bash
+CUDA_VISIBLE_DEVICES=2 \
+OUTPUT_DIR=/DATA/ljl/substage/deco_runs \
+BATCH_SIZE=512 \
+WORKERS=16 \
 RUN_ID=bread-deco-stage1-balanced-light-v2 \
 AUGMENTATION_PRESET=balanced-light-v2 \
 RESUME_FROM= \
 bash train_deco/scripts/train.sh \
-  --mode server-train \
+  --mode local-train \
   --manifest /home/ljl/FRS_Tact/train_deco/data_manifests/bread_01_03.json \
   --dry-run
 ```
 
-Expected: a two-GPU `torchrun` command with a new run ID, no `--resume`, and `--augmentation-preset balanced-light-v2`.
+Expected: one Python process (not `torchrun`) with `CUDA_VISIBLE_DEVICES=2`, batch
+512, workers 16, a new run ID, no `--resume`, and
+`--augmentation-preset balanced-light-v2`.
 
 - [ ] **Step 5: Record the external launch blocker accurately**
 

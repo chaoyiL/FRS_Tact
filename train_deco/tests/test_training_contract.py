@@ -146,6 +146,21 @@ def test_exact_resume_rejects_cross_preset_configuration():
         validate_resume_config(checkpoint, current, resume_mode="exact")
 
 
+@pytest.mark.parametrize("preset", ("low-light-v1", "balanced-light-v2"))
+def test_exact_resume_accepts_same_preset_augmentation(preset):
+    augmentation = asdict(augmentation_preset(preset))
+    checkpoint = {
+        "training_state_version": 2,
+        "augmentation": augmentation,
+    }
+
+    validate_resume_config(
+        checkpoint,
+        {**checkpoint, "augmentation": dict(augmentation)},
+        resume_mode="exact",
+    )
+
+
 def _launcher_dry_run(**environment):
     launcher = Path(__file__).parents[1] / "scripts" / "train.sh"
     return subprocess.run(

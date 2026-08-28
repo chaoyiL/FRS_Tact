@@ -145,22 +145,29 @@ stopping 始终只使用正常的 unseen loss。
 ## 图像增强训练
 
 训练脚本的新运行默认使用 `balanced-light-v2`：25% 保留原始光照、75% 使用
-温和亮度、对比度、饱和度和模糊扰动；不使用暗光曝光或 Gamma 增强。两路相机在
-同一样本中共享增强参数，避免破坏双视角对应关系。
+温和亮度、对比度和饱和度扰动；在这 75% 分支内，20% 概率再施加模糊（总体约 15%），
+并非每个变换后的样本都会模糊。不使用暗光曝光或 Gamma 增强。两路相机在同一样本中
+共享增强参数，避免破坏双视角对应关系。
 
 `low-light-v1` 保留用于复现旧训练：25% 保留原始光照、55% 使用暗光曝光或
 Gamma、20% 使用温和亮度扰动。其暗光范围来自真机无标签图片的亮度统计；这些图片
 不会作为带动作标签的训练或验证样本。
 
-以下是新的 Bread Stage1 运行命令。manifest 路径记录自原始 Bread checkpoint；
-该文件必须存在于目标训练机器上，仓库不声明它在本机可用：
+以下是新的 Bread Stage1 受控对比运行命令。manifest 路径记录自原始 Bread
+checkpoint；该文件必须存在于目标训练机器上，仓库不声明它在本机可用。使用同一
+manifest 时，这些值复现原 checkpoint 的单进程 world size、全局 batch 512、workers
+16 和预期每 epoch 1259 steps：
 
 ```bash
+CUDA_VISIBLE_DEVICES=2 \
+OUTPUT_DIR=/DATA/ljl/substage/deco_runs \
+BATCH_SIZE=512 \
+WORKERS=16 \
 RUN_ID=bread-deco-stage1-balanced-light-v2 \
 AUGMENTATION_PRESET=balanced-light-v2 \
 RESUME_FROM= \
 bash train_deco/scripts/train.sh \
-  --mode server-train \
+  --mode local-train \
   --manifest /home/ljl/FRS_Tact/train_deco/data_manifests/bread_01_03.json
 ```
 

@@ -592,6 +592,7 @@ def restore_stage2_resume_arguments(args, *, checkpoint_loader=load_checkpoint) 
             continue
         if name in saved_config:
             setattr(args, name, saved_config[name])
+    args.augmentation_preset = saved_config.get("augmentation_preset")
     # Fresh-initialization sources are provenance only during exact resume.
     args.stage1_checkpoint = None
     args.tactile_encoder_checkpoint = None
