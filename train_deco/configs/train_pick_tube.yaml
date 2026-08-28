@@ -17,15 +17,12 @@ model:
   rope_height: 256
   rope_width: 256
 augmentation:
-  version: low-light-v1
+  version: balanced-light-v2
   enabled: true
   identity_probability: 0.25
-  low_light_probability: 0.55
-  mild_probability: 0.20
-  exposure_probability: 0.5
-  exposure_range: [0.58, 0.90]
-  gamma_range: [1.10, 1.50]
-  mild_brightness_range: [0.90, 1.10]
+  low_light_probability: 0.00
+  mild_probability: 0.75
+  mild_brightness_range: [0.90, 1.20]
   contrast_range: [0.85, 1.10]
   saturation_range: [0.90, 1.10]
   blur_probability: 0.20

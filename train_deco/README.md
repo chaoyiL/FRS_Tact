@@ -142,32 +142,31 @@ loss 和 velocity MAE：正常触觉、临时将所有 tactile gate 置零的
 在 forward 后恢复，shuffle 不消耗正常验证 RNG；best checkpoint 和 early
 stopping 始终只使用正常的 unseen loss。
 
-## 暗光增强训练
+## 图像增强训练
 
-训练脚本默认启用 `low-light-v1`：25% 保留原始光照、55% 使用暗光曝光或
-Gamma、20% 使用温和亮度扰动。两路相机在同一样本中共享光照参数，避免破坏
-双视角对应关系。暗光范围来自真机无标签图片的亮度统计；这些图片不会作为
-带动作标签的训练或验证样本。
+训练脚本的新运行默认使用 `balanced-light-v2`：25% 保留原始光照、75% 使用
+温和亮度、对比度、饱和度和模糊扰动；不使用暗光曝光或 Gamma 增强。两路相机在
+同一样本中共享增强参数，避免破坏双视角对应关系。
 
-从头训练时使用新的 `RUN_ID`，并且不要设置 `RESUME_FROM`：
+`low-light-v1` 保留用于复现旧训练：25% 保留原始光照、55% 使用暗光曝光或
+Gamma、20% 使用温和亮度扰动。其暗光范围来自真机无标签图片的亮度统计；这些图片
+不会作为带动作标签的训练或验证样本。
 
-```bash
-RUN_ID=deco_low_light_v1 \
-  bash train_deco/scripts/train.sh --mode server-train
-```
-
-可使用环境变量覆盖参数，例如：
+以下是新的 Bread Stage1 运行命令。manifest 路径记录自原始 Bread checkpoint；
+该文件必须存在于目标训练机器上，仓库不声明它在本机可用：
 
 ```bash
-AUGMENTATION_EXPOSURE_MIN=0.58 \
-AUGMENTATION_EXPOSURE_MAX=0.90 \
-AUGMENTATION_GAMMA_MIN=1.10 \
-AUGMENTATION_GAMMA_MAX=1.50 \
-  bash train_deco/scripts/train.sh --mode server-train
+RUN_ID=bread-deco-stage1-balanced-light-v2 \
+AUGMENTATION_PRESET=balanced-light-v2 \
+RESUME_FROM= \
+bash train_deco/scripts/train.sh \
+  --mode server-train \
+  --manifest /home/ljl/FRS_Tact/train_deco/data_manifests/bread_01_03.json
 ```
 
 所有增强参数都会保存到 checkpoint 的 `config.augmentation` 中；exact resume
-会拒绝不同的增强配置。验证和 TorchScript 导出不执行随机图像增强。
+会拒绝不同的增强配置。要 exact resume 旧 Bread checkpoint，必须显式设置
+`AUGMENTATION_PRESET=low-light-v1`。验证和 TorchScript 导出不执行随机图像增强。
 采用的无标签真机亮度统计记录在
 `train_deco/configs/low_light_reference.yaml`，该文件只说明增强范围的来源，
 训练代码不会读取其中的真机图片路径或把这些图片混入监督数据。

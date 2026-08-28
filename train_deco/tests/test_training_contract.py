@@ -146,17 +146,29 @@ def test_exact_resume_rejects_cross_preset_configuration():
         validate_resume_config(checkpoint, current, resume_mode="exact")
 
 
-def test_train_launcher_passes_low_light_augmentation_contract():
-    launcher = (
-        Path(__file__).parents[1] / "scripts" / "train.sh"
-    ).read_text()
+def _launcher_dry_run(**environment):
+    launcher = Path(__file__).parents[1] / "scripts" / "train.sh"
+    return subprocess.run(
+        ["bash", str(launcher), "--mode", "local-smoke", "--dry-run"],
+        cwd=Path(__file__).parents[2],
+        env={**os.environ, **environment},
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout
 
-    assert "--augmentation-enabled" in launcher
-    assert '--augmentation-identity-probability "${AUGMENTATION_IDENTITY_PROBABILITY}"' in launcher
-    assert '--augmentation-low-light-probability "${AUGMENTATION_LOW_LIGHT_PROBABILITY}"' in launcher
-    assert '--augmentation-mild-probability "${AUGMENTATION_MILD_PROBABILITY}"' in launcher
-    assert '--augmentation-exposure-range "${AUGMENTATION_EXPOSURE_MIN}" "${AUGMENTATION_EXPOSURE_MAX}"' in launcher
-    assert '--augmentation-gamma-range "${AUGMENTATION_GAMMA_MIN}" "${AUGMENTATION_GAMMA_MAX}"' in launcher
+
+def test_train_launcher_defaults_new_runs_to_balanced_light_v2():
+    output = _launcher_dry_run(RUN_ID="balanced-light-test")
+
+    assert "--augmentation-preset balanced-light-v2" in output
+    assert "--run-id balanced-light-test" in output
+
+
+def test_train_launcher_can_explicitly_select_low_light_v1():
+    output = _launcher_dry_run(AUGMENTATION_PRESET="low-light-v1")
+
+    assert "--augmentation-preset low-light-v1" in output
 
 
 def test_train_launcher_preserves_run_id_and_accepts_yes_for_augmentation():
