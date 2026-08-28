@@ -20,12 +20,14 @@ observation:
   language_prompt: Use the right hand to insert the object.
   single_arm_mode: true
   controlled_arm: right
+  # camera0 was a constant black placeholder throughout this model's training data.
+  black_camera0: true
   no_state_obs_mode: false
 control:
   control_frequency: 30.0
   controller_frequency: 80.0
   action_horizon: 32
-  steps_per_inference: 24
+  steps_per_inference: 16
 runtime:
   auto_start: false
   warmup_runs: 5

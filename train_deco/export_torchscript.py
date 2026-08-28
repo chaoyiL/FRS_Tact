@@ -410,12 +410,14 @@ def _atomic_write_text(path: Path, content: str) -> None:
 
 
 def _snapshot(policy: nn.Module, config: dict) -> nn.Module:
-    # Build, load, and trace an independent CPU copy. In particular, do not move
-    # or switch the mode of the live training policy.
-    snapshot = _build_policy(config).cpu()
+    # Build and trace an independent copy without moving or switching the mode
+    # of the live training policy. Tracing must use the deployment device because
+    # TorchScript specializes input-derived device expressions into literals.
+    device = next(policy.parameters()).device
+    snapshot = _build_policy(config).to(device)
     snapshot.load_state_dict(
         {
-            key: value.detach().cpu()
+            key: value.detach().to(device)
             for key, value in policy.state_dict().items()
         },
         strict=True,
@@ -424,18 +426,22 @@ def _snapshot(policy: nn.Module, config: dict) -> nn.Module:
 
 
 def _trace(policy, stats, config, image_height, image_width):
-    if next(policy.parameters()).device.type != "cpu":
-        raise ValueError("TorchScript export snapshot must be on CPU")
+    device = next(policy.parameters()).device
     stage2 = config.get("model_type") == STAGE2_MODEL_TYPE
     deployment_type = Stage2DECODeployment if stage2 else UpstreamDECODeployment
-    deployment = deployment_type(policy, stats, config).eval().cpu()
+    deployment = deployment_type(policy, stats, config).eval().to(device)
     images = torch.zeros(
-        1, len(config["camera_names"]), 3, image_height, image_width
+        1, len(config["camera_names"]), 3, image_height, image_width,
+        device=device,
     )
-    observation = torch.zeros(1, int(config["source_obs_dim"]))
+    observation = torch.zeros(
+        1, int(config["source_obs_dim"]), device=device
+    )
     inputs = (images, observation)
     if stage2:
-        tactile_images = torch.zeros(1, 4, 3, image_height, image_width)
+        tactile_images = torch.zeros(
+            1, 4, 3, image_height, image_width, device=device
+        )
         inputs = (images, tactile_images, observation)
     with torch.inference_mode():
         traced = torch.jit.trace(
@@ -562,8 +568,9 @@ def _save_and_validate(traced, output_path, metadata, inputs):
         traced, output_path, {"deco_metadata.json": metadata_json}
     )
     extra = {"deco_metadata.json": ""}
+    target_device = inputs[0].device
     loaded = torch.jit.load(
-        str(output_path), _extra_files=extra, map_location="cpu"
+        str(output_path), _extra_files=extra, map_location=target_device
     ).eval()
     with torch.inference_mode():
         output = loaded(*inputs)
@@ -649,10 +656,9 @@ def export_checkpoint(
     device: str = "cpu",
 ) -> dict:
     checkpoint_path = Path(checkpoint_path)
-    # The device argument is retained for CLI/API compatibility. Export is
-    # deliberately CPU-only so the archive is portable regardless of the
-    # training/checkpoint device.
-    del device
+    target_device = torch.device(device)
+    if target_device.type == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError(f"CUDA export device {target_device} is unavailable")
     checkpoint = torch.load(
         checkpoint_path, map_location="cpu", weights_only=True
     )
@@ -665,7 +671,7 @@ def export_checkpoint(
     stage2_metadata = None
     if config.get("model_type") == STAGE2_MODEL_TYPE:
         stage2_metadata = _validate_stage2_checkpoint(checkpoint, config)
-    policy = _build_policy(config).cpu()
+    policy = _build_policy(config).to(target_device)
     policy.load_state_dict(checkpoint["model"], strict=True)
     if stage2_metadata is not None:
         _validate_stage2_gates(policy, stage2_metadata)

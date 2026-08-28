@@ -45,6 +45,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     profile = deployment_profile(config)
     checkpoint = resolve_checkpoint(config)
     connection = section(config, "connection")
+    observation_config = section(config, "observation")
     runtime = section(config, "runtime")
     seed = int(config.get("seed", 0))
     warmup_runs = int(runtime.get("warmup_runs", 1))
@@ -56,10 +57,11 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     if max_iterations < 0:
         raise ValueError("max_iterations must be nonnegative")
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
+    black_camera0 = bool(observation_config.get("black_camera0", False))
 
     def policy_observation(observation: dict[str, Any]) -> dict[str, Any]:
         return (
-            project_right_observation(observation)
+            project_right_observation(observation, black_camera0=black_camera0)
             if profile == SINGLE_RIGHT_ARM_PROFILE
             else observation
         )
@@ -84,6 +86,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         f"state={policy.state_dim} action={policy.action_dim} "
         f"horizon={policy.action_horizon} sample_hz={policy.expected_sample_hz:g}"
     )
+    if black_camera0:
+        print("[startup] camera0 input replaced with training-matched black frames")
 
     bridge: RobotBridgeClient | None = None
     try:

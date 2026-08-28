@@ -163,12 +163,22 @@ def test_legacy_loop_reads_next_observation_without_waiting_for_action_ack(
 
 def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) -> None:
     predicted_states: list[np.ndarray] = []
+    predicted_camera0: list[np.ndarray] = []
+    predicted_camera1: list[np.ndarray] = []
     sent_actions: list[tuple[np.ndarray, int]] = []
+    camera0 = np.full((4, 5, 3), 255, dtype=np.uint8)
+    camera1 = np.full((4, 5, 3), 17, dtype=np.uint8)
     observations = iter(
         [
-            (0, {"observation.state": np.arange(20, dtype=np.float32)}),
-            (1, {"observation.state": np.arange(20, dtype=np.float32)}),
-            (2, {"observation.state": np.arange(20, dtype=np.float32)}),
+            (
+                index,
+                {
+                    "observation.state": np.arange(20, dtype=np.float32),
+                    "observation.images.camera0": camera0.copy(),
+                    "observation.images.camera1": camera1.copy(),
+                },
+            )
+            for index in range(3)
         ]
     )
     config = {
@@ -182,9 +192,13 @@ def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) ->
             "observation_timeout_s": 1.25,
             "require_token": False,
         },
-        "observation": {"single_arm_mode": True, "controlled_arm": "right"},
+        "observation": {
+            "single_arm_mode": True,
+            "controlled_arm": "right",
+            "black_camera0": True,
+        },
         "control": {},
-        "runtime": {"auto_start": True, "warmup_runs": 0},
+        "runtime": {"auto_start": True, "warmup_runs": 1},
     }
     right_action = np.tile(np.arange(10, dtype=np.float32), (32, 1))
 
@@ -218,6 +232,8 @@ def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) ->
 
         def predict(self, observation, *, seed):
             predicted_states.append(observation["observation.state"].copy())
+            predicted_camera0.append(observation["observation.images.camera0"].copy())
+            predicted_camera1.append(observation["observation.images.camera1"].copy())
             return right_action.copy()
 
     monkeypatch.setattr(remote_client, "check", lambda _path: config)
@@ -228,9 +244,14 @@ def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) ->
 
     remote_client.run(Path("unused.yaml"), max_iterations_override=1)
 
-    predicted_state = predicted_states[0]
     sent_action, obs_seq = sent_actions[0]
-    np.testing.assert_array_equal(predicted_state, np.arange(7, 14, dtype=np.float32))
+    assert len(predicted_states) == 2
+    for predicted_state in predicted_states:
+        np.testing.assert_array_equal(predicted_state, np.arange(7, 14, dtype=np.float32))
+    for image in predicted_camera0:
+        np.testing.assert_array_equal(image, np.zeros_like(camera0))
+    for image in predicted_camera1:
+        np.testing.assert_array_equal(image, camera1)
     assert obs_seq == 1
     assert sent_action.shape == (32, 20)
     np.testing.assert_array_equal(sent_action[:, 10:], right_action)

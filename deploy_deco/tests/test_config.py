@@ -44,6 +44,7 @@ def test_checked_in_right_config_matches_insert_artifact():
     server = make_server_config(config)
     assert server["single_arm_mode"] is False
     assert server["steps_per_inference"] == 24
+    assert config["observation"]["black_camera0"] is True
 
 
 def test_right_config_rejects_bimanual_artifact():
@@ -51,6 +52,14 @@ def test_right_config_rejects_bimanual_artifact():
     bimanual = load_sidecar(load_config(CONFIG)["checkpoint"])
     with pytest.raises(ValueError, match="profile"):
         validate_artifact_contract(right, bimanual)
+
+
+def test_dual_arm_config_rejects_black_camera0():
+    config = load_config(CONFIG)
+    config["observation"]["black_camera0"] = True
+
+    with pytest.raises(ValueError, match="single-right-arm"):
+        validate_config(config)
 
 
 def test_training_frequency_mismatch_is_rejected():

@@ -97,9 +97,14 @@ def validate_config(config: Mapping[str, Any]) -> None:
         observation.get("single_arm_mode", False), "observation.single_arm_mode"
     )
     controlled_arm = observation.get("controlled_arm")
+    black_camera0 = _boolean(
+        observation.get("black_camera0", False), "observation.black_camera0"
+    )
     if profile == DUAL_ARM_PROFILE:
         if single_arm_mode or controlled_arm is not None:
             raise ValueError("dual-arm DECO requires bimanual observations")
+        if black_camera0:
+            raise ValueError("black_camera0 is only supported for single-right-arm DECO")
     elif profile == SINGLE_RIGHT_ARM_PROFILE:
         if not single_arm_mode or controlled_arm != "right":
             raise ValueError("single-right-arm DECO requires controlled_arm='right'")

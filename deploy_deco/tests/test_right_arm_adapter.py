@@ -19,6 +19,33 @@ def test_project_right_observation_uses_indices_7_through_13():
     assert projected["observation.state"] is not source["observation.state"]
 
 
+def test_project_right_observation_can_replace_camera0_with_black_without_mutating_source():
+    source = observation()
+    source["observation.images.camera0"].fill(255)
+
+    projected = project_right_observation(source, black_camera0=True)
+
+    np.testing.assert_array_equal(
+        projected["observation.images.camera0"],
+        np.zeros_like(source["observation.images.camera0"]),
+    )
+    np.testing.assert_array_equal(source["observation.images.camera0"], 255)
+    assert projected["observation.images.camera0"].dtype == source[
+        "observation.images.camera0"
+    ].dtype
+    assert projected["observation.images.camera0"].shape == source[
+        "observation.images.camera0"
+    ].shape
+
+
+def test_project_right_observation_requires_camera0_when_black_replacement_is_enabled():
+    source = observation()
+    source.pop("observation.images.camera0")
+
+    with pytest.raises(ValueError, match="missing observation.images.camera0"):
+        project_right_observation(source, black_camera0=True)
+
+
 def test_expand_right_action_holds_left_and_preserves_right():
     source = observation()
     right = np.arange(20, dtype=np.float32).reshape(2, 10)

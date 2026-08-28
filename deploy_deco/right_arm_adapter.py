@@ -15,9 +15,16 @@ def _server_state(observation: Mapping[str, Any]) -> np.ndarray:
     return state
 
 
-def project_right_observation(observation: Mapping[str, Any]) -> dict[str, Any]:
+def project_right_observation(
+    observation: Mapping[str, Any], *, black_camera0: bool = False
+) -> dict[str, Any]:
     result = dict(observation)
     result["observation.state"] = _server_state(observation)[7:14].copy()
+    if black_camera0:
+        key = "observation.images.camera0"
+        if key not in observation:
+            raise ValueError(f"right-arm observation is missing {key}")
+        result[key] = np.zeros_like(np.asarray(observation[key]))
     return result
 
 
