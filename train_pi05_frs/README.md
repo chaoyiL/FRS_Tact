@@ -35,6 +35,25 @@ loading, or tmux. Each foreground run creates one timestamped
 `frs_training.output/pipeline_YYYYmmdd_HHMMSS.log`. Set `FRS_TMUX_SESSION` to choose the tmux
 session name; attach with `tmux attach -t <name>`.
 
+### Right-hand single-arm training
+
+`configs/train_pi05_frs_right.yaml` is the independent right-hand configuration. Its fixed
+contract is 7D `observation.state`, 10D `action`, one right-wrist visual stream, and tactile keys
+`tactile_right_0`, `tactile_right_1` in that order. Replace its example checkpoint, dataset,
+encoder, norm-statistics, cache, and output paths before starting it.
+
+```bash
+# Dependency-light input/configuration check.
+bash train_pi05_frs/scripts/start_frs_pi05_right_train.sh --check
+
+# Run tactile precompute, Pi0.5 action-cache generation, and FRS training.
+bash train_pi05_frs/scripts/start_frs_pi05_right_train.sh
+```
+
+The right-hand Pi0.5 checkpoint itself must use `action_dim: 10`, and its norm statistics must
+come from the same 7D-state/10D-action fine-tune. A dual-arm Pi0.5 checkpoint or dual-arm FRS
+checkpoint cannot be reused by only changing the profile.
+
 ### Physical bimanual training
 
 `configs/train_pi05_frs_bimanual_gated.yaml` is the independent configuration for the fixed

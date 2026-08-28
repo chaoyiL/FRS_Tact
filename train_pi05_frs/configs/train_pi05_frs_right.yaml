@@ -1,18 +1,18 @@
-# Full Pi0.5 FRS pipeline with the fixed physical bimanual objective.
-# Local snapshot of the pinned native JAX/Orbax Hugging Face fine-tune.
-checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
-allow_download: true
+# Pi0.5 FRS 右手单臂完整训练流水线。
+# 固定合同：7D observation.state、10D action、右腕视觉、两路右手触觉。
+# 使用前必须替换 checkpoint、数据集、触觉编码器和 norm_stats 的示例路径。
+checkpoint: /workspace/checkpoints/model/pi05_right/checkpoint
+allow_download: false
 
 datasets:
-  - repo_id: KaiyueChen/two_tubes_03
-    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_03
-    action_key: actions
+  - repo_id: local/pick_tube_right
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_right
+    action_key: action
     rename_map:
       observation.images.camera0: observation.images.camera1
-      observation.images.camera1: observation.images.camera2
 
 action_cache:
-  root: /workspace/frs_two_tubes_03/action_cache_two_tubes_03_slerpflow_k50_state_v3
+  root: /workspace/frs_pick_tube_pi05_right/action_cache_slerpflow_k50_state_v3
   model_sample_steps: 10
   reverse_steps: 50
   reverse_solver: slerpflow
@@ -29,7 +29,7 @@ action_cache:
 
 tactile_embedding_cache:
   enabled: true
-  root: /workspace/tactile_embeddings
+  root: /workspace/tactile_embeddings_pi05_right
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -38,42 +38,42 @@ tactile_embedding_cache:
   precompute_flush_every: 20
 
 model:
-  state_action_profile: dual-arm-20x20
-  state_dim: 20
-  robot_action_dim: 20
+  state_action_profile: single-right-arm-7x10
+  state_dim: 7
+  robot_action_dim: 10
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
+  tactile_encoder_path: /workspace/checkpoints/encoder/pi05_right
   freeze_tactile_encoder: true
   tactile_keys:
-    - observation.images.tactile_left_0
     - observation.images.tactile_right_0
-    - observation.images.tactile_left_1
     - observation.images.tactile_right_1
   tactile_embedding_dim: 512
-  tactile_num_tokens: 4
+  tactile_num_tokens: 2
   tactile_image_size: 224
   state_conditioning: true
   state_dropout_rate: 0.1
   camera_map:
-    left_wrist_0_rgb: observation.images.camera1
-    right_wrist_0_rgb: observation.images.camera2
-  action_dim: 20
+    right_wrist_0_rgb: observation.images.camera1
+  # 必须与右手 Pi0.5 checkpoint 的模型 action_dim 一致。
+  action_dim: 10
   action_horizon: 50
-  paligemma_variant: gemma_2b_lora
-  action_expert_variant: gemma_300m_lora
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
 
 norm_stats:
-  dir: /workspace/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets
-  asset_id: two_tubes_0102
+  # 必须使用训练右手 Pi0.5 checkpoint 时的同一套 7D state / 10D action 统计量。
+  dir: /workspace/checkpoints/model/pi05_right/checkpoint/assets
+  asset_id: pick_tube_right
   use_quantile_norm: true
 
 frs_training:
-  output: /workspace/frs_two_tubes_03/run_bimanual_gated_two_tubes_03_0824_02
+  output: /workspace/frs_pick_tube_pi05_right/run_gated_right_01
   tactile_window_divisor: 5
   history_stride: 3
-  loss_mode: bimanual_gated
-  gate_tau: 0.65
-  gate_temperature: 0.15
+  loss_mode: gated
+  gate_tau: 0.4
+  gate_temperature: 0.1
+  gate_lambda: 0.25
   aux_decode_weight: 4.0
   aux_decode_steps: 10
   aux_decode_solver: fireflow
@@ -81,7 +81,7 @@ frs_training:
   low_gate_safety_margin: 0.03
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  rank_weight: 4.0
+  rank_weight: 2.0
   rank_margin: 0.0
   repair_weight: 2.0
   repair_margin: 0.0
@@ -92,7 +92,7 @@ frs_training:
   depth: 6
   num_heads: 4
   mlp_ratio: 4
-  learning_rate: 1.0e-4
+  learning_rate: 3.0e-4
   weight_decay: 1.0e-4
   grad_clip_norm: 1.0
   warmup_epochs: 2
@@ -100,7 +100,7 @@ frs_training:
   min_lr_ratio: 0.1
   lr_schedule: cosine
   batch_size: 128
-  epochs: 50
+  epochs: 100
   validation_steps: 10
   eval_every: 5
   seed: 42

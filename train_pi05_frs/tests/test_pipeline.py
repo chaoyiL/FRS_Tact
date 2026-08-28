@@ -322,6 +322,26 @@ def test_bimanual_config_is_independent_and_validated():
     validate_config(config, check_paths=False)
 
 
+def test_right_hand_config_has_fixed_single_arm_contract():
+    path = TRAIN_ROOT / "configs" / "train_pi05_frs_right.yaml"
+    config = load_config(path)
+    model = config["model"]
+
+    assert model["state_action_profile"] == "single-right-arm-7x10"
+    assert model["state_dim"] == 7
+    assert model["robot_action_dim"] == 10
+    assert model["action_dim"] == 10
+    assert model["tactile_num_tokens"] == 2
+    assert model["tactile_keys"] == [
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_right_1",
+    ]
+    assert model["camera_map"] == {
+        "right_wrist_0_rgb": "observation.images.camera1"
+    }
+    validate_config(config, check_paths=False)
+
+
 def test_bimanual_metadata_supports_native_and_padded_action_widths():
     for action_dim in (20, 32):
         metadata = bimanual_objective_metadata(action_dim=action_dim)

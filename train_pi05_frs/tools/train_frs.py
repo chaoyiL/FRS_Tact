@@ -80,6 +80,9 @@ TACTILE_CACHE_KEYS = {
     "precompute_flush_every",
 }
 MODEL_KEYS = {
+    "state_action_profile",
+    "state_dim",
+    "robot_action_dim",
     "use_tactile_encoder",
     "tactile_encoder_path",
     "freeze_tactile_encoder",
@@ -94,6 +97,25 @@ MODEL_KEYS = {
     "action_horizon",
     "paligemma_variant",
     "action_expert_variant",
+}
+STATE_ACTION_PROFILES = {
+    "dual-arm-20x20": {
+        "state_dim": 20,
+        "robot_action_dim": 20,
+        "tactile_basenames": (
+            "tactile_left_0",
+            "tactile_right_0",
+            "tactile_left_1",
+            "tactile_right_1",
+        ),
+        "camera_slots": {"left_wrist_0_rgb", "right_wrist_0_rgb"},
+    },
+    "single-right-arm-7x10": {
+        "state_dim": 7,
+        "robot_action_dim": 10,
+        "tactile_basenames": ("tactile_right_0", "tactile_right_1"),
+        "camera_slots": {"right_wrist_0_rgb"},
+    },
 }
 NORM_STATS_KEYS = {"dir", "asset_id", "use_quantile_norm"}
 TRAINING_KEYS = {
@@ -930,6 +952,48 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         raise ValueError(
             f"config.model.camera_map has unknown keys: {sorted(unknown_cameras)}"
         )
+    profile_name: str | None = None
+    profile: Mapping[str, Any] | None = None
+    state_dim: int | None = None
+    robot_action_dim: int | None = None
+    if model.get("state_action_profile") is not None:
+        profile_name = _nonempty_string(
+            model["state_action_profile"], "model.state_action_profile"
+        )
+        if profile_name not in STATE_ACTION_PROFILES:
+            raise ValueError(
+                "config.model.state_action_profile must be dual-arm-20x20 or "
+                "single-right-arm-7x10"
+            )
+        profile = STATE_ACTION_PROFILES[profile_name]
+        state_dim = _integer(
+            model,
+            "state_dim",
+            prefix="model.",
+            default=int(profile["state_dim"]),
+        )
+        robot_action_dim = _integer(
+            model,
+            "robot_action_dim",
+            prefix="model.",
+            default=int(profile["robot_action_dim"]),
+        )
+        if state_dim != profile["state_dim"] or robot_action_dim != profile["robot_action_dim"]:
+            raise ValueError(
+                f"config.model dimensions do not match profile {profile_name}: "
+                f"state={state_dim}, robot_action={robot_action_dim}"
+            )
+        tactile_basenames = tuple(str(key).rsplit(".", 1)[-1] for key in tactile_keys)
+        if tactile_basenames != profile["tactile_basenames"]:
+            raise ValueError(
+                f"config.model.tactile_keys do not match profile {profile_name}: "
+                f"{tactile_basenames!r} != {profile['tactile_basenames']!r}"
+            )
+        if set(camera_map) != profile["camera_slots"]:
+            raise ValueError(
+                f"config.model.camera_map slots do not match profile {profile_name}: "
+                f"{sorted(camera_map)!r} != {sorted(profile['camera_slots'])!r}"
+            )
 
     for key, default in (
         ("model_sample_steps", 10),
@@ -982,10 +1046,22 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         validate_bimanual_action_dim(
             model_integers["action_dim"], field_name="config.model.action_dim"
         )
-    if len(tactile_keys) != 4 or model_integers["tactile_num_tokens"] != 4:
+    if profile_name is None and (
+        len(tactile_keys) != 4 or model_integers["tactile_num_tokens"] != 4
+    ):
         raise ValueError(
             "config.model.tactile_keys and tactile_num_tokens must each be exactly 4"
         )
+    if profile_name is not None and len(tactile_keys) != model_integers["tactile_num_tokens"]:
+        raise ValueError(
+            "config.model.tactile_num_tokens must equal the number of tactile_keys"
+        )
+    if robot_action_dim is not None and model_integers["action_dim"] < robot_action_dim:
+        raise ValueError(
+            "config.model.action_dim cannot be smaller than model.robot_action_dim"
+        )
+    if profile_name == "single-right-arm-7x10" and model_integers["action_dim"] != 10:
+        raise ValueError("single-right-arm-7x10 requires config.model.action_dim=10")
     state_dropout_rate = _number(
         model, "state_dropout_rate", prefix="model.", default=0.0
     )
@@ -1179,6 +1255,16 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
                 f"dataset {index} state/action feature widths {widths} do not match "
                 f"dataset 0 {expected_widths}"
             )
+    required_widths = (
+        None
+        if state_dim is None or robot_action_dim is None
+        else {"state": state_dim, "actions": robot_action_dim}
+    )
+    if required_widths is not None and expected_widths != required_widths:
+        raise ValueError(
+            f"dataset state/action widths do not match profile {profile_name}: "
+            f"{expected_widths} != {required_widths}"
+        )
     norm_dir = str(norm_stats["dir"])
     if not _is_url(norm_dir):
         asset_dir = resolve_local_path(norm_dir) / str(norm_stats["asset_id"])
