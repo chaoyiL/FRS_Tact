@@ -36,6 +36,19 @@ uv run --project deploy_deco python -m deploy_deco.remote_client \
 
 也可以设置 `PYTHON_BIN` 后运行 `bash deploy_deco/scripts/start_deco.sh`。
 
+### Right-arm insert deployment
+
+The right-arm launcher runs the 7D-to-10D insert policy while the robot server
+remains in bimanual mode. The client sends an identity hold action for the left
+arm and places the model output in the right-arm action block.
+
+Start the server and then run one manually confirmed client iteration:
+
+```bash
+bash /home/typhon/vb3_robot_server/scripts/bimanual_deco.sh
+bash deploy_deco/scripts/start_deco_right.sh --max-iterations 1
+```
+
 ## 服务端兼容
 
 当前 `vb3_robot_server` 已经提供与训练一致的：

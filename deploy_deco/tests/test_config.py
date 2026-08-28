@@ -62,3 +62,9 @@ def test_legacy_config_does_not_require_action_ack_timeout():
     config = load_config(CONFIG)
     config["connection"].pop("action_ack_timeout_s", None)
     validate_config(config)
+
+
+def test_right_launcher_selects_right_config():
+    script = (ROOT / "deploy_deco" / "scripts" / "start_deco_right.sh").read_text()
+    assert "deploy_deco_right.yaml" in script
+    assert "start_deco.sh" in script
