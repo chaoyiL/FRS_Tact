@@ -166,6 +166,7 @@ def _episode_path(root: Path, info: dict, episode_id: int) -> Path:
 def _episode_specs(
     root: Path,
     info: dict,
+    task_rows: list[dict],
     source_name: str,
     global_offset: int,
     preserve_source_ids: bool,
@@ -186,43 +187,19 @@ def _episode_specs(
             raise ValueError(
                 f"Episode must contain a transition and terminal row: episode={episode_id}, length={length}"
             )
-        raw_tasks = row.get("tasks", ())
-        if not isinstance(raw_tasks, (list, tuple)):
-            raise ValueError(
-                f"Episode tasks must be a list: episode={source_episode_id}, "
-                f"got={type(raw_tasks).__name__}"
-            )
-        resolved_task_ids = []
-        for value in raw_tasks:
-            if isinstance(value, bool):
-                raise ValueError(
-                    f"Invalid boolean task reference in episode {source_episode_id}"
-                )
-            if isinstance(value, int):
-                task_index = value
-            elif isinstance(value, str):
-                if value not in task_index_by_text:
-                    raise ValueError(
-                        f"Unknown task text in episode {source_episode_id}: {value!r}"
-                    )
-                task_index = task_index_by_text[value]
-            else:
-                raise ValueError(
-                    f"Unsupported task reference in episode {source_episode_id}: "
-                    f"{value!r}"
-                )
-            if task_index not in task_indices:
-                raise ValueError(
-                    f"Unknown task_index in episode {source_episode_id}: {task_index}"
-                )
-            resolved_task_ids.append(task_index)
         specs.append(
             _EpisodeSpec(
                 episode_id=episode_id,
                 source_episode_id=source_episode_id,
                 source_name=source_name,
                 length=length,
-                task_ids=tuple(resolved_task_ids),
+                task_ids=_resolve_episode_task_ids(
+                    row.get("tasks", ()),
+                    task_indices,
+                    task_index_by_text,
+                    root=root,
+                    episode_index=source_episode_id,
+                ),
                 path=_episode_path(root, info, source_episode_id),
             )
         )
@@ -234,6 +211,57 @@ def _episode_specs(
     if sum(spec.length for spec in specs) != int(info.get("total_frames", -1)):
         raise ValueError("LeRobot total_frames disagrees with episodes.jsonl")
     return sorted(specs, key=lambda spec: spec.episode_id)
+
+
+def _resolve_episode_task_ids(
+    values: object,
+    task_ids: set[int],
+    task_names: dict[str, int],
+    *,
+    root: Path,
+    episode_index: int,
+) -> tuple[int, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(
+            f"Episode tasks must be a list: root={root}, episode={episode_index}"
+        )
+    resolved = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(
+                f"Invalid boolean task value: root={root}, episode={episode_index}"
+            )
+        if isinstance(value, int):
+            task_index = value
+        elif isinstance(value, str):
+            label = value.strip()
+            if label in task_names:
+                task_index = task_names[label]
+            else:
+                try:
+                    task_index = int(label)
+                except ValueError:
+                    # Some early single-task LeRobot exports wrote a generic
+                    # episode label that differs from tasks.jsonl. Mapping it
+                    # is safe only when there is exactly one possible task ID.
+                    if len(task_ids) != 1:
+                        raise ValueError(
+                            "Unknown LeRobot episode task label: "
+                            f"root={root}, episode={episode_index}, task={value!r}"
+                        ) from None
+                    task_index = next(iter(task_ids))
+        else:
+            raise ValueError(
+                "Unsupported LeRobot episode task value: "
+                f"root={root}, episode={episode_index}, task={value!r}"
+            )
+        if task_index not in task_ids:
+            raise ValueError(
+                "LeRobot episode task ID is absent from tasks.jsonl: "
+                f"root={root}, episode={episode_index}, task_index={task_index}"
+            )
+        resolved.append(task_index)
+    return tuple(sorted(set(resolved)))
 
 
 def _fixed_vector_column(table, key: str, dimension: int) -> np.ndarray:
@@ -652,6 +680,7 @@ def build_lerobot_vision_datasets(
         source_specs = _episode_specs(
             root,
             info,
+            task_rows,
             source["name"],
             global_offset,
             preserve_source_ids,

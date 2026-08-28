@@ -12,6 +12,7 @@ from PIL import Image
 from train_deco.lerobot_vision_dataset import (
     CAMERA_NAMES,
     TACTILE_NAMES,
+    _resolve_episode_task_ids,
     _validate_info,
     build_lerobot_vision_datasets,
 )
@@ -69,7 +70,8 @@ def _write_fixture(
     *,
     state_dim: int = 20,
     action_dim: int = 20,
-    episode_tasks_as_text: bool = False,
+    episode_tasks: list[int | str] | None = None,
+    camera0_color: tuple[int, int, int] = (16, 32, 64),
 ) -> None:
     (root / "meta").mkdir(parents=True)
     info = _info(state_dim=state_dim, action_dim=action_dim)
@@ -79,9 +81,9 @@ def _write_fixture(
         encoding="utf-8",
     )
     episodes = []
+    episode_tasks = [0] if episode_tasks is None else episode_tasks
     tactile_colors = ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0))
     for episode_index in range(2):
-        episode_tasks = ["pick tube"] if episode_tasks_as_text else [0]
         episodes.append(
             {
                 "episode_index": episode_index,
@@ -102,8 +104,8 @@ def _write_fixture(
             "episode_index": [episode_index] * 3,
             "task_index": [0] * 3,
         }
-        for name in CAMERA_NAMES:
-            columns[name] = [{"bytes": _jpeg_bytes((16, 32, 64))}] * 3
+        columns[CAMERA_NAMES[0]] = [{"bytes": _jpeg_bytes(camera0_color)}] * 3
+        columns[CAMERA_NAMES[1]] = [{"bytes": _jpeg_bytes((16, 32, 64))}] * 3
         for name, color in zip(TACTILE_NAMES, tactile_colors):
             columns[name] = [{"bytes": _jpeg_bytes(color)}] * 3
         path = root / "data" / "chunk-000" / f"episode_{episode_index:06d}.parquet"
@@ -170,7 +172,7 @@ def test_single_right_arm_manifest_is_explicit_and_builds_7x10_dataset(
         dataset_root,
         state_dim=7,
         action_dim=10,
-        episode_tasks_as_text=True,
+        episode_tasks=["pick tube"],
     )
 
     with pytest.raises(ValueError, match="explicit handedness"):
@@ -207,6 +209,141 @@ def test_single_right_arm_manifest_is_explicit_and_builds_7x10_dataset(
     assert train.metadata["action_columns"] == list(
         SINGLE_RIGHT_ARM_7X10.action_columns
     )
+
+
+def test_single_right_arm_multiroot_accepts_standard_string_episode_tasks(
+    tmp_path: Path,
+) -> None:
+    roots = [tmp_path / "insert_01", tmp_path / "insert_02"]
+    manifest_path = tmp_path / "insert_01_02.json"
+    for root in roots:
+        _write_fixture(
+            root,
+            state_dim=7,
+            action_dim=10,
+            episode_tasks=["perform manipulation task"],
+            camera0_color=(0, 0, 0),
+        )
+
+    manifest = write_multiroot_manifest(
+        roots,
+        manifest_path,
+        dataset_id="insert_01_02",
+        state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+        require_black_camera0=True,
+    )
+    assert [source["name"] for source in manifest["sources"]] == [
+        "insert_01",
+        "insert_02",
+    ]
+    assert [source["camera0_black_preflight"]["frames"] for source in manifest["sources"]] == [
+        6,
+        6,
+    ]
+
+    train, val = build_lerobot_vision_datasets(
+        manifest_path,
+        action_chunk_size=2,
+        validation_ratio=0.5,
+        split_seed=0,
+        include_tactile=False,
+    )
+    assert train[0]["observation"].shape == (7,)
+    assert train[0]["action"].shape == (2, 10)
+    assert {row["source"] for row in train.manifest["splits"]["train"]["episodes"]} == {
+        "insert_01",
+        "insert_02",
+    }
+    assert {row["source"] for row in val.manifest["splits"]["val"]["episodes"]} == {
+        "insert_01",
+        "insert_02",
+    }
+
+
+def test_camera0_black_preflight_rejects_nonblack_pixels(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "insert_01"
+    _write_fixture(
+        dataset_root,
+        state_dim=7,
+        action_dim=10,
+        camera0_color=(32, 0, 0),
+    )
+
+    with pytest.raises(ValueError, match="camera0.*not pure black"):
+        write_multiroot_manifest(
+            [dataset_root],
+            tmp_path / "insert_01.json",
+            state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+            require_black_camera0=True,
+        )
+
+
+def test_camera0_black_preflight_rejects_duplicate_episode_metadata(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "insert_01"
+    _write_fixture(
+        dataset_root,
+        state_dim=7,
+        action_dim=10,
+        camera0_color=(0, 0, 0),
+    )
+    episodes_path = dataset_root / "meta/episodes.jsonl"
+    first_episode = episodes_path.read_text(encoding="utf-8").splitlines()[0]
+    episodes_path.write_text(f"{first_episode}\n{first_episode}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Duplicate episode_index"):
+        write_multiroot_manifest(
+            [dataset_root],
+            tmp_path / "insert_01.json",
+            state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+            require_black_camera0=True,
+        )
+
+
+def test_camera0_black_preflight_rejects_episode_row_count_mismatch(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "insert_01"
+    _write_fixture(
+        dataset_root,
+        state_dim=7,
+        action_dim=10,
+        camera0_color=(0, 0, 0),
+    )
+    episode_path = dataset_root / "data/chunk-000/episode_000000.parquet"
+    pq.write_table(pq.read_table(episode_path).slice(0, 2), episode_path)
+
+    with pytest.raises(ValueError, match="camera0 row count disagrees"):
+        write_multiroot_manifest(
+            [dataset_root],
+            tmp_path / "insert_01.json",
+            state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+            require_black_camera0=True,
+        )
+
+
+def test_standard_string_task_label_maps_to_declared_task_id(tmp_path: Path) -> None:
+    assert _resolve_episode_task_ids(
+        ["insert"],
+        {3},
+        {"insert": 3},
+        root=tmp_path,
+        episode_index=0,
+    ) == (3,)
+
+
+def test_unknown_string_task_is_rejected_when_mapping_is_ambiguous(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="Unknown LeRobot episode task label"):
+        _resolve_episode_task_ids(
+            ["generic task"],
+            {0, 1},
+            {"insert": 0, "remove": 1},
+            root=tmp_path,
+            episode_index=0,
+        )
 
 
 @pytest.mark.skipif(

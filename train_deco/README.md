@@ -34,6 +34,61 @@ bash train_deco/scripts/prepare_data.sh \
   --state-action-profile single-right-arm-7x10
 ```
 
+### Insert 01 + 02 单右臂重训
+
+当前已核对的 `KaiyueChen/insert_02` 完整 revision 为
+`babbcf401b84640b599c084a9121e80561944e8f`；下载时固定该 revision，避免后续漂移。
+下载后的两个 LeRobot v2.1 根目录直接生成一个 manifest，不复制数据，也不使用
+加权 sampler：
+
+```bash
+hf download KaiyueChen/insert_01 \
+  --repo-type dataset \
+  --revision deead6367f0a2d817306a28bcaecc089b5cfe653 \
+  --local-dir /DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_01
+
+hf download KaiyueChen/insert_02 \
+  --repo-type dataset \
+  --revision babbcf401b84640b599c084a9121e80561944e8f \
+  --local-dir /DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_02
+
+PYTHON_BIN=/home/ljl/FRS_Tact/train_deco/.venv/bin/python \
+bash train_deco/scripts/prepare_data.sh \
+  --mode server \
+  --root /DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_01 \
+  --root /DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_02 \
+  --output /home/ljl/FRS_Tact/train_deco/data_manifests/insert_01_02.json \
+  --dataset-id insert_01_02 \
+  --state-action-profile single-right-arm-7x10 \
+  --require-black-camera0
+```
+
+`--require-black-camera0` 会读取、哈希全部 episode 的每帧 `camera0` JPEG，并解码
+每个唯一 JPEG payload，检查其全部像素都为 0；结果和检查帧数写入 manifest。上述
+revision 实际为 711 episodes / 310619 frames，而不是早先预期的 700 episodes。
+与 500-episode 的 `insert_01` 合并后，按默认 `validation_ratio=0.1` 分来源拆分，
+预期得到 450 + 640 个训练 episodes 和 50 + 71 个验证 episodes；训练样本按两个
+来源的全部有效帧自然混合，因此实际 episode 比为 500:711。
+
+使用 `balanced-light-v2` 从头训练 Stage 1：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 \
+OUTPUT_DIR=/DATA/ljl/substage/deco_runs \
+BATCH_SIZE=512 \
+WORKERS=32 \
+RUN_ID=insert-deco-stage1-balanced-light-v2 \
+AUGMENTATION_PRESET=balanced-light-v2 \
+BACKBONE_WEIGHTS=/home/ljl/FRS_Tact/train_deco/pretrained/resnet34-b627a593 \
+RESUME_FROM= \
+bash train_deco/scripts/train.sh \
+  --mode local-train \
+  --manifest /home/ljl/FRS_Tact/train_deco/data_manifests/insert_01_02.json
+```
+
+不要同时设置旧的低光增强细分环境变量。该运行不从旧 Insert checkpoint resume，
+因此不会继承 `low-light-v1` 配置。
+
 正式训练使用 `--mode local-train`，服务器 DDP 使用 `--mode server-train`。
 所有脚本从 FRS_Tact 仓库根目录启动；虚拟环境、manifest 和输出默认位于
 `train_deco/` 下。
