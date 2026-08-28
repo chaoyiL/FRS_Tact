@@ -1,1 +1,1 @@
-"""Remote robot deployment client using JAX SmolVLA."""
+"""PyTorch SmolVLA vision and JAX SmolVLA-FRS deployment clients."""

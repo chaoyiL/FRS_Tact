@@ -1,0 +1,48 @@
+# Right-hand single-arm pure-vision SmolVLA deployment (PyTorch).
+backend: pytorch_smolvla
+# Must be a PyTorch checkpoint trained with 7D state and 10D action.
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/smolvla_right
+revision: null
+allow_download: false
+device: cuda
+rename_map:
+  observation.images.camera0: observation.images.camera1
+
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  action_ack_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+observation:
+  state_action_profile: single-right-arm-7x10
+  data_type: vision
+  language_prompt: Use the right hand to complete the task.
+  single_arm_mode: true
+  controlled_arm: right
+  no_state_obs_mode: false
+
+control:
+  control_frequency: 20.0
+  controller_frequency: 80.0
+  action_horizon: 20
+  steps_per_inference: 5
+
+runtime:
+  auto_start: false
+  warmup_runs: 1
+  status_interval_s: 2.0
+  max_iterations: 0
+
+logging:
+  save_observations: true
+  output_dir: outputs/smolvla_pytorch_right_observations
+  save_every: 1
+  queue_size: 32

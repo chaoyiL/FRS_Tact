@@ -30,8 +30,35 @@ export TMPDIR="${FRS_TMPDIR:-${WORKSPACE_ROOT}/tmp}"
 mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR}"
 # 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
-if [[ "${BASH_SOURCE[0]}" == "$0" && -n "${1:-}" ]]; then
-    HF_DATASET_CACHE_DIR="$1"
+REQUESTED_DATASETS=()
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    while (( $# > 0 )); do
+        case "$1" in
+            --dataset)
+                [[ $# -ge 2 ]] || { echo "--dataset requires a repository name" >&2; exit 2; }
+                REQUESTED_DATASETS+=("${2##*/}")
+                shift 2
+                ;;
+            --cache-dir)
+                [[ $# -ge 2 ]] || { echo "--cache-dir requires a path" >&2; exit 2; }
+                HF_DATASET_CACHE_DIR="$2"
+                shift 2
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: bash scripts/download_data.sh [--dataset NAME]... [--cache-dir PATH]
+
+Without --dataset, downloads the datasets enabled in the DATASETS list.
+This is the only supported training-dataset download and v2.1 -> v3.0 path.
+EOF
+                exit 0
+                ;;
+            *)
+                echo "Unknown argument: $1" >&2
+                exit 2
+                ;;
+        esac
+    done
 fi
 # ====================================================
 
@@ -67,6 +94,9 @@ DATASETS=(
     # pick_cube_03
     # pick_cube_fix
 )
+if (( ${#REQUESTED_DATASETS[@]} > 0 )); then
+    DATASETS=("${REQUESTED_DATASETS[@]}")
+fi
 
 log() {
     # 打到 stderr，避免被 $(...) 命令替换吞掉

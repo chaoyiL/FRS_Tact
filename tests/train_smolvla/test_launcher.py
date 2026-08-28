@@ -70,23 +70,33 @@ def test_existing_tmux_session_is_rejected(monkeypatch):
 
 
 def test_shell_contains_no_training_constants():
-    shell = (ROOT / "train_smolvla/scripts/train.sh").read_text()
-    assert "python -m train_smolvla.launcher" in shell
-    for forbidden in ("batch_size", "optimizer_lr", "save_freq", "steps:"):
-        assert forbidden not in shell
+    for name in ("start_smolvla_train.sh", "start_smolvla_right_train.sh"):
+        shell = (ROOT / "train_smolvla/scripts" / name).read_text()
+        assert "-m train_smolvla.torch_train" in shell
+        for forbidden in ("batch_size", "optimizer_lr", "save_freq", "steps:"):
+            assert forbidden not in shell
 
 
-def test_shell_discovers_root_from_a_foreign_cwd_without_starting_training(tmp_path):
-    fake_uv = tmp_path / "uv"
-    fake_uv.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@"\n', encoding="utf-8")
-    fake_uv.chmod(0o755)
+@pytest.mark.parametrize(
+    ("script_name", "config_name"),
+    [
+        ("start_smolvla_train.sh", "train_pytorch.yaml"),
+        ("start_smolvla_right_train.sh", "train_pytorch_right.yaml"),
+    ],
+)
+def test_shell_discovers_root_from_a_foreign_cwd_without_starting_training(
+    tmp_path, script_name, config_name
+):
+    fake_python = tmp_path / "python"
+    fake_python.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@"\n', encoding="utf-8")
+    fake_python.chmod(0o755)
     foreign_cwd = tmp_path / "foreign"
     foreign_cwd.mkdir()
 
     result = subprocess.run(
-        ["bash", str(ROOT / "train_smolvla/scripts/train.sh")],
+        ["bash", str(ROOT / "train_smolvla/scripts" / script_name)],
         cwd=foreign_cwd,
-        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}"},
+        env={**os.environ, "SMOLVLA_TORCH_PYTHON": str(fake_python)},
         text=True,
         capture_output=True,
         check=False,
@@ -94,13 +104,10 @@ def test_shell_discovers_root_from_a_foreign_cwd_without_starting_training(tmp_p
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.splitlines() == [
-        "run",
-        "--no-sync",
-        "python",
         "-m",
-        "train_smolvla.launcher",
+        "train_smolvla.torch_train",
         "--config",
-        str(ROOT / "train_smolvla/configs/train.yaml"),
+        str(ROOT / "train_smolvla/configs" / config_name),
     ]
 
 

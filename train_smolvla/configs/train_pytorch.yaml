@@ -1,0 +1,110 @@
+# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与 VB3/官方 LeRobot 训练流程对齐。
+# 启动：bash train_smolvla/scripts/start_smolvla_train.sh
+
+dataset:
+  # 数据必须先通过 scripts/download_data.sh 下载并转换为 LeRobot v3.0。
+  repo_id: KaiyueChen/pick_tube_05
+  root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+  expected_fps: 30
+  state_dim: 20
+  action_dim: 20
+  image_keys:
+    - observation.images.camera0
+    - observation.images.camera1
+  eval_split: 0.10
+  image_transforms:
+    enable: true
+    max_num_transforms: 2
+    random_order: false
+    tfs:
+      brightness:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          brightness: [0.8, 1.2]
+      contrast:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          contrast: [0.8, 1.2]
+      saturation:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          saturation: [0.85, 1.15]
+      hue:
+        weight: 0.5
+        type: ColorJitter
+        kwargs:
+          hue: [-0.01, 0.01]
+      sharpness:
+        weight: 0.5
+        type: SharpnessJitter
+        kwargs:
+          sharpness: [0.8, 1.2]
+
+policy:
+  path: lerobot/smolvla_base
+  chunk_size: 20
+  n_action_steps: 10
+  empty_cameras: 0
+  num_vlm_layers: 16
+  num_expert_layers: 16
+  freeze_vision_encoder: true
+  train_expert_only: false
+  train_state_proj: true
+  optimizer_lr: 5.0e-5
+  scheduler_warmup_steps: 1500
+  scheduler_decay_steps: 30000
+  device: cuda
+  push_to_hub: false
+
+# 与数据中的相机键对应；双臂配置把左右腕相机统一成模型的 camera1/camera2。
+rename_map:
+  observation.images.camera0: observation.images.camera1
+  observation.images.camera1: observation.images.camera2
+
+# VB3 使用的混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
+peft:
+  enable: true
+  method_type: LORA
+  target_modules: 'model\.vlm_with_expert\.vlm\.model\.text_model\.layers\..*\.self_attn\.(q|v)_proj'
+  full_training_modules:
+    - model.vlm_with_expert.lm_expert
+    - model.state_proj
+    - model.action_in_proj
+    - model.action_out_proj
+    - model.action_time_mlp_in
+    - model.action_time_mlp_out
+  rank: 16
+  lora_alpha: 16
+
+training:
+  output_dir: /workspace/outputs/smolvla_pick_tube_05
+  job_name: smolvla_pick_tube_05
+  # batch_size 和 num_workers 均为每张 GPU 的数值。
+  batch_size: 64
+  num_workers: 8
+  steps: 30000
+  eval_steps: 500
+  max_eval_samples: 0
+  save_freq: 2000
+  log_freq: 20
+  seed: 1000
+  # 填写完整 checkpoint 的 pretrained_model/train_config.json；新训练保持 null。
+  resume_from: null
+
+distributed:
+  num_gpus: 1
+  num_machines: 1
+  mixed_precision: bf16
+
+wandb:
+  enable: true
+  project: smolvla-pick-tube-05
+  entity: null
+  mode: online
+  notes: PyTorch SmolVLA pure-vision dual-arm training
+  run_id: null
+  disable_artifact: true
+  add_tags: true

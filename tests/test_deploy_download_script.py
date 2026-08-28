@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = ROOT / "deploy_smolvla/scripts/download.sh"
+SCRIPT = ROOT / "scripts/download_ckpt.sh"
 BASE_DIR = Path("checkpoints/model/pick_tube_01_jax")
 FRS_DIR = Path("checkpoints/frs/frs_0809_02")
 ENCODER_DIR = Path("checkpoints/encoder/encoder_ckpt_0809")
@@ -55,7 +55,7 @@ BASE_SIDECARS = (
 
 def make_project(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:
     project = tmp_path / "project"
-    script_path = project / "deploy_smolvla/scripts/download.sh"
+    script_path = project / "scripts/download_ckpt.sh"
     script_path.parent.mkdir(parents=True)
     shutil.copy2(SCRIPT, script_path)
     (project / "tools").mkdir()
@@ -267,7 +267,7 @@ fi
 
 def run_download(project: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["bash", "deploy_smolvla/scripts/download.sh"],
+        ["bash", "scripts/download_ckpt.sh"],
         cwd=project,
         env=env,
         text=True,
@@ -766,7 +766,7 @@ def test_delegated_failure_names_asset_and_destination(
 
 def test_refuses_unguarded_base_overwrite(tmp_path: Path) -> None:
     project, log_path, env = make_project(tmp_path)
-    script = project / "deploy_smolvla/scripts/download.sh"
+    script = project / "scripts/download_ckpt.sh"
     content = script.read_text(encoding="utf-8")
     content = content.replace(
         'BASE_DIR="${CHECKPOINT_ROOT}/model/${SMOLVLA_BASENAME}_jax"',

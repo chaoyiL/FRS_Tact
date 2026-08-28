@@ -1,59 +1,48 @@
-# Visual SmolVLA Training
+# SmolVLA training
 
-This package runs visual-only SmolVLA JAX fine-tuning from one YAML configuration.
+Pure-vision SmolVLA training uses the official PyTorch LeRobot implementation,
+following the command construction and dataset-contract handling used by VB3.
+The older JAX model modules remain package-internal because SmolVLA-FRS training
+and deployment still consume converted JAX checkpoints.
 
-## Start training
+## PyTorch vision training
 
-Prepare the environment, data, and checkpoint first. The launcher deliberately does
-not install or download dependencies:
-
-```bash
-bash scripts/setup_env.sh --root
-bash scripts/download_data.sh
-bash scripts/download_encoder.sh
-```
-
-省略 `--root` 时，统一安装脚本会保持兼容行为，同时安装根环境和 Pi0.5 部署环境。
+Download/upgrade every training dataset through the shared data pipeline first:
 
 ```bash
-bash train_smolvla/scripts/train.sh
+bash scripts/download_data.sh --dataset pick_tube_05
 ```
 
-The default launcher starts a tmux session named `smolvla_train`. Attach to its
-output with:
+Point the training YAML `dataset.root` at the resulting
+`/workspace/lerobot_v30/KaiyueChen/<dataset>` directory. Training launchers do
+not implement a second downloader.
+
+Use the Python environment that runs VB3 and contains official LeRobot SmolVLA:
 
 ```bash
-tmux attach -t smolvla_train
+export SMOLVLA_TORCH_PYTHON=/home/typhon/vb3/.venv/bin/python
+bash train_smolvla/scripts/start_smolvla_train.sh
 ```
 
-If that session already exists, the launcher stops instead of replacing it. Attach
-to the existing session or choose a different `launcher.tmux_session` value in the
-YAML.
-
-Set `launcher.foreground: true` to run in the current terminal. To invoke the
-training module directly, use:
+Right-hand single-arm training:
 
 ```bash
-uv run --no-sync python -m train_smolvla.train --config train_smolvla/configs/train.yaml
+bash train_smolvla/scripts/start_smolvla_right_train.sh
 ```
 
-## Configure and resume
+The right-hand dataset must expose a 7D `observation.state`, a 10D `action`,
+and the camera contract declared by `rename_map`.
 
-Edit `train_smolvla/configs/train.yaml` before starting a run. It holds the
-dataset, checkpoint, output, resume, and training parameters, as well as launcher
-settings. Pass a different YAML file as the first argument to the shell wrapper
-when needed.
+To inspect the generated official LeRobot command without training:
 
-Set `resume` to an existing checkpoint directory to continue a run. With no
-`resume` value, the launcher stops if the configured output already contains a
-`checkpoint-*` directory, preventing an unsafe overwrite.
+```bash
+python -m train_smolvla.torch_train \
+  --config train_smolvla/configs/train_pytorch_right.yaml --dry-run
+```
 
-## Logs
+## JAX FRS path
 
-Each foreground training process writes one timestamped log under
-`train_smolvla/outputs/logs/`, for example:
-
-`train_smolvla/outputs/logs/train_YYYYMMDD_HHMMSS.log`
-
-The complete `train_smolvla/outputs/` tree is runtime output and is ignored by
-Git.
+After PyTorch training, merge/export the selected PyTorch checkpoint with
+`tools/merge_smolvla_peft_to_jax.py`. Generate FRS caches and train using
+`train_smolvla_frs`. Do not deploy the converted JAX bundle as the normal
+pure-vision policy; it is the source policy for the JAX FRS runtime.

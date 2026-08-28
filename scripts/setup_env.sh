@@ -1,15 +1,41 @@
 #!/usr/bin/env bash
-# 同时安装两套环境
-#bash scripts/setup_env.sh
-
-# 只安装根 SmolVLA/FRS 环境
-#bash scripts/setup_env.sh --root
-
-# 只安装 Pi0.5 部署环境
-#bash scripts/setup_env.sh --pi05_deploy
-
-# 帮助
-#bash scripts/setup_env.sh --help
+# 环境安装脚本使用方法（请在项目根目录执行）：
+#
+#   1. 同时安装根目录的 SmolVLA/FRS 环境和 Pi0.5 部署环境：
+#      bash scripts/setup_env.sh
+#
+#   2. 只安装根目录的 SmolVLA/FRS 训练与部署环境：
+#      bash scripts/setup_env.sh --root
+#
+#   3. 只安装独立的 Pi0.5 纯视觉与 FRS 部署环境：
+#      bash scripts/setup_env.sh --pi05_deploy
+#
+#   4. 查看命令帮助：
+#      bash scripts/setup_env.sh --help
+#
+# 脚本会执行以下工作：
+#   - 安装缺少的系统依赖、uv 和 Python 3.12；
+#   - 按照对应项目的 uv.lock 创建并同步虚拟环境；
+#   - 检查 Python 依赖以及 NVIDIA GPU、PyTorch/JAX 设备；
+#   - 生成项目根目录下的 .env.frs，供训练、部署和下载脚本读取。
+#
+# 默认虚拟环境位置：
+#   - SmolVLA/FRS：<项目根目录>/.venv
+#   - Pi0.5：      <项目根目录>/deploy_pi05/.venv
+# 在 /workspace 中运行时，虚拟环境默认保存在 /workspace/venvs 下。
+#
+# 常用可选环境变量：
+#   FRS_VENV_DIR           自定义 SmolVLA/FRS 虚拟环境目录
+#   PI05_VENV_DIR          自定义 Pi0.5 虚拟环境目录
+#   FRS_WORKSPACE_ROOT     自定义工作区和缓存根目录
+#   FRS_STORAGE_ROOT       自定义 Hugging Face、OpenPI 和临时文件存储目录
+#   UV_CACHE_DIR           自定义 uv 缓存目录
+#   FRS_IGNORE_UV_PROCESSES=1
+#                          忽略其他正在运行的 uv sync/uv run 进程检查
+#
+# 注意：
+#   - --root 与 --pi05_deploy 不能同时使用；不传参数即可安装两套环境。
+#   - 安装系统依赖可能需要 root 或 sudo 权限，并且安装过程需要联网。
 
 set -Eeuo pipefail
 
@@ -463,7 +489,9 @@ print_summary() {
     echo "  ${UV_BIN} run --no-sync wandb login"
     echo
     echo "一键启动视觉 SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/train.sh"
+    echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/start_smolvla_train.sh"
+    echo "一键启动右手单臂视觉 SmolVLA："
+    echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/start_smolvla_right_train.sh"
     echo "一键启动纯视觉 Pi0.5："
     echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05.sh"
     echo "一键启动 Pi0.5 + FRS："

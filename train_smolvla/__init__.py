@@ -1,4 +1,4 @@
-"""Standalone visual-only JAX SmolVLA implementation."""
+"""PyTorch training entrypoint plus JAX compatibility runtime used by FRS."""
 
 from importlib import import_module
 from typing import Any

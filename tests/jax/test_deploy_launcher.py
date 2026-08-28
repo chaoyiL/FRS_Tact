@@ -15,10 +15,9 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_remote_client.sh"
-FRS_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_frs.sh"
 SMOLVLA_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_smolvla.sh"
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
-DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
+DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_pytorch.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
 
 
@@ -532,7 +531,8 @@ def _run_wrapper_check(
     env["VB_ROBOT_TOKEN"] = "test-token"
     env["HF_HUB_CACHE"] = str(ROOT / "checkpoints" / "model")
     if config_override is not None:
-        env["FRS_DEPLOY_CONFIG"] = str(config_override)
+        env["SMOLVLA_VISION_CONFIG"] = str(config_override)
+        env["SMOLVLA_FRS_CONFIG"] = str(config_override)
     return subprocess.run(
         ["bash", str(wrapper), "--check", *extra_args],
         cwd=ROOT,
@@ -543,10 +543,10 @@ def _run_wrapper_check(
     )
 
 
-def test_frs_wrapper_uses_frs_config_without_executable_nested_script() -> None:
+def test_smolvla_frs_mode_uses_frs_config_without_executable_nested_script() -> None:
     assert SHARED_LAUNCHER.stat().st_mode & 0o111 == 0
 
-    result = _run_wrapper_check(FRS_LAUNCHER)
+    result = _run_wrapper_check(SMOLVLA_LAUNCHER, extra_args=("--mode", "frs"))
 
     assert result.returncode == 0, result.stderr
     assert f"config={FRS_CONFIG}" in result.stdout
@@ -564,7 +564,7 @@ def test_smolvla_wrapper_uses_visual_config_without_executable_nested_script() -
 @pytest.mark.parametrize(
     ("wrapper", "explicit_config"),
     (
-        (FRS_LAUNCHER, DEFAULT_CONFIG),
+        (SMOLVLA_LAUNCHER, DEFAULT_CONFIG),
         (SMOLVLA_LAUNCHER, FRS_CONFIG),
     ),
 )
@@ -583,7 +583,7 @@ def test_wrapper_allows_later_explicit_config_override(
 @pytest.mark.parametrize(
     ("wrapper", "config_override"),
     (
-        (FRS_LAUNCHER, DEFAULT_CONFIG),
+        (SMOLVLA_LAUNCHER, DEFAULT_CONFIG),
         (SMOLVLA_LAUNCHER, FRS_CONFIG),
     ),
 )

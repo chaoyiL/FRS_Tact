@@ -617,7 +617,7 @@ def test_direct_protocol_trace_builder_exception_is_fail_open(
 
 def _direct_backend_config() -> dict[str, object]:
     config = yaml.safe_load(
-        (ROOT / "deploy_smolvla/configs/deploy_smolvla_jax.yaml").read_text()
+        (ROOT / "deploy_smolvla/configs/deploy_frs.yaml").read_text()
     )
     config["backend"] = "direct_tactile_decoder"
     config["direct_decoder"] = {"bundle": str(ABLATION), "device": "cpu"}
@@ -699,7 +699,7 @@ def test_run_rejects_direct_backend_with_tactile_checkpoint(
 
 def test_direct_backend_requires_vitac_horizon_and_bundle(tmp_path: Path) -> None:
     config = yaml.safe_load(
-        (ROOT / "deploy_smolvla/configs/deploy_smolvla_jax.yaml").read_text()
+        (ROOT / "deploy_smolvla/configs/deploy_frs.yaml").read_text()
     )
     config["backend"] = "direct_tactile_decoder"
     config["direct_decoder"] = {"bundle": str(ABLATION), "device": "cpu"}

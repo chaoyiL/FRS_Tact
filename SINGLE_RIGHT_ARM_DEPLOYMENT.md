@@ -59,7 +59,7 @@ frs:
 
 ## SmolVLA 纯视觉
 
-复制 `deploy_smolvla/configs/deploy_smolvla_jax.yaml`，修改 checkpoint 和观测合同：
+复制 `deploy_smolvla/configs/deploy_smolvla_pytorch_right.yaml`，修改 PyTorch checkpoint 和观测合同：
 
 ```yaml
 checkpoint: /path/to/single_right_smolvla
@@ -107,12 +107,12 @@ PI05_DEPLOY_CONFIG=/path/to/pi05_frs_right.yaml \
   bash deploy_pi05/scripts/start_pi05_frs.sh --check
 
 # SmolVLA 纯视觉
-FRS_DEPLOY_CONFIG=/path/to/smolvla_right.yaml \
-  bash deploy_smolvla/scripts/start_smolvla.sh --check
+SMOLVLA_VISION_CONFIG=/path/to/smolvla_right.yaml \
+  bash deploy_smolvla/scripts/start_smolvla_right.sh --mode vision --check
 
 # SmolVLA + FRS
-FRS_DEPLOY_CONFIG=/path/to/smolvla_frs_right.yaml \
-  bash deploy_smolvla/scripts/start_frs.sh --check
+SMOLVLA_FRS_CONFIG=/path/to/smolvla_frs_right.yaml \
+  bash deploy_smolvla/scripts/start_smolvla_right.sh --mode frs --check
 ```
 
 `--check` 只检查启动器选择，不加载模型或连接机器人。第一次真机测试应保持
