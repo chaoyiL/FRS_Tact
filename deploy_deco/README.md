@@ -42,10 +42,18 @@ The right-arm launcher runs the 7D-to-10D insert policy while the robot server
 remains in bimanual mode. The client sends an identity hold action for the left
 arm and places the model output in the right-arm action block.
 
-Start the server and then run one manually confirmed client iteration:
+Set the same `VB_ROBOT_TOKEN` value in both terminals. Start the server first,
+then run one manually confirmed client iteration:
 
 ```bash
+# Terminal 1 (server)
+export VB_ROBOT_TOKEN='...'
 bash /home/typhon/vb3_robot_server/scripts/bimanual_deco.sh
+```
+
+```bash
+# Terminal 2 (client; use the exact same VB_ROBOT_TOKEN value as Terminal 1)
+export VB_ROBOT_TOKEN='...'
 bash deploy_deco/scripts/start_deco_right.sh --max-iterations 1
 ```
 

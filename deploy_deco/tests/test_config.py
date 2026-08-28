@@ -1,3 +1,6 @@
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -64,7 +67,26 @@ def test_legacy_config_does_not_require_action_ack_timeout():
     validate_config(config)
 
 
-def test_right_launcher_selects_right_config():
-    script = (ROOT / "deploy_deco" / "scripts" / "start_deco_right.sh").read_text()
-    assert "deploy_deco_right.yaml" in script
-    assert "start_deco.sh" in script
+def test_right_launcher_selects_right_config_and_forwards_arguments(tmp_path):
+    scripts = tmp_path / "deploy_deco" / "scripts"
+    scripts.mkdir(parents=True)
+    right_launcher = scripts / "start_deco_right.sh"
+    shutil.copy(ROOT / "deploy_deco" / "scripts" / "start_deco_right.sh", right_launcher)
+
+    output = tmp_path / "delegated.txt"
+    delegated_launcher = scripts / "start_deco.sh"
+    delegated_launcher.write_text('printf "%s\\n" "$CONFIG" "$@" > "$OUTPUT"\n')
+    env = {**os.environ, "OUTPUT": str(output)}
+    env.pop("CONFIG", None)
+
+    subprocess.run(
+        ["bash", str(right_launcher), "--max-iterations", "1"],
+        check=True,
+        env=env,
+    )
+
+    assert output.read_text().splitlines() == [
+        str(tmp_path / "deploy_deco" / "configs" / "deploy_deco_right.yaml"),
+        "--max-iterations",
+        "1",
+    ]
