@@ -166,9 +166,12 @@ def _episode_path(root: Path, info: dict, episode_id: int) -> Path:
 def _episode_specs(
     root: Path,
     info: dict,
+    task_rows: list[dict],
     source_name: str,
     global_offset: int,
     preserve_source_ids: bool,
+    task_indices: set[int],
+    task_index_by_text: dict[str, int],
 ) -> list[_EpisodeSpec]:
     rows = _read_jsonl(root / "meta/episodes.jsonl")
     specs = []
@@ -190,7 +193,13 @@ def _episode_specs(
                 source_episode_id=source_episode_id,
                 source_name=source_name,
                 length=length,
-                task_ids=tuple(int(value) for value in row.get("tasks", ())),
+                task_ids=_resolve_episode_task_ids(
+                    row.get("tasks", ()),
+                    task_indices,
+                    task_index_by_text,
+                    root=root,
+                    episode_index=source_episode_id,
+                ),
                 path=_episode_path(root, info, source_episode_id),
             )
         )
@@ -202,6 +211,57 @@ def _episode_specs(
     if sum(spec.length for spec in specs) != int(info.get("total_frames", -1)):
         raise ValueError("LeRobot total_frames disagrees with episodes.jsonl")
     return sorted(specs, key=lambda spec: spec.episode_id)
+
+
+def _resolve_episode_task_ids(
+    values: object,
+    task_ids: set[int],
+    task_names: dict[str, int],
+    *,
+    root: Path,
+    episode_index: int,
+) -> tuple[int, ...]:
+    if not isinstance(values, (list, tuple)):
+        raise ValueError(
+            f"Episode tasks must be a list: root={root}, episode={episode_index}"
+        )
+    resolved = []
+    for value in values:
+        if isinstance(value, bool):
+            raise ValueError(
+                f"Invalid boolean task value: root={root}, episode={episode_index}"
+            )
+        if isinstance(value, int):
+            task_index = value
+        elif isinstance(value, str):
+            label = value.strip()
+            if label in task_names:
+                task_index = task_names[label]
+            else:
+                try:
+                    task_index = int(label)
+                except ValueError:
+                    # Some early single-task LeRobot exports wrote a generic
+                    # episode label that differs from tasks.jsonl. Mapping it
+                    # is safe only when there is exactly one possible task ID.
+                    if len(task_ids) != 1:
+                        raise ValueError(
+                            "Unknown LeRobot episode task label: "
+                            f"root={root}, episode={episode_index}, task={value!r}"
+                        ) from None
+                    task_index = next(iter(task_ids))
+        else:
+            raise ValueError(
+                "Unsupported LeRobot episode task value: "
+                f"root={root}, episode={episode_index}, task={value!r}"
+            )
+        if task_index not in task_ids:
+            raise ValueError(
+                "LeRobot episode task ID is absent from tasks.jsonl: "
+                f"root={root}, episode={episode_index}, task_index={task_index}"
+            )
+        resolved.append(task_index)
+    return tuple(sorted(set(resolved)))
 
 
 def _fixed_vector_column(table, key: str, dimension: int) -> np.ndarray:
@@ -297,12 +357,28 @@ def _compute_train_stats(
     }
 
 
-def _task_ids(root: Path, info: dict) -> tuple[list[str], list[dict]]:
+def _task_ids(
+    root: Path,
+    info: dict,
+) -> tuple[list[str], list[dict], set[int], dict[str, int]]:
     rows = _read_jsonl(root / "meta/tasks.jsonl")
-    ids = sorted({int(row["task_index"]) for row in rows})
+    ids = []
+    task_index_by_text = {}
+    for row in rows:
+        task_index = int(row["task_index"])
+        task_text = row.get("task")
+        if not isinstance(task_text, str) or not task_text:
+            raise ValueError("LeRobot task text must be a non-empty string")
+        if task_index in ids:
+            raise ValueError(f"Duplicate task_index in tasks.jsonl: {task_index}")
+        if task_text in task_index_by_text:
+            raise ValueError(f"Duplicate task text in tasks.jsonl: {task_text!r}")
+        ids.append(task_index)
+        task_index_by_text[task_text] = task_index
+    ids.sort()
     if len(ids) != int(info.get("total_tasks", -1)) or not ids:
         raise ValueError("LeRobot total_tasks disagrees with tasks.jsonl")
-    return [str(task_id) for task_id in ids], rows
+    return [str(task_id) for task_id in ids], rows, set(ids), task_index_by_text
 
 
 def _load_sources(dataset_source: Path) -> tuple[list[dict], str, str | None]:
@@ -580,7 +656,12 @@ def build_lerobot_vision_datasets(
             _tactile_image_shape(info) if include_tactile else None
         )
         fps = float(info["fps"])
-        source_tasks, task_rows = _task_ids(root, info)
+        (
+            source_tasks,
+            task_rows,
+            source_task_indices,
+            task_index_by_text,
+        ) = _task_ids(root, info)
         if expected_image_shape is None:
             expected_image_shape = image_shape
             expected_tactile_image_shape = tactile_image_shape
@@ -599,9 +680,12 @@ def build_lerobot_vision_datasets(
         source_specs = _episode_specs(
             root,
             info,
+            task_rows,
             source["name"],
             global_offset,
             preserve_source_ids,
+            source_task_indices,
+            task_index_by_text,
         )
         specs.extend(source_specs)
         source_episode_ids = [spec.episode_id for spec in source_specs]

@@ -1,0 +1,27 @@
+{
+  "format": "deco-lerobot-v21-multiroot-v1",
+  "dataset_id": "bread_01_02_03",
+  "sources": [
+    {
+      "name": "bread_01",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/bread_01",
+      "source_dataset_id": "bread_01",
+      "total_episodes": 293,
+      "total_frames": 196281
+    },
+    {
+      "name": "bread_02",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/bread_02",
+      "source_dataset_id": "bread_02",
+      "total_episodes": 482,
+      "total_frames": 244831
+    },
+    {
+      "name": "bread_03",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/bread_03",
+      "source_dataset_id": "bread_03",
+      "total_episodes": 587,
+      "total_frames": 276252
+    }
+  ]
+}

@@ -12,13 +12,14 @@ MODE="local"
 OUTPUT=""
 DATASET_ID=""
 STATE_ACTION_PROFILE=""
+REQUIRE_BLACK_CAMERA0=0
 ROOTS=()
 
 usage() {
   cat <<'EOF'
 用法：
-  bash scripts/pick_tube_vision/02_prepare_data.sh --mode local [选项]
-  bash scripts/pick_tube_vision/02_prepare_data.sh --mode server [选项]
+  bash train_deco/scripts/prepare_data.sh --mode local [选项]
+  bash train_deco/scripts/prepare_data.sh --mode server [选项]
 
 模式：
   local   使用本机 pick_tube_01，供 RTX 4090 冒烟测试
@@ -31,6 +32,8 @@ usage() {
   --dataset-id ID    manifest 中的数据集名称
   --state-action-profile PROFILE
                      状态/动作合同：dual-arm-20x20 或 single-right-arm-7x10
+  --require-black-camera0
+                     解码并检查所有 camera0 图像必须为纯黑（单臂占位相机）
   -h, --help         显示帮助
 
 默认路径：
@@ -65,6 +68,10 @@ while [[ $# -gt 0 ]]; do
     --state-action-profile)
       STATE_ACTION_PROFILE="$2"
       shift 2
+      ;;
+    --require-black-camera0)
+      REQUIRE_BLACK_CAMERA0=1
+      shift
       ;;
     -h|--help)
       usage
@@ -124,6 +131,9 @@ PREPARE_COMMAND=(
 )
 if [[ -n "${STATE_ACTION_PROFILE}" ]]; then
   PREPARE_COMMAND+=(--state-action-profile "${STATE_ACTION_PROFILE}")
+fi
+if [[ "${REQUIRE_BLACK_CAMERA0}" -eq 1 ]]; then
+  PREPARE_COMMAND+=(--require-black-camera0)
 fi
 PREPARE_COMMAND+=("${ROOTS[@]}")
 "${PREPARE_COMMAND[@]}"

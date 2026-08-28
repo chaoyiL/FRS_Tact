@@ -1,0 +1,13 @@
+{
+  "format": "deco-lerobot-v21-multiroot-v1",
+  "dataset_id": "insert_01",
+  "sources": [
+    {
+      "name": "insert_01",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_01",
+      "source_dataset_id": "insert_01",
+      "total_episodes": 500,
+      "total_frames": 252795
+    }
+  ]
+}
