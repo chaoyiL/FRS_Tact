@@ -136,6 +136,7 @@ def make_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
     observation = section(config, "observation")
     control = section(config, "control")
     return {
+        "task": 0,
         "data_type": "vision",
         "language_prompt": str(observation.get("language_prompt", "")),
         "control_frequency": float(control["control_frequency"]),

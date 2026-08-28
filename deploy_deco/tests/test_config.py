@@ -25,6 +25,12 @@ def test_checked_in_config_matches_checked_in_external_artifact():
     assert "execution_protocol" not in server
 
 
+def test_server_config_hardcodes_task_zero():
+    config = load_config(CONFIG)
+
+    assert make_server_config(config)["task"] == 0
+
+
 def test_training_frequency_mismatch_is_rejected():
     config = load_config(CONFIG)
     config["control"]["control_frequency"] = 20.0
