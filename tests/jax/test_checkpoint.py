@@ -223,87 +223,8 @@ def test_visual_config_rejects_tactile_checkpoints(
 ) -> None:
     (tmp_path / "config.json").write_text(json.dumps(tactile_fields), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="train_vtsmolvla"):
+    with pytest.raises(ValueError, match="separate FRS runtime"):
         JaxSmolVLAConfig.from_pretrained(tmp_path)
-
-
-def test_effective_config_persists_tactile_fusion_settings(tmp_path: Path) -> None:
-    from train_vtsmolvla.checkpoint import write_effective_config as write_vt_config
-    from train_vtsmolvla.configuration import VTSmolVLAConfig as JaxVTSmolVLAConfig
-
-    config = replace(
-        JaxVTSmolVLAConfig(),
-        image_keys=("observation.images.camera1", "observation.images.camera2"),
-        use_tactile_encoder=True,
-        tactile_encoder_path="checkpoints/encoder_ckpt_05/best",
-        freeze_tactile_encoder=True,
-        tactile_keys=(
-            "observation.images.tactile_left_0",
-            "observation.images.tactile_right_0",
-            "observation.images.tactile_left_1",
-            "observation.images.tactile_right_1",
-        ),
-        tactile_embedding_dim=512,
-        tactile_num_tokens=4,
-        tactile_image_size=224,
-    )
-    write_vt_config(tmp_path, config)
-    raw = json.loads((tmp_path / "config.json").read_text())
-    assert raw["use_tactile_encoder"] is True
-    assert raw["tactile_encoder_path"] == "checkpoints/encoder_ckpt_05/best"
-    assert raw["freeze_tactile_encoder"] is True
-    assert raw["tactile_keys"] == list(config.tactile_keys)
-    assert raw["tactile_embedding_dim"] == 512
-    assert raw["tactile_num_tokens"] == 4
-    assert raw["tactile_image_size"] == 224
-
-    reloaded = JaxVTSmolVLAConfig.from_pretrained(tmp_path)
-    assert reloaded.use_tactile_encoder is True
-    assert reloaded.tactile_keys == config.tactile_keys
-
-
-@pytest.mark.parametrize(
-    ("overrides", "message"),
-    [
-        (
-            {
-                "use_tactile_encoder": True,
-                "tactile_keys": ["observation.images.touch"],
-                "tactile_num_tokens": 1,
-            },
-            "tactile_encoder_path is required",
-        ),
-        (
-            {
-                "use_tactile_encoder": True,
-                "tactile_encoder_path": "encoder",
-                "tactile_keys": [],
-                "tactile_num_tokens": 0,
-            },
-            "tactile_keys is required",
-        ),
-        (
-            {
-                "use_tactile_encoder": True,
-                "tactile_encoder_path": "encoder",
-                "tactile_keys": ["observation.images.touch"],
-                "tactile_num_tokens": 2,
-            },
-            "tactile_keys length must match",
-        ),
-    ],
-)
-def test_vt_config_rejects_invalid_persisted_tactile_contracts(
-    tmp_path: Path,
-    overrides: dict[str, object],
-    message: str,
-) -> None:
-    from train_vtsmolvla.configuration import VTSmolVLAConfig
-
-    (tmp_path / "config.json").write_text(json.dumps(overrides), encoding="utf-8")
-
-    with pytest.raises(ValueError, match=message):
-        VTSmolVLAConfig.from_pretrained(tmp_path)
 
 
 def test_processor_configs_sync_rename_map_and_feature_shapes(tmp_path: Path) -> None:

@@ -22,14 +22,16 @@ from lerobot.datasets import LeRobotDataset
 from train_smolvla import JaxSmolVLAPolicy
 from train_smolvla.checkpoint import resolve_checkpoint
 from train_smolvla.data import lerobot_sample_to_observation
-from train_vtsmolvla import VTJaxSmolVLAPolicy
 
 
 def _policy_type_from_snapshot(snapshot: Path):
     with (snapshot / "config.json").open(encoding="utf-8") as file:
         config = json.load(file)
     if bool(config.get("use_tactile_encoder", False)):
-        return VTJaxSmolVLAPolicy
+        raise ValueError(
+            "tactile-fused SmolVLA checkpoints are no longer supported; "
+            "use a visual SmolVLA checkpoint with the separate FRS runtime"
+        )
     return JaxSmolVLAPolicy
 
 

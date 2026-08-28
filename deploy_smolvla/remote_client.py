@@ -21,8 +21,7 @@ import yaml
 
 from train_smolvla import JaxSmolVLAPolicy
 from train_smolvla.checkpoint import resolve_checkpoint
-from train_vtsmolvla import VTJaxSmolVLAPolicy
-from train_vtsmolvla.validation import (
+from train_smolvla.validation import (
     CheckpointContract,
     contract_from_checkpoint,
     validate_checkpoint,
@@ -49,7 +48,7 @@ SMOLVLA_VITAC_OBSERVATION_PROFILE = "smolvla_vitac_256"
 DIRECT_DECODER_BACKEND = "direct_tactile_decoder"
 DUAL_ARM_PROFILE = "dual-arm-20x20"
 SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
-Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
+Policy = JaxSmolVLAPolicy
 LOGGER = logging.getLogger(__name__)
 
 
@@ -345,31 +344,11 @@ def _checkpoint_contract(
             raise ValueError(f"checkpoint_contract.{key} must be {qualifier} of strings")
         return tuple(value)
 
-    tactile_num_tokens = integer("tactile_num_tokens", allow_zero=True)
-    if has_override("tactile_proj_mode"):
-        tactile_proj_mode = raw["tactile_proj_mode"]
-    elif inferred is not None and inferred.tactile_proj_mode is not None:
-        tactile_proj_mode = inferred.tactile_proj_mode
-    else:
-        tactile_proj_mode = "full" if tactile_num_tokens else "frozen"
-    if not isinstance(tactile_proj_mode, str) or tactile_proj_mode not in {
-        "frozen",
-        "full",
-        "lora",
-    }:
-        raise ValueError(
-            "checkpoint_contract.tactile_proj_mode must be one of "
-            "'frozen', 'full', or 'lora'"
-        )
     contract = CheckpointContract(
         state_dim=integer("state_dim"),
         action_dim=integer("action_dim"),
         chunk_size=integer("chunk_size"),
         image_keys=string_tuple("image_keys"),
-        tactile_keys=string_tuple("tactile_keys", allow_empty=True),
-        tactile_embedding_dim=integer("tactile_embedding_dim"),
-        tactile_num_tokens=tactile_num_tokens,
-        tactile_proj_mode=tactile_proj_mode,
         lora_rank=integer("lora_rank", allow_zero=True),
         vlm_lora_target_modules=string_tuple("vlm_lora_target_modules", allow_empty=True),
     )
@@ -378,11 +357,6 @@ def _checkpoint_contract(
             f"checkpoint chunk_size/contract.chunk_size={contract.chunk_size} does not match "
             f"control.action_horizon={control['action_horizon']}"
         )
-    if contract.tactile_num_tokens != len(contract.tactile_keys):
-        raise ValueError("checkpoint_contract.tactile_num_tokens must equal the number of tactile_keys")
-    overlap = sorted(set(contract.image_keys) & set(contract.tactile_keys))
-    if overlap:
-        raise ValueError(f"checkpoint_contract RGB and tactile keys overlap: {overlap}")
     return contract
 
 
@@ -426,8 +400,7 @@ def _load_validated_policy(
         base_sidecars=base_sidecars,
         require_weight=True,
     ).require_valid()
-    policy_type = VTJaxSmolVLAPolicy if expected.tactile_num_tokens else JaxSmolVLAPolicy
-    return policy_type.from_pretrained(
+    return JaxSmolVLAPolicy.from_pretrained(
         snapshot,
         rename_map=rename_map,
         revision=None,

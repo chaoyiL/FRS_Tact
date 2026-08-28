@@ -59,7 +59,6 @@ PROTECTED = (
     "deploy_pi05",
     "train_smolvla",
     "train_smolvla_frs",
-    "train_vtsmolvla",
 )
 APPROVED_PROTECTED_CHANGES = {
     "deploy_pi05/frs_inference/decoder.py",
@@ -371,7 +370,6 @@ def test_private_closure_contains_only_approved_pi05_and_dataset_runtime() -> No
         "encoder",
         "modalities_eval",
         "train_smolvla",
-        "train_vtsmolvla",
         "dataset_writer.py",
         "compute_stats.py",
     )
@@ -522,7 +520,6 @@ def test_training_project_tracks_no_forbidden_package_or_generated_artifact() ->
         "modalities_eval",
         "train_smolvla",
         "train_smolvla_frs",
-        "train_vtsmolvla",
     }
     generated_parts = {
         ".venv",

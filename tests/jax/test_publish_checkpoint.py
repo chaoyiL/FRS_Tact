@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from safetensors.numpy import save_file as save_safetensors_file
 
-from train_vtsmolvla.validation import CheckpointContract, validate_checkpoint
+from train_smolvla.validation import CheckpointContract, validate_checkpoint
 from tools.publish_smolvla_checkpoint import (
     INFERENCE_FILENAMES,
     SIDECAR_FILENAMES,
@@ -25,19 +25,11 @@ from tools.publish_smolvla_checkpoint import (
     resolve_dataset_revisions,
 )
 
-VT_CONTRACT = CheckpointContract(
+VISUAL_CONTRACT = CheckpointContract(
     state_dim=20,
     action_dim=20,
     chunk_size=20,
     image_keys=("observation.images.camera1", "observation.images.camera2"),
-    tactile_keys=(
-        "observation.images.tactile_left_0",
-        "observation.images.tactile_right_0",
-        "observation.images.tactile_left_1",
-        "observation.images.tactile_right_1",
-    ),
-    tactile_embedding_dim=512,
-    tactile_num_tokens=4,
     lora_rank=16,
     vlm_lora_target_modules=("q_proj", "v_proj"),
 )
@@ -52,9 +44,6 @@ def _weight_tensors() -> dict[str, np.ndarray]:
         "model.vlm_with_expert.vlm.model.text_model.embed_tokens.weight": np.zeros(
             (2, 960), dtype=np.float16
         ),
-        "model.tactile_encoder.params/conv/kernel": np.zeros((1,), dtype=np.float32),
-        "model.tactile_proj.weight": np.zeros((960, 512), dtype=np.float16),
-        "model.tactile_proj.bias": np.zeros((960,), dtype=np.float16),
     }
     for target in ("q_proj", "v_proj"):
         prefix = f"model.vlm_with_expert.vlm.model.text_model.layers.0.self_attn.{target}"
@@ -70,7 +59,7 @@ def _valid_checkpoint(path: Path) -> Path:
     path.mkdir(parents=True)
     features = {
         "observation.state": {"type": "STATE", "shape": [20]},
-        **{key: {"type": "VISUAL", "shape": [3, 512, 512]} for key in VT_CONTRACT.image_keys},
+        **{key: {"type": "VISUAL", "shape": [3, 512, 512]} for key in VISUAL_CONTRACT.image_keys},
     }
     _json(
         path / "config.json",
@@ -80,11 +69,6 @@ def _valid_checkpoint(path: Path) -> Path:
             "num_vlm_layers": 1,
             "input_features": features,
             "output_features": {"action": {"type": "ACTION", "shape": [20]}},
-            "use_tactile_encoder": True,
-            "tactile_keys": list(VT_CONTRACT.tactile_keys),
-            "tactile_embedding_dim": 512,
-            "tactile_num_tokens": 4,
-            "tactile_proj_mode": "full",
             "lora_rank": 16,
             "vlm_lora_target_modules": ["q_proj", "v_proj"],
             "module_modes": {
@@ -94,14 +78,13 @@ def _valid_checkpoint(path: Path) -> Path:
                 "expert": "full",
                 "action": "full",
                 "state_proj": "full",
-                "tactile_proj": "full",
             },
         },
     )
     normalizer_features = {
         "observation.state": {"type": "STATE", "shape": [20]},
         "action": {"type": "ACTION", "shape": [20]},
-        **{key: {"type": "VISUAL", "shape": [3, 512, 512]} for key in VT_CONTRACT.image_keys},
+        **{key: {"type": "VISUAL", "shape": [3, 512, 512]} for key in VISUAL_CONTRACT.image_keys},
     }
     _json(
         path / "policy_preprocessor.json",
@@ -160,7 +143,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
     bundle = build_inference_bundle(
         source,
         tmp_path / "bundle",
-        expected=VT_CONTRACT,
+        expected=VISUAL_CONTRACT,
         dataset_revisions=datasets,
     )
 
@@ -171,11 +154,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
         "state_dim": 20,
         "action_dim": 20,
         "chunk_size": 20,
-        "image_keys": list(VT_CONTRACT.image_keys),
-        "tactile_keys": list(VT_CONTRACT.tactile_keys),
-        "tactile_embedding_dim": 512,
-        "tactile_num_tokens": 4,
-        "tactile_proj_mode": "full",
+        "image_keys": list(VISUAL_CONTRACT.image_keys),
         "lora_rank": 16,
         "vlm_lora_target_modules": ["q_proj", "v_proj"],
     }
@@ -189,7 +168,7 @@ def test_bundle_has_exact_allowlist_and_provenance(tmp_path: Path) -> None:
 
 def test_bundle_copies_model_into_an_independent_file(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     bundled_hash = _sha256(bundle / "model.safetensors")
 
     assert (source / "model.safetensors").stat().st_ino != (bundle / "model.safetensors").stat().st_ino
@@ -203,7 +182,7 @@ def test_without_model_bundle_is_explicitly_not_publishable(tmp_path: Path) -> N
     bundle = build_inference_bundle(
         source,
         tmp_path / "sidecars",
-        expected=VT_CONTRACT,
+        expected=VISUAL_CONTRACT,
         include_model=False,
     )
     assert not (bundle / "model.safetensors").exists()
@@ -211,7 +190,7 @@ def test_without_model_bundle_is_explicitly_not_publishable(tmp_path: Path) -> N
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(_sha256(source / "model.safetensors")),
         )
 
@@ -220,7 +199,7 @@ def test_without_model_bundle_is_explicitly_not_publishable(tmp_path: Path) -> N
 def test_bundle_refuses_incomplete_source(tmp_path: Path, relative: str) -> None:
     source = _valid_checkpoint(tmp_path / relative)
     with pytest.raises(ValueError, match="incomplete"):
-        build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+        build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
 
 
 def test_bundle_refuses_existing_destination_and_invalid_source(tmp_path: Path) -> None:
@@ -228,12 +207,12 @@ def test_bundle_refuses_existing_destination_and_invalid_source(tmp_path: Path) 
     destination = tmp_path / "bundle"
     destination.mkdir()
     with pytest.raises(FileExistsError):
-        build_inference_bundle(source, destination, expected=VT_CONTRACT)
+        build_inference_bundle(source, destination, expected=VISUAL_CONTRACT)
 
     destination.rmdir()
     (source / "config.json").unlink()
     with pytest.raises(ValueError, match="checkpoint validation failed"):
-        build_inference_bundle(source, destination, expected=VT_CONTRACT)
+        build_inference_bundle(source, destination, expected=VISUAL_CONTRACT)
     assert not destination.exists()
 
 
@@ -283,14 +262,14 @@ class RecordingApi:
 
 def test_sidecar_publish_never_uploads_weight_and_preserves_remote_hash(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     expected_sha = _sha256(source / "model.safetensors")
     api = RecordingApi(expected_sha)
 
     result = publish_bundle(
         bundle,
         repo_id="owner/model",
-        expected=VT_CONTRACT,
+        expected=VISUAL_CONTRACT,
         api=api,
         sidecars_only=True,
     )
@@ -308,7 +287,7 @@ def test_sidecar_publish_never_uploads_weight_and_preserves_remote_hash(tmp_path
 def test_publish_validates_manifest_against_payload_and_external_contract(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
     expected_sha = _sha256(source / "model.safetensors")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     manifest_path = bundle / "conversion_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["files"] = {}
@@ -317,11 +296,11 @@ def test_publish_validates_manifest_against_payload_and_external_contract(tmp_pa
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha),
         )
 
-    bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VISUAL_CONTRACT)
     manifest_path = bundle / "conversion_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["contract"]["state_dim"] = 6
@@ -330,7 +309,7 @@ def test_publish_validates_manifest_against_payload_and_external_contract(tmp_pa
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha),
         )
 
@@ -338,7 +317,7 @@ def test_publish_validates_manifest_against_payload_and_external_contract(tmp_pa
 def test_publish_refuses_symlinked_payload(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
     expected_sha = _sha256(source / "model.safetensors")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     external = tmp_path / "external-config.json"
     (bundle / "config.json").replace(external)
     (bundle / "config.json").symlink_to(external)
@@ -347,52 +326,52 @@ def test_publish_refuses_symlinked_payload(tmp_path: Path) -> None:
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha),
         )
 
 
 def test_publish_refuses_invalid_or_unexpected_bundle(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     expected_sha = _sha256(source / "model.safetensors")
     (bundle / "config.json").unlink()
     with pytest.raises(ValueError, match="missing inference files"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha),
         )
 
-    bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle-2", expected=VISUAL_CONTRACT)
     (bundle / "training_state.msgpack").write_bytes(b"forbidden")
     with pytest.raises(ValueError, match="unexpected files"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha),
         )
 
 
 def test_publish_refuses_remote_weight_change_before_or_after_commit(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     expected_sha = _sha256(source / "model.safetensors")
 
     with pytest.raises(ValueError, match="remote model.safetensors SHA-256"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi("0" * 64),
         )
     with pytest.raises(RuntimeError, match="changed during publication"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha, mutate_after_commit="f" * 64),
         )
 
@@ -400,13 +379,13 @@ def test_publish_refuses_remote_weight_change_before_or_after_commit(tmp_path: P
 def test_publish_pins_nonmain_parent_and_checks_new_commit(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
     expected_sha = _sha256(source / "model.safetensors")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     api = RecordingApi(expected_sha, repo_sha="c" * 40)
 
     publish_bundle(
         bundle,
         repo_id="owner/model",
-        expected=VT_CONTRACT,
+        expected=VISUAL_CONTRACT,
         api=api,
         revision="repair-branch",
     )
@@ -424,14 +403,14 @@ def test_publish_relies_on_parent_commit_to_atomically_reject_branch_move(tmp_pa
             raise RuntimeError("parent commit does not match branch head")
 
     source = _valid_checkpoint(tmp_path / "checkpoint")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
     api = MovingBranchApi(_sha256(source / "model.safetensors"))
 
     with pytest.raises(RuntimeError, match="parent commit"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=api,
             revision="repair-branch",
         )
@@ -440,13 +419,13 @@ def test_publish_relies_on_parent_commit_to_atomically_reject_branch_move(tmp_pa
 def test_publish_refuses_non_lfs_remote_weight(tmp_path: Path) -> None:
     source = _valid_checkpoint(tmp_path / "checkpoint")
     expected_sha = _sha256(source / "model.safetensors")
-    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VT_CONTRACT)
+    bundle = build_inference_bundle(source, tmp_path / "bundle", expected=VISUAL_CONTRACT)
 
     with pytest.raises(ValueError, match="no LFS SHA-256"):
         publish_bundle(
             bundle,
             repo_id="owner/model",
-            expected=VT_CONTRACT,
+            expected=VISUAL_CONTRACT,
             api=RecordingApi(expected_sha, lfs=False),
         )
 
@@ -563,14 +542,8 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
   action_dim: 20
   chunk_size: 20
   image_keys: [observation.images.camera1, observation.images.camera2]
-  use_tactile_encoder: true
-  tactile_keys: [t0, t1, t2, t3]
-  tactile_embedding_dim: 512
-  tactile_num_tokens: 4
   lora_rank: 16
   vlm_lora_target_modules: [q_proj, v_proj]
-  module_modes:
-    tactile_proj: lora
 """,
         encoding="utf-8",
     )
@@ -578,78 +551,15 @@ def test_training_yaml_contract_is_authoritative(tmp_path: Path) -> None:
     assert contract.state_dim == 20
     assert contract.action_dim == 20
     assert contract.chunk_size == 20
-    assert contract.tactile_num_tokens == 4
-    assert contract.tactile_proj_mode == "lora"
-
-
-def test_legacy_visual_manifest_contract_defaults_tactile_projection_to_frozen() -> None:
-    from tools.publish_smolvla_checkpoint import _contract_from_dict
-
-    contract = _contract_from_dict(
-        {
-            "state_dim": 20,
-            "action_dim": 20,
-            "chunk_size": 20,
-            "image_keys": ["rgb"],
-            "tactile_keys": [],
-            "tactile_embedding_dim": 512,
-            "tactile_num_tokens": 0,
-            "lora_rank": 0,
-            "vlm_lora_target_modules": [],
-        }
+    assert contract.image_keys == (
+        "observation.images.camera1",
+        "observation.images.camera2",
     )
-
-    assert contract.tactile_proj_mode == "frozen"
-
-    explicit = _contract_from_dict(
-        {
-            "state_dim": 20,
-            "action_dim": 20,
-            "chunk_size": 20,
-            "image_keys": ["rgb"],
-            "tactile_keys": [],
-            "tactile_embedding_dim": 512,
-            "tactile_num_tokens": 0,
-            "tactile_proj_mode": "lora",
-            "lora_rank": 16,
-            "vlm_lora_target_modules": [],
-        }
-    )
-
-    assert explicit.tactile_proj_mode == "lora"
-
-
-def test_training_yaml_rejects_non_mapping_module_modes(tmp_path: Path) -> None:
-    yaml_path = tmp_path / "train.yaml"
-    yaml_path.write_text(
-        """model:
-  state_dim: 20
-  action_dim: 20
-  chunk_size: 20
-  image_keys: [rgb]
-  module_modes: []
-""",
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="model.module_modes must be a mapping"):
-        contract_from_training_yaml(yaml_path)
+    assert contract.lora_rank == 16
 
 
 def test_visual_training_yaml_contract_and_repaired_sidecars_validate(tmp_path: Path) -> None:
     snapshot = _valid_checkpoint(tmp_path / "snapshot")
-    config = json.loads((snapshot / "config.json").read_text(encoding="utf-8"))
-    for field in (
-        "use_tactile_encoder",
-        "tactile_keys",
-        "tactile_embedding_dim",
-        "tactile_num_tokens",
-        "tactile_proj_mode",
-    ):
-        config.pop(field, None)
-    config["module_modes"].pop("tactile_proj", None)
-    _json(snapshot / "config.json", config)
-
     training = tmp_path / "visual-train.yaml"
     training.write_text(
         """datasets:
@@ -701,7 +611,6 @@ model:
         metadata_loader=lambda repo_id, revision: metadata,
     )
 
-    assert expected.tactile_proj_mode == "frozen"
     assert validate_checkpoint(output, expected=expected, require_weight=True).ok
 
 
@@ -721,11 +630,6 @@ model:
   action_dim: 20
   chunk_size: 20
   image_keys: [observation.images.camera1, observation.images.camera2]
-  use_tactile_encoder: true
-  tactile_encoder_path: /not/read/by/repair
-  tactile_keys: [observation.images.tactile_left_0, observation.images.tactile_right_0, observation.images.tactile_left_1, observation.images.tactile_right_1]
-  tactile_embedding_dim: 512
-  tactile_num_tokens: 4
   lora_rank: 16
   vlm_lora_target_modules: [q_proj, v_proj]
   module_modes:
@@ -735,7 +639,6 @@ model:
     expert: full
     action: full
     state_proj: full
-    tactile_proj: full
 """,
         encoding="utf-8",
     )
@@ -885,7 +788,7 @@ def test_legacy_metadata_fallback_matches_v21_converter_semantics(tmp_path: Path
     bundle = build_inference_bundle(
         _valid_checkpoint(tmp_path / "checkpoint"),
         tmp_path / "bundle",
-        expected=VT_CONTRACT,
+        expected=VISUAL_CONTRACT,
         dataset_revisions=provenance,
     )
     manifest = json.loads((bundle / "conversion_manifest.json").read_text(encoding="utf-8"))
@@ -959,7 +862,7 @@ def test_current_unpinned_training_yaml_fails_closed_without_weight_history(tmp_
     with pytest.raises(ValueError, match="model weight upload time is unavailable"):
         repair_sidecars(
             repo_id="owner/model",
-            training_config="train_vtsmolvla/configs/train.yaml",
+            training_config="train_smolvla/configs/train.yaml",
             output=output,
             api=UnprovenApi(),
             snapshot_resolver=lambda repo_id, revision: pytest.fail("must fail before download"),

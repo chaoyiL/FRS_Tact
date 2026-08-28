@@ -16,7 +16,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_remote_client.sh"
 FRS_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_frs.sh"
-VT_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_vtsmolvla.sh"
+SMOLVLA_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_smolvla.sh"
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_jax.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
@@ -389,48 +389,7 @@ def test_pi05_bridge_state_obs_seq_extension_preserves_legacy_payload() -> None:
     ]
 
 
-def test_policy_loader_selects_vt_policy_for_a_tactile_contract(monkeypatch, tmp_path) -> None:
-    from deploy_smolvla import remote_client
-    from train_vtsmolvla.validation import CheckpointContract
-
-    selected = []
-    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda *args, **kwargs: tmp_path)
-    monkeypatch.setattr(
-        remote_client,
-        "validate_checkpoint",
-        lambda *args, **kwargs: type("Report", (), {"require_valid": lambda self: self})(),
-    )
-    monkeypatch.setattr(
-        remote_client.VTJaxSmolVLAPolicy,
-        "from_pretrained",
-        lambda *args, **kwargs: selected.append("vt") or object(),
-    )
-    monkeypatch.setattr(
-        remote_client.JaxSmolVLAPolicy,
-        "from_pretrained",
-        lambda *args, **kwargs: selected.append("visual") or object(),
-    )
-    expected = CheckpointContract(
-        state_dim=20,
-        action_dim=20,
-        chunk_size=20,
-        image_keys=("rgb",),
-        tactile_keys=("touch",),
-        tactile_num_tokens=1,
-    )
-
-    remote_client._load_validated_policy(
-        "checkpoint",
-        revision=None,
-        allow_download=False,
-        expected=expected,
-        rename_map=None,
-    )
-
-    assert selected == ["vt"]
-
-
-def test_visual_contract_loads_visual_policy_with_frozen_tactile_projection(
+def test_visual_contract_loads_visual_policy(
     monkeypatch, tmp_path
 ) -> None:
     from deploy_smolvla import remote_client
@@ -441,9 +400,6 @@ def test_visual_contract_loads_visual_policy_with_frozen_tactile_projection(
             "action_dim": 20,
             "chunk_size": 20,
             "image_keys": ["rgb"],
-            "tactile_keys": [],
-            "tactile_embedding_dim": 512,
-            "tactile_num_tokens": 0,
             "lora_rank": 0,
             "vlm_lora_target_modules": [],
         }
@@ -459,11 +415,6 @@ def test_visual_contract_loads_visual_policy_with_frozen_tactile_projection(
         or type("Report", (), {"require_valid": lambda self: self})(),
     )
     monkeypatch.setattr(
-        remote_client.VTJaxSmolVLAPolicy,
-        "from_pretrained",
-        lambda *args, **kwargs: selected.append("vt") or object(),
-    )
-    monkeypatch.setattr(
         remote_client.JaxSmolVLAPolicy,
         "from_pretrained",
         lambda *args, **kwargs: selected.append("visual") or object(),
@@ -477,7 +428,6 @@ def test_visual_contract_loads_visual_policy_with_frozen_tactile_projection(
         rename_map=None,
     )
 
-    assert expected.tactile_proj_mode == "frozen"
     assert validated == [expected]
     assert selected == ["visual"]
 
@@ -602,10 +552,10 @@ def test_frs_wrapper_uses_frs_config_without_executable_nested_script() -> None:
     assert f"config={FRS_CONFIG}" in result.stdout
 
 
-def test_vt_wrapper_uses_vt_config_without_executable_nested_script() -> None:
+def test_smolvla_wrapper_uses_visual_config_without_executable_nested_script() -> None:
     assert SHARED_LAUNCHER.stat().st_mode & 0o111 == 0
 
-    result = _run_wrapper_check(VT_LAUNCHER)
+    result = _run_wrapper_check(SMOLVLA_LAUNCHER)
 
     assert result.returncode == 0, result.stderr
     assert f"config={DEFAULT_CONFIG}" in result.stdout
@@ -615,7 +565,7 @@ def test_vt_wrapper_uses_vt_config_without_executable_nested_script() -> None:
     ("wrapper", "explicit_config"),
     (
         (FRS_LAUNCHER, DEFAULT_CONFIG),
-        (VT_LAUNCHER, FRS_CONFIG),
+        (SMOLVLA_LAUNCHER, FRS_CONFIG),
     ),
 )
 def test_wrapper_allows_later_explicit_config_override(
@@ -634,7 +584,7 @@ def test_wrapper_allows_later_explicit_config_override(
     ("wrapper", "config_override"),
     (
         (FRS_LAUNCHER, DEFAULT_CONFIG),
-        (VT_LAUNCHER, FRS_CONFIG),
+        (SMOLVLA_LAUNCHER, FRS_CONFIG),
     ),
 )
 def test_public_wrapper_preserves_frs_deploy_config_override(

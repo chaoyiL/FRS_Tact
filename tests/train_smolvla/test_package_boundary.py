@@ -52,7 +52,7 @@ modules = sorted(
 )
 for module_name in modules:
     importlib.import_module(module_name)
-for forbidden_prefix in ("train_encoder", "train_vtsmolvla"):
+for forbidden_prefix in ("train_encoder",):
     loaded = sorted(
         name
         for name in sys.modules
@@ -103,11 +103,6 @@ def test_visual_production_sources_have_no_forbidden_coupling():
                 )
             ):
                 imported_modules.add(node.args[0].value)
-        assert not {
-            module
-            for module in imported_modules
-            if module == "train_vtsmolvla" or module.startswith("train_vtsmolvla.")
-        }, path
 
 
 def test_visual_config_has_no_tactile_fields():

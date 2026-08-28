@@ -75,7 +75,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--minimal",
         action="store_true",
-        help="只下载推理/VT-SmolVLA 所需的 checkpoint.json 和参数归档",
+        help="只下载 SmolVLA 推理所需的 checkpoint.json 和参数归档",
     )
     parser.add_argument("--force-download", action="store_true", help="强制重新下载文件")
     return parser.parse_args(argv)

@@ -216,7 +216,7 @@ def test_policy_rejects_tactile_checkpoint_through_visual_config_entry(tmp_path:
         tactile_keys=["observation.images.tactile_left_0"],
     )
 
-    with pytest.raises(ValueError, match="train_vtsmolvla"):
+    with pytest.raises(ValueError, match="separate FRS runtime"):
         JaxSmolVLAPolicy.from_pretrained(tmp_path, local_files_only=True)
 
 

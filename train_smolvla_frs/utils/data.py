@@ -12,7 +12,7 @@ import numpy as np
 
 from lerobot.datasets import LeRobotDatasetMetadata
 from train_smolvla.data import resolve_source_visual_keys
-from train_vtsmolvla.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
+from train_smolvla_frs.utils.tactile_cache import TactileEmbeddingCache, tactile_cache_dir
 from train_encoder.utils.checkpoint import TactileEncoderBundle, load_tactile_encoder
 from train_encoder.utils.image_dataset import create_image_dataset
 from train_encoder.utils.model import encode_resnet18, tactile_clip_config_from_dict

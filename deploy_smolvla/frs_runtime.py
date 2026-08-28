@@ -19,15 +19,29 @@ import numpy as np
 
 from modalities_eval.utils import EvalObservation
 from train_encoder.utils.checkpoint import load_tactile_encoder
+from train_encoder.utils.image_dataset import parse_image_to_unit
 from train_encoder.utils.model import tactile_clip_config_from_dict
 from train_encoder.utils.resnet import encode_resnet18
 from train_smolvla_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
 from train_smolvla_frs.utils.checkpoint import load_checkpoint as load_frs_checkpoint
 from train_smolvla_frs.utils.data import resolve_tactile_window, tactile_change_from_tokens
 from train_smolvla_frs.utils.model import decode_actions
-from train_vtsmolvla.preprocessing import prepare_tactile_batch
 from utils.integration import REVERSE_INTEGRATION_VERSION
 from utils.source_model import reverse_integrate_actions
+
+
+def prepare_tactile_batch(image: Any, image_size: int) -> np.ndarray:
+    """Apply the tactile encoder's per-frame preprocessing to a batch."""
+
+    image = np.asarray(image)
+    if image.ndim == 3:
+        image = image[None, ...]
+    if image.ndim != 4:
+        raise ValueError(f"expected a tactile image or batch, got {image.shape}")
+    return np.stack(
+        [parse_image_to_unit(frame, image_size=image_size) for frame in image],
+        axis=0,
+    ).astype(np.float32, copy=False)
 
 
 @dataclass(frozen=True)

@@ -283,7 +283,10 @@ def test_prepare_tactile_embeddings_invokes_shared_precompute(monkeypatch, tmp_p
         seen["kwargs"] = kwargs
         return tmp_path
 
-    monkeypatch.setattr("train_vtsmolvla.precompute.precompute_from_config", fake_precompute)
+    monkeypatch.setattr(
+        "train_smolvla_frs.precompute_tactile_embeddings.precompute_from_config",
+        fake_precompute,
+    )
     config = {"tactile_embedding_cache": {"root": str(tmp_path)}}
     assert prepare_tactile_embeddings_from_config(config) == tmp_path
     assert seen["config"] is config

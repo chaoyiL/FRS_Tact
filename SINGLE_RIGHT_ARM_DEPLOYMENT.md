@@ -108,7 +108,7 @@ PI05_DEPLOY_CONFIG=/path/to/pi05_frs_right.yaml \
 
 # SmolVLA 纯视觉
 FRS_DEPLOY_CONFIG=/path/to/smolvla_right.yaml \
-  bash deploy_smolvla/scripts/start_vtsmolvla.sh --check
+  bash deploy_smolvla/scripts/start_smolvla.sh --check
 
 # SmolVLA + FRS
 FRS_DEPLOY_CONFIG=/path/to/smolvla_frs_right.yaml \

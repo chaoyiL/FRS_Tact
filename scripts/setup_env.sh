@@ -464,8 +464,6 @@ print_summary() {
     echo
     echo "一键启动视觉 SmolVLA："
     echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/train.sh"
-    echo "一键启动 VT-SmolVLA："
-    echo "  bash ${PROJECT_ROOT}/train_vtsmolvla/scripts/train.sh"
     echo "一键启动纯视觉 Pi0.5："
     echo "  bash ${PROJECT_ROOT}/deploy_pi05/scripts/start_pi05.sh"
     echo "一键启动 Pi0.5 + FRS："

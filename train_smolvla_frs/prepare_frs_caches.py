@@ -910,7 +910,7 @@ def prepare_tactile_embeddings_from_config(
         raise ValueError("config.tactile_embedding_cache must be a mapping")
     if not tactile.get("root") or not bool(tactile.get("enabled", True)):
         return None
-    from train_vtsmolvla.precompute import precompute_from_config
+    from train_smolvla_frs.precompute_tactile_embeddings import precompute_from_config
 
     print("prepare tactile embedding cache", flush=True)
     return precompute_from_config(

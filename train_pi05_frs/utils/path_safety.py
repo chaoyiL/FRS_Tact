@@ -31,7 +31,6 @@ _PROTECTED_SUBTREES = tuple(
         "train_encoder",
         "train_smolvla",
         "train_smolvla_frs",
-        "train_vtsmolvla",
         "utils",
     )
 ) + tuple(

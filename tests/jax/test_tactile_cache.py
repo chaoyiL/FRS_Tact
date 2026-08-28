@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from train_vtsmolvla.tactile_cache import (
+from train_smolvla_frs.utils.tactile_cache import (
     TACTILE_EMBEDDINGS_NAME,
     TACTILE_METADATA_NAME,
     TactileEmbeddingCache,

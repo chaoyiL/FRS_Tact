@@ -86,9 +86,6 @@ def test_legacy_smolvla_source_and_removed_training_entrypoints_are_gone() -> No
     legacy_paths = (
         ROOT / "lerobot/policies/smolvla_jax",
         ROOT / "tools/train_smolvla_jax.py",
-        ROOT / "tools/train_vtsmolvla_jax.py",
         ROOT / "configs/train_smolvla_jax.yaml",
-        ROOT / "configs/train_vtsmolvla_jax.yaml",
-        ROOT / "scripts/start_vtsmolvla_train.sh",
     )
     assert [str(path.relative_to(ROOT)) for path in legacy_paths if path.exists()] == []

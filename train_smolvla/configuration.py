@@ -115,7 +115,7 @@ class JaxSmolVLAConfig:
         if raw.get("use_tactile_encoder", False) or raw.get("tactile_keys"):
             raise ValueError(
                 "train_smolvla only loads visual SmolVLA checkpoints; "
-                "use train_vtsmolvla for checkpoints with tactile inputs"
+                "use a visual SmolVLA checkpoint with the separate FRS runtime"
             )
 
     @classmethod

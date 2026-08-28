@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from train_vtsmolvla.precompute import main
+from train_smolvla_frs.precompute_tactile_embeddings import main
 
 __all__ = ["main"]
 
