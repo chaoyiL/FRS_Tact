@@ -30,8 +30,8 @@ control:
   controller_frequency: 80.0
   # Must match artifact output [1,32,20].
   action_horizon: 32
-  # Execute eight actions (0.267s) before obtaining a new observation and replanning.
-  steps_per_inference: 32
+  # Execute 24 actions (0.8s) before obtaining a new observation and replanning.
+  steps_per_inference: 24
 
 runtime:
   auto_start: false

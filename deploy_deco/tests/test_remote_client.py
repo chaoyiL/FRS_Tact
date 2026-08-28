@@ -7,6 +7,82 @@ import numpy as np
 from deploy_deco import bridge_client, policy, remote_client
 
 
+def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch) -> None:
+    events: list[tuple[str, int | str] | str] = []
+    observations = iter(
+        [
+            (0, {"frame": "warmup"}),
+            (1, {"frame": "action-input"}),
+            (2, {"frame": "post-action"}),
+        ]
+    )
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "connection": {
+            "address": "127.0.0.1",
+            "port": 26421,
+            "observation_timeout_s": 1.25,
+            "require_token": False,
+        },
+        "observation": {},
+        "control": {},
+        "runtime": {"auto_start": True, "warmup_runs": 0},
+    }
+
+    class ProtocolFaithfulBridge:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def send_config(self, server_config: dict) -> None:
+            pass
+
+        def receive_observation(self, timeout: float | None = None):
+            obs_seq, observation = next(observations)
+            events.append(("observation", obs_seq))
+            assert timeout == 1.25
+            return obs_seq, observation
+
+        def send_state(self, state: str) -> None:
+            events.append(("state", state))
+
+        def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            events.append(("action", obs_seq))
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakePolicy:
+        state_dim = 20
+        action_dim = 20
+        action_horizon = 32
+        expected_sample_hz = 30.0
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+        def predict(self, observation: dict, *, seed: int) -> np.ndarray:
+            return np.zeros((32, 20), dtype=np.float32)
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(remote_client, "make_server_config", lambda _config: {})
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", ProtocolFaithfulBridge)
+    monkeypatch.setattr(policy, "DECOPolicy", FakePolicy)
+
+    remote_client.run(Path("unused.yaml"), max_iterations_override=1)
+
+    assert events == [
+        ("observation", 0),
+        ("state", "start"),
+        ("observation", 1),
+        ("action", 1),
+        ("observation", 2),
+        ("state", "stop"),
+        "close",
+    ]
+
+
 def test_legacy_loop_reads_next_observation_without_waiting_for_action_ack(
     monkeypatch,
 ) -> None:
@@ -16,6 +92,7 @@ def test_legacy_loop_reads_next_observation_without_waiting_for_action_ack(
             (0, {"frame": "warmup"}),
             (1, {"frame": "first"}),
             (2, {"frame": "second"}),
+            (3, {"frame": "post-action"}),
         ]
     )
     config = {
@@ -91,6 +168,7 @@ def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) ->
         [
             (0, {"observation.state": np.arange(20, dtype=np.float32)}),
             (1, {"observation.state": np.arange(20, dtype=np.float32)}),
+            (2, {"observation.state": np.arange(20, dtype=np.float32)}),
         ]
     )
     config = {

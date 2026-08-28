@@ -128,6 +128,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
                 f"[client] iteration={iteration} obs_seq={obs_seq} "
                 f"inference_ms={inference_ms:.1f} action_shape={action.shape}"
             )
+        if max_iterations > 0:
+            bridge.receive_observation(timeout=observation_timeout)
     except KeyboardInterrupt:
         print("[client] Interrupted")
     finally:
