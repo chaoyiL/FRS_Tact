@@ -619,6 +619,34 @@ def test_stage2_resume_restores_state_arguments_and_keeps_only_runtime_overrides
     assert args.validation_seed == 444
 
 
+def test_stage2_resume_restores_saved_augmentation_preset() -> None:
+    checkpoint = _valid_resume_checkpoint()
+    checkpoint["config"]["augmentation_preset"] = "balanced-light-v2"
+    args = build_argument_parser().parse_args([
+        "--stage", "2", "--resume", "/runtime/stage2.pt",
+    ])
+
+    restore_stage2_resume_arguments(
+        args, checkpoint_loader=lambda path, device: checkpoint
+    )
+
+    assert args.augmentation_preset == "balanced-light-v2"
+
+
+def test_legacy_stage2_resume_keeps_legacy_augmentation_path() -> None:
+    checkpoint = _valid_resume_checkpoint()
+    checkpoint["config"].pop("augmentation_preset", None)
+    args = build_argument_parser().parse_args([
+        "--stage", "2", "--resume", "/runtime/stage2.pt",
+    ])
+
+    restore_stage2_resume_arguments(
+        args, checkpoint_loader=lambda path, device: checkpoint
+    )
+
+    assert args.augmentation_preset is None
+
+
 @pytest.mark.parametrize(
     ("path", "bad_value", "message"),
     [
