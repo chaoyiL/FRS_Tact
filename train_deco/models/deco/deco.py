@@ -11,12 +11,13 @@ from .rope import RotaryPosEmbed, apply_rotary_emb
 
 
 class DECO(nn.Module):
-    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM):
+    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM, obs_dim=None):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = head_dim
         self.chunk_size = chunk_size
         self.act_dim = act_dim
+        self.obs_dim = act_dim if obs_dim is None else int(obs_dim)
         self.obs_state = obs_state
         self.use_tactile = use_tactile
         self.tactile_image_mode = tactile_image_mode
@@ -41,7 +42,7 @@ class DECO(nn.Module):
         )
         if self.obs_state:
             self.obs_encoder = nn.Sequential(
-                nn.Linear(act_dim, dim),
+                nn.Linear(self.obs_dim, dim),
                 nn.Mish(),
                 nn.Linear(dim, dim)
             )
@@ -129,7 +130,7 @@ class DECO(nn.Module):
             img1: [B, C, H, W]
             img2: [B, C, H, W]
             img3: optional [B, C, H, W] for a three-camera policy
-            obs: [B, 28]
+            obs: [B, obs_dim]
             act: [B, chunk, 28]
             task_idx: [B, ]
             tac1: [B, 1062]
@@ -158,7 +159,7 @@ class DECO(nn.Module):
             tactile = None
 
         if self.obs_state:
-            obs = self.obs_encoder(obs)  # (b, act_dim) --> (b, dim)
+            obs = self.obs_encoder(obs)  # (b, obs_dim) --> (b, dim)
         if self.use_task_condition: # onehot condition for different sub-tasks
             task_emb = self.task_encoder(task_idx) # (b, ) --> (b, dim)
 
@@ -533,7 +534,7 @@ class timeEmb(nn.Module):
         return emb
     
 
-def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM):
+def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False, num_cameras=2, tactile_image_mode=False, tactile_encoder=None, tactile_token_dim=RESNET18_EMBEDDING_DIM, obs_dim=None):
     # def get_trainable_state_dict(model):
     #     return {
     #         name: param.detach().cpu()
@@ -560,6 +561,7 @@ def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False,
             tactile_image_mode=tactile_image_mode,
             tactile_encoder=tactile_encoder,
             tactile_token_dim=tactile_token_dim,
+            obs_dim=obs_dim,
         )
     
     if pretrain_model_path:  # load pretrained weights for finetuning or inference

@@ -474,6 +474,8 @@ def _metadata(
         "epoch": int(epoch),
         "val_loss": float(val_loss),
         "dataset_id": config.get("dataset_id"),
+        "state_action_profile": config.get("state_action_profile"),
+        "controlled_arms": config.get("controlled_arms"),
         "upstream_model": "train_deco.models.deco.deco.DECO",
         "camera_names": config["camera_names"],
         "input": {

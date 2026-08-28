@@ -10,7 +10,7 @@ STAGE2_MODEL_TYPE = "upstream-deco-stage2-tactile-image"
 
 
 def observation_indices(contract: dict) -> list[int]:
-    """Map the source state vector to upstream DECO's action-sized observation."""
+    """Map the source state vector to the DECO observation encoder input."""
     state_columns = list(contract["state_columns"])
     action_columns = list(contract["action_columns"])
     if len(state_columns) != int(contract["obs_dim"]):
@@ -20,10 +20,8 @@ def observation_indices(contract: dict) -> list[int]:
     explicit = contract.get("observation_indices")
     if explicit is not None:
         indices = [int(index) for index in explicit]
-        if len(indices) != int(contract["action_dim"]):
-            raise ValueError(
-                "observation_indices count must match the action dimension"
-            )
+        if not indices:
+            raise ValueError("observation_indices must not be empty")
         if len(set(indices)) != len(indices):
             raise ValueError("observation_indices must be unique")
         if any(index < 0 or index >= int(contract["obs_dim"]) for index in indices):
@@ -34,8 +32,8 @@ def observation_indices(contract: dict) -> list[int]:
     missing = [name for name in action_columns if name not in state_columns]
     if missing:
         raise ValueError(
-            "Upstream DECO requires an action-sized observation; action columns are "
-            f"missing from the state vector: {missing}"
+            "The implicit DECO observation mapping requires action columns to exist "
+            f"in the state vector; missing columns: {missing}"
         )
     return [state_columns.index(name) for name in action_columns]
 
@@ -47,6 +45,7 @@ def build_model(config: dict, load_backbone: bool = True) -> DECO:
         raise FileNotFoundError(f"Upstream DECO ResNet34 weights not found: {backbone}")
     return modeling(
         action_dim=int(config["action_dim"]),
+        obs_dim=int(config.get("obs_dim", config["action_dim"])),
         chunk_size=int(config["chunk_size"]),
         obs_state=True,
         use_tactile=False,
@@ -83,6 +82,7 @@ def build_stage2_model(
         raise ValueError(f"Stage2 tactile adapter rank must be positive, got {adapter_rank}")
     return modeling(
         action_dim=int(config["action_dim"]),
+        obs_dim=int(config.get("obs_dim", config["action_dim"])),
         chunk_size=int(config["chunk_size"]),
         obs_state=True,
         use_tactile=True,

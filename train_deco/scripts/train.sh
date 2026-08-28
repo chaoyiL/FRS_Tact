@@ -221,8 +221,10 @@ AUGMENTATION_BLUR_PROBABILITY="${AUGMENTATION_BLUR_PROBABILITY:-0.20}"
 AUGMENTATION_BLUR_SIGMA_MIN="${AUGMENTATION_BLUR_SIGMA_MIN:-0.1}"
 AUGMENTATION_BLUR_SIGMA_MAX="${AUGMENTATION_BLUR_SIGMA_MAX:-1.0}"
 
-case "${AUGMENTATION_ENABLED,,}" in
-  1|true|yes|on) AUGMENTATION_FLAG=(--augmentation-enabled) ;;
+case "${AUGMENTATION_ENABLED}" in
+  1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Oo][Nn])
+    AUGMENTATION_FLAG=(--augmentation-enabled)
+    ;;
   *) AUGMENTATION_FLAG=(--no-augmentation-enabled) ;;
 esac
 
@@ -268,8 +270,11 @@ COMMAND=(
   --torchscript-image-width 224
   --save-every "${SAVE_EVERY}"
   --keep-last-checkpoints 5
-  "${EXTRA_ARGS[@]}"
 )
+
+if [[ "${MODE}" == "local-smoke" ]]; then
+  COMMAND+=(--limit-samples 16 --log-every-steps 1)
+fi
 
 if [[ -n "${RESUME_FROM}" ]]; then
   COMMAND+=(--resume "${RESUME_FROM}" --resume-mode exact)

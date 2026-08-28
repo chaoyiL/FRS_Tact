@@ -15,6 +15,11 @@ from train_deco.lerobot_vision_dataset import (
     _validate_info,
     build_lerobot_vision_datasets,
 )
+from train_deco.prepare_lerobot_multiroot import write_multiroot_manifest
+from train_deco.state_action_profiles import (
+    SINGLE_RIGHT_ARM_7X10,
+    SINGLE_RIGHT_ARM_PROFILE,
+)
 
 
 def _jpeg_bytes(rgb: tuple[int, int, int]) -> bytes:
@@ -24,10 +29,15 @@ def _jpeg_bytes(rgb: tuple[int, int, int]) -> bytes:
     return encoded.getvalue()
 
 
-def _info(include_tactile: bool = True) -> dict:
+def _info(
+    include_tactile: bool = True,
+    *,
+    state_dim: int = 20,
+    action_dim: int = 20,
+) -> dict:
     features = {
-        "observation.state": {"dtype": "float32", "shape": [20]},
-        "actions": {"dtype": "float32", "shape": [20]},
+        "observation.state": {"dtype": "float32", "shape": [state_dim]},
+        "actions": {"dtype": "float32", "shape": [action_dim]},
         **{
             name: {"dtype": "image", "shape": [3, 5, 3]}
             for name in CAMERA_NAMES
@@ -54,9 +64,14 @@ def _info(include_tactile: bool = True) -> dict:
     }
 
 
-def _write_fixture(root: Path) -> None:
+def _write_fixture(
+    root: Path,
+    *,
+    state_dim: int = 20,
+    action_dim: int = 20,
+) -> None:
     (root / "meta").mkdir(parents=True)
-    info = _info()
+    info = _info(state_dim=state_dim, action_dim=action_dim)
     (root / "meta/info.json").write_text(json.dumps(info), encoding="utf-8")
     (root / "meta/tasks.jsonl").write_text(
         json.dumps({"task_index": 0, "task": "pick tube"}) + "\n",
@@ -67,11 +82,13 @@ def _write_fixture(root: Path) -> None:
     for episode_index in range(2):
         episodes.append({"episode_index": episode_index, "length": 3, "tasks": [0]})
         columns = {
-            "observation.state": [np.full(20, row, dtype=np.float32) for row in range(3)],
+            "observation.state": [
+                np.full(state_dim, row, dtype=np.float32) for row in range(3)
+            ],
             "actions": [
-                np.full(20, 1.0, dtype=np.float32),
-                np.full(20, 2.0, dtype=np.float32),
-                np.zeros(20, dtype=np.float32),
+                np.full(action_dim, 1.0, dtype=np.float32),
+                np.full(action_dim, 2.0, dtype=np.float32),
+                np.zeros(action_dim, dtype=np.float32),
             ],
             "frame_index": list(range(3)),
             "episode_index": [episode_index] * 3,
@@ -134,6 +151,49 @@ def test_stage2_dataset_returns_four_tactile_images_in_stable_order(tmp_path: Pa
     assert sample["tactile_images"].shape == (4, 3, 3, 5)
     dominant_channels = sample["tactile_images"].mean(dim=(2, 3)).argmax(dim=1)
     assert torch.equal(dominant_channels, torch.tensor([0, 1, 2, 0]))
+
+
+def test_single_right_arm_manifest_is_explicit_and_builds_7x10_dataset(
+    tmp_path: Path,
+) -> None:
+    dataset_root = tmp_path / "insert_01"
+    manifest_path = tmp_path / "insert_01.json"
+    _write_fixture(dataset_root, state_dim=7, action_dim=10)
+
+    with pytest.raises(ValueError, match="explicit handedness"):
+        write_multiroot_manifest(
+            [dataset_root],
+            manifest_path,
+            dataset_id="insert_01",
+        )
+
+    manifest = write_multiroot_manifest(
+        [dataset_root],
+        manifest_path,
+        dataset_id="insert_01",
+        state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+    )
+    assert manifest["state_action_profile"] == SINGLE_RIGHT_ARM_PROFILE
+
+    train, val = build_lerobot_vision_datasets(
+        manifest_path,
+        action_chunk_size=2,
+        validation_ratio=0.5,
+        split_seed=0,
+        include_tactile=False,
+    )
+    sample = train[0]
+    assert sample["observation"].shape == (7,)
+    assert sample["action"].shape == (2, 10)
+    assert val.metadata == train.metadata
+    assert train.metadata["state_action_profile"] == SINGLE_RIGHT_ARM_PROFILE
+    assert train.metadata["controlled_arms"] == ["right"]
+    assert train.metadata["state_columns"] == list(
+        SINGLE_RIGHT_ARM_7X10.state_columns
+    )
+    assert train.metadata["action_columns"] == list(
+        SINGLE_RIGHT_ARM_7X10.action_columns
+    )
 
 
 @pytest.mark.skipif(

@@ -20,6 +20,10 @@ from train_deco.model_factory import (
     build_stage2_model,
 )
 from train_deco.stage2_initialization import configure_stage2_trainability
+from train_deco.state_action_profiles import (
+    SINGLE_RIGHT_ARM_7X10,
+    SINGLE_RIGHT_ARM_PROFILE,
+)
 
 
 def config(camera_names=None):
@@ -269,6 +273,59 @@ def test_pick_tube_export_describes_mixed_action_semantics(tmp_path):
     assert metadata["output"]["action_columns"] == pick_tube_config["action_columns"]
     assert metadata["output"]["gripper_mode"] == "absolute"
     assert metadata["normalization"]["statistics_source"] == "train_episodes_nonterminal_rows_once"
+
+
+def test_single_right_arm_export_accepts_7d_state_and_returns_10d_action(tmp_path):
+    single_config = config() | {
+        "source_obs_dim": 7,
+        "obs_dim": 7,
+        "action_dim": 10,
+        "observation_indices": list(range(7)),
+        "state_action_profile": SINGLE_RIGHT_ARM_PROFILE,
+        "controlled_arms": ["right"],
+        "action_mode": "tcp_delta_absolute_gripper",
+        "state_layout": SINGLE_RIGHT_ARM_7X10.state_layout,
+        "rotation_representation": "rotation_6d_matrix_columns",
+        "terminal_action_policy": "excluded",
+        "state_columns": list(SINGLE_RIGHT_ARM_7X10.state_columns),
+        "action_columns": list(SINGLE_RIGHT_ARM_7X10.action_columns),
+        "gripper_mode": "absolute",
+        "statistics_source": "train_episodes_nonterminal_rows_once",
+    }
+    single_stats = {
+        "observation_mean": [0.0] * 7,
+        "observation_std": [1.0] * 7,
+        "action_mean": [0.0] * 10,
+        "action_std": [1.0] * 10,
+    }
+    model = build_model(single_config, load_backbone=False)
+    assert model.obs_encoder[0].in_features == 7
+    assert model.act_dim == 10
+
+    output = tmp_path / "insert-01.ts"
+    metadata = export_policy(
+        model,
+        single_stats,
+        single_config,
+        output,
+        32,
+        32,
+        1,
+        0.5,
+    )
+    assert metadata["state_action_profile"] == SINGLE_RIGHT_ARM_PROFILE
+    assert metadata["controlled_arms"] == ["right"]
+    assert metadata["input"]["observation"] == [1, 7]
+    assert metadata["output"]["action"] == [1, 4, 10]
+
+    exported = torch.jit.load(str(output)).eval()
+    with torch.inference_mode():
+        action = exported(
+            torch.zeros(1, 2, 3, 32, 32),
+            torch.zeros(1, 7),
+        )
+    assert action.shape == (1, 4, 10)
+    assert torch.isfinite(action).all()
 
 
 @torch.no_grad()

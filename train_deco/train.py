@@ -1344,6 +1344,7 @@ def main(argv=None):
         raise ValueError("DECO Stage 1 requires two or three camera streams")
     obs_index_list = observation_indices(contract)
     observation_index = torch.tensor(obs_index_list, dtype=torch.long, device=device)
+    deco_obs_dim = len(obs_index_list)
     action_dim = int(contract["action_dim"])
     chunk_size = int(contract["chunk_size"])
     if train_dataset.task_ids != val_dataset.task_ids:
@@ -1384,13 +1385,15 @@ def main(argv=None):
     config = vars(args) | {
         "model_type": STAGE2_MODEL_TYPE if args.stage == 2 else MODEL_TYPE,
         "source_obs_dim": int(contract["obs_dim"]),
-        "obs_dim": action_dim,
+        "obs_dim": deco_obs_dim,
         "action_dim": action_dim,
         "chunk_size": chunk_size,
         "source_chunk_size": train_dataset.source_chunk_size,
         "observation_indices": obs_index_list,
         "state_columns": contract["state_columns"],
         "action_columns": contract["action_columns"],
+        "state_action_profile": contract.get("state_action_profile"),
+        "controlled_arms": contract.get("controlled_arms"),
         "action_mode": action_mode,
         **action_mode_config_fields(action_mode),
         "expected_sample_hz": contract.get("expected_sample_hz"),

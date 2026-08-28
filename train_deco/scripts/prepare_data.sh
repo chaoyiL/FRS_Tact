@@ -11,6 +11,7 @@ SERVER_DATA_PARENT="${SERVER_DATA_PARENT:-/DATA/ljl/substage/lerobot_v30_work/Ka
 MODE="local"
 OUTPUT=""
 DATASET_ID=""
+STATE_ACTION_PROFILE=""
 ROOTS=()
 
 usage() {
@@ -28,6 +29,8 @@ usage() {
   --root PATH        自定义数据根目录，可重复；一旦指定就替换模式默认值
   --output PATH      输出多数据集 manifest JSON
   --dataset-id ID    manifest 中的数据集名称
+  --state-action-profile PROFILE
+                     状态/动作合同：dual-arm-20x20 或 single-right-arm-7x10
   -h, --help         显示帮助
 
 默认路径：
@@ -57,6 +60,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dataset-id)
       DATASET_ID="$2"
+      shift 2
+      ;;
+    --state-action-profile)
+      STATE_ACTION_PROFILE="$2"
       shift 2
       ;;
     -h|--help)
@@ -110,10 +117,16 @@ for root in "${ROOTS[@]}"; do
 done
 
 cd "${PROJECT_ROOT}"
-"${PYTHON_BIN}" -m train_deco.prepare_lerobot_multiroot \
-  --output "${OUTPUT}" \
-  --dataset-id "${DATASET_ID}" \
-  "${ROOTS[@]}"
+PREPARE_COMMAND=(
+  "${PYTHON_BIN}" -m train_deco.prepare_lerobot_multiroot
+  --output "${OUTPUT}"
+  --dataset-id "${DATASET_ID}"
+)
+if [[ -n "${STATE_ACTION_PROFILE}" ]]; then
+  PREPARE_COMMAND+=(--state-action-profile "${STATE_ACTION_PROFILE}")
+fi
+PREPARE_COMMAND+=("${ROOTS[@]}")
+"${PREPARE_COMMAND[@]}"
 
 echo "数据 manifest 已生成：${OUTPUT}"
 echo "数据集数量：${#ROOTS[@]}"

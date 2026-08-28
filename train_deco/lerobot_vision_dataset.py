@@ -1,8 +1,8 @@
-"""Strict LeRobot v2.1 image adapter for the ``pick_tube_01`` layout.
+"""Strict LeRobot v2.1 image adapter for supported DECO robot profiles.
 
-The source state and action already carry the desired robot representation.
-This module therefore performs no state/action derivation: it only validates,
-normalizes, chunks and decodes two RGB camera streams plus optional tactile RGB streams.
+The source state and action already carry the desired robot representation. This
+module performs no state/action derivation: an explicit profile validates their
+semantics and dimensions before normalization, chunking and image decoding.
 """
 
 from __future__ import annotations
@@ -21,6 +21,11 @@ from PIL import Image, UnidentifiedImageError
 from torch.utils.data import Dataset
 
 from .splits import split_episodes
+from .state_action_profiles import (
+    DUAL_ARM_20X20,
+    StateActionProfile,
+    resolve_state_action_profile,
+)
 
 
 DATASET_FORMAT = "lerobot-v2.1-parquet-vision-deco-v1"
@@ -36,50 +41,13 @@ TACTILE_NAMES = (
 )
 STATE_KEY = "observation.state"
 ACTION_KEY = "actions"
-STATE_DIM = 20
-ACTION_DIM = 20
+# Backward-compatible exports for the original dual-arm contract. Runtime data
+# dimensions are selected from an explicit StateActionProfile instead.
+STATE_DIM = DUAL_ARM_20X20.state_dim
+ACTION_DIM = DUAL_ARM_20X20.action_dim
 STD_FLOOR = 1e-4
-
-STATE_COLUMNS = (
-    "robot0.relative_start.x",
-    "robot0.relative_start.y",
-    "robot0.relative_start.z",
-    "robot0.relative_start.rx",
-    "robot0.relative_start.ry",
-    "robot0.relative_start.rz",
-    "robot0.gripper_width",
-    "robot1.relative_start.x",
-    "robot1.relative_start.y",
-    "robot1.relative_start.z",
-    "robot1.relative_start.rx",
-    "robot1.relative_start.ry",
-    "robot1.relative_start.rz",
-    "robot1.gripper_width",
-    "left_relative_to_right.x",
-    "left_relative_to_right.y",
-    "left_relative_to_right.z",
-    "left_relative_to_right.rx",
-    "left_relative_to_right.ry",
-    "left_relative_to_right.rz",
-)
-
-_ACTION_COMPONENTS = (
-    "delta.x",
-    "delta.y",
-    "delta.z",
-    "rotation_column_0.x",
-    "rotation_column_0.y",
-    "rotation_column_0.z",
-    "rotation_column_1.x",
-    "rotation_column_1.y",
-    "rotation_column_1.z",
-    "gripper_width",
-)
-ACTION_COLUMNS = tuple(
-    f"robot{robot_index}.{component}"
-    for robot_index in range(2)
-    for component in _ACTION_COMPONENTS
-)
+STATE_COLUMNS = DUAL_ARM_20X20.state_columns
+ACTION_COLUMNS = DUAL_ARM_20X20.action_columns
 
 _NUMERIC_COLUMNS = (
     STATE_KEY,
@@ -140,7 +108,11 @@ def _tactile_image_shape(info: dict) -> tuple[int, int]:
 
 
 def _validate_info(
-    root: Path, info: dict, *, include_tactile: bool = False
+    root: Path,
+    info: dict,
+    profile: StateActionProfile = DUAL_ARM_20X20,
+    *,
+    include_tactile: bool = False,
 ) -> tuple[int, int]:
     if info.get("codebase_version") != "v2.1":
         raise ValueError(
@@ -148,10 +120,16 @@ def _validate_info(
         )
     if info.get("video_path") is not None or int(info.get("total_videos", -1)) != 0:
         raise ValueError("This adapter requires Parquet-embedded images, not video files")
-    if _feature_shape(info, STATE_KEY) != (STATE_DIM,):
-        raise ValueError(f"{STATE_KEY} must be exactly {STATE_DIM}D")
-    if _feature_shape(info, ACTION_KEY) != (ACTION_DIM,):
-        raise ValueError(f"{ACTION_KEY} must be exactly {ACTION_DIM}D")
+    if _feature_shape(info, STATE_KEY) != (profile.state_dim,):
+        raise ValueError(
+            f"{STATE_KEY} must be exactly {profile.state_dim}D for "
+            f"state_action_profile={profile.name!r}"
+        )
+    if _feature_shape(info, ACTION_KEY) != (profile.action_dim,):
+        raise ValueError(
+            f"{ACTION_KEY} must be exactly {profile.action_dim}D for "
+            f"state_action_profile={profile.name!r}"
+        )
     camera_shapes = [_feature_shape(info, name) for name in CAMERA_NAMES]
     if len(set(camera_shapes)) != 1 or len(camera_shapes[0]) != 3:
         raise ValueError(f"The two RGB camera shapes must match, got {camera_shapes}")
@@ -235,7 +213,10 @@ def _fixed_vector_column(table, key: str, dimension: int) -> np.ndarray:
     return values
 
 
-def _read_and_validate_numeric(spec: _EpisodeSpec) -> tuple[np.ndarray, np.ndarray]:
+def _read_and_validate_numeric(
+    spec: _EpisodeSpec,
+    profile: StateActionProfile = DUAL_ARM_20X20,
+) -> tuple[np.ndarray, np.ndarray]:
     try:
         table = pq.read_table(spec.path, columns=list(_NUMERIC_COLUMNS))
     except Exception as exc:
@@ -244,8 +225,8 @@ def _read_and_validate_numeric(spec: _EpisodeSpec) -> tuple[np.ndarray, np.ndarr
         raise ValueError(
             f"Episode row count mismatch: episode={spec.episode_id}, metadata={spec.length}, parquet={table.num_rows}"
         )
-    states = _fixed_vector_column(table, STATE_KEY, STATE_DIM)
-    actions = _fixed_vector_column(table, ACTION_KEY, ACTION_DIM)
+    states = _fixed_vector_column(table, STATE_KEY, profile.state_dim)
+    actions = _fixed_vector_column(table, ACTION_KEY, profile.action_dim)
     if not np.isfinite(states).all() or not np.isfinite(actions).all():
         raise ValueError(f"Non-finite state/action in episode {spec.episode_id}")
     frame_indices = np.asarray(table["frame_index"].to_numpy(), dtype=np.int64)
@@ -270,16 +251,18 @@ def _read_and_validate_numeric(spec: _EpisodeSpec) -> tuple[np.ndarray, np.ndarr
 
 
 def _compute_train_stats(
-    specs: list[_EpisodeSpec], train_episode_ids: set[int]
+    specs: list[_EpisodeSpec],
+    train_episode_ids: set[int],
+    profile: StateActionProfile = DUAL_ARM_20X20,
 ) -> dict[str, np.ndarray]:
-    observation_sum = np.zeros(STATE_DIM, dtype=np.float64)
-    observation_square_sum = np.zeros(STATE_DIM, dtype=np.float64)
-    action_sum = np.zeros(ACTION_DIM, dtype=np.float64)
-    action_square_sum = np.zeros(ACTION_DIM, dtype=np.float64)
+    observation_sum = np.zeros(profile.state_dim, dtype=np.float64)
+    observation_square_sum = np.zeros(profile.state_dim, dtype=np.float64)
+    action_sum = np.zeros(profile.action_dim, dtype=np.float64)
+    action_square_sum = np.zeros(profile.action_dim, dtype=np.float64)
     observation_count = 0
     action_count = 0
     for spec in specs:
-        states, actions = _read_and_validate_numeric(spec)
+        states, actions = _read_and_validate_numeric(spec, profile)
         if spec.episode_id not in train_episode_ids:
             continue
         # The final state has no valid next action and is not an anchor. The
@@ -322,7 +305,7 @@ def _task_ids(root: Path, info: dict) -> tuple[list[str], list[dict]]:
     return [str(task_id) for task_id in ids], rows
 
 
-def _load_sources(dataset_source: Path) -> tuple[list[dict], str]:
+def _load_sources(dataset_source: Path) -> tuple[list[dict], str, str | None]:
     if dataset_source.is_file():
         payload = json.loads(dataset_source.read_text(encoding="utf-8"))
         from .prepare_lerobot_multiroot import MANIFEST_FORMAT
@@ -337,8 +320,16 @@ def _load_sources(dataset_source: Path) -> tuple[list[dict], str]:
         ]
         if not sources:
             raise ValueError("LeRobot multi-root manifest has no sources")
-        return sorted(sources, key=lambda row: row["name"]), str(payload["dataset_id"])
-    return [{"name": dataset_source.name, "root": dataset_source}], dataset_source.name
+        return (
+            sorted(sources, key=lambda row: row["name"]),
+            str(payload["dataset_id"]),
+            payload.get("state_action_profile"),
+        )
+    return (
+        [{"name": dataset_source.name, "root": dataset_source}],
+        dataset_source.name,
+        None,
+    )
 
 
 class LeRobotVisionDECODataset(Dataset):
@@ -373,6 +364,8 @@ class LeRobotVisionDECODataset(Dataset):
         self.image_height = int(image_height)
         self.image_width = int(image_width)
         self.include_tactile = bool(include_tactile)
+        self.state_dim = int(metadata["obs_dim"])
+        self.action_dim = int(metadata["action_dim"])
         self.tactile_image_height = (
             int(tactile_image_height) if tactile_image_height is not None else None
         )
@@ -431,8 +424,8 @@ class LeRobotVisionDECODataset(Dataset):
         if table.num_rows != spec.length:
             raise ValueError(f"Episode row count changed after validation: {spec.path}")
         episode = {
-            "states": _fixed_vector_column(table, STATE_KEY, STATE_DIM),
-            "actions": _fixed_vector_column(table, ACTION_KEY, ACTION_DIM),
+            "states": _fixed_vector_column(table, STATE_KEY, self.state_dim),
+            "actions": _fixed_vector_column(table, ACTION_KEY, self.action_dim),
             "task_indices": np.asarray(table["task_index"].to_numpy(), dtype=np.int64),
             "images": tuple(table[name] for name in CAMERA_NAMES),
         }
@@ -551,7 +544,7 @@ def build_lerobot_vision_datasets(
     """Build train/validation views with one shared train-only statistics set."""
 
     source_path = Path(dataset_dir).expanduser().resolve()
-    source_rows, manifest_dataset_id = _load_sources(source_path)
+    source_rows, manifest_dataset_id, requested_profile = _load_sources(source_path)
     if action_chunk_size <= 0:
         raise ValueError(f"action_chunk_size must be positive, got {action_chunk_size}")
     specs = []
@@ -562,6 +555,7 @@ def build_lerobot_vision_datasets(
     expected_tactile_image_shape = None
     expected_fps = None
     expected_tasks = None
+    expected_profile = None
     tasks = None
     global_offset = 0
     preserve_source_ids = len(source_rows) == 1
@@ -571,7 +565,17 @@ def build_lerobot_vision_datasets(
         if not info_path.is_file():
             raise ValueError(f"LeRobot info.json is missing: {info_path}")
         info = json.loads(info_path.read_text(encoding="utf-8"))
-        image_shape = _validate_info(root, info, include_tactile=include_tactile)
+        profile = resolve_state_action_profile(
+            requested_profile,
+            _feature_shape(info, STATE_KEY),
+            _feature_shape(info, ACTION_KEY),
+        )
+        image_shape = _validate_info(
+            root,
+            info,
+            profile,
+            include_tactile=include_tactile,
+        )
         tactile_image_shape = (
             _tactile_image_shape(info) if include_tactile else None
         )
@@ -582,12 +586,14 @@ def build_lerobot_vision_datasets(
             expected_tactile_image_shape = tactile_image_shape
             expected_fps = fps
             expected_tasks = task_rows
+            expected_profile = profile
             tasks = source_tasks
-        elif (image_shape, tactile_image_shape, fps, task_rows) != (
+        elif (image_shape, tactile_image_shape, fps, task_rows, profile) != (
             expected_image_shape,
             expected_tactile_image_shape,
             expected_fps,
             expected_tasks,
+            expected_profile,
         ):
             raise ValueError(f"LeRobot source contract differs: {root}")
         source_specs = _episode_specs(
@@ -614,21 +620,25 @@ def build_lerobot_vision_datasets(
                 "total_frames": int(info["total_frames"]),
             }
         )
-    stats = _compute_train_stats(specs, set(train_episode_ids))
+    if expected_profile is None:
+        raise ValueError("LeRobot dataset has no state/action profile")
+    stats = _compute_train_stats(specs, set(train_episode_ids), expected_profile)
     dataset_id = (
         f"{manifest_dataset_id}@vision2-v1-val{validation_ratio:g}-seed{split_seed}"
     )
     metadata = {
         "source_format": DATASET_FORMAT,
-        "obs_dim": STATE_DIM,
-        "action_dim": ACTION_DIM,
+        "state_action_profile": expected_profile.name,
+        "obs_dim": expected_profile.state_dim,
+        "action_dim": expected_profile.action_dim,
         "chunk_size": int(action_chunk_size),
         "camera_names": list(CAMERA_NAMES),
-        "state_columns": list(STATE_COLUMNS),
-        "action_columns": list(ACTION_COLUMNS),
-        "observation_indices": list(range(STATE_DIM)),
+        "state_columns": list(expected_profile.state_columns),
+        "action_columns": list(expected_profile.action_columns),
+        "observation_indices": list(range(expected_profile.state_dim)),
         "action_mode": "tcp_delta_absolute_gripper",
-        "state_layout": "relative_start_pose6d_gripper_plus_left_relative_right",
+        "state_layout": expected_profile.state_layout,
+        "controlled_arms": list(expected_profile.controlled_arms),
         "rotation_representation": "rotation_6d_matrix_columns",
         "gripper_mode": "absolute",
         "terminal_action_policy": "excluded",
@@ -640,6 +650,7 @@ def build_lerobot_vision_datasets(
     manifest = {
         "format": DATASET_FORMAT,
         "dataset_id": dataset_id,
+        "state_action_profile": expected_profile.name,
         "sources": sources,
         "split_seed": int(split_seed),
         "validation_ratio": float(validation_ratio),

@@ -4,11 +4,12 @@
 `/home/hillbot/deco/deco_baseline` 中当前验证过的 `cloud_training` 链路提取，
 不依赖 FRS_Tact 根目录的 SmolVLA、JAX 或 FRS 训练代码。
 
-## 固定数据合同
+## 状态与动作合同
 
 - 图像：`observation.images.camera0`、`observation.images.camera1`
-- state：20D，`7 + 7 + 6`
-- action：每手 `TCP delta xyz + Rotation6D matrix columns + absolute gripper`
+- `dual-arm-20x20`：state 为 `7 + 7 + 6`，action 为双臂各 10D
+- `single-right-arm-7x10`：state 为右臂 7D，action 为右臂 10D
+- 每臂 10D action 均为 `TCP delta xyz + Rotation6D matrix columns + absolute gripper`
 - 默认 chunk：32
 - 数据频率：30Hz
 - 当前主训练链：LeRobot v2.1 parquet
@@ -19,6 +20,18 @@
 bash train_deco/scripts/setup_env.sh
 bash train_deco/scripts/prepare_data.sh --mode local --root /path/to/pick_tube_01
 bash train_deco/scripts/train.sh --mode local-smoke
+```
+
+7D state / 10D action 不能仅凭维度判断左右臂，必须在生成 manifest 时显式声明：
+
+```bash
+PYTHON_BIN=/path/to/train_deco/.venv/bin/python \
+bash train_deco/scripts/prepare_data.sh \
+  --mode server \
+  --root /path/to/insert_01 \
+  --output /path/to/insert_01.json \
+  --dataset-id insert_01 \
+  --state-action-profile single-right-arm-7x10
 ```
 
 正式训练使用 `--mode local-train`，服务器 DDP 使用 `--mode server-train`。
@@ -66,9 +79,10 @@ train_deco/.venv/bin/python -m pip install \
 可用 `--tactile-encoder-cache /absolute/cache/path` 改写缓存根目录。相同源内容的
 后续启动直接复用已验证的 artifact；源文件内容变化会产生新的 SHA256 目录。
 `server-stage2` 使用 DDP 时只有 global rank 0 执行解析/转换并原子更新
-`current.json`，随后广播 immutable generation 路径。barrier 后每个 rank 都独立
-复核 source/artifact SHA256、转换 metadata 与 parity 记录，再 strict-load 同一个
-缓存 artifact；非零 rank 不导入 JAX。
+`current.json`，随后广播 immutable generation 路径。barrier 后每个 rank 都 strict-load
+同一个缓存 artifact，并独立复核 source/artifact SHA256、转换 metadata 与 parity 记录。
+非零 rank 不导入 JAX。
+因此 rank 0 校验转换 metadata 和 SHA256，其他 rank 也会在加载前独立复核。
 
 Stage 2 checkpoint 写入 `OUTPUT_DIR/RUN_ID/`：
 

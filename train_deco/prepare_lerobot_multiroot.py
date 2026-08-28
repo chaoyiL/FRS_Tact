@@ -6,6 +6,8 @@ import argparse
 import json
 from pathlib import Path
 
+from .state_action_profiles import PROFILES, resolve_state_action_profile
+
 
 MANIFEST_FORMAT = "deco-lerobot-v21-multiroot-v1"
 REQUIRED_FEATURES = (
@@ -53,6 +55,7 @@ def write_multiroot_manifest(
     roots: list[str | Path],
     output_path: str | Path,
     dataset_id: str | None = None,
+    state_action_profile: str | None = None,
 ) -> dict:
     resolved = sorted({Path(root).expanduser().resolve() for root in roots})
     if not resolved:
@@ -60,6 +63,7 @@ def write_multiroot_manifest(
     sources = []
     expected_contract = None
     names = set()
+    resolved_profile = None
     for root in resolved:
         info = _read_json(root / "meta/info.json")
         contract = _source_contract(root, info)
@@ -67,6 +71,15 @@ def write_multiroot_manifest(
             expected_contract = contract
         elif contract != expected_contract:
             raise ValueError(f"LeRobot source contract differs: {root}")
+        current_profile = resolve_state_action_profile(
+            state_action_profile,
+            tuple(int(value) for value in contract["state_shape"]),
+            tuple(int(value) for value in contract["action_shape"]),
+        )
+        if resolved_profile is None:
+            resolved_profile = current_profile
+        elif current_profile != resolved_profile:
+            raise ValueError(f"LeRobot state/action profile differs: {root}")
         name = root.name
         if name in names:
             raise ValueError(f"Duplicate LeRobot source name: {name}")
@@ -83,6 +96,7 @@ def write_multiroot_manifest(
     payload = {
         "format": MANIFEST_FORMAT,
         "dataset_id": dataset_id or "+".join(source["name"] for source in sources),
+        "state_action_profile": resolved_profile.name,
         "sources": sources,
     }
     output = Path(output_path).expanduser().resolve()
@@ -97,9 +111,15 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", required=True)
     parser.add_argument("--dataset-id")
+    parser.add_argument("--state-action-profile", choices=sorted(PROFILES))
     parser.add_argument("roots", nargs="+")
     args = parser.parse_args()
-    manifest = write_multiroot_manifest(args.roots, args.output, args.dataset_id)
+    manifest = write_multiroot_manifest(
+        args.roots,
+        args.output,
+        args.dataset_id,
+        args.state_action_profile,
+    )
     print(json.dumps({"event": "lerobot_multiroot_manifest_ready", **manifest}))
 
 
