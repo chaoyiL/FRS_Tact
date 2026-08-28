@@ -23,7 +23,7 @@ def test_checked_in_config_matches_checked_in_external_artifact():
     server = make_server_config(config)
     assert server["observation_profile"] == "deco_vision_224"
     assert server["action_horizon"] == 32
-    assert server["steps_per_inference"] == 24
+    assert server["steps_per_inference"] == config["control"]["steps_per_inference"]
     assert "execution_protocol" not in server
 
 
