@@ -123,3 +123,4 @@ docs/
 /train_deco/pretrained/resnet34-b627a593
 /deploy_deco/checkpoints/*.ts
 /deploy_deco/checkpoints/*.ts.json
+/deploy_deco/offline_results/
