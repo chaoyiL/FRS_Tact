@@ -100,6 +100,7 @@ def print_startup_summary(
                 "[startup] task1 "
                 f"dispatch_lead_s={float(control['dispatch_lead_time_s']):g} "
                 f"approach_gain={float(task1['approach_translation_gain']):g} "
+                f"right_approach_gain={float(task1['right_approach_translation_gain']):g} "
                 f"translation_gain={float(task1['translation_gain']):g} "
                 f"left_min_lift_m={float(task1['left_min_lift_height_m']):g} "
                 f"right_preclose_forward_m={float(task1['right_preclose_forward_m']):g}"

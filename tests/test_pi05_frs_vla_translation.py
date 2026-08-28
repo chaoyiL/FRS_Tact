@@ -57,6 +57,16 @@ def test_shared_gripper_config_parses_exact_hysteresis_contract() -> None:
     assert parsed == _config()
 
 
+def test_deployed_frs_gripper_config_projects_right_thresholds() -> None:
+    config_path = Path(__file__).parents[1] / "deploy_pi05/configs/deploy_pi05_frs.yaml"
+    parsed = parse_gripper_hysteresis_config(
+        yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    )
+
+    assert parsed.right_close_threshold == pytest.approx(0.105)
+    assert parsed.right_reopen_threshold == pytest.approx(0.115)
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [({}, 0), ({"task": 0}, 0), ({"task": 1}, 1)],
@@ -77,6 +87,7 @@ def test_task1_motion_gains_parse_from_shared_yaml() -> None:
             "task": 1,
             "task1": {
                 "approach_translation_gain": 1.2,
+                "right_approach_translation_gain": 1.5,
                 "translation_gain": 1.5,
                 "rotation_gain": 1.0,
             },
@@ -85,13 +96,20 @@ def test_task1_motion_gains_parse_from_shared_yaml() -> None:
 
     assert parsed == Task1MotionGainConfig(
         approach_translation_gain=1.2,
+        right_approach_translation_gain=1.5,
         translation_gain=1.5,
         rotation_gain=1.0,
     )
 
 
 @pytest.mark.parametrize(
-    "field", ["approach_translation_gain", "translation_gain", "rotation_gain"]
+    "field",
+    [
+        "approach_translation_gain",
+        "right_approach_translation_gain",
+        "translation_gain",
+        "rotation_gain",
+    ],
 )
 @pytest.mark.parametrize(
     "value", [0.0, -1.0, float("nan"), float("inf"), True, "1.5", 3.1]
@@ -99,6 +117,7 @@ def test_task1_motion_gains_parse_from_shared_yaml() -> None:
 def test_task1_motion_gains_reject_invalid_values(field: str, value: object) -> None:
     raw = {
         "approach_translation_gain": 1.2,
+        "right_approach_translation_gain": 1.5,
         "translation_gain": 1.5,
         "rotation_gain": 1.0,
     }
@@ -111,6 +130,7 @@ def test_task1_motion_gains_reject_invalid_values(field: str, value: object) -> 
 def test_task0_motion_gains_are_identity() -> None:
     assert parse_task1_motion_gain_config({"task": 0}) == Task1MotionGainConfig(
         approach_translation_gain=1.0,
+        right_approach_translation_gain=1.0,
         translation_gain=1.0,
         rotation_gain=1.0,
     )
@@ -125,6 +145,43 @@ def test_task1_client_validation_requires_exactly_80_hz_controller_frequency() -
         ValueError, match="Task 1 control.controller_frequency must be 80.0"
     ):
         validate_frs_config_section(config)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("control_frequency", 9.9, "control.control_frequency must be 10.0"),
+        ("controller_frequency", 80.1, "control.controller_frequency must be 80.0"),
+        ("dispatch_lead_time_s", 0.05, "control.dispatch_lead_time_s must be 0.04"),
+    ],
+)
+def test_task1_client_validation_enforces_exact_temporal_contract(
+    field: str, value: float, message: str
+) -> None:
+    config_path = Path(__file__).parents[1] / "deploy_pi05/configs/deploy_pi05_frs.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["control"][field] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_frs_config_section(config)
+
+
+def test_task1_client_validation_requires_dispatch_lead_field() -> None:
+    config_path = Path(__file__).parents[1] / "deploy_pi05/configs/deploy_pi05_frs.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["control"].pop("dispatch_lead_time_s")
+
+    with pytest.raises(ValueError, match="control.dispatch_lead_time_s"):
+        validate_frs_config_section(config)
+
+
+def test_task0_client_validation_does_not_require_task1_dispatch_lead() -> None:
+    config_path = Path(__file__).parents[1] / "deploy_pi05/configs/deploy_pi05_frs.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["task"] = 0
+    config["control"].pop("dispatch_lead_time_s")
+
+    validate_frs_config_section(config)
 
 
 def test_task1_runtime_requires_explicit_motion_gain() -> None:
@@ -144,6 +201,7 @@ def test_task1_runtime_accepts_explicit_motion_gain_before_loading(
 ) -> None:
     motion_gain = Task1MotionGainConfig(
         approach_translation_gain=1.2,
+        right_approach_translation_gain=1.5,
         translation_gain=1.5,
         rotation_gain=1.0,
     )
@@ -168,8 +226,8 @@ def test_task1_runtime_accepts_explicit_motion_gain_before_loading(
 @pytest.mark.parametrize(
     ("latched", "left_gain", "right_gain"),
     [
-        pytest.param((True, False), 1.5, 1.2, id="left-latched"),
-        pytest.param((False, False), 1.2, 1.2, id="both-open"),
+        pytest.param((True, False), 1.5, 1.5, id="left-latched"),
+        pytest.param((False, False), 1.2, 1.5, id="both-open"),
         pytest.param((True, True), 1.5, 1.5, id="both-closed"),
         pytest.param((False, True), 1.2, 1.5, id="left-reopened"),
     ],
@@ -184,6 +242,7 @@ def test_task1_motion_gain_uses_each_arm_latch_phase(
         latched=latched,
         config=Task1MotionGainConfig(
             approach_translation_gain=1.2,
+            right_approach_translation_gain=1.5,
             translation_gain=1.5,
             rotation_gain=1.0,
         ),
@@ -207,6 +266,7 @@ def test_task1_startup_summary_advertises_shared_motion_contract(capsys) -> None
         },
         "task1": {
             "approach_translation_gain": 1.2,
+            "right_approach_translation_gain": 1.5,
             "translation_gain": 1.5,
             "rotation_gain": 1.0,
             "left_min_lift_height_m": 0.10,
@@ -236,6 +296,7 @@ def test_task1_startup_summary_advertises_shared_motion_contract(capsys) -> None
     output = capsys.readouterr().out
     assert "dispatch_lead_s=0.04" in output
     assert "approach_gain=1.2" in output
+    assert "right_approach_gain=1.5" in output
     assert "translation_gain=1.5" in output
     assert "left_min_lift_m=0.1" in output
     assert "right_preclose_forward_m=0.005" in output

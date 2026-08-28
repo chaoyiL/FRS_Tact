@@ -1,7 +1,45 @@
 # Plain-vision pi0.5 deployment configuration.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_bread_all_step8000/checkpoint
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
 seed: 0
 num_steps: 10
+
+# 0: direct model control, 1: tube-extraction guard, 2: bread-and-ketchup squeeze guard.
+task: 1
+task1:
+  max_world_xy_deviation_m: 0.005
+  left_release_height_m: 0.10
+  right_release_height_m: 0.04
+  hold_left_during_right_lift: true
+  approach_translation_gain: 1.2
+  translation_gain: 1.5
+  rotation_gain: 1.0
+  left_min_lift_height_m: 0.10
+  left_lift_speed_m_s: 0.04
+  right_preclose_forward_m: 0.005
+  right_preclose_speed_m_s: 0.02
+  right_preclose_tolerance_m: 0.001
+  right_preclose_stable_steps: 3
+task2:
+  right_release_drop_m: 0.01
+  right_release_speed_m_s: 0.01
+  left_grasp_command_m: 0.022
+  left_squeeze_command_m: 0.012
+  left_grasp_speed_m_s: 0.008
+  left_squeeze_speed_m_s: 0.003
+  left_grasp_tolerance_m: 0.002
+  right_release_open_threshold_m: 0.025
+  toast_offset_from_right_release_xyz_m: [0.0, 0.0, 0.08]
+  toast_xy_tolerance_m: 0.05
+  toast_z_tolerance_m: 0.03
+  left_squeeze_vla_threshold: 0.04
+  hold_pose_while_closing: true
+  right_lift_height_m: 0.05
+  right_left_shift_m: 0.2
+  right_motion_speed_m_s: 0.08
+  right_pose_tolerance_m: 0.005
+  right_home_tolerance_m: 0.01
+  right_home_rotation_tolerance_rad: 0.1
+  right_grasp_tolerance_m: 0.003
 
 model:
   # The selected legacy pi05_bi checkpoint was trained with 20D model actions.
@@ -17,8 +55,8 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_bread_all_step8000/checkpoint/assets/
-  asset_id: bread_all
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets/
+  asset_id: two_tubes_0102
   use_quantile_norm: true
 
 connection:
@@ -36,7 +74,7 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   #Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
   #Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   #Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
@@ -54,9 +92,9 @@ control:
 
 gripper:
   hysteresis_enabled: true
-  # VLA <= 0.08 locks the left gripper closed through return noise.
+  # VLA <= 0.09 locks the left gripper closed through return noise.
   # Reopening is allowed only once the VLA width reaches 0.10.
-  left_close_threshold: 0.08
+  left_close_threshold: 0.09
   left_reopen_threshold: 0.10
   left_closed_command: 0.01
 

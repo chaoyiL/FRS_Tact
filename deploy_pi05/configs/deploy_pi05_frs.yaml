@@ -17,13 +17,16 @@ task1:
   hold_left_during_right_lift: true
   # Applied only after that arm's gripper latch switches translation to VLA.
   approach_translation_gain: 1.2
+  right_approach_translation_gain: 1.5
+
   translation_gain: 1.5
   rotation_gain: 1.0
   # Task 1 motion stages consumed by the robot-side sequencer.
   left_min_lift_height_m: 0.10
   left_lift_speed_m_s: 0.04
-  right_preclose_forward_m: 0.005
-  right_preclose_speed_m_s: 0.02
+  right_preclose_forward_m: 0.01
+  right_approach_min_open_m: 0.045
+  right_preclose_speed_m_s: 0.01
   right_preclose_tolerance_m: 0.001
   right_preclose_stable_steps: 3
 
@@ -96,17 +99,17 @@ control:
 
 gripper:
   # 左手 VLA <= 0.08：闭合并锁存
-  # 右手 VLA <= 0.09：闭合并锁存
+  # 右手 VLA <= 0.105：闭合并锁存
   # 闭合后短暂的预测波动不会让夹爪张开
-  # 只有 VLA 明确预测到 >= 0.10 才解除锁存
+  # 左手 VLA >= 0.10、右手 VLA >= 0.115 时才解除各自锁存
   # 左右手状态相互独立
   # FRS 仍然不修改夹爪 9/19 维，夹爪来源仍是 VLA，只在物理执行端防抖
 
   left_close_threshold: 0.08
   left_reopen_threshold: 0.10
   left_closed_command: 0.01
-  right_close_threshold: 0.09
-  right_reopen_threshold: 0.10
+  right_close_threshold: 0.105
+  right_reopen_threshold: 0.115
   right_closed_command: 0.01
 
 runtime:

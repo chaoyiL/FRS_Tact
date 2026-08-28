@@ -23,6 +23,7 @@ class GripperHysteresisConfig:
 @dataclass(frozen=True)
 class Task1MotionGainConfig:
     approach_translation_gain: float
+    right_approach_translation_gain: float
     translation_gain: float
     rotation_gain: float
 
@@ -62,6 +63,7 @@ def parse_task1_motion_gain_config(
     if parse_task_switch(config) != 1:
         return Task1MotionGainConfig(
             approach_translation_gain=1.0,
+            right_approach_translation_gain=1.0,
             translation_gain=1.0,
             rotation_gain=1.0,
         )
@@ -70,6 +72,12 @@ def parse_task1_motion_gain_config(
         approach_translation_gain=_bounded_float(
             raw.get("approach_translation_gain"),
             "task1.approach_translation_gain",
+            minimum=0.1,
+            maximum=3.0,
+        ),
+        right_approach_translation_gain=_bounded_float(
+            raw.get("right_approach_translation_gain"),
+            "task1.right_approach_translation_gain",
             minimum=0.1,
             maximum=3.0,
         ),
@@ -163,14 +171,34 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
         raise ValueError("FRS deployment requires observation.data_type='vitac'")
     control = _mapping(config.get("control"), "control")
     if task == 1:
-        controller_frequency = control.get("controller_frequency")
-        if (
-            isinstance(controller_frequency, bool)
-            or not isinstance(controller_frequency, Real)
-            or not math.isfinite(float(controller_frequency))
-            or float(controller_frequency) != 80.0
-        ):
+        control_frequency = _bounded_float(
+            control.get("control_frequency"),
+            "control.control_frequency",
+            minimum=0.1,
+            maximum=1000.0,
+        )
+        controller_frequency = _bounded_float(
+            control.get("controller_frequency"),
+            "control.controller_frequency",
+            minimum=0.1,
+            maximum=1000.0,
+        )
+        dispatch_lead_time_s = _bounded_float(
+            control.get("dispatch_lead_time_s"),
+            "control.dispatch_lead_time_s",
+            minimum=1e-6,
+            maximum=1.0,
+        )
+        if control_frequency != 10.0:
+            raise ValueError("Task 1 control.control_frequency must be 10.0")
+        if controller_frequency != 80.0:
             raise ValueError("Task 1 control.controller_frequency must be 80.0")
+        if dispatch_lead_time_s != 0.04:
+            raise ValueError("Task 1 control.dispatch_lead_time_s must be 0.04")
+        if dispatch_lead_time_s < 3.0 / controller_frequency:
+            raise ValueError(
+                "control.dispatch_lead_time_s must cover three controller periods"
+            )
     steps = _integer(control.get("steps_per_inference"), "control.steps_per_inference")
     horizon = _integer(control.get("action_horizon"), "control.action_horizon")
     if steps != horizon:

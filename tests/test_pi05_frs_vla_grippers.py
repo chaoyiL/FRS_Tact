@@ -19,6 +19,7 @@ def _runtime() -> FRSRuntime:
     runtime.metadata = {"extra_metadata": {"loss_mode": "bimanual_gated"}}
     runtime.task1_motion_gain = Task1MotionGainConfig(
         approach_translation_gain=1.0,
+        right_approach_translation_gain=1.0,
         translation_gain=1.0,
         rotation_gain=1.0,
     )
@@ -157,6 +158,7 @@ def test_steer_action_applies_task1_translation_gain_after_unnormalization() -> 
     runtime.task = 1
     runtime.task1_motion_gain = Task1MotionGainConfig(
         approach_translation_gain=1.2,
+        right_approach_translation_gain=1.5,
         translation_gain=1.5,
         rotation_gain=1.0,
     )
@@ -196,7 +198,7 @@ def test_steer_action_applies_task1_translation_gain_after_unnormalization() -> 
     result = runtime.steer_action(4, 10, {}, 1)
 
     np.testing.assert_allclose(result.selected_action[0:3], [3.0, 4.5, 6.0])
-    np.testing.assert_allclose(result.selected_action[10:13], [7.2, 7.2, 7.2])
+    np.testing.assert_allclose(result.selected_action[10:13], [9.0, 9.0, 9.0])
     np.testing.assert_array_equal(
         result.selected_action[[9, 19]], runtime._action_vla[0, 1, [9, 19]]
     )
@@ -207,6 +209,7 @@ def test_task0_bypasses_task1_motion_gain_in_robot_space(monkeypatch) -> None:
     runtime.task = 0
     runtime.task1_motion_gain = Task1MotionGainConfig(
         approach_translation_gain=1.2,
+        right_approach_translation_gain=1.5,
         translation_gain=1.5,
         rotation_gain=1.25,
     )

@@ -200,11 +200,12 @@ def _apply_task1_motion_gain(
         raise ValueError("task1 motion gain requires a finite 20D robot action")
     adjusted = np.array(action, dtype=np.float32, copy=True)
     for side_index, is_latched in enumerate(latched):
-        gain = (
-            config.translation_gain
-            if is_latched
-            else config.approach_translation_gain
-        )
+        if is_latched:
+            gain = config.translation_gain
+        elif side_index == 1:
+            gain = config.right_approach_translation_gain
+        else:
+            gain = config.approach_translation_gain
         adjusted[_POSITION_ACTION_SLICES[side_index]] *= gain
         if not is_latched or config.rotation_gain == 1.0:
             continue
@@ -437,6 +438,7 @@ class FRSRuntime:
         self.task1_motion_gain = (
             Task1MotionGainConfig(
                 approach_translation_gain=1.0,
+                right_approach_translation_gain=1.0,
                 translation_gain=1.0,
                 rotation_gain=1.0,
             )
