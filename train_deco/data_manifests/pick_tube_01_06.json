@@ -1,0 +1,48 @@
+{
+  "format": "deco-lerobot-v21-multiroot-v1",
+  "dataset_id": "pick_tube_01_02_03_04_05_06",
+  "sources": [
+    {
+      "name": "pick_tube_01",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_01",
+      "source_dataset_id": "pick_tube_01",
+      "total_episodes": 400,
+      "total_frames": 174571
+    },
+    {
+      "name": "pick_tube_02",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_02",
+      "source_dataset_id": "pick_tube_02",
+      "total_episodes": 150,
+      "total_frames": 61811
+    },
+    {
+      "name": "pick_tube_03",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_03",
+      "source_dataset_id": "pick_tube_03",
+      "total_episodes": 500,
+      "total_frames": 202809
+    },
+    {
+      "name": "pick_tube_04",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_04",
+      "source_dataset_id": "pick_tube_04",
+      "total_episodes": 200,
+      "total_frames": 71437
+    },
+    {
+      "name": "pick_tube_05",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_05",
+      "source_dataset_id": "pick_tube_05",
+      "total_episodes": 350,
+      "total_frames": 133710
+    },
+    {
+      "name": "pick_tube_06",
+      "path": "/DATA/ljl/substage/lerobot_v30_work/KaiyueChen/pick_tube_06",
+      "source_dataset_id": "pick_tube_06",
+      "total_episodes": 100,
+      "total_frames": 37229
+    }
+  ]
+}
