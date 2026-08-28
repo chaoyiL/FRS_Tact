@@ -1,4 +1,7 @@
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from deploy_smolvla import remote_client
 from tools import infer_smolvla_jax as infer
@@ -36,3 +39,20 @@ def test_pure_vision_server_config_requests_smolvla_256_profile() -> None:
     config = remote_client._build_server_config(observation, control, frs_policy=None)
 
     assert config["observation_profile"] == "smolvla_vision_256"
+
+
+def test_smolvla_right_arm_profile_requires_7d_state_and_10d_action() -> None:
+    observation = {
+        "state_action_profile": "single-right-arm-7x10",
+        "single_arm_mode": True,
+        "controlled_arm": "right",
+    }
+    policy = SimpleNamespace(config=SimpleNamespace(state_dim=7, action_dim=10))
+
+    assert remote_client._validate_state_action_profile(observation, policy) == (
+        "single-right-arm-7x10"
+    )
+
+    policy.config.action_dim = 20
+    with pytest.raises(ValueError, match="does not match"):
+        remote_client._validate_state_action_profile(observation, policy)

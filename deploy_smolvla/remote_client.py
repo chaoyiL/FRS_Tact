@@ -47,6 +47,8 @@ SUPPORTED_DATA_TYPES = frozenset({"vision", "vitac"})
 SMOLVLA_OBSERVATION_PROFILE = "smolvla_vision_256"
 SMOLVLA_VITAC_OBSERVATION_PROFILE = "smolvla_vitac_256"
 DIRECT_DECODER_BACKEND = "direct_tactile_decoder"
+DUAL_ARM_PROFILE = "dual-arm-20x20"
+SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
 Policy = JaxSmolVLAPolicy | VTJaxSmolVLAPolicy
 LOGGER = logging.getLogger(__name__)
 
@@ -214,8 +216,28 @@ def load_config(path: Path) -> dict[str, Any]:
 
     if observation["data_type"] not in SUPPORTED_DATA_TYPES:
         raise ValueError("observation.data_type must be 'vision' or 'vitac'")
-    if observation["single_arm_mode"] or observation["no_state_obs_mode"]:
-        raise ValueError("The current checkpoint contract requires bimanual state mode")
+    if type(observation["single_arm_mode"]) is not bool:
+        raise ValueError("observation.single_arm_mode must be a boolean")
+    if type(observation["no_state_obs_mode"]) is not bool:
+        raise ValueError("observation.no_state_obs_mode must be a boolean")
+    if observation["no_state_obs_mode"]:
+        raise ValueError("SmolVLA deployment requires state observations")
+    profile = str(observation.get("state_action_profile", DUAL_ARM_PROFILE))
+    if profile not in {DUAL_ARM_PROFILE, SINGLE_RIGHT_ARM_PROFILE}:
+        raise ValueError(
+            "observation.state_action_profile must be 'dual-arm-20x20' or "
+            "'single-right-arm-7x10'"
+        )
+    expected_single = profile == SINGLE_RIGHT_ARM_PROFILE
+    if observation["single_arm_mode"] is not expected_single:
+        raise ValueError(
+            "observation.single_arm_mode does not match observation.state_action_profile"
+        )
+    expected_arm = "right" if expected_single else None
+    if observation.get("controlled_arm") != expected_arm:
+        raise ValueError(
+            f"observation.controlled_arm must be {expected_arm!r} for profile {profile!r}"
+        )
     if int(control["action_horizon"]) <= 0:
         raise ValueError("action_horizon must be positive")
     if isinstance(control["steps_per_inference"], bool) or not isinstance(
@@ -1131,6 +1153,24 @@ def _build_server_config(
     return server_config
 
 
+def _validate_state_action_profile(
+    observation_config: Mapping[str, Any], policy: Policy
+) -> str:
+    profile = str(observation_config.get("state_action_profile", DUAL_ARM_PROFILE))
+    state_dim = int(policy.config.state_dim)
+    action_dim = int(policy.config.action_dim)
+    # Existing bimanual SmolVLA checkpoints include more than one state layout;
+    # retain their checkpoint-derived contract. Right-hand deployment is the
+    # new fixed profile and must never be inferred from dimensions alone.
+    expected = (7, 10)
+    if profile == SINGLE_RIGHT_ARM_PROFILE and (state_dim, action_dim) != expected:
+        raise ValueError(
+            f"checkpoint state/action contract {(state_dim, action_dim)} does not match "
+            f"observation.state_action_profile={profile!r}, expected {expected}"
+        )
+    return profile
+
+
 def run(
     config_path: Path,
     max_iterations_override: int | None = None,
@@ -1163,6 +1203,7 @@ def run(
         control=control,
         rename_map=rename_map,
     )
+    state_action_profile = _validate_state_action_profile(observation_config, policy)
     print(f"[client] JAX backend: {jax.default_backend()}")
     policy.reset()
     direct_decoder_config = _direct_decoder_config(config)
@@ -1213,7 +1254,8 @@ def run(
     state_dim = int(policy.config.state_dim)
     empty_cameras = int(policy.config.empty_cameras)
     print(
-        f"[client] Contract: state_dim={state_dim} action_dim={policy.config.action_dim} "
+        f"[client] Contract: profile={state_action_profile} state_dim={state_dim} "
+        f"action_dim={policy.config.action_dim} "
         f"images={list(robot_image_keys)} tactile={list(robot_tactile_keys)} "
         f"empty_cameras={empty_cameras}"
     )
