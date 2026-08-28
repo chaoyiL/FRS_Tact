@@ -33,6 +33,16 @@ def metadata(payload: bytes) -> dict:
     }
 
 
+def right_metadata(payload: bytes) -> dict:
+    contract = metadata(payload)
+    contract["state_action_profile"] = "single-right-arm-7x10"
+    contract["controlled_arms"] = ["right"]
+    contract["input"]["observation"] = [1, 7]
+    contract["input"]["state_layout"] = "single_right_relative_start_pose6d_gripper"
+    contract["output"]["action"] = [1, 32, 10]
+    return contract
+
+
 def test_sidecar_and_hash_are_required(tmp_path):
     payload = b"fake torchscript archive"
     artifact = tmp_path / "policy.ts"
@@ -54,4 +64,15 @@ def test_wrong_action_semantics_are_rejected():
     contract = metadata(b"")
     contract["output"]["action_mode"] = "absolute"
     with pytest.raises(ValueError, match="action_mode"):
+        validate_metadata(contract)
+
+
+def test_single_right_arm_contract_is_accepted():
+    assert validate_metadata(right_metadata(b""))["controlled_arms"] == ["right"]
+
+
+def test_single_right_arm_contract_rejects_bimanual_action_width():
+    contract = right_metadata(b"")
+    contract["output"]["action"] = [1, 32, 20]
+    with pytest.raises(ValueError, match="single-right-arm"):
         validate_metadata(contract)
