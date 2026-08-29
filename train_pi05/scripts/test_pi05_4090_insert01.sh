@@ -98,7 +98,7 @@ bash train_pi05/scripts/start_pi05_train.sh --check "${CONFIG}"
 
 log "抽样 ${MAX_NORM_FRAMES} 帧计算测试专用归一化统计"
 "${TRAIN_PI05_PYTHON}" train_pi05/tools/compute_norm_stats.py \
-    "${CONFIG}" --max-frames "${MAX_NORM_FRAMES}"
+    --config-name "${CONFIG}" --max-frames "${MAX_NORM_FRAMES}"
 
 NORM_STATS="${TRAIN_ROOT}/assets/insert_01_4090_smoke/norm_stats.json"
 [[ -s "${NORM_STATS}" ]] || fail "归一化统计没有生成：${NORM_STATS}"

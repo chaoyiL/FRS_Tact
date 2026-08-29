@@ -108,7 +108,7 @@ CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内�
 ```bash
 # 先修改 train_pi05/configs/train_pi05_right.yaml 中的数据路径和 norm_stats。
 source env_path
-"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py train_pi05/configs/train_pi05_right.yaml
+"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py --config-name train_pi05/configs/train_pi05_right.yaml
 bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
 ```
@@ -126,7 +126,7 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 source env_path
 "$TRAIN_PI05_PYTHON" train_pi05/tools/smoke_test.py
 "$TRAIN_PI05_PYTHON" train_pi05/tools/check_dataset.py --config-name pi05_bi
-"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py pi05_bi
+"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py --config-name pi05_bi
 ```
 
 `training.overwrite` 与 `training.resume` 不能同时为 `true`。正式训练前应确保

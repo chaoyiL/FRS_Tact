@@ -214,7 +214,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.delta_timestamps = delta_timestamps
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
-        self._video_backend = video_backend if video_backend else get_safe_default_video_backend()
+        self._video_backend = video_backend
         self._return_uint8 = return_uint8
         self._depth_output_unit = depth_output_unit
         self._batch_encoding_size = batch_encoding_size
@@ -230,6 +230,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         )
         self.root = self.meta.root
         self.revision = self.meta.revision
+        if self._video_backend is None:
+            self._video_backend = get_safe_default_video_backend() if self.meta.video_keys else "image"
         self.meta.rescale_depth_stats(self._depth_output_unit)
 
         if episodes is not None and any(
@@ -751,7 +753,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.image_transforms = None
         obj.delta_timestamps = None
         obj.episodes = None
-        obj._video_backend = video_backend if video_backend is not None else get_safe_default_video_backend()
+        obj._video_backend = (
+            video_backend
+            if video_backend is not None
+            else (get_safe_default_video_backend() if obj.meta.video_keys else "image")
+        )
         obj._return_uint8 = False
         obj._depth_output_unit = DEFAULT_DEPTH_UNIT
         obj._batch_encoding_size = batch_encoding_size
@@ -850,7 +856,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.image_transforms = None
         obj.delta_timestamps = None
         obj.episodes = None
-        obj._video_backend = video_backend if video_backend else get_safe_default_video_backend()
+        obj._video_backend = video_backend
         obj._return_uint8 = False
         obj._depth_output_unit = DEFAULT_DEPTH_UNIT
         obj._batch_encoding_size = batch_encoding_size
@@ -862,6 +868,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.meta = LeRobotDatasetMetadata(
             obj.repo_id, obj._requested_root, obj.revision, force_cache_sync=force_cache_sync
         )
+        if obj._video_backend is None:
+            obj._video_backend = get_safe_default_video_backend() if obj.meta.video_keys else "image"
 
         obj._encoder_threads = encoder_threads
         obj.root = obj.meta.root
