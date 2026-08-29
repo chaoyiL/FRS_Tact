@@ -25,6 +25,7 @@ from train_deco.train import (
     export_stage2_torchscript_artifacts,
     create_training_datasets,
     apply_restored_dataset_stats,
+    resolve_dataloader_prefetch_factor,
     resolve_tactile_encoder_distributed,
     restore_stage2_training_state,
     restore_stage2_resume_arguments,
@@ -149,6 +150,15 @@ def test_stage2_parity_inputs_keep_observation_and_action_dimensions_distinct() 
     assert tactile.shape == (1, 4, 3, 224, 224)
 
 
+def test_dataloader_prefetch_factor_is_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("DATALOADER_PREFETCH_FACTOR", "1")
+
+    assert resolve_dataloader_prefetch_factor(0) is None
+    assert resolve_dataloader_prefetch_factor(12) == 1
+
+    monkeypatch.setenv("DATALOADER_PREFETCH_FACTOR", "0")
+    with pytest.raises(ValueError, match="must be positive"):
+        resolve_dataloader_prefetch_factor(12)
 
 
 class _RecordingGradScaler:

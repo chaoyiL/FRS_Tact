@@ -710,6 +710,15 @@ def restore_stage2_training_state(
         "stage2_metadata": metadata,
     }
 
+def resolve_dataloader_prefetch_factor(workers: int) -> int | None:
+    if workers == 0:
+        return None
+    factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", "2"))
+    if factor <= 0:
+        raise ValueError("DATALOADER_PREFETCH_FACTOR must be positive")
+    return factor
+
+
 def make_loader(dataset, batch_size, workers, rank, world_size, shuffle, seed):
     sampler = None
     if world_size > 1:
@@ -730,6 +739,7 @@ def make_loader(dataset, batch_size, workers, rank, world_size, shuffle, seed):
         sampler=sampler,
         shuffle=shuffle and sampler is None,
         num_workers=workers,
+        prefetch_factor=resolve_dataloader_prefetch_factor(workers),
         pin_memory=torch.cuda.is_available(),
         # persistent_workers disabled: each worker holds ~120k open file
         # descriptors (146k mmap'd npy shards) and /dev/shm tensor objects;

@@ -232,7 +232,8 @@ bash train_deco/scripts/server_stage2_rtxpro6000.sh run bread
 ```
 
 默认 `BATCH_SIZE=512` 是单卡物理 batch size，16 vCPU 自动配置为 12 个
-DataLoader workers。若 512 在实际 RTX PRO 6000 显存或主机内存上 OOM，脚本会保留现有日志，
+DataLoader workers，并设置 `DATALOADER_PREFETCH_FACTOR=1` 控制在途 batch 的内存峰值。
+若 512 在实际 RTX PRO 6000 显存或主机内存上 OOM，脚本会保留现有日志，
 之后必须显式降低 `BATCH_SIZE` 再启动；当前训练器没有梯度累积，不能把较小的物理
 batch 自动等价成有效 batch 1024。
 
