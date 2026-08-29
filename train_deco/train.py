@@ -359,7 +359,7 @@ def build_stage2_parity_inputs(
         "img1": images[0],
         "img2": images[1],
         "obs": torch.randn(
-            1, int(config["action_dim"]), generator=generator
+            1, int(config["obs_dim"]), generator=generator
         ).to(device),
         "act": torch.randn(
             1, int(config["chunk_size"]), int(config["action_dim"]),
@@ -715,6 +715,15 @@ def restore_stage2_training_state(
         "stage2_metadata": metadata,
     }
 
+def resolve_dataloader_prefetch_factor(workers: int) -> int | None:
+    if workers == 0:
+        return None
+    factor = int(os.environ.get("DATALOADER_PREFETCH_FACTOR", "2"))
+    if factor <= 0:
+        raise ValueError("DATALOADER_PREFETCH_FACTOR must be positive")
+    return factor
+
+
 def make_loader(dataset, batch_size, workers, rank, world_size, shuffle, seed):
     sampler = None
     if world_size > 1:
@@ -735,6 +744,7 @@ def make_loader(dataset, batch_size, workers, rank, world_size, shuffle, seed):
         sampler=sampler,
         shuffle=shuffle and sampler is None,
         num_workers=workers,
+        prefetch_factor=resolve_dataloader_prefetch_factor(workers),
         pin_memory=torch.cuda.is_available(),
         # persistent_workers disabled: each worker holds ~120k open file
         # descriptors (146k mmap'd npy shards) and /dev/shm tensor objects;
@@ -1754,6 +1764,7 @@ def main(argv=None):
                 mode=args.wandb_mode,
                 output_dir=output_dir,
                 config=config,
+                resume="allow" if args.resume_from else None,
             )
             print(json.dumps({
                 "event": "wandb_initialized", "url": wandb_logger.url,

@@ -18,11 +18,22 @@ fi
 cd "${PROJECT_ROOT}"
 if [[ -n "${SMOLVLA_TORCH_PYTHON:-}" ]]; then
     PYTHON_BIN="${SMOLVLA_TORCH_PYTHON}"
-elif [[ -x "/home/typhon/vb3/.venv/bin/python" ]]; then
-    PYTHON_BIN="/home/typhon/vb3/.venv/bin/python"
+elif [[ -x "${WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python" ]]; then
+    PYTHON_BIN="${WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python"
+elif [[ -x "${PROJECT_ROOT}/.venv-smolvla-torch/bin/python" ]]; then
+    PYTHON_BIN="${PROJECT_ROOT}/.venv-smolvla-torch/bin/python"
 else
-    echo "[smolvla-right] 请设置 SMOLVLA_TORCH_PYTHON，指向 VB3/官方 LeRobot 环境的 Python" >&2
+    echo "[smolvla-right] 未找到 FRS_Tact 的官方 LeRobot 训练环境。" >&2
+    echo "[smolvla-right] 请先运行：bash scripts/setup_env.sh --smolvla" >&2
     exit 1
 fi
 
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "[smolvla-right] Python 不存在或不可执行：${PYTHON_BIN}" >&2
+    echo "[smolvla-right] 请重新运行：bash scripts/setup_env.sh --smolvla" >&2
+    exit 1
+fi
+
+# 让多卡训练时由包装器找到同一环境中的 accelerate。
+export PATH="$(dirname -- "${PYTHON_BIN}"):${PATH}"
 exec "${PYTHON_BIN}" -m train_smolvla.torch_train --config "${CONFIG_PATH}" "$@"

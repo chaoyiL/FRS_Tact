@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 from typing import Any
 
-
 EPOCH_FIELDS = (
     "epoch",
     "global_step",
@@ -140,6 +139,7 @@ class WandbMetricsLogger:
         mode: str,
         output_dir: Path,
         config: dict[str, Any],
+        resume: str | None = None,
     ) -> None:
         try:
             import wandb
@@ -149,18 +149,20 @@ class WandbMetricsLogger:
                 "rerun train_deco/setup_environment.sh"
             ) from exc
 
-        self._run = wandb.init(
-            project=project,
-            entity=entity or None,
-            name=name,
-            id=run_id,
-            group=group or None,
-            tags=tags,
-            mode=mode,
-            dir=str(output_dir),
-            config=config,
-            resume="allow",
-        )
+        init_options = {
+            "project": project,
+            "entity": entity or None,
+            "name": name,
+            "id": run_id,
+            "group": group or None,
+            "tags": tags,
+            "mode": mode,
+            "dir": str(output_dir),
+            "config": config,
+        }
+        if resume is not None:
+            init_options["resume"] = resume
+        self._run = wandb.init(**init_options)
         self._run.define_metric("global_step")
         self._run.define_metric("*", step_metric="global_step")
 
