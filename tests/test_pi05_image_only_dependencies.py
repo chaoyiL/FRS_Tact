@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import importlib.util
 import tomllib
 from pathlib import Path
 
@@ -109,3 +110,14 @@ def test_jax_model_import_does_not_eagerly_load_pytorch_model_or_pytest() -> Non
     ).read_text(encoding="utf-8")
     assert "import pytest" not in gemma_pytorch
     assert "pytest.Cache" not in gemma_pytorch
+
+
+def test_smoke_training_schedule_is_valid_for_two_steps() -> None:
+    train_path = ROOT / "train_pi05" / "train.py"
+    spec = importlib.util.spec_from_file_location("pi05_yaml_train", train_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._fit_schedule_steps(2, 1_000) == (1, 2)
+    assert module._fit_schedule_steps(30_000, 1_000) == (1_000, 30_000)
