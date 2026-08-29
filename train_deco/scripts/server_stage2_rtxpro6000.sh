@@ -97,9 +97,24 @@ require_runtime() {
     [[ -x "${PYTHON_BIN}" && -x "${HF_BIN}" ]] || fail "请先运行 setup"
 }
 
-require_tokens() {
+wandb_enabled() {
+    case "${WANDB_ENABLED:-1}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        0|false|FALSE|no|NO|off|OFF) return 1 ;;
+        *) fail "WANDB_ENABLED 必须是布尔值，当前为：${WANDB_ENABLED}" ;;
+    esac
+}
+
+require_hf_token() {
     [[ -n "${HF_TOKEN:-}" ]] || fail "未设置 HF_TOKEN：${SERVER_ENV_FILE}"
-    [[ -n "${WANDB_API_KEY:-}" ]] || fail "未设置 WANDB_API_KEY：${SERVER_ENV_FILE}"
+}
+
+require_training_tokens() {
+    require_hf_token
+    if wandb_enabled && [[ "${WANDB_MODE:-online}" == "online" ]]; then
+        [[ -n "${WANDB_API_KEY:-}" ]] || fail \
+            "W&B online 模式未设置 WANDB_API_KEY；不用 W&B 时请设置 WANDB_ENABLED=0"
+    fi
 }
 
 detect_workers() {
@@ -140,7 +155,7 @@ download_dataset() {
 
 download_assets() {
     require_runtime
-    require_tokens
+    require_hf_token
     create_roots
     check_disk
     "${HF_BIN}" auth whoami
@@ -199,7 +214,7 @@ train_task() {
     timestamp="$(date +%Y%m%d_%H%M%S)"
     set_task "${task}" "${timestamp}"
     require_runtime
-    require_tokens
+    require_training_tokens
     create_roots
     [[ -f "${TASK_MANIFEST}" ]] || fail "缺少 manifest：${TASK_MANIFEST}"
     [[ -f "${TASK_STAGE1}" ]] || fail "缺少 Stage1：${TASK_STAGE1}"
@@ -213,7 +228,7 @@ train_task() {
     warn "BATCH_SIZE 是单卡物理 batch；如 CUDA OOM，请显式降低 BATCH_SIZE"
     printf '%s\n' "${TASK_RUN_ID}" > "${STATE_ROOT}/last_${task}_run_id"
 
-    export WANDB_ENABLED=1
+    export WANDB_ENABLED="${WANDB_ENABLED:-1}"
     export WANDB_PROJECT="${WANDB_PROJECT:-deco-stage2}"
     export WANDB_GROUP="${WANDB_GROUP:-deco-stage2-rtxpro6000}"
     export WANDB_TAGS="${WANDB_TAGS:-stage2,rtxpro6000,${task}}"
@@ -253,7 +268,7 @@ upload_task() {
     run_id="$(last_run_id "${task}" "${2:-}")"
     set_task "${task}" unused
     require_runtime
-    require_tokens
+    require_hf_token
     [[ -n "${TASK_REPO}" ]] || fail "请设置 HF_OUTPUT_${task^^}_REPO=owner/repo"
     run_dir="${OUTPUT_ROOT}/${run_id}"
     [[ -f "${run_dir}/deco_stage2_best.pt" ]] || fail "缺少训练产物：${run_dir}"
@@ -278,7 +293,11 @@ doctor() {
     "${PYTHON_BIN}" -c \
         'import torch, wandb, huggingface_hub; print(torch.__version__, torch.version.cuda, wandb.__version__, huggingface_hub.__version__)'
     [[ -n "${HF_TOKEN:-}" ]] && log "HF_TOKEN=已设置" || warn "HF_TOKEN=未设置"
-    [[ -n "${WANDB_API_KEY:-}" ]] && log "WANDB_API_KEY=已设置" || warn "WANDB_API_KEY=未设置"
+    if wandb_enabled; then
+        [[ -n "${WANDB_API_KEY:-}" ]] && log "WANDB_API_KEY=已设置" || warn "WANDB_API_KEY=未设置"
+    else
+        log "W&B=已禁用"
+    fi
 }
 
 main() {
