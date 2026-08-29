@@ -110,6 +110,24 @@ resolve_uv() {
   fi
 }
 
+jax_environment_matches() {
+  [[ -x "${JAX_PYTHON}" ]] || return 1
+  env -u LD_LIBRARY_PATH "${JAX_PYTHON}" - "${JAX_VERSION}" "${FLAX_VERSION}" <<"PY"
+import sys
+
+import flax
+import jax
+import numpy
+import pyarrow
+import yaml
+from PIL import Image
+
+expected_jax, expected_flax = sys.argv[1:]
+if jax.__version__ != expected_jax or flax.__version__ != expected_flax:
+    raise SystemExit(1)
+PY
+}
+
 setup_environments() {
   create_roots
   if [[ ! -x "${PYTHON_BIN}" || ! -x "${ACCELERATE_BIN}" || ! -x "${RDP_DIR}/.venv/bin/hf" ]]; then
@@ -123,14 +141,22 @@ setup_environments() {
     echo "复用 RDP 训练环境：${RDP_DIR}/.venv"
   fi
 
+  local uv_bin
+  uv_bin=$(resolve_uv)
   if [[ ! -x "${JAX_PYTHON}" ]]; then
-    local uv_bin
-    uv_bin=$(resolve_uv)
     if [[ "${DRY_RUN}" != "1" && ! -x "${uv_bin}" ]]; then
       echo "找不到 uv；RDP 环境安装脚本应先安装 uv：${uv_bin}" >&2
       exit 1
     fi
     run "${uv_bin}" venv --python 3.12 "${RDP_DIR}/.venv-jax"
+  fi
+
+  if [[ "${DRY_RUN}" == "1" ]] || ! jax_environment_matches; then
+    if [[ "${DRY_RUN}" != "1" && ! -x "${uv_bin}" ]]; then
+      echo "找不到 uv，无法修复 JAX 环境：${uv_bin}" >&2
+      exit 1
+    fi
+    echo "安装或修复 JAX 触觉编码环境：JAX ${JAX_VERSION}, Flax ${FLAX_VERSION}"
     run "${uv_bin}" pip install --python "${JAX_PYTHON}" \
       --index-url "${PYPI_INDEX_URL}" \
       "jax[cuda12]==${JAX_VERSION}" \
@@ -141,7 +167,7 @@ setup_environments() {
       "pyyaml==6.0.3" \
       "tqdm==4.70.0"
   else
-    echo "复用 JAX 触觉编码环境：${RDP_DIR}/.venv-jax"
+    echo "复用已验证的 JAX 触觉编码环境：${RDP_DIR}/.venv-jax"
   fi
 
   verify_runtime
@@ -155,7 +181,7 @@ verify_runtime() {
   check_executable "${PYTHON_BIN}" "RDP Python"
   check_executable "${ACCELERATE_BIN}" "Accelerate"
   check_executable "${JAX_PYTHON}" "JAX Python"
-  "${PYTHON_BIN}" - <<"PY"
+  env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${PYTHON_BIN}" - <<"PY"
 import accelerate
 import diffusers
 import hydra
@@ -169,7 +195,7 @@ if not torch.cuda.is_available():
     raise SystemExit("RDP PyTorch 环境没有检测到 CUDA")
 print(f"RDP torch={torch.__version__}, gpu={torch.cuda.get_device_name(0)}")
 PY
-  env -u LD_LIBRARY_PATH XLA_PYTHON_CLIENT_PREALLOCATE=false \
+  env -u LD_LIBRARY_PATH "CUDA_VISIBLE_DEVICES=${GPU_ID}" XLA_PYTHON_CLIENT_PREALLOCATE=false \
     "${JAX_PYTHON}" - <<"PY"
 import flax
 import jax
@@ -323,6 +349,7 @@ precompute_task() {
   check_encoder
   local args=(
     env -u LD_LIBRARY_PATH
+    "CUDA_VISIBLE_DEVICES=${GPU_ID}"
     XLA_PYTHON_CLIENT_PREALLOCATE=false
     "${JAX_PYTHON}" precompute_pick_tube_v21_tactile_embeddings.py
     --dataset-root "${LEROBOT_ROOT}"
