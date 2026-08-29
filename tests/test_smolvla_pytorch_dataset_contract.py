@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 import json
+import os
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
@@ -11,6 +12,7 @@ import yaml
 
 from train_smolvla.torch_train import (
     _accelerate_command,
+    _configure_single_gpu_precision,
     _effective_output_dir,
     _install_accelerate_timeout,
     _prepare_output_dir,
@@ -99,7 +101,7 @@ def test_wandb_auto_rejects_unauthenticated_online_environment(monkeypatch) -> N
 
 
 def test_default_command_resolves_wandb_and_accelerate_defaults(monkeypatch) -> None:
-    config_path = Path(__file__).parents[1] / "train_smolvla/configs/train_pytorch.yaml"
+    config_path = Path(__file__).parents[1] / "train_smolvla/configs/train_smolvla.yaml"
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     monkeypatch.delenv("WANDB_MODE", raising=False)
     monkeypatch.setattr("train_smolvla.torch_train._wandb_has_credentials", lambda: False)
@@ -236,3 +238,65 @@ def test_existing_output_directory_is_preserved_and_incremented(
     assert not selected.exists()
     assert marker.read_text(encoding="utf-8") == "preserve me"
     assert _effective_output_dir(config) == selected
+
+
+@pytest.mark.parametrize(
+    "launcher_name",
+    ["start_smolvla_train.sh", "start_smolvla_right_train.sh"],
+)
+def test_launcher_uses_local_regenerable_arrow_cache(launcher_name: str) -> None:
+    launcher = (
+        Path(__file__).parents[1] / "train_smolvla" / "scripts" / launcher_name
+    ).read_text(encoding="utf-8")
+
+    assert 'SMOLVLA_USE_LOCAL_ARROW_CACHE:-1' in launcher
+    assert '/tmp/frs_tact_smolvla' in launcher
+    assert 'export HF_DATASETS_CACHE="${SMOLVLA_LOCAL_CACHE_ROOT}/datasets_arrow"' in launcher
+    assert 'export TMPDIR="${SMOLVLA_LOCAL_CACHE_ROOT}/tmp"' in launcher
+
+
+def test_training_configs_use_smolvla_names() -> None:
+    config_dir = Path(__file__).parents[1] / "train_smolvla/configs"
+
+    assert (config_dir / "train_smolvla.yaml").is_file()
+    assert (config_dir / "train_smolvla_right.yaml").is_file()
+    assert not (config_dir / "train_pytorch.yaml").exists()
+    assert not (config_dir / "train_pytorch_right.yaml").exists()
+
+
+def test_4090_smoke_config_keeps_contract_and_minimizes_training() -> None:
+    config_path = (
+        Path(__file__).parents[1]
+        / "train_smolvla/configs/train_smolvla_4090_smoke.yaml"
+    )
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    assert config["datasets"] == [
+        {
+            "repo_id": "KaiyueChen/two_tubes_04",
+            "root": "/workspace/lerobot_v30/KaiyueChen/two_tubes_04",
+        }
+    ]
+    assert config["dataset"]["state_dim"] == 20
+    assert config["dataset"]["action_dim"] == 20
+    assert len(config["dataset"]["image_keys"]) == 2
+    assert config["augmentation"] == {
+        "preset": "balanced-light-v2",
+        "enabled": True,
+    }
+    assert config["training"]["batch_size"] == 1
+    assert config["training"]["steps"] == 5
+    assert config["training"]["save_freq"] == 5
+    assert config["training"]["eval_steps"] == 0
+    assert config["distributed"]["num_gpus"] == 1
+    assert config["wandb"]["enable"] is False
+
+
+def test_single_gpu_precision_uses_yaml_value(monkeypatch) -> None:
+    monkeypatch.delenv("ACCELERATE_MIXED_PRECISION", raising=False)
+
+    _configure_single_gpu_precision(
+        {"distributed": {"mixed_precision": "bf16"}}
+    )
+
+    assert os.environ["ACCELERATE_MIXED_PRECISION"] == "bf16"

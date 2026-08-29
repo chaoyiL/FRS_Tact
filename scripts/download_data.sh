@@ -30,7 +30,7 @@ resolve_data_python() {
             return 0
         fi
     done
-    echo "找不到 Python 3.12 数据工具环境；请先运行 scripts/setup_env.sh --pi05_train" >&2
+    echo "找不到 Python 3.12 数据工具环境；请先运行 scripts/setup_env.sh --smolvla 或 --pi05_train" >&2
     return 1
 }
 
@@ -144,7 +144,7 @@ check_deps() {
     if [[ ! -x "${DATA_PYTHON}" ]]; then
         echo "=========================================="
         echo " 数据工具 Python 不可执行：${DATA_PYTHON}"
-        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo "=========================================="
         exit 1
     fi
@@ -157,7 +157,7 @@ check_deps() {
     if [[ ! -x "${DATA_HF}" ]] || ! "${DATA_HF}" version &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境中未检测到 hf 命令：${DATA_HF}"
-        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo ""
         echo " 安装后如需登录，请执行:"
         echo "   ${DATA_HF} auth login"
@@ -168,7 +168,7 @@ check_deps() {
     if ! "${DATA_PYTHON}" -c "import av, draccus, jsonlines, torchvision; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境缺少 LeRobot 转换依赖（av/draccus/jsonlines/torchvision）。"
-        echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
+        echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo "=========================================="
         exit 1
     fi
@@ -253,6 +253,13 @@ canonicalize_v30_action_key() {
     log "检查 v3.0 动作字段（actions -> action）: ${dataset_dir}"
     "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
         "${dataset_dir}" >&2
+}
+
+verify_v30_action_key() {
+    local dataset_dir="$1"
+    log "验证 v3.0 动作字段已在转换时写为 action: ${dataset_dir}"
+    "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
+        --check "${dataset_dir}" >&2
 }
 
 get_hf_repo_cache_dir() {
@@ -546,6 +553,7 @@ upgrade_dataset_to_v30() {
     version="$(get_dataset_version "$snapshot_dir")"
     if [[ "$version" == "v3.0" ]]; then
         log "下载产物已是 v3.0，直接作为升级结果: ${snapshot_dir}"
+        verify_v30_action_key "$snapshot_dir"
         rm -rf "$old_backup" "$leftover_v30" "$work_dir"
         UPGRADED_DATASET_DIR="$snapshot_dir"
         return 0
@@ -604,7 +612,9 @@ upgrade_dataset_to_v30() {
         return 1
     fi
 
-    canonicalize_v30_action_key "$work_dir"
+    # 本仓库的转换器在首次写出 parquet 和 stats 时已经把 actions 规范为 action；
+    # 此处只验证，不再对所有 parquet 做第二遍 rewrite。
+    verify_v30_action_key "$work_dir"
 
     # 转换完成后删除旧版缓存，再放入 workspace 最终目录
     promote_v30_to_workspace "$dataset_name"

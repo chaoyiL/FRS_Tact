@@ -1,0 +1,14 @@
+{
+  "format": "deco-lerobot-v21-multiroot-v1",
+  "dataset_id": "press_01",
+  "state_action_profile": "single-right-arm-7x10",
+  "sources": [
+    {
+      "name": "press_01",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/press_01",
+      "source_dataset_id": "press_01",
+      "total_episodes": 800,
+      "total_frames": 197500
+    }
+  ]
+}

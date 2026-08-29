@@ -1,4 +1,4 @@
-# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与官方 LeRobot 训练流程对齐。
+# 纯视觉 SmolVLA 双臂训练配置，字段与官方 LeRobot 训练流程对齐。
 # 启动：bash train_smolvla/scripts/start_smolvla_train.sh
 
 dataset:

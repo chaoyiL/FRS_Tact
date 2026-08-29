@@ -95,6 +95,13 @@ With `training.existing_output: increment`, a failed or completed run directory
 is preserved and the next fresh run receives a timestamped sibling directory.
 Resume jobs still use `training.resume_from` and are never redirected.
 
+The launchers place regenerable Hugging Face Arrow and temporary files under
+`/tmp/frs_tact_smolvla` by default. This avoids RunPod network-volume user
+quota failures while keeping source datasets, model caches, outputs, and
+checkpoints in `/workspace`. Set `SMOLVLA_USE_LOCAL_ARROW_CACHE=0` only when the
+workspace quota is known to have enough headroom, or override the local path
+with `SMOLVLA_LOCAL_CACHE_ROOT`.
+
 The default dual-arm YAML enables DECO's exact `balanced-light-v2` training
 augmentation. It calls the same DECO implementation at batch level, so both
 cameras in one sample share the branch and all sampled parameters. Official
@@ -117,8 +124,51 @@ To inspect the generated official LeRobot command without training:
 
 ```bash
 python -m train_smolvla.torch_train \
-  --config train_smolvla/configs/train_pytorch_right.yaml --dry-run
+  --config train_smolvla/configs/train_smolvla_right.yaml --dry-run
 ```
+
+## RTX 4090 end-to-end smoke test
+
+The dedicated smoke path keeps the production dual-arm contract (20D state,
+20D action, camera1/camera2 after rename, PEFT, and balanced-light-v2) while
+using only `KaiyueChen/two_tubes_04`, one visible GPU, batch size 1, and five
+training steps. Evaluation and W&B are disabled; step 5 writes a real
+checkpoint and the launcher verifies that its model weights exist.
+
+Run the complete environment -> data -> training -> checkpoint pipeline:
+
+```bash
+bash train_smolvla/scripts/run_smolvla_4090_smoke.sh
+```
+
+The setup and data stages are idempotent. To rerun only training after both
+have already passed:
+
+```bash
+SMOLVLA_SMOKE_SKIP_SETUP=1 \
+SMOLVLA_SMOKE_SKIP_DOWNLOAD=1 \
+bash train_smolvla/scripts/run_smolvla_4090_smoke.sh
+```
+
+The smoke configuration is `configs/train_smolvla_4090_smoke.yaml`; it must not
+replace the two-GPU production configuration in `configs/train_smolvla.yaml`.
+
+## RunPod training issues already addressed
+
+- An obsolete `/home/typhon/vb3` Python path was replaced by the managed
+  `/workspace/venvs/smolvla_torch` environment and `.env.frs` lookup.
+- Legacy dataset key `actions` is migrated to the LeRobot v3 `action` key.
+- Extra tactile cameras are allowed in source datasets but pruned before the
+  pure-vision reader decodes samples; only camera0/camera1 feed this policy.
+- TorchCodec is pinned to 0.5.0 for PyTorch 2.7.1, removing the ABI mismatch.
+- W&B automatically falls back to offline mode when no API key exists.
+- Five-dataset initialization no longer hits Accelerate's 600-second barrier;
+  the configured process-group timeout is 7200 seconds.
+- Regenerable Arrow/temp files use `/tmp/frs_tact_smolvla`, preventing the
+  RunPod workspace user quota from aborting Parquet conversion.
+- The 6D/three-camera values printed before dataset creation are base-checkpoint
+  defaults. A post-construction guard requires the final dual-arm policy to be
+  20D state, 20D action, and exactly two renamed cameras before step 1.
 
 ## JAX FRS path
 
