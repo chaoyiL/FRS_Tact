@@ -1,8 +1,8 @@
 from typing import Literal
 
-import pytest
 import torch
 from torch import nn
+from transformers.cache_utils import Cache
 from transformers import GemmaForCausalLM
 from transformers import PaliGemmaForConditionalGeneration
 from transformers.models.auto import CONFIG_MAPPING
@@ -92,7 +92,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         self,
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
-        past_key_values: list[torch.FloatTensor] | pytest.Cache | None = None,
+        past_key_values: list[torch.FloatTensor] | Cache | None = None,
         inputs_embeds: list[torch.FloatTensor] | None = None,
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,

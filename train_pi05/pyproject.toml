@@ -38,7 +38,6 @@ dependencies = [
     "pyarrow>=21.0.0,<30.0.0",
     "PyYAML>=6.0.0,<7.0.0",
     "pydantic>=2.0",
-    "safetensors",
     "sentencepiece>=0.2.0",
     "torch==2.7.1",
     "tqdm>=4.66.0",

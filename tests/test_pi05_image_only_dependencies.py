@@ -39,6 +39,8 @@ def test_pi05_training_environment_has_no_video_or_device_stack() -> None:
             "msgpack",
             "nvidia-ml-py",
             "opencv-python",
+            "pytest",
+            "safetensors",
             "torchcodec",
             "torchvision",
             "websockets",
@@ -95,3 +97,15 @@ def test_private_lerobot_utility_parses_as_python_311() -> None:
         encoding="utf-8"
     )
     ast.parse(source, feature_version=(3, 11))
+
+
+def test_jax_model_import_does_not_eagerly_load_pytorch_model_or_pytest() -> None:
+    model_path = ROOT / "train_pi05" / "src" / "openpi" / "models" / "model.py"
+    imports = _top_level_imports(model_path)
+    assert imports.isdisjoint({"pytest", "safetensors"})
+
+    gemma_pytorch = (
+        ROOT / "train_pi05" / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
+    ).read_text(encoding="utf-8")
+    assert "import pytest" not in gemma_pytorch
+    assert "pytest.Cache" not in gemma_pytorch
