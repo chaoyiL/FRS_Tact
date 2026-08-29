@@ -66,7 +66,7 @@ usage() {
 
 all：配置环境、下载、准备 manifest，然后依次训练并上传 Insert 01~02 和
 Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=512；
-workers 使用 vCPU 的 75%，所以 16 vCPU 对应 12 workers；每个 worker
+workers 使用全部可用 vCPU，所以 16 vCPU 对应 16 workers；每个 worker
 只预取 1 个 batch，以控制大 batch 的主机内存峰值。
 EOF
 }
@@ -119,7 +119,8 @@ require_training_tokens() {
 }
 
 detect_workers() {
-    local workers=$(( $(nproc) * 3 / 4 ))
+    local workers
+    workers="$(nproc)"
     ((workers > 0)) || workers=1
     printf '%s\n' "${workers}"
 }
