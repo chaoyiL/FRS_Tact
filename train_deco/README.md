@@ -200,8 +200,8 @@ stopping 始终只使用正常的 unseen loss。
 ### RTX PRO 6000 单卡服务器全流程
 
 专属脚本固定将环境、缓存、数据、权重、manifest、输出和日志放在
-`/workspace` 下，只训练 Insert 01~02 与 Bread 01~03，不下载或使用
-`bread_04`。先把本仓库放到 `/workspace/FRS_Tact`，然后配置密钥：
+`/workspace` 下，训练 Insert 01~02、Bread 01~03 和 Two Tubes 01~04；
+`bread_04` 与 Two Tubes 05/06 均不下载、不使用。先配置密钥：
 
 ```bash
 cd /workspace/FRS_Tact
@@ -209,11 +209,11 @@ mkdir -p /workspace/secrets
 cp train_deco/configs/server_stage2_rtxpro6000.env.example \
   /workspace/secrets/deco-stage2.env
 chmod 600 /workspace/secrets/deco-stage2.env
-# 编辑该文件，填写 HF_TOKEN、WANDB_API_KEY、WANDB_ENTITY 和两个 HF 输出仓库
+# 编辑该文件，填写 HF_TOKEN 和三个 HF 输出仓库；W&B 默认关闭
 ```
 
-一条命令会配置环境、按固定 revision 下载数据和初始化权重、生成两个 manifest，
-依次训练两个任务，并在每个任务成功后上传 best/latest 产物到对应的私有 HF
+一条命令会配置环境、按固定 revision 下载数据和初始化权重、生成三个 manifest，
+依次训练三个任务，并在每个任务成功后上传 best/latest 产物到对应的私有 HF
 model repo：
 
 ```bash
@@ -229,7 +229,10 @@ bash train_deco/scripts/server_stage2_rtxpro6000.sh prepare
 bash train_deco/scripts/server_stage2_rtxpro6000.sh doctor
 bash train_deco/scripts/server_stage2_rtxpro6000.sh run insert
 bash train_deco/scripts/server_stage2_rtxpro6000.sh run bread
+bash train_deco/scripts/server_stage2_rtxpro6000.sh run two_tubes
 ```
+
+Two Tubes 使用 `wjstx/deco_0828` 中的 `pick_two_tubes/deco_stage1_best.pt` 初始化。
 
 默认 `BATCH_SIZE=512` 是单卡物理 batch size，16 vCPU 自动配置为 16 个
 DataLoader workers，并设置 `DATALOADER_PREFETCH_FACTOR=1` 控制在途 batch 的内存峰值。
