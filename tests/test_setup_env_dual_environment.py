@@ -38,6 +38,7 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'SMOLVLA_TORCH_VENV_DIR="${SMOLVLA_TORCH_VENV_DIR:-${DEFAULT_SMOLVLA_TORCH_VENV_DIR}}"' in source
     assert 'export SMOLVLA_TORCH_PYTHON=%q' in source
     assert 'export FRS_PYTHON=%q' in source
+    assert 'export DATA_TOOL_PYTHON=%q' in source
     assert '"torchcodec==${SMOLVLA_TORCHCODEC_VERSION}"' in source
     assert 'PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}"' in source
@@ -193,10 +194,12 @@ sync_root_environment() {{ record sync-root; }}
 sync_smolvla_torch_environment() {{ record sync-smolvla-torch; }}
 sync_pi05_environment() {{ record sync-pi05; }}
 sync_pi05_train_environment() {{ record sync-pi05-train; }}
+sync_data_tools_environment() {{ record sync-data-tools; }}
 write_environment_file() {{ record env-file; }}
 verify_python_environment() {{ record verify-root; }}
 verify_smolvla_torch_environment() {{ record verify-smolvla-torch; }}
 verify_pi05_environment() {{ record verify-pi05; }}
+verify_data_tools_environment() {{ record verify-data-tools; }}
 verify_pi05_train_environment() {{ record verify-pi05-train; }}
 check_root_gpu() {{ record gpu-root; }}
 check_pi05_gpu() {{ record gpu-pi05; }}
@@ -260,6 +263,8 @@ def test_pi05_train_selector_only_sets_up_training_environment(tmp_path: Path) -
     assert completed.returncode == 0, completed.stderr
     events = read_events(tmp_path)
     assert "sync-pi05-train" in events
+    assert "sync-data-tools" in events
+    assert "verify-data-tools" in events
     assert "verify-pi05-train" in events
     assert "gpu-pi05-train" in events
     assert "sync-root" not in events

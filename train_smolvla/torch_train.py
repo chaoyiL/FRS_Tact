@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from bisect import bisect_right
 import copy
+from datetime import timedelta
 import inspect
 import json
 import netrc as netrc_module
@@ -13,8 +14,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_pytorch.yaml"
+OUTPUT_DIR_OVERRIDE_ENV = "FRS_SMOLVLA_OUTPUT_DIR"
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -139,6 +142,65 @@ def validate_cuda_runtime(config: dict[str, Any]) -> None:
         f"[smolvla] CUDA ready: {available} GPU(s); using {requested}, "
         f"batch_per_gpu={batch_per_gpu}, global_batch={batch_per_gpu * requested}"
     )
+
+
+def _install_accelerate_timeout(config: dict[str, Any]) -> Callable[[], None]:
+    """Inject a longer process-group timeout before LeRobot creates Accelerator."""
+    import accelerate
+    from accelerate.utils import InitProcessGroupKwargs
+
+    timeout_seconds = int(config["distributed"].get("timeout_seconds", 7200))
+    if timeout_seconds <= 0:
+        raise ValueError("distributed.timeout_seconds must be greater than zero")
+    upstream_accelerator = accelerate.Accelerator
+
+    def accelerator_with_timeout(*args, **kwargs):
+        handlers = list(kwargs.pop("kwargs_handlers", None) or [])
+        if any(isinstance(handler, InitProcessGroupKwargs) for handler in handlers):
+            raise ValueError("LeRobot already supplied an InitProcessGroupKwargs handler")
+        handlers.append(InitProcessGroupKwargs(timeout=timedelta(seconds=timeout_seconds)))
+        return upstream_accelerator(*args, kwargs_handlers=handlers, **kwargs)
+
+    accelerate.Accelerator = accelerator_with_timeout
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+        print(f"[smolvla] distributed process-group timeout={timeout_seconds}s")
+
+    def restore() -> None:
+        accelerate.Accelerator = upstream_accelerator
+
+    return restore
+
+
+def _effective_output_dir(config: dict[str, Any]) -> Path:
+    configured = Path(str(config["training"]["output_dir"])).expanduser()
+    override = os.environ.get(OUTPUT_DIR_OVERRIDE_ENV)
+    return Path(override).expanduser() if override else configured
+
+
+def _prepare_output_dir(config: dict[str, Any]) -> Path:
+    """Choose a fresh output directory without deleting a previous run."""
+    output_dir = Path(str(config["training"]["output_dir"])).expanduser()
+    if config["training"].get("resume_from") or not output_dir.exists():
+        os.environ[OUTPUT_DIR_OVERRIDE_ENV] = str(output_dir)
+        return output_dir
+    policy = str(config["training"].get("existing_output", "error")).lower()
+    if policy != "increment":
+        raise FileExistsError(
+            f"training output directory already exists: {output_dir}; "
+            "set training.existing_output=increment or configure training.resume_from"
+        )
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    candidate = output_dir.with_name(f"{output_dir.name}-{timestamp}")
+    suffix = 1
+    while candidate.exists():
+        candidate = output_dir.with_name(f"{output_dir.name}-{timestamp}-{suffix}")
+        suffix += 1
+    os.environ[OUTPUT_DIR_OVERRIDE_ENV] = str(candidate)
+    print(
+        f"[smolvla] output directory exists; preserving it and using {candidate}",
+        flush=True,
+    )
+    return candidate
 
 
 def dataset_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -352,6 +414,7 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
     def make_train_eval_datasets(cfg):
         from lerobot.datasets.compute_stats import aggregate_stats
 
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
         saved = {
             "repo_id": cfg.dataset.repo_id,
             "root": cfg.dataset.root,
@@ -360,7 +423,13 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
         train_datasets: list[Any] = []
         eval_datasets: list[Any] = []
         try:
-            for source in sources:
+            for source_index, source in enumerate(sources, start=1):
+                started_at = time.monotonic()
+                print(
+                    f"[smolvla][rank {local_rank}] loading dataset "
+                    f"{source_index}/{len(sources)}: {source['repo_id']}",
+                    flush=True,
+                )
                 cfg.dataset.repo_id = source["repo_id"]
                 cfg.dataset.root = source["root"]
                 cfg.dataset.revision = source["revision"]
@@ -368,6 +437,13 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
                 train_datasets.append(_select_dataset_cameras(train_dataset, selected_images))
                 if eval_dataset is not None:
                     eval_datasets.append(_select_dataset_cameras(eval_dataset, selected_images))
+                print(
+                    f"[smolvla][rank {local_rank}] dataset ready: {source['repo_id']} "
+                    f"train_frames={len(train_dataset)} "
+                    f"eval_frames={0 if eval_dataset is None else len(eval_dataset)} "
+                    f"elapsed={time.monotonic() - started_at:.1f}s",
+                    flush=True,
+                )
         finally:
             cfg.dataset.repo_id = saved["repo_id"]
             cfg.dataset.root = saved["root"]
@@ -476,7 +552,7 @@ def build_command(config: dict[str, Any]) -> list[str]:
             ]
         )
 
-    output_dir = Path(str(training["output_dir"])).expanduser()
+    output_dir = _effective_output_dir(config)
     command.extend(
         [
             f"--policy.chunk_size={int(policy['chunk_size'])}",
@@ -640,9 +716,11 @@ def _run_worker(config: dict[str, Any], command: list[str]) -> None:
         config, upstream_make_datasets
     )
     sys.argv = ["lerobot-train", *command]
+    restore_accelerator = _install_accelerate_timeout(config)
     try:
         lerobot_train.main()
     finally:
+        restore_accelerator()
         import torch.distributed as distributed
 
         if distributed.is_available() and distributed.is_initialized():
@@ -661,6 +739,7 @@ def run(config_path: Path, *, dry_run: bool = False, worker: bool = False) -> No
     if num_gpus < 1:
         raise ValueError("distributed.num_gpus must be at least 1")
     if not dry_run and not worker:
+        _prepare_output_dir(config)
         validate_dataset_contract(config)
         validate_cuda_runtime(config)
     if num_gpus > 1 and not worker:

@@ -108,6 +108,8 @@ peft:
 
 training:
   output_dir: /workspace/outputs/smolvla_task1
+  # Preserve an existing/failed run and choose a timestamped directory.
+  existing_output: increment
   job_name: smolvla_task1
   # batch_size 和 num_workers 均为每张 GPU 的数值。
   batch_size: 64
@@ -125,6 +127,9 @@ distributed:
   num_gpus: 2
   num_machines: 1
   mixed_precision: bf16
+  # LeRobot lets rank 0 prepare all local datasets before rank 1. Five datasets
+  # can exceed Accelerate/NCCL's 600-second default on network-backed storage.
+  timeout_seconds: 7200
 
 wandb:
   enable: true

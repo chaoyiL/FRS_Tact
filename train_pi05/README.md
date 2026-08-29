@@ -3,7 +3,7 @@
 这是独立的纯视觉 pi0.5 微调项目，目录结构与 `train_pi05_frs` 对齐：
 
 - `configs/train_pi05.yaml`：数据集、模型档位和训练参数。
-- `../scripts/setup_env.sh --pi05_train`：通过仓库统一入口创建本目录专用 `.venv`。
+- `../scripts/setup_env.sh --pi05_train`：通过仓库统一入口创建 Python 3.11 训练环境和 Python 3.12 数据转换环境。
 - `scripts/start_pi05_train.sh`：配置预检、tmux 和正式训练入口。
 - `scripts/start_pi05_right_train.sh`：固定使用右手单臂配置的一键启动入口。
 - `train.py`：将 YAML 转成 openpi JAX 训练配置。
@@ -48,6 +48,10 @@ bash scripts/setup_env.sh --pi05_train
 bash train_pi05/scripts/start_pi05_train.sh --check
 bash train_pi05/scripts/start_pi05_train.sh
 ```
+
+Pi0.5 JAX 训练固定使用 `/workspace/venvs/pi05_train`（Python 3.11）；
+`download_data.sh` 固定使用 `/workspace/venvs/lerobot_data_tools`（Python 3.12）。
+这是因为当前 LeRobot 转换器包含 Python 3.12 语法，两者不能共用解释器。
 
 如果服务器访问 PyPI 较慢，可以仅在安装时指定镜像；PyTorch CPU wheel 仍从
 PyTorch 官方索引获取，JAX CUDA wheel 和其他包从所选 PyPI 镜像获取：

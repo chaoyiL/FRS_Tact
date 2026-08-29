@@ -25,8 +25,11 @@
 #
 #      bash scripts/setup_env.sh --pi05_deploy
 #
-#   4. --pi05_train：只安装纯视觉 Pi0.5 JAX 训练环境，使用 Python 3.11。
-#      该环境对应 train_pi05，不包含 AnyTouch 或触觉训练分支。
+#   4. --pi05_train：安装两套职责分离的环境：
+#      - 纯视觉 Pi0.5 JAX 训练环境，使用 Python 3.11，对应 train_pi05；
+#      - LeRobot 数据下载/转换环境，使用 Python 3.12，对应 data_tools。
+#      Pi0.5 训练项目不包含 AnyTouch 或触觉训练分支。download_data.sh 会自动
+#      使用 Python 3.12 数据环境，不会错误地调用 Python 3.11 训练环境。
 #
 #      bash scripts/setup_env.sh --pi05_train
 #
@@ -45,11 +48,13 @@
 #     SmolVLA Torch <仓库根目录>/.venv-smolvla-torch
 #     Pi0.5 部署    <仓库根目录>/deploy_pi05/.venv
 #     Pi0.5 训练    <仓库根目录>/train_pi05/.venv
+#     数据下载/转换 <仓库根目录>/data_tools/.venv
 #   当仓库位于 /workspace 下时：
 #     SmolVLA/FRS   /workspace/venvs/frs_tact
 #     SmolVLA Torch /workspace/venvs/smolvla_torch
 #     Pi0.5 部署    /workspace/venvs/pi05_deploy
 #     Pi0.5 训练    /workspace/venvs/pi05_train
+#     数据下载/转换 /workspace/venvs/lerobot_data_tools
 
 set -Eeuo pipefail
 
@@ -75,6 +80,7 @@ if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
     DEFAULT_SMOLVLA_TORCH_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/smolvla_torch"
     DEFAULT_PI05_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/pi05_deploy"
     DEFAULT_PI05_TRAIN_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/pi05_train"
+    DEFAULT_DATA_TOOLS_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/lerobot_data_tools"
     DEFAULT_UV_CACHE_DIR="${WORKSPACE_ROOT_VALUE}/uv-cache"
     DEFAULT_STORAGE_ROOT="${WORKSPACE_ROOT_VALUE}"
 else
@@ -82,6 +88,7 @@ else
     DEFAULT_SMOLVLA_TORCH_VENV_DIR="${PROJECT_ROOT}/.venv-smolvla-torch"
     DEFAULT_PI05_VENV_DIR="${PROJECT_ROOT}/deploy_pi05/.venv"
     DEFAULT_PI05_TRAIN_VENV_DIR="${PROJECT_ROOT}/train_pi05/.venv"
+    DEFAULT_DATA_TOOLS_VENV_DIR="${PROJECT_ROOT}/data_tools/.venv"
     DEFAULT_UV_CACHE_DIR="${HOME}/.cache/uv"
     DEFAULT_STORAGE_ROOT="${PROJECT_ROOT}/.cache"
 fi
@@ -91,6 +98,8 @@ PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"
 PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"
 PI05_TRAIN_PROJECT_ROOT="${PROJECT_ROOT}/train_pi05"
 PI05_TRAIN_VENV_DIR="${PI05_TRAIN_VENV_DIR:-${DEFAULT_PI05_TRAIN_VENV_DIR}}"
+DATA_TOOLS_PROJECT_ROOT="${PROJECT_ROOT}/data_tools"
+DATA_TOOLS_VENV_DIR="${DATA_TOOLS_VENV_DIR:-${DEFAULT_DATA_TOOLS_VENV_DIR}}"
 UV_CACHE_DIR_VALUE="${UV_CACHE_DIR:-${DEFAULT_UV_CACHE_DIR}}"
 STORAGE_ROOT="${FRS_STORAGE_ROOT:-${DEFAULT_STORAGE_ROOT}}"
 HF_HOME_VALUE="${STORAGE_ROOT}/huggingface"
@@ -112,7 +121,7 @@ usage() {
 不传参数       同时安装 SmolVLA 环境和 Pi0.5 部署环境；不安装 Pi0.5 训练环境
 --smolvla      安装 FRS_Tact 环境及独立的官方 LeRobot SmolVLA 训练环境（Python 3.12）
 --pi05_deploy  只安装 Pi0.5 与 Pi0.5-FRS 部署环境（Python 3.12）
---pi05_train   只安装纯视觉 Pi0.5 JAX 训练环境（Python 3.11）
+--pi05_train   安装纯视觉 Pi0.5 JAX 训练环境（Python 3.11）和数据转换环境（Python 3.12）
 -h, --help     只显示本帮助，不执行安装
 
 三个显式参数不能组合使用。
@@ -277,10 +286,14 @@ validate_environment_targets() {
     if [[ "${PI05_TRAIN_VENV_DIR}" != /* ]]; then
         PI05_TRAIN_VENV_DIR="${PROJECT_ROOT}/${PI05_TRAIN_VENV_DIR}"
     fi
+    if [[ "${DATA_TOOLS_VENV_DIR}" != /* ]]; then
+        DATA_TOOLS_VENV_DIR="${PROJECT_ROOT}/${DATA_TOOLS_VENV_DIR}"
+    fi
     VENV_DIR="$(realpath -m -- "${VENV_DIR}")"
     SMOLVLA_TORCH_VENV_DIR="$(realpath -m -- "${SMOLVLA_TORCH_VENV_DIR}")"
     PI05_VENV_DIR="$(realpath -m -- "${PI05_VENV_DIR}")"
     PI05_TRAIN_VENV_DIR="$(realpath -m -- "${PI05_TRAIN_VENV_DIR}")"
+    DATA_TOOLS_VENV_DIR="$(realpath -m -- "${DATA_TOOLS_VENV_DIR}")"
     # FRS_Tact 包含同名的精简 lerobot 包，不能与官方 LeRobot 安装在同一环境。
     if [[ "${VENV_DIR}" == "${SMOLVLA_TORCH_VENV_DIR}" ]]; then
         fail "FRS_Tact 与官方 LeRobot SmolVLA 训练必须使用不同环境：${VENV_DIR}"
@@ -297,6 +310,12 @@ validate_environment_targets() {
           "${PI05_TRAIN_VENV_DIR}" == "${PI05_VENV_DIR}" ]]; then
         fail "Pi0.5 训练必须使用独立的虚拟环境目录：${PI05_TRAIN_VENV_DIR}"
     fi
+    if [[ "${DATA_TOOLS_VENV_DIR}" == "${PI05_TRAIN_VENV_DIR}" || \
+          "${DATA_TOOLS_VENV_DIR}" == "${VENV_DIR}" || \
+          "${DATA_TOOLS_VENV_DIR}" == "${PI05_VENV_DIR}" || \
+          "${DATA_TOOLS_VENV_DIR}" == "${SMOLVLA_TORCH_VENV_DIR}" ]]; then
+        fail "LeRobot 数据工具必须使用独立的 Python 3.12 环境：${DATA_TOOLS_VENV_DIR}"
+    fi
 }
 
 configure_uv_storage() {
@@ -311,13 +330,14 @@ configure_uv_storage() {
     fi
     if should_setup_pi05_train; then
         mkdir -p "$(dirname -- "${PI05_TRAIN_VENV_DIR}")"
+        mkdir -p "$(dirname -- "${DATA_TOOLS_VENV_DIR}")"
         export UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"
     else
         export UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
     fi
     export UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}"
 
-    local cache_device env_device smolvla_torch_env_device pi05_env_device pi05_train_env_device needs_copy=0
+    local cache_device env_device smolvla_torch_env_device pi05_env_device pi05_train_env_device data_tools_env_device needs_copy=0
     cache_device="$(stat -c '%d' "${UV_CACHE_DIR_VALUE}")"
     if should_setup_smolvla; then
         env_device="$(stat -c '%d' "$(dirname -- "${VENV_DIR}")")"
@@ -332,6 +352,8 @@ configure_uv_storage() {
     if should_setup_pi05_train; then
         pi05_train_env_device="$(stat -c '%d' "$(dirname -- "${PI05_TRAIN_VENV_DIR}")")"
         [[ "${pi05_train_env_device}" == "${cache_device}" ]] || needs_copy=1
+        data_tools_env_device="$(stat -c '%d' "$(dirname -- "${DATA_TOOLS_VENV_DIR}")")"
+        [[ "${data_tools_env_device}" == "${cache_device}" ]] || needs_copy=1
     fi
     if ((needs_copy)); then
         export UV_LINK_MODE="copy"
@@ -367,6 +389,7 @@ write_environment_file() {
         printf 'export PI05_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export PI05_FRS_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export TRAIN_PI05_PYTHON=%q\n' "${PI05_TRAIN_VENV_DIR}/bin/python"
+        printf 'export DATA_TOOL_PYTHON=%q\n' "${DATA_TOOLS_VENV_DIR}/bin/python"
         printf 'export UV_CACHE_DIR=%q\n' "${UV_CACHE_DIR}"
         printf 'export WORKSPACE_ROOT=%q\n' "${WORKSPACE_ROOT}"
         printf 'export HF_HOME=%q\n' "${HF_HOME}"
@@ -396,6 +419,8 @@ validate_selected_projects() {
     if should_setup_pi05_train; then
         [[ -f "${PI05_TRAIN_PROJECT_ROOT}/pyproject.toml" ]] || \
             fail "缺少 Pi0.5 训练项目：${PI05_TRAIN_PROJECT_ROOT}/pyproject.toml"
+        [[ -f "${DATA_TOOLS_PROJECT_ROOT}/pyproject.toml" ]] || \
+            fail "缺少 LeRobot 数据工具项目：${DATA_TOOLS_PROJECT_ROOT}/pyproject.toml"
     fi
 }
 
@@ -407,6 +432,8 @@ install_python() {
         "${UV_BIN}" python install "${PYTHON_VERSION}"
     fi
     if should_setup_pi05_train; then
+        log "为数据下载/转换安装 Python ${PYTHON_VERSION}"
+        "${UV_BIN}" python install "${PYTHON_VERSION}"
         log "为纯视觉 Pi0.5 训练安装 Python ${PI05_TRAIN_PYTHON_VERSION}"
         "${UV_BIN}" python install "${PI05_TRAIN_PYTHON_VERSION}"
     fi
@@ -504,6 +531,54 @@ sync_pi05_train_environment() {
         UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}" \
             "${UV_BIN}" sync --verbose --python "${PI05_TRAIN_PYTHON_VERSION}" \
             --project "${PI05_TRAIN_PROJECT_ROOT}" "${pi05_sync_indexes[@]}"
+    )
+}
+
+sync_data_tools_environment() {
+    log "LeRobot 数据工具环境目录：${DATA_TOOLS_VENV_DIR}"
+    log "同步 Python 3.12 下载与 v2.1 -> v3.0 转换依赖"
+    (
+        local -a data_sync_indexes=()
+        export UV_HTTP_CONNECT_TIMEOUT="${UV_HTTP_CONNECT_TIMEOUT:-15}"
+        export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"
+        export UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-8}"
+        if [[ -n "${FRS_PYPI_MIRROR:-}" ]]; then
+            export UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"
+        fi
+        if [[ -n "${FRS_PYTORCH_INDEX:-}" ]]; then
+            data_sync_indexes=(--index "pytorch-cpu=${FRS_PYTORCH_INDEX}")
+        fi
+        UV_PROJECT_ENVIRONMENT="${DATA_TOOLS_VENV_DIR}" \
+            "${UV_BIN}" sync --verbose --python "${PYTHON_VERSION}" \
+            --project "${DATA_TOOLS_PROJECT_ROOT}" "${data_sync_indexes[@]}"
+    )
+}
+
+verify_data_tools_environment() {
+    local data_python="${DATA_TOOLS_VENV_DIR}/bin/python"
+    local data_hf="${DATA_TOOLS_VENV_DIR}/bin/hf"
+    [[ -x "${data_python}" ]] || fail "LeRobot 数据工具 Python 不可执行：${data_python}"
+    [[ -x "${data_hf}" ]] || fail "LeRobot 数据工具缺少 hf 命令：${data_hf}"
+    log "验证 Python 3.12 LeRobot 数据下载与 v2.1 -> v3.0 转换环境"
+    (
+        cd "${PROJECT_ROOT}"
+        PYTHONDONTWRITEBYTECODE=1 \
+        PYTHONPATH="${PROJECT_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+            "${data_python}" - <<'PY'
+import sys
+
+import av
+import draccus
+import jsonlines
+import torchvision
+from lerobot.datasets.v30 import convert_dataset_v21_to_v30
+
+del av, draccus, jsonlines, torchvision, convert_dataset_v21_to_v30
+if sys.version_info[:2] != (3, 12):
+    raise RuntimeError(f"LeRobot data conversion requires Python 3.12, got {sys.version}")
+print(f"LeRobot data tools python={sys.version.split()[0]}")
+PY
+        "${data_hf}" version
     )
 }
 
@@ -693,8 +768,10 @@ PY
 print_summary() {
     if should_setup_pi05_train; then
         echo "Pi0.5 训练环境（已安装）：${PI05_TRAIN_VENV_DIR}"
+        echo "LeRobot 数据工具环境（已安装）：${DATA_TOOLS_VENV_DIR}"
     else
         echo "Pi0.5 训练环境（本次未安装）：${PI05_TRAIN_VENV_DIR}"
+        echo "LeRobot 数据工具环境（本次未安装）：${DATA_TOOLS_VENV_DIR}"
     fi
     log "环境安装完成：${SETUP_MODE}"
     echo
@@ -752,11 +829,13 @@ main() {
     should_setup_smolvla && sync_root_environment
     should_setup_smolvla && sync_smolvla_torch_environment
     should_setup_pi05 && sync_pi05_environment
+    should_setup_pi05_train && sync_data_tools_environment
     should_setup_pi05_train && sync_pi05_train_environment
     write_environment_file
     should_setup_smolvla && verify_python_environment
     should_setup_smolvla && verify_smolvla_torch_environment
     should_setup_pi05 && verify_pi05_environment
+    should_setup_pi05_train && verify_data_tools_environment
     should_setup_pi05_train && verify_pi05_train_environment
     should_setup_smolvla && check_root_gpu
     should_setup_pi05 && check_pi05_gpu

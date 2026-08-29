@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from datetime import timedelta
 import json
 from pathlib import Path
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import yaml
 
 from train_smolvla.torch_train import (
     _accelerate_command,
+    _effective_output_dir,
+    _install_accelerate_timeout,
+    _prepare_output_dir,
     _select_dataset_cameras,
     build_command,
     resolve_wandb_mode,
@@ -172,3 +177,62 @@ def test_constructed_policy_rejects_pretrained_six_dimensional_defaults() -> Non
             config,
             ("observation.images.camera1", "observation.images.camera2"),
         )
+
+
+def test_accelerate_process_group_timeout_is_injected(monkeypatch) -> None:
+    class FakeInitProcessGroupKwargs:
+        def __init__(self, *, timeout) -> None:
+            self.timeout = timeout
+
+    received: dict = {}
+
+    class FakeAccelerator:
+        def __init__(self, *args, **kwargs) -> None:
+            received["args"] = args
+            received["kwargs"] = kwargs
+
+    accelerate_module = ModuleType("accelerate")
+    accelerate_module.Accelerator = FakeAccelerator
+    accelerate_utils_module = ModuleType("accelerate.utils")
+    accelerate_utils_module.InitProcessGroupKwargs = FakeInitProcessGroupKwargs
+    monkeypatch.setitem(sys.modules, "accelerate", accelerate_module)
+    monkeypatch.setitem(sys.modules, "accelerate.utils", accelerate_utils_module)
+
+    restore = _install_accelerate_timeout(
+        {"distributed": {"timeout_seconds": 7200}}
+    )
+    try:
+        accelerate_module.Accelerator(kwargs_handlers=["ddp"])
+    finally:
+        restore()
+
+    handlers = received["kwargs"]["kwargs_handlers"]
+    assert handlers[0] == "ddp"
+    assert handlers[1].timeout == timedelta(seconds=7200)
+    assert accelerate_module.Accelerator is FakeAccelerator
+
+
+def test_existing_output_directory_is_preserved_and_incremented(
+    tmp_path: Path, monkeypatch
+) -> None:
+    output_dir = tmp_path / "smolvla_task1"
+    output_dir.mkdir()
+    marker = output_dir / "failed-run.log"
+    marker.write_text("preserve me", encoding="utf-8")
+    config = {
+        "training": {
+            "output_dir": str(output_dir),
+            "existing_output": "increment",
+            "resume_from": None,
+        }
+    }
+    monkeypatch.delenv("FRS_SMOLVLA_OUTPUT_DIR", raising=False)
+
+    selected = _prepare_output_dir(config)
+
+    assert selected != output_dir
+    assert selected.parent == output_dir.parent
+    assert selected.name.startswith("smolvla_task1-")
+    assert not selected.exists()
+    assert marker.read_text(encoding="utf-8") == "preserve me"
+    assert _effective_output_dir(config) == selected

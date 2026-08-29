@@ -14,11 +14,9 @@ description = "Standalone pure-vision JAX pi0.5 fine-tuning"
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "augmax>=0.3.4",
-    "av>=15.0.0,<16.0.0",
     "beartype==0.19.0",
     "chex",
     "dm-tree>=0.1.8",
-    "draccus==0.10.0",
     "datasets>=4.7.0,<5.0.0",
     "einops>=0.8.0",
     "etils[epath]",
@@ -30,7 +28,6 @@ dependencies = [
     "jax[cuda12]==0.5.3; sys_platform == 'linux'",
     "jax==0.5.3; sys_platform != 'linux'",
     "jaxtyping==0.2.36",
-    "jsonlines>=4.0.0,<5.0.0",
     "ml-collections==1.0.0",
     "msgpack>=1.0.5",
     "numpy>=1.22.4,<2.0.0",
@@ -45,11 +42,9 @@ dependencies = [
     "pydantic>=2.0",
     "pynvml>=12.0.0",
     "pytest>=8.3.4",
-    "requests>=2.32.0,<3.0.0",
     "safetensors",
     "sentencepiece>=0.2.0",
     "torch==2.7.1",
-    "torchvision==0.22.1",
     "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
     "torchcodec>=0.3.0,<0.12.0; sys_platform == 'linux'",
     "tqdm>=4.66.0",
@@ -80,7 +75,6 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
-torchvision = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.pytest.ini_options]
 testpaths = ["src/openpi"]

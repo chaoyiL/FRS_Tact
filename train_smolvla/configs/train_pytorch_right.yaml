@@ -79,6 +79,7 @@ peft:
 
 training:
   output_dir: /workspace/outputs/smolvla_right
+  existing_output: increment
   job_name: smolvla_right
   batch_size: 64
   num_workers: 8
@@ -94,6 +95,7 @@ distributed:
   num_gpus: 1
   num_machines: 1
   mixed_precision: bf16
+  timeout_seconds: 7200
 
 wandb:
   enable: true

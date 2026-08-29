@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
+DATA_TOOL_PYTHON_OVERRIDE="${DATA_TOOL_PYTHON:-}"
 
 if [[ -f "${ENV_FILE}" ]]; then
     # 读取 setup_env.sh 写入的各项目解释器路径；下面会显式选择一个可执行环境，
@@ -14,22 +15,22 @@ fi
 
 resolve_data_python() {
     local candidate=""
-    if [[ -n "${DATA_TOOL_PYTHON:-}" ]]; then
-        [[ -x "${DATA_TOOL_PYTHON}" ]] || {
-            echo "DATA_TOOL_PYTHON 不可执行: ${DATA_TOOL_PYTHON}" >&2
+    if [[ -n "${DATA_TOOL_PYTHON_OVERRIDE}" ]]; then
+        [[ -x "${DATA_TOOL_PYTHON_OVERRIDE}" ]] || {
+            echo "DATA_TOOL_PYTHON 不可执行: ${DATA_TOOL_PYTHON_OVERRIDE}" >&2
             return 1
         }
-        printf '%s\n' "${DATA_TOOL_PYTHON}"
+        printf '%s\n' "${DATA_TOOL_PYTHON_OVERRIDE}"
         return 0
     fi
-    # 完整根环境优先；只安装了 --pi05_train 时回退到 Pi0.5 训练环境。
-    for candidate in "${FRS_PYTHON:-}" "${TRAIN_PI05_PYTHON:-}" "${PROJECT_ROOT}/.venv/bin/python"; do
+    # 转换器包含 Python 3.12 语法，禁止回退到 Pi0.5 的 Python 3.11 环境。
+    for candidate in "${DATA_TOOL_PYTHON:-}" "${FRS_PYTHON:-}" "${PROJECT_ROOT}/.venv/bin/python"; do
         if [[ -n "${candidate}" && -x "${candidate}" ]]; then
             printf '%s\n' "${candidate}"
             return 0
         fi
     done
-    echo "找不到数据下载/转换 Python；请先运行 scripts/setup_env.sh --pi05_train" >&2
+    echo "找不到 Python 3.12 数据工具环境；请先运行 scripts/setup_env.sh --pi05_train" >&2
     return 1
 }
 
@@ -148,6 +149,11 @@ check_deps() {
         exit 1
     fi
 
+    if ! "${DATA_PYTHON}" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+        echo "数据转换必须使用 Python 3.12，当前解释器为: ${DATA_PYTHON}" >&2
+        exit 1
+    fi
+
     if [[ ! -x "${DATA_HF}" ]] || ! "${DATA_HF}" version &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境中未检测到 hf 命令：${DATA_HF}"
@@ -159,7 +165,7 @@ check_deps() {
         exit 1
     fi
 
-    if ! "${DATA_PYTHON}" -c "import av, draccus, jsonlines, lerobot, torchvision" &>/dev/null; then
+    if ! "${DATA_PYTHON}" -c "import av, draccus, jsonlines, torchvision; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境缺少 LeRobot 转换依赖（av/draccus/jsonlines/torchvision）。"
         echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
@@ -666,6 +672,7 @@ main() {
 
     log "============================================"
     log "Hugging Face smash 数据集下载脚本启动"
+    log "数据工具 Python: ${DATA_PYTHON} ($("${DATA_PYTHON}" -c 'import platform; print(platform.python_version())'))"
     log "workspace 根目录: ${WORKSPACE_ROOT}"
     log "HF_HOME: ${HF_HOME}"
     log "命名空间: ${HF_NAMESPACE}"

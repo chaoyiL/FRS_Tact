@@ -87,6 +87,14 @@ contract before reading the first batch. The dual-arm launcher must report
 `state=20D action=20D` and exactly `camera1`, `camera2`; the 6D/three-camera
 values printed earlier are only defaults from the base checkpoint configuration.
 
+Multi-GPU startup uses `distributed.timeout_seconds` (7200 seconds by default).
+Official LeRobot initializes all local datasets on rank 0 before releasing the
+other ranks, so a five-dataset job on network-backed RunPod storage can exceed
+Accelerate's 600-second NCCL default even when both GPUs and NCCL are healthy.
+With `training.existing_output: increment`, a failed or completed run directory
+is preserved and the next fresh run receives a timestamped sibling directory.
+Resume jobs still use `training.resume_from` and are never redirected.
+
 The default dual-arm YAML enables DECO's exact `balanced-light-v2` training
 augmentation. It calls the same DECO implementation at batch level, so both
 cameras in one sample share the branch and all sampled parameters. Official
