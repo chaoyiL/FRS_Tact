@@ -292,6 +292,23 @@ def test_4090_smoke_config_keeps_contract_and_minimizes_training() -> None:
     assert config["wandb"]["enable"] is False
 
 
+def test_4090_smoke_launcher_has_real_staged_acceptance_checks() -> None:
+    launcher = (
+        Path(__file__).parents[1]
+        / "train_smolvla/scripts/run_smolvla_4090_smoke.sh"
+    ).read_text(encoding="utf-8")
+
+    for stage in ("env", "data", "sample", "preflight", "train", "checkpoint"):
+        assert f"should_run {stage}" in launcher
+    assert 'video_backend="torchcodec"' in launcher
+    assert "sample = dataset[0]" in launcher
+    assert "five real forward/backward optimization steps" in launcher
+    assert '"optimizer_state.safetensors"' in launcher
+    assert 'step_state.get("step") != 5' in launcher
+    assert '"observation.images.camera1"' in launcher
+    assert '"observation.images.camera2"' in launcher
+
+
 def test_single_gpu_precision_uses_yaml_value(monkeypatch) -> None:
     monkeypatch.delenv("ACCELERATE_MIXED_PRECISION", raising=False)
 
