@@ -74,6 +74,8 @@ VENV_PYTHON="${VENV_PATH}/bin/python"
   tqdm==4.67.1 \
   pytest==9.1.1 \
   safetensors==0.5.3 \
+  'huggingface_hub>=0.34,<2' \
+  'wandb>=0.19,<1' \
   "jax[cpu]>=0.4.30,<0.6" \
   "flax>=0.10,<0.12" \
   --index-url "${PYPI_INDEX}"

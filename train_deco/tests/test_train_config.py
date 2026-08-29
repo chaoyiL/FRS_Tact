@@ -13,7 +13,8 @@ def _parse(*arguments: str):
     return build_argument_parser().parse_args(arguments)
 
 
-def test_stage1_cli_defaults_remain_vision_only() -> None:
+def test_stage1_cli_defaults_remain_vision_only(monkeypatch) -> None:
+    monkeypatch.delenv("WANDB_ENABLED", raising=False)
     args = _parse()
 
     assert args.stage == 1
@@ -23,7 +24,20 @@ def test_stage1_cli_defaults_remain_vision_only() -> None:
     assert args.tactile_adapter_rank == 32
     assert args.resume_from is None
     assert args.epochs == 100
+    assert args.wandb_enabled is False
     validate_stage_arguments(args)
+
+
+def test_wandb_cli_reads_environment_without_exposing_a_token(monkeypatch) -> None:
+    monkeypatch.setenv("WANDB_ENABLED", "1")
+    monkeypatch.setenv("WANDB_PROJECT", "deco-server")
+    monkeypatch.setenv("WANDB_TAGS", "stage2,rtxpro6000")
+    args = _parse()
+
+    assert args.wandb_enabled is True
+    assert args.wandb_project == "deco-server"
+    assert args.wandb_tags == "stage2,rtxpro6000"
+    assert not hasattr(args, "wandb_api_key")
 
 
 def test_fresh_stage2_requires_stage1_and_tactile_initialization_paths() -> None:

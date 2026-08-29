@@ -197,6 +197,45 @@ loss 和 velocity MAE：正常触觉、临时将所有 tactile gate 置零的
 在 forward 后恢复，shuffle 不消耗正常验证 RNG；best checkpoint 和 early
 stopping 始终只使用正常的 unseen loss。
 
+### RTX PRO 6000 单卡服务器全流程
+
+专属脚本固定将环境、缓存、数据、权重、manifest、输出和日志放在
+`/workspace` 下，只训练 Insert 01~02 与 Bread 01~03，不下载或使用
+`bread_04`。先把本仓库放到 `/workspace/FRS_Tact`，然后配置密钥：
+
+```bash
+cd /workspace/FRS_Tact
+mkdir -p /workspace/secrets
+cp train_deco/configs/server_stage2_rtxpro6000.env.example \
+  /workspace/secrets/deco-stage2.env
+chmod 600 /workspace/secrets/deco-stage2.env
+# 编辑该文件，填写 HF_TOKEN、WANDB_API_KEY、WANDB_ENTITY 和两个 HF 输出仓库
+```
+
+一条命令会配置环境、按固定 revision 下载数据和初始化权重、生成两个 manifest，
+依次训练两个任务，并在每个任务成功后上传 best/latest 产物到对应的私有 HF
+model repo：
+
+```bash
+bash train_deco/scripts/server_stage2_rtxpro6000.sh all
+```
+
+也可以分步执行：
+
+```bash
+bash train_deco/scripts/server_stage2_rtxpro6000.sh setup
+bash train_deco/scripts/server_stage2_rtxpro6000.sh download
+bash train_deco/scripts/server_stage2_rtxpro6000.sh prepare
+bash train_deco/scripts/server_stage2_rtxpro6000.sh doctor
+bash train_deco/scripts/server_stage2_rtxpro6000.sh run insert
+bash train_deco/scripts/server_stage2_rtxpro6000.sh run bread
+```
+
+默认 `BATCH_SIZE=1024` 是单卡物理 batch size，16 vCPU 自动配置为 12 个
+DataLoader workers。若 1024 在实际 RTX PRO 6000 显存上 OOM，脚本会保留现有日志，
+之后必须显式降低 `BATCH_SIZE` 再启动；当前训练器没有梯度累积，不能把较小的物理
+batch 自动等价成有效 batch 1024。
+
 ## 图像增强训练
 
 训练脚本的新运行默认使用 `balanced-light-v2`：25% 保留原始光照、75% 使用

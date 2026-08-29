@@ -34,7 +34,7 @@ from .input_adapter import (
     validate_augmentation_config,
 )
 from .lerobot_vision_dataset import TACTILE_NAMES
-from .metrics import MetricsLogger
+from .metrics import MetricsLogger, WandbMetricsLogger
 from .model_factory import (
     MODEL_TYPE,
     STAGE2_MODEL_TYPE,
@@ -576,6 +576,13 @@ _STAGE2_RESUME_RUNTIME_ARGUMENT_KEYS = frozenset(
         "stage1_checkpoint",
         "tactile_encoder_checkpoint",
         "tactile_encoder_cache",
+        "wandb_enabled",
+        "wandb_project",
+        "wandb_entity",
+        "wandb_group",
+        "wandb_tags",
+        "wandb_mode",
+        "wandb_run_id",
     }
 )
 
@@ -1218,6 +1225,23 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keep-last-checkpoints", type=int,
                         default=int(os.environ.get("KEEP_LAST_CHECKPOINTS", "5")))
     parser.add_argument("--log-every-steps", type=int, default=int(os.environ.get("LOG_EVERY_STEPS", "100")))
+    parser.add_argument(
+        "--wandb-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("WANDB_ENABLED", False),
+    )
+    parser.add_argument(
+        "--wandb-project", default=os.environ.get("WANDB_PROJECT", "deco-stage2")
+    )
+    parser.add_argument("--wandb-entity", default=os.environ.get("WANDB_ENTITY"))
+    parser.add_argument("--wandb-group", default=os.environ.get("WANDB_GROUP"))
+    parser.add_argument("--wandb-tags", default=os.environ.get("WANDB_TAGS", ""))
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default=os.environ.get("WANDB_MODE", "online"),
+    )
+    parser.add_argument("--wandb-run-id", default=os.environ.get("WANDB_RUN_ID"))
     parser.add_argument("--validation-seed", type=int, default=int(os.environ.get("VALIDATION_SEED", "12345")))
     parser.add_argument(
         "--validation-noise-seeds",
@@ -1699,11 +1723,33 @@ def main(argv=None):
         )
         print(json.dumps({"event": "start", **config}), flush=True)
         metrics_logger = MetricsLogger(output_dir)
+        wandb_logger = None
+        if args.wandb_enabled:
+            wandb_logger = WandbMetricsLogger(
+                project=args.wandb_project,
+                entity=args.wandb_entity,
+                name=args.run_id,
+                run_id=args.wandb_run_id or args.run_id,
+                group=args.wandb_group,
+                tags=[
+                    tag.strip() for tag in args.wandb_tags.split(",")
+                    if tag.strip()
+                ],
+                mode=args.wandb_mode,
+                output_dir=output_dir,
+                config=config,
+            )
+            print(json.dumps({
+                "event": "wandb_initialized", "url": wandb_logger.url,
+            }), flush=True)
         if resume_record is not None:
             metrics_logger.log(resume_record)
+            if wandb_logger is not None:
+                wandb_logger.log(resume_record)
             print(json.dumps(resume_record), flush=True)
     else:
         metrics_logger = None
+        wandb_logger = None
     started = time.monotonic()
 
     def log_step(record):
@@ -1722,6 +1768,8 @@ def main(argv=None):
             )
             record["elapsed_seconds"] = time.monotonic() - started
             metrics_logger.log(record)
+            if wandb_logger is not None:
+                wandb_logger.log(record)
             print(json.dumps(record), flush=True)
 
     for epoch in range(start_epoch, args.epochs):
@@ -1859,6 +1907,8 @@ def main(argv=None):
             }
             record.update(ablation_record)
             metrics_logger.log_epoch(record)
+            if wandb_logger is not None:
+                wandb_logger.log(record)
             print(json.dumps(record), flush=True)
             checkpoint = {
                 "model": raw_model.state_dict(), "config": config,
@@ -1961,11 +2011,17 @@ def main(argv=None):
     if device.type == "cuda" and rank == 0:
         peak_gb = torch.cuda.max_memory_allocated() / (1024 ** 3)
         peak_reserved_gb = torch.cuda.max_memory_reserved() / (1024 ** 3)
-        print(json.dumps({
+        memory_record = {
             "event": "training_peak_memory",
             "peak_alloc_gb": round(peak_gb, 3),
             "peak_reserved_gb": round(peak_reserved_gb, 3),
-        }), flush=True)
+            "global_step": global_step,
+        }
+        if wandb_logger is not None:
+            wandb_logger.log(memory_record)
+        print(json.dumps(memory_record), flush=True)
+    if wandb_logger is not None:
+        wandb_logger.finish()
     cleanup_dist()
 
 
