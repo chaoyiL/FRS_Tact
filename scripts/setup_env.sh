@@ -37,7 +37,7 @@
 #   - 检查并安装缺少的系统工具、uv 和所需 Python 版本；
 #   - 用所选项目的依赖配置创建或同步独立虚拟环境；
 #   - 导入关键 Python 包，并检查 NVIDIA GPU、PyTorch/JAX 设备；
-#   - 生成仓库根目录的 .env.frs，供启动和下载脚本读取。
+#   - 生成仓库根目录的 .env.frs，记录每套环境唯一的 Python 路径；启动和下载脚本会自动读取。
 #
 # 默认虚拟环境目录：
 #   普通路径：
@@ -355,7 +355,8 @@ configure_runtime_storage() {
 }
 
 write_environment_file() {
-    # 各启动脚本通过 .env.frs 获取固定的 Python 和缓存路径，无需猜测当前激活的环境。
+    # .env.frs 是各项目解释器路径的唯一入口。Pi0.5 训练脚本会自动读取
+    # TRAIN_PI05_PYTHON，因此 /workspace 和普通目录使用完全相同的启动命令。
     {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"

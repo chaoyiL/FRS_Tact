@@ -44,6 +44,7 @@ bash scripts/download_data.sh \
 
 ```bash
 bash scripts/setup_env.sh --pi05_train
+# 训练入口会自动读取仓库根目录的 .env.frs，无需手动激活虚拟环境。
 bash train_pi05/scripts/start_pi05_train.sh --check
 bash train_pi05/scripts/start_pi05_train.sh
 ```
@@ -62,9 +63,8 @@ bash train_pi05/scripts/start_pi05_train.sh
 
 ```bash
 # 先修改 train_pi05/configs/train_pi05_right.yaml 中的数据路径和 norm_stats。
-cd train_pi05
-uv run python tools/compute_norm_stats.py configs/train_pi05_right.yaml
-cd ..
+source .env.frs
+"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py train_pi05/configs/train_pi05_right.yaml
 bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
 ```
@@ -76,10 +76,10 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 辅助工具需要时单独调用，例如：
 
 ```bash
-cd train_pi05
-uv run python tools/smoke_test.py
-uv run python tools/check_dataset.py --config-name pi05_bi
-uv run python tools/compute_norm_stats.py pi05_bi
+source .env.frs
+"$TRAIN_PI05_PYTHON" train_pi05/tools/smoke_test.py
+"$TRAIN_PI05_PYTHON" train_pi05/tools/check_dataset.py --config-name pi05_bi
+"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py pi05_bi
 ```
 
 `training.overwrite` 与 `training.resume` 不能同时为 `true`。正式训练前应确保

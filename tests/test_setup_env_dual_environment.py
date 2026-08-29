@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts/setup_env.sh"
+PI05_TRAIN_LAUNCHER = ROOT / "train_pi05/scripts/start_pi05_train.sh"
 
 
 def test_setup_env_help_is_safe_to_execute_directly() -> None:
@@ -44,6 +45,17 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"' in source
     assert '--project "${PI05_TRAIN_PROJECT_ROOT}"' in source
     assert "sync_environments" in source
+
+
+def test_pi05_train_launcher_loads_canonical_environment_file() -> None:
+    source = PI05_TRAIN_LAUNCHER.read_text(encoding="utf-8")
+    assert 'ENV_FILE="${PROJECT_ROOT}/.env.frs"' in source
+    assert 'source "${ENV_FILE}"' in source
+    assert 'TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_PYTHON:-}"' in source
+    assert (
+        'TRAIN_PYTHON="${TRAIN_PYTHON_OVERRIDE:-${TRAIN_PI05_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}}"'
+        in source
+    )
 
 
 def test_sync_environments_uses_each_project_lock(tmp_path: Path) -> None:
