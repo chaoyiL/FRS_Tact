@@ -23,7 +23,6 @@ dependencies = [
     "jax[cuda12]==0.5.3; sys_platform == 'linux'",
     "jax==0.5.3; sys_platform != 'linux'",
     "jaxtyping==0.2.36",
-    "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
     "ml-collections==1.0.0",
     "msgpack>=1.0.5",
     "numpy>=1.22.4,<2.0.0",
@@ -63,12 +62,14 @@ packages = ["src/openpi", "src/openpi_client", "src/lerobot", "tools"]
 override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
 
 [[tool.uv.index]]
-name = "pytorch-cu128"
-url = "https://download.pytorch.org/whl/cu128"
+# Pi0.5 使用 JAX 访问 GPU；PyTorch 只负责 LeRobot 数据加载和视频解码，
+# 使用 CPU wheel 可避免重复下载数 GB 的 CUDA/NVIDIA 运行库。
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
 
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
 
 [tool.pytest.ini_options]
 testpaths = ["src/openpi"]

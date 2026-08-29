@@ -466,11 +466,27 @@ sync_pi05_environment() {
 
 sync_pi05_train_environment() {
     log "Pi0.5 训练环境目录：${PI05_TRAIN_VENV_DIR}"
-    log "同步纯视觉 Pi0.5 JAX 训练项目"
+    log "同步纯视觉 Pi0.5 JAX 训练项目（显示详细下载进度）"
     # train_pi05 当前没有要求预先存在 uv.lock；首次同步时允许 uv 解析并生成锁文件。
-    UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}" \
-        "${UV_BIN}" sync --python "${PI05_TRAIN_PYTHON_VERSION}" \
-        --project "${PI05_TRAIN_PROJECT_ROOT}"
+    # 网络较慢时增加读取超时和重试次数；FRS_PYPI_MIRROR 可临时指定 PyPI 镜像，
+    # 例如 https://pypi.tuna.tsinghua.edu.cn/simple。
+    (
+        local -a pi05_sync_indexes=()
+        export UV_HTTP_CONNECT_TIMEOUT="${UV_HTTP_CONNECT_TIMEOUT:-15}"
+        export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"
+        export UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-8}"
+        if [[ -n "${FRS_PYPI_MIRROR:-}" ]]; then
+            export UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"
+            log "Pi0.5 训练使用 PyPI 镜像：${UV_DEFAULT_INDEX}"
+        fi
+        if [[ -n "${FRS_PYTORCH_INDEX:-}" ]]; then
+            pi05_sync_indexes=(--index "pytorch-cpu=${FRS_PYTORCH_INDEX}")
+            log "Pi0.5 训练使用 PyTorch CPU 镜像：${FRS_PYTORCH_INDEX}"
+        fi
+        UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}" \
+            "${UV_BIN}" sync --verbose --python "${PI05_TRAIN_PYTHON_VERSION}" \
+            --project "${PI05_TRAIN_PROJECT_ROOT}" "${pi05_sync_indexes[@]}"
+    )
 }
 
 # Preserve the source-level helper used by existing tests and shell consumers.

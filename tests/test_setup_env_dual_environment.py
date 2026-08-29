@@ -44,6 +44,10 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'PI05_TRAIN_VENV_DIR="${PI05_TRAIN_VENV_DIR:-${DEFAULT_PI05_TRAIN_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"' in source
     assert '--project "${PI05_TRAIN_PROJECT_ROOT}"' in source
+    assert 'UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"' in source
+    assert 'UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-8}"' in source
+    assert 'UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"' in source
+    assert 'pytorch-cpu=${FRS_PYTORCH_INDEX}' in source
     assert "sync_environments" in source
 
 

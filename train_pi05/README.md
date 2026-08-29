@@ -49,6 +49,19 @@ bash train_pi05/scripts/start_pi05_train.sh --check
 bash train_pi05/scripts/start_pi05_train.sh
 ```
 
+如果服务器访问 PyPI 较慢，可以仅在安装时指定镜像；PyTorch CPU wheel 仍从
+PyTorch 官方索引获取，JAX CUDA wheel 和其他包从所选 PyPI 镜像获取：
+
+```bash
+FRS_PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple \
+FRS_PYTORCH_INDEX=https://mirrors.aliyun.com/pytorch-wheels/cpu \
+  bash scripts/setup_env.sh --pi05_train
+```
+
+Pi0.5 使用 JAX 访问 GPU。环境中的 PyTorch 只用于读取 LeRobot 数据，因而固定使用
+CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内置所需的 LeRobot v3
+只读运行时代码，不需要在安装时访问 GitHub 克隆另一份 LeRobot。
+
 ### 右手单臂训练
 
 右手训练使用 `configs/train_pi05_right.yaml` 和 `pi05_single` 档位，固定合同为
