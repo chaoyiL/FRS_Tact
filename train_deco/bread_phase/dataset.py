@@ -61,9 +61,6 @@ def derive_bread_phase_labels(actions: np.ndarray) -> np.ndarray:
     reopen_row = close_row + 1 + int(reopens[0])
 
     motion_starts = np.flatnonzero(_left_motion_starts(actions))
-    before_reopen = motion_starts[motion_starts < reopen_row]
-    if len(before_reopen):
-        raise ValueError("Bread phase labeling found left motion before right gripper reopen")
     after_reopen = motion_starts[motion_starts > reopen_row]
     if len(after_reopen) == 0:
         raise ValueError("Bread phase labeling missing sustained left motion after right gripper reopen")
