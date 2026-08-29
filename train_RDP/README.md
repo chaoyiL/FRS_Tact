@@ -1,9 +1,8 @@
 # train_RDP
 
-独立的 Pick Tube Reactive Diffusion Policy 训练子项目。代码来自
-`RDP_vitamin` 的 `agent/rdp-pick-tube-deployment` 分支，精确 revision 记录在
-`SOURCE_REVISION`。内部顶层包名继续使用 `reactive_diffusion_policy`，以兼容 Hydra
-`_target_` 和 checkpoint。
+独立的 Pick Tube Reactive Diffusion Policy 训练子项目。服务器使用的代码目录是
+`/home/ljl/FRS_Tact/train_RDP`。内部顶层包名继续使用
+`reactive_diffusion_policy`，以兼容 Hydra `_target_` 和 checkpoint。
 
 现有默认双臂合同是 PCA30、20D 动作、AT→LDP 两阶段训练，并带 dataset、PCA、
 normalizer、AT/LDP 的 artifact identity 校验。详细说明见
@@ -43,39 +42,38 @@ bash scripts/train_pick_tube_single_gpu.sh all
 non-deployable checkpoint 用于真机。
 
 
-## 单右臂 RDP（Insert 01 + 02）
+## `/home/ljl` 服务器：单右臂 Insert / Press
 
-`train_deco` 中 Insert 数据的合同已移植为独立 RDP profile：
-`single-right-arm-7x10`。其中 state 是右臂 7D，action 是右臂 10D
-（3D 相对位移、6D 旋转、夹爪宽度）；现有 `dual-arm-20x20` 流程保持不变。
-RGB 仍使用 camera0/camera1，触觉仍使用四传感器并压缩为 PCA30。
+服务器脚本已经固定以下路径：
+
+- RDP 代码：`/home/ljl/FRS_Tact/train_RDP`
+- 原始数据：`/DATA/ljl/substage/lerobot_v21/KaiyueChen`
+- encoder、中间数据和训练输出：`/DATA/ljl/substage/rdp_single_right`
+
+本服务器脚本使用 PyTorch 2.10/CUDA 12.8 和 JAX 0.8.3/CUDA 12。训练分为两个互相隔离的环境：`.venv-jax` 只读取四路触觉图像，使用
+`KaiyueChen/encoder_ckpt_0824` 生成 `[N, 4, 512]` embedding；`.venv` 完成
+PCA30、Zarr 转换以及 PyTorch AT -> LDP 训练。不要把两个环境合并。
 
 ```bash
-cd train_RDP
+cd /home/ljl/FRS_Tact/train_RDP
 
-# 安装训练环境并登录（私有数据集才需要 token）
-bash scripts/install_pick_tube_training_env.sh
-.venv/bin/hf auth login
+# 只需首次执行：配置两个环境并从 HF 镜像下载 encoder_ckpt_0824
+bash scripts/server_ljl_single_right.sh setup
 
-# 下载固定 revision 的 insert_01/insert_02 和 RDP 已验证的 0809 编码器
-bash scripts/setup_pick_tube_single_right_data.sh datasets
-bash scripts/setup_pick_tube_single_right_data.sh encoder
+# 正式运行前检查 GPU、encoder 以及三个数据集的 shape/fps 合同
+bash scripts/server_ljl_single_right.sh doctor both
 
-# JAX 环境生成触觉特征；随后拟合 PCA30
-JAX_PYTHON=/absolute/path/to/jax/bin/python \
-  bash scripts/setup_pick_tube_single_right_data.sh precompute
-bash scripts/setup_pick_tube_single_right_data.sh pca
-
-# 建议先转换每个数据集 1 个 episode，再转换全量
-bash scripts/setup_pick_tube_single_right_data.sh smoke
-bash scripts/setup_pick_tube_single_right_data.sh convert
-
-# AT -> LDP 单卡训练；同一个 RUN_ID 可断点续训
-RUN_ID=insert_single_right_v1 \
-  bash scripts/train_pick_tube_single_right_gpu.sh all
+# 两个模型顺序训练：insert_01+insert_02 一个，press_01 一个
+bash scripts/server_ljl_single_right.sh all both
 ```
 
-服务器数据不在 `/home/hillbot/datasets` 时，通过 `LEROBOT_ROOT` 指定；输出路径可用
-`DATASET_PATH`、`TACTILE_CACHE_ROOT`、`TACTILE_PCA_PATH` 和 `OUTPUT_ROOT` 覆盖。
-若提供正式 baseline JSON，单手配置读取
-`val_active_right_translation_mae_mm` 和 `val_active_right_rotation_mae_deg`。
+也可以分别执行，断点重跑会复用已有 embedding、PCA、Zarr 和 checkpoint：
+
+```bash
+bash scripts/server_ljl_single_right.sh all insert
+bash scripts/server_ljl_single_right.sh all press
+```
+
+`prepare` 会自动完成触觉 embedding、独立 PCA30 和 Zarr 转换；`train` 只训练已有
+Zarr。默认使用 GPU 0、bf16、AT 20 epoch、LDP 10 epoch；需要时可在命令前覆盖，
+例如 `GPU_ID=1 AT_BATCH=32 LDP_BATCH=32 bash scripts/server_ljl_single_right.sh all insert`。
