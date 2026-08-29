@@ -89,7 +89,12 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
+def main(
+    config_name: str,
+    max_frames: int | None = None,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+):
     config_path = Path(config_name).expanduser()
     if config_path.suffix.lower() in {".yaml", ".yml"}:
         # Reuse the formal training path so ordered datasets, per-source
@@ -103,15 +108,27 @@ def main(config_name: str, max_frames: int | None = None):
     else:
         # Keep the original named-profile interface for existing workflows.
         config = _config.get_config(config_name)
+    stats_batch_size = config.batch_size if batch_size is None else batch_size
+    stats_num_workers = config.num_workers if num_workers is None else num_workers
+    if stats_batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {stats_batch_size}")
+    if stats_num_workers < 0:
+        raise ValueError(f"num_workers must be non-negative, got {stats_num_workers}")
+
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if data_config.rlds_data_dir is not None:
         data_loader, num_batches = create_rlds_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, max_frames
+            data_config, config.model.action_horizon, stats_batch_size, max_frames
         )
     else:
         data_loader, num_batches = create_torch_dataloader(
-            data_config, config.model.action_horizon, config.batch_size, config.model, config.num_workers, max_frames
+            data_config,
+            config.model.action_horizon,
+            stats_batch_size,
+            config.model,
+            stats_num_workers,
+            max_frames,
         )
 
     keys = ["state", "actions"]

@@ -669,9 +669,13 @@ import flax
 import jax
 import orbax.checkpoint
 import torch
+import torchvision
 import yaml
 
+import av
+import draccus
 import openpi.training.config
+import openpi.training.data_loader
 
 if sys.version_info[:2] != (3, 11):
     raise RuntimeError(f"Pi0.5 training requires Python 3.11, got {sys.version}")
@@ -679,6 +683,7 @@ print(f"pi05 train python={sys.version.split()[0]}")
 print(f"pi05 train jax={jax.__version__}")
 print(f"pi05 train flax={flax.__version__}")
 print(f"pi05 train torch={torch.__version__}")
+print(f"pi05 train torchvision={torchvision.__version__}")
 PY
     )
 }
