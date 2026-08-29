@@ -21,6 +21,7 @@ from train_deco.train import (
     build_argument_parser,
     STAGE2_CHECKPOINT_SCHEMA_VERSION,
     build_stage2_checkpoint_metadata,
+    build_stage2_parity_inputs,
     export_stage2_torchscript_artifacts,
     create_training_datasets,
     apply_restored_dataset_stats,
@@ -128,6 +129,24 @@ def _optimizer(model: nn.Module):
         betas=(0.95, 0.999),
     )
     return optimizer, constant_lr_scheduler(optimizer)
+
+
+def test_stage2_parity_inputs_keep_observation_and_action_dimensions_distinct() -> None:
+    inputs, tactile = build_stage2_parity_inputs(
+        {
+            "camera_names": ["camera0", "camera1"],
+            "image_size": 256,
+            "obs_dim": 7,
+            "action_dim": 10,
+            "chunk_size": 32,
+            "use_task_condition": False,
+        },
+        torch.device("cpu"),
+    )
+
+    assert inputs["obs"].shape == (1, 7)
+    assert inputs["act"].shape == (1, 32, 10)
+    assert tactile.shape == (1, 4, 3, 224, 224)
 
 
 

@@ -354,7 +354,7 @@ def build_stage2_parity_inputs(
         "img1": images[0],
         "img2": images[1],
         "obs": torch.randn(
-            1, int(config["action_dim"]), generator=generator
+            1, int(config["obs_dim"]), generator=generator
         ).to(device),
         "act": torch.randn(
             1, int(config["chunk_size"]), int(config["action_dim"]),
