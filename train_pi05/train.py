@@ -15,7 +15,7 @@ PURE_VISION_PROFILES = {"pi05_single", "pi05_bi", "pi05_bi_no_state"}
 
 
 def _fit_schedule_steps(total_steps: int, configured_warmup_steps: int) -> tuple[int, int]:
-    """Return a valid warmup/decay pair for both smoke tests and full training."""
+    """Return a valid warmup/decay pair for any requested training length."""
 
     if total_steps <= 0:
         raise ValueError(f"training.steps must be positive, got {total_steps}")

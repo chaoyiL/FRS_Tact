@@ -7,7 +7,7 @@
 - `scripts/start_pi05_train.sh`：配置预检、tmux 和正式训练入口。
 - `scripts/start_pi05_right_train.sh`：固定使用右手单臂配置的一键启动入口。
 - `train.py`：将 YAML 转成 openpi JAX 训练配置。
-- `tools/`：底层训练循环、数据检查、归一化统计和 smoke test。
+- `tools/`：底层训练循环、数据检查和归一化统计。
 - `src/openpi`：pi0.5 模型和训练循环。
 - `src/lerobot`：项目私有的 LeRobot v3 只读数据运行时。
 
@@ -56,27 +56,6 @@ Pi0.5 JAX 训练固定使用 `/workspace/venvs/pi05_train`（Python 3.11）；
 `download_data.sh` 固定使用 `/workspace/venvs/lerobot_data_tools`（Python 3.12）。
 这是因为当前 LeRobot 转换器包含 Python 3.12 语法，两者不能共用解释器。
 
-### 新服务器单张 RTX 4090 完整链路测试
-
-新服务器需要上述两套环境，但只需要执行一个入口。下面的测试固定使用
-`insert_01`，检查 7D state、10D action 和 `camera1`，抽样 512 帧生成测试专用
-归一化统计，然后执行 2 步真实 JAX 前向、反向和参数更新，最后检查 checkpoint：
-
-```bash
-cd /workspace/FRS_Tact
-bash train_pi05/scripts/test_pi05_4090_insert01.sh --setup
-```
-
-如果两套环境和转换后的数据已经存在，可以跳过安装与下载：
-
-```bash
-bash train_pi05/scripts/test_pi05_4090_insert01.sh --skip-download
-```
-
-首次运行还会下载 `pi05_base`，并进行耗时较长的 XLA 编译。测试输出位于
-`/workspace/outputs/pi05_4090_insert01_smoke`。抽样统计只用于验证链路，正式训练
-前仍应使用正式 YAML 对完整训练数据重新运行 `compute_norm_stats.py`。
-
 如果服务器访问 PyPI 较慢，可以仅在安装时指定镜像；PyTorch CPU wheel 仍从
 PyTorch 官方索引获取，JAX CUDA wheel 和其他包从所选 PyPI 镜像获取：
 
@@ -124,7 +103,6 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 
 ```bash
 source env_path
-"$TRAIN_PI05_PYTHON" train_pi05/tools/smoke_test.py
 "$TRAIN_PI05_PYTHON" train_pi05/tools/check_dataset.py --config-name pi05_bi
 "$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py --config-name pi05_bi
 ```
