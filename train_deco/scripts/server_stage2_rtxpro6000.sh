@@ -65,8 +65,9 @@ usage() {
   bash train_deco/scripts/server_stage2_rtxpro6000.sh all
 
 all：配置环境、下载、准备 manifest，然后依次训练并上传 Insert 01~02 和
-Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=1024；
-workers 使用 vCPU 的 75%，所以 16 vCPU 对应 12 workers。
+Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=512；
+workers 使用 vCPU 的 75%，所以 16 vCPU 对应 12 workers；每个 worker
+只预取 1 个 batch，以控制大 batch 的主机内存峰值。
 EOF
 }
 
@@ -97,9 +98,24 @@ require_runtime() {
     [[ -x "${PYTHON_BIN}" && -x "${HF_BIN}" ]] || fail "请先运行 setup"
 }
 
-require_tokens() {
+wandb_enabled() {
+    case "${WANDB_ENABLED:-1}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+        0|false|FALSE|no|NO|off|OFF) return 1 ;;
+        *) fail "WANDB_ENABLED 必须是布尔值，当前为：${WANDB_ENABLED}" ;;
+    esac
+}
+
+require_hf_token() {
     [[ -n "${HF_TOKEN:-}" ]] || fail "未设置 HF_TOKEN：${SERVER_ENV_FILE}"
-    [[ -n "${WANDB_API_KEY:-}" ]] || fail "未设置 WANDB_API_KEY：${SERVER_ENV_FILE}"
+}
+
+require_training_tokens() {
+    require_hf_token
+    if wandb_enabled && [[ "${WANDB_MODE:-online}" == "online" ]]; then
+        [[ -n "${WANDB_API_KEY:-}" ]] || fail \
+            "W&B online 模式未设置 WANDB_API_KEY；不用 W&B 时请设置 WANDB_ENABLED=0"
+    fi
 }
 
 detect_workers() {
@@ -140,7 +156,7 @@ download_dataset() {
 
 download_assets() {
     require_runtime
-    require_tokens
+    require_hf_token
     create_roots
     check_disk
     "${HF_BIN}" auth whoami
@@ -199,7 +215,7 @@ train_task() {
     timestamp="$(date +%Y%m%d_%H%M%S)"
     set_task "${task}" "${timestamp}"
     require_runtime
-    require_tokens
+    require_training_tokens
     create_roots
     [[ -f "${TASK_MANIFEST}" ]] || fail "缺少 manifest：${TASK_MANIFEST}"
     [[ -f "${TASK_STAGE1}" ]] || fail "缺少 Stage1：${TASK_STAGE1}"
@@ -207,13 +223,13 @@ train_task() {
     nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
     workers="${WORKERS:-$(detect_workers)}"
-    batch_size="${BATCH_SIZE:-1024}"
+    batch_size="${BATCH_SIZE:-512}"
     run_dir="${OUTPUT_ROOT}/${TASK_RUN_ID}"
     log "task=${task} run=${TASK_RUN_ID} batch=${batch_size} workers=${workers}"
     warn "BATCH_SIZE 是单卡物理 batch；如 CUDA OOM，请显式降低 BATCH_SIZE"
     printf '%s\n' "${TASK_RUN_ID}" > "${STATE_ROOT}/last_${task}_run_id"
 
-    export WANDB_ENABLED=1
+    export WANDB_ENABLED="${WANDB_ENABLED:-1}"
     export WANDB_PROJECT="${WANDB_PROJECT:-deco-stage2}"
     export WANDB_GROUP="${WANDB_GROUP:-deco-stage2-rtxpro6000}"
     export WANDB_TAGS="${WANDB_TAGS:-stage2,rtxpro6000,${task}}"
@@ -222,6 +238,7 @@ train_task() {
     export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
     export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
     export MKL_NUM_THREADS="${MKL_NUM_THREADS:-1}"
+    export DATALOADER_PREFETCH_FACTOR="${DATALOADER_PREFETCH_FACTOR:-1}"
 
     OUTPUT_DIR="${OUTPUT_ROOT}" RUN_ID="${TASK_RUN_ID}" \
     BATCH_SIZE="${batch_size}" WORKERS="${workers}" EPOCHS="${EPOCHS:-50}" \
@@ -253,7 +270,7 @@ upload_task() {
     run_id="$(last_run_id "${task}" "${2:-}")"
     set_task "${task}" unused
     require_runtime
-    require_tokens
+    require_hf_token
     [[ -n "${TASK_REPO}" ]] || fail "请设置 HF_OUTPUT_${task^^}_REPO=owner/repo"
     run_dir="${OUTPUT_ROOT}/${run_id}"
     [[ -f "${run_dir}/deco_stage2_best.pt" ]] || fail "缺少训练产物：${run_dir}"
@@ -272,13 +289,17 @@ doctor() {
     create_roots
     log "code=${CODE_ROOT}"
     log "python=$("${PYTHON_BIN}" --version 2>&1)"
-    log "cpu=$(nproc) workers=${WORKERS:-$(detect_workers)} batch=${BATCH_SIZE:-1024}"
+    log "cpu=$(nproc) workers=${WORKERS:-$(detect_workers)} batch=${BATCH_SIZE:-512} prefetch=${DATALOADER_PREFETCH_FACTOR:-1}"
     df -h /workspace
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
     "${PYTHON_BIN}" -c \
         'import torch, wandb, huggingface_hub; print(torch.__version__, torch.version.cuda, wandb.__version__, huggingface_hub.__version__)'
     [[ -n "${HF_TOKEN:-}" ]] && log "HF_TOKEN=已设置" || warn "HF_TOKEN=未设置"
-    [[ -n "${WANDB_API_KEY:-}" ]] && log "WANDB_API_KEY=已设置" || warn "WANDB_API_KEY=未设置"
+    if wandb_enabled; then
+        [[ -n "${WANDB_API_KEY:-}" ]] && log "WANDB_API_KEY=已设置" || warn "WANDB_API_KEY=未设置"
+    else
+        log "W&B=已禁用"
+    fi
 }
 
 main() {
