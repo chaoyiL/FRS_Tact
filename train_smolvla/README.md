@@ -57,7 +57,7 @@ shuffles their frames. Sources must have identical FPS and feature schemas;
 their natural sampling share is proportional to frame count.
 
 Install FRS_Tact's isolated official LeRobot SmolVLA environment. Under RunPod
-it is stored at `/workspace/venvs/smolvla_torch`; `.env.frs` records the Python
+it is stored at `/workspace/venvs/smolvla_torch`; `env_path` records the Python
 path automatically:
 
 ```bash
@@ -156,7 +156,7 @@ replace the two-GPU production configuration in `configs/train_smolvla.yaml`.
 ## RunPod training issues already addressed
 
 - An obsolete `/home/typhon/vb3` Python path was replaced by the managed
-  `/workspace/venvs/smolvla_torch` environment and `.env.frs` lookup.
+  `/workspace/venvs/smolvla_torch` environment and `env_path` lookup.
 - Legacy dataset key `actions` is migrated to the LeRobot v3 `action` key.
 - Extra tactile cameras are allowed in source datasets but pruned before the
   pure-vision reader decodes samples; only camera0/camera1 feed this policy.

@@ -17,7 +17,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_PATH="${1:-${PROJECT_ROOT}/train_smolvla_frs/configs/train_frs.yaml}"
 OUTPUT_ROOT="${FRS_ABLATION_OUTPUT_ROOT:-${PROJECT_ROOT}/checkpoints/frs}"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_loss_ablation}"
 
 log() { echo "[frs-ablation] $*"; }

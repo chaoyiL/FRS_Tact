@@ -5,7 +5,16 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
 CONFIG="${TRAIN_ROOT}/configs/test_pi05_4090_insert01.yaml"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
 MAX_NORM_FRAMES="${PI05_SMOKE_NORM_FRAMES:-512}"
 RUN_SETUP=0
 SKIP_DOWNLOAD=0

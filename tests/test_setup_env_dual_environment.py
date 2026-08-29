@@ -56,7 +56,9 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
 
 def test_pi05_train_launcher_loads_canonical_environment_file() -> None:
     source = PI05_TRAIN_LAUNCHER.read_text(encoding="utf-8")
-    assert 'ENV_FILE="${PROJECT_ROOT}/.env.frs"' in source
+    assert 'ENV_FILE="${PROJECT_ROOT}/env_path"' in source
+    assert 'PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"' in source
+    assert 'LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"' in source
     assert 'source "${ENV_FILE}"' in source
     assert 'TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_PYTHON:-}"' in source
     assert (
@@ -73,7 +75,7 @@ def test_sync_environments_uses_each_project_lock(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)
-    env_file = tmp_path / ".env.frs"
+    env_file = tmp_path / "env_path"
     root_venv = tmp_path / "root-venv"
     pi05_venv = tmp_path / "pi05-venv"
     command = f"""

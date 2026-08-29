@@ -40,7 +40,7 @@
 #   - 检查并安装缺少的系统工具、uv 和所需 Python 版本；
 #   - 用所选项目的依赖配置创建或同步独立虚拟环境；
 #   - 导入关键 Python 包，并检查 NVIDIA GPU、PyTorch/JAX 设备；
-#   - 生成仓库根目录的 .env.frs，记录每套环境唯一的 Python 路径；启动和下载脚本会自动读取。
+#   - 生成仓库根目录的 env_path，记录每套环境唯一的 Python 路径；启动和下载脚本会自动读取。
 #
 # 默认虚拟环境目录：
 #   普通路径：
@@ -67,7 +67,7 @@ SMOLVLA_TORCH_VERSION_TORCHVISION="${SMOLVLA_TORCH_VERSION_TORCHVISION:-0.22.1}"
 SMOLVLA_TORCHCODEC_VERSION="${SMOLVLA_TORCHCODEC_VERSION:-0.5.0}"
 # train_pi05 的依赖约束与另外两套项目不同，因此固定使用独立的 Python 3.11 环境。
 PI05_TRAIN_PYTHON_VERSION="3.11"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
 
 if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
     DEFAULT_WORKSPACE_ROOT="/workspace"
@@ -378,8 +378,9 @@ configure_runtime_storage() {
 }
 
 write_environment_file() {
-    # .env.frs 是各项目解释器路径的唯一入口。Pi0.5 训练脚本会自动读取
-    # TRAIN_PI05_PYTHON，因此 /workspace 和普通目录使用完全相同的启动命令。
+    # env_path 是所有项目解释器和缓存路径的统一索引，不等同于激活某一个 venv。
+    # 启动/下载脚本会自动读取对应的 *_PYTHON；手动执行工具时可 source 一次后
+    # 显式调用所需解释器，因此 /workspace 和普通目录使用完全相同的命令结构。
     {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
@@ -796,8 +797,15 @@ print_summary() {
     echo "首次使用时登录："
     echo "  cd ${PROJECT_ROOT}"
     echo "  source ${ENV_FILE}"
-    echo "  ${UV_BIN} run --no-sync hf auth login"
-    echo "  ${UV_BIN} run --no-sync wandb login"
+    if should_setup_pi05_train; then
+        echo "  ${DATA_TOOLS_VENV_DIR}/bin/hf auth login"
+        echo "  ${PI05_TRAIN_VENV_DIR}/bin/wandb login"
+    elif should_setup_smolvla; then
+        echo "  ${VENV_DIR}/bin/hf auth login"
+        echo "  ${VENV_DIR}/bin/wandb login"
+    elif should_setup_pi05; then
+        echo "  ${PI05_VENV_DIR}/bin/hf auth login"
+    fi
     echo
     echo "一键启动视觉 SmolVLA："
     echo "  bash ${PROJECT_ROOT}/train_smolvla/scripts/start_smolvla_train.sh"

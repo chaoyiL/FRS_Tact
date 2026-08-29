@@ -38,7 +38,7 @@ bash scripts/setup_env.sh --pi05_deploy
 部署环境。只部署 Pi0.5 时使用上述选项，可跳过根 SmolVLA/FRS 依赖同步和验证。
 
 如果通过 `PI05_VENV_DIR` 把 Pi0.5 环境放到其他位置，启动前先执行
-`source /home/typhon/FRS_Tact/.env.frs`，让启动器读取生成的 Python 路径。
+`source /workspace/FRS_Tact/env_path`，让启动器读取生成的 Python 路径。
 
 也可以只在本目录手动同步 Pi0.5 环境：
 
