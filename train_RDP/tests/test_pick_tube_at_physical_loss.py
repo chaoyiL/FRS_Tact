@@ -275,3 +275,52 @@ def test_vae_physical_v2_projects_rotation_before_returning_actions():
 
     assert torch.linalg.matrix_norm(matrix.transpose(-1, -2) @ matrix - identity).max() < 1e-5
     assert (torch.linalg.det(matrix) - 1).abs().max() < 1e-5
+
+
+
+def test_single_right_physical_loss_and_vae_support_10d_actions():
+    target = torch.zeros((2, 3, 10), dtype=torch.float32)
+    target[..., 3:9] = IDENTITY_6D.float()
+    prediction = target.clone()
+    prediction[..., 0] = 0.001
+    valid_mask = torch.ones((2, 3), dtype=torch.bool)
+    idle_mask = torch.ones((2, 3, 1), dtype=torch.bool)
+
+    losses = compute_bimanual_physical_loss(
+        target,
+        prediction,
+        valid_mask,
+        idle_mask,
+        DEFAULT_WEIGHTS,
+    )
+    assert losses["position_loss"] > 0
+    assert losses["idle_loss"] > 0
+
+    vae = VAE(
+        horizon=3,
+        shape_meta={"action": {"shape": [10]}, "extended_obs": {}},
+        n_latent_dims=4,
+        n_embed=2,
+        mlp_layer_num=0,
+        use_vq=False,
+        eval=False,
+        device="cpu",
+        action_loss_version="physical_v2",
+        physical_loss_weights=DEFAULT_WEIGHTS,
+    )
+    fit_actions = target.reshape(-1, 10).numpy().copy()
+    fit_actions[:, 9] = torch.linspace(0.01, 0.06, len(fit_actions)).numpy()
+    normalizer = get_action_normalizer(fit_actions, version="zero_centered_v2")
+    from reactive_diffusion_policy.model.common.normalizer import LinearNormalizer
+
+    wrapped = LinearNormalizer()
+    wrapped["action"] = normalizer
+    vae.set_normalizer(wrapped)
+    result = vae.compute_loss_and_metric(
+        {
+            "action": target,
+            "valid_mask": valid_mask,
+            "idle_arm_mask": idle_mask,
+        }
+    )
+    assert result["loss"].ndim == 0

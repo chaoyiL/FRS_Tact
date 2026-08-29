@@ -16,17 +16,38 @@ from omegaconf import OmegaConf
 
 from reactive_diffusion_policy.common.artifact_manifest import stable_json_digest
 from reactive_diffusion_policy.common.pick_tube_action_contract import (
+    DUAL_ARM_PROFILE,
     HIGH_ROTATION_DELTA_DEG,
     HIGH_TRANSLATION_DELTA_M,
     LOW_ROTATION_DELTA_DEG,
     LOW_TRANSLATION_DELTA_M,
+    resolve_state_action_profile,
 )
 
 
-_ARM_LAYOUT = {
-    "left": (slice(0, 3), slice(3, 9), 9),
-    "right": (slice(10, 13), slice(13, 19), 19),
-}
+def _arm_layout_for(
+    action_dim: int,
+    state_action_profile: str | None,
+) -> dict[str, tuple[slice, slice, int]]:
+    if state_action_profile is None:
+        if action_dim != 20:
+            raise ValueError(
+                "10D validation requires state_action_profile=single-right-arm-7x10"
+            )
+        state_action_profile = DUAL_ARM_PROFILE
+    profile = resolve_state_action_profile(state_action_profile)
+    if profile.action_dim != action_dim:
+        raise ValueError(
+            f"{profile.name} requires {profile.action_dim}D actions, got {action_dim}D"
+        )
+    return {
+        arm_name: (
+            slice(arm_index * 10, arm_index * 10 + 3),
+            slice(arm_index * 10 + 3, arm_index * 10 + 9),
+            arm_index * 10 + 9,
+        )
+        for arm_index, arm_name in enumerate(profile.controlled_arms)
+    }
 
 
 def build_episode_split_manifest(
@@ -148,22 +169,29 @@ def compute_idle_rollout_metrics(
     horizon: int = 29,
     *,
     valid_mask=None,
+    state_action_profile: str | None = None,
 ) -> dict[str, float]:
-    """Measure bimanual physical errors from unnormalized 20D actions."""
+    """Measure physical errors from unnormalized 10D or 20D actions."""
     target_array = _as_numpy(target).astype(np.float64, copy=False)
     prediction_array = _as_numpy(prediction).astype(np.float64, copy=False)
     idle_array = _as_numpy(idle_mask).astype(bool, copy=False)
-    if target_array.shape != prediction_array.shape or target_array.shape[-1] != 20:
-        raise ValueError("target and prediction must have matching [..., T, 20] shapes")
+    if target_array.shape != prediction_array.shape:
+        raise ValueError("target and prediction must have matching shapes")
     if target_array.ndim == 2:
         target_array = target_array[None]
         prediction_array = prediction_array[None]
     if target_array.ndim != 3:
-        raise ValueError("target and prediction must have shape [B, T, 20]")
+        raise ValueError("target and prediction must have shape [B, T, A]")
+    arm_layout = _arm_layout_for(
+        target_array.shape[-1],
+        state_action_profile,
+    )
     if idle_array.ndim == 2:
         idle_array = idle_array[None]
-    if idle_array.shape != (*target_array.shape[:-1], 2):
-        raise ValueError("idle_mask must have shape [B, T, 2]")
+    if idle_array.shape != (*target_array.shape[:-1], len(arm_layout)):
+        raise ValueError(
+            f"idle_mask must have shape [B, T, {len(arm_layout)}]"
+        )
     if horizon < 1 or horizon > target_array.shape[-2]:
         raise ValueError("horizon must be positive and no longer than the action sequence")
 
@@ -183,28 +211,28 @@ def compute_idle_rollout_metrics(
     valid_array = valid_array[:, start:]
 
     integrated_translation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     integrated_rotation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     idle_step_translation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     idle_step_rotation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     active_translation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     active_rotation: dict[str, list[float]] = {
-        arm: [] for arm in _ARM_LAYOUT
+        arm: [] for arm in arm_layout
     }
     translation_bias = {
-        phase: {arm: [] for arm in _ARM_LAYOUT} for phase in ("idle", "active")
+        phase: {arm: [] for arm in arm_layout} for phase in ("idle", "active")
     }
     gripper_error = {
-        phase: {arm: [] for arm in _ARM_LAYOUT} for phase in ("idle", "active")
+        phase: {arm: [] for arm in arm_layout} for phase in ("idle", "active")
     }
     micro_target_count = 0
     micro_predicted_count = 0
@@ -212,7 +240,7 @@ def compute_idle_rollout_metrics(
     true_predicted_micro_count = 0
 
     for arm_index, (arm, (position_slice, rotation_slice, gripper_index)) in enumerate(
-        _ARM_LAYOUT.items()
+        arm_layout.items()
     ):
         for batch_index in range(target_array.shape[0]):
             target_total_rotation = np.eye(3)
@@ -338,7 +366,7 @@ def compute_idle_rollout_metrics(
     metrics["val_idle_rotation_p95_deg"] = metrics[
         "val_idle_rotation_step_p95_deg"
     ]
-    for arm in _ARM_LAYOUT:
+    for arm in arm_layout:
         metrics.update(
             {
                 f"val_idle_{arm}_translation_29_mm": _mean_or_nan(
@@ -448,9 +476,11 @@ def compute_contiguous_300_step_drift(
     idle_mask,
     *,
     valid_mask=None,
+    state_action_profile: str | None = None,
 ) -> dict[str, float]:
     """Measure drift from genuine contiguous 300-step action trajectories."""
     target_array = _as_numpy(target)
+    arm_layout = _arm_layout_for(target_array.shape[-1], state_action_profile)
     if target_array.ndim < 2 or target_array.shape[-2] < 300:
         raise ValueError("300 contiguous action steps are required for drift metrics")
     metrics = compute_idle_rollout_metrics(
@@ -459,12 +489,13 @@ def compute_contiguous_300_step_drift(
         idle_mask,
         horizon=300,
         valid_mask=valid_mask,
+        state_action_profile=state_action_profile,
     )
     result = {
         "val_idle_translation_300_mm": metrics["val_idle_translation_29_mm"],
         "val_idle_rotation_300_deg": metrics["val_idle_rotation_29_deg"],
     }
-    for arm in _ARM_LAYOUT:
+    for arm in arm_layout:
         result[f"val_idle_{arm}_translation_300_mm"] = metrics[
             f"val_idle_{arm}_translation_29_mm"
         ]
@@ -561,9 +592,11 @@ def load_active_metric_baselines(config) -> dict[str, float] | None:
         raise ValueError(f"validation baseline_json is invalid JSON: {path}") from error
     if not isinstance(value, Mapping):
         raise ValueError("validation baseline_json must contain a JSON object")
+    controlled_arms = _select(config, "task.controlled_arms")
+    active_arm = str(controlled_arms[0]) if controlled_arms else "left"
     required = {
-        "translation_mm": "val_active_left_translation_mae_mm",
-        "rotation_deg": "val_active_left_rotation_mae_deg",
+        "translation_mm": f"val_active_{active_arm}_translation_mae_mm",
+        "rotation_deg": f"val_active_{active_arm}_rotation_mae_deg",
     }
     baselines: dict[str, float] = {}
     for output_key, input_key in required.items():

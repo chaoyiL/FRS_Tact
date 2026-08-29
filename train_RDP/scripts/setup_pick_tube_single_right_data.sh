@@ -19,32 +19,34 @@ RDP_MODEL_REPO=${RDP_MODEL_REPO:-wjstx/rdp}
 RDP_MODEL_REVISION=${RDP_MODEL_REVISION:-main}
 RDP_WEIGHTS_DIR=${RDP_WEIGHTS_DIR:-${RDP_DIR}/data/weights/wjstx_rdp}
 LEROBOT_ROOT=${LEROBOT_ROOT:-/home/hillbot/datasets}
-TACTILE_CACHE_ROOT=${TACTILE_CACHE_ROOT:-${RDP_DIR}/data/tactile_embeddings_encoder0809}
-TACTILE_PCA_PATH=${TACTILE_PCA_PATH:-${RDP_DIR}/data/PCA_Transform_PickTube/tactile_pca_2x15.npz}
-DATASET_PATH=${DATASET_PATH:-${RDP_DIR}/data/pick_tube_01_06_pca30_rdp_zarr}
-SMOKE_DATASET_PATH=${SMOKE_DATASET_PATH:-${RDP_DIR}/data/pick_tube_01_06_pca30_smoke_rdp_zarr}
+TACTILE_CACHE_ROOT=${TACTILE_CACHE_ROOT:-${RDP_DIR}/data/tactile_embeddings_encoder0809_insert_01_02}
+TACTILE_PCA_PATH=${TACTILE_PCA_PATH:-${RDP_DIR}/data/PCA_Transform_Insert/tactile_pca_insert_01_02_encoder0809_2x15.npz}
+DATASET_PATH=${DATASET_PATH:-${RDP_DIR}/data/insert_01_02_pca30_single_right_rdp_zarr}
+SMOKE_DATASET_PATH=${SMOKE_DATASET_PATH:-${RDP_DIR}/data/insert_01_02_pca30_single_right_smoke_rdp_zarr}
 ENCODER_DIR=${ENCODER_DIR:-${RDP_DIR}/data/encoder_ckpt_0809}
 ENCODER_RELEASE_BASE=${ENCODER_RELEASE_BASE:-https://alpha.hf-mirror.com/KaiyueChen/encoder_ckpt_0809/resolve/main}
 ENCODER_PARAMS_FILE=params-235cb754d17b461b8be2d652c96fc169.npz
 JAX_PYTHON=${JAX_PYTHON:-${RDP_DIR}/.venv-jax/bin/python}
 OVERWRITE=${OVERWRITE:-0}
 SMOKE_EPISODES=${SMOKE_EPISODES:-1}
+INSERT_01_REVISION=${INSERT_01_REVISION:-deead6367f0a2d817306a28bcaecc089b5cfe653}
+INSERT_02_REVISION=${INSERT_02_REVISION:-babbcf401b84640b599c084a9121e80561944e8f}
 
 usage() {
   cat <<USAGE
 Usage: $0 <datasets|encoder|weights|precompute|pca|validate|convert|smoke>
 
-  datasets   Download LeRobot pick_tube_01..06 from the HF mirror.
+  datasets   Download pinned LeRobot insert_01 and insert_02 revisions.
   encoder    Download the inference-only encoder from the HF mirror.
   weights    Download latest AT/LDP deployment checkpoints from wjstx/rdp.
   precompute Build tactile embeddings using a separate JAX CUDA environment.
   pca        Fit two arm-wise 1024-to-15 PCA projections.
   validate   Validate an existing RDP Zarr and load one AT/LDP batch.
-  convert    Convert all LeRobot pick_tube_01..06 episodes, then validate.
+  convert    Convert insert_01 + insert_02 as right-arm 7D/10D, then validate.
   smoke      Convert a small subset to SMOKE_DATASET_PATH, then validate.
 
 Environment variables:
-  LEROBOT_ROOT        LeRobot root containing pick_tube_01..06
+  LEROBOT_ROOT        LeRobot root containing insert_01 and insert_02
                       (default: /home/hillbot/datasets)
   HF_ENDPOINT         Hugging Face endpoint (default: alpha.hf-mirror.com)
   HF_HUB_DISABLE_XET  Disable Xet CAS downloads (default: 1)
@@ -53,7 +55,7 @@ Environment variables:
   RDP_MODEL_REPO      RDP checkpoint repository (default: wjstx/rdp)
   RDP_MODEL_REVISION  Repository revision (default: main)
   RDP_WEIGHTS_DIR     Local checkpoint directory
-  TACTILE_CACHE_ROOT  Root containing KaiyueChen/pick_tube_XX/embeddings.npy
+  TACTILE_CACHE_ROOT  Root containing KaiyueChen/insert_0X/embeddings.npy
   TACTILE_PCA_PATH    Two-arm PCA artifact used by conversion and deployment
   DATASET_PATH        Full RDP Zarr output/input directory
   JAX_PYTHON          Python from a separate CUDA-enabled JAX environment
@@ -65,14 +67,21 @@ USAGE
 
 download_datasets() {
   mkdir -p "${LEROBOT_ROOT}"
-  for dataset_name in pick_tube_01 pick_tube_02 pick_tube_03 pick_tube_04 pick_tube_05 pick_tube_06; do
-    echo "Downloading KaiyueChen/${dataset_name} to ${LEROBOT_ROOT}/${dataset_name}"
+  local dataset_name revision
+  for dataset_name in insert_01 insert_02; do
+    if [[ "${dataset_name}" == "insert_01" ]]; then
+      revision="${INSERT_01_REVISION}"
+    else
+      revision="${INSERT_02_REVISION}"
+    fi
+    echo "Downloading KaiyueChen/${dataset_name}@${revision} to ${LEROBOT_ROOT}/${dataset_name}"
     HF_ENDPOINT="${HF_ENDPOINT}" \
       HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET}" \
       HF_HUB_DOWNLOAD_TIMEOUT="${HF_HUB_DOWNLOAD_TIMEOUT}" \
       "${HF_BIN}" download \
       "KaiyueChen/${dataset_name}" \
       --repo-type dataset \
+      --revision "${revision}" \
       --local-dir "${LEROBOT_ROOT}/${dataset_name}" \
       --max-workers "${HF_MAX_WORKERS}"
     test -f "${LEROBOT_ROOT}/${dataset_name}/meta/info.json"
@@ -240,19 +249,19 @@ case "${COMMAND}" in
     download_rdp_weights
     ;;
   precompute)
-    precompute_tactile "$@"
+    precompute_tactile --datasets insert_01 insert_02 "$@"
     ;;
   validate)
     validate_dataset "${DATASET_PATH}"
     ;;
   pca)
-    fit_tactile_pca "$@"
+    fit_tactile_pca --datasets insert_01 insert_02 "$@"
     ;;
   convert)
-    convert_dataset "${DATASET_PATH}" "$@"
+    convert_dataset "${DATASET_PATH}" --datasets insert_01 insert_02 --dataset-repeats --state-action-profile single-right-arm-7x10 "$@"
     ;;
   smoke)
-    convert_dataset "${SMOKE_DATASET_PATH}" --max-episodes-per-dataset "${SMOKE_EPISODES}" "$@"
+    convert_dataset "${SMOKE_DATASET_PATH}" --datasets insert_01 insert_02 --dataset-repeats --state-action-profile single-right-arm-7x10 --max-episodes-per-dataset "${SMOKE_EPISODES}" "$@"
     ;;
   -h|--help|help)
     usage

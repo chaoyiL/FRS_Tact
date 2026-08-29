@@ -149,6 +149,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
             cfg.training.sample_every = 1
 
         active_baselines = load_active_metric_baselines(cfg)
+        active_metric_arm = str(cfg.task.get("controlled_arms", ["left"])[0])
 
         accelerator = Accelerator(
             log_with='wandb',
@@ -466,6 +467,9 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                 torch.cat(val_idle_masks),
                                 horizon=cfg.n_action_steps,
                                 valid_mask=torch.cat(val_valid_masks),
+                                state_action_profile=cfg.task.get(
+                                    "state_action_profile", None
+                                ),
                             )
                             step_log.update(physical_metrics)
                             step_log.update(
@@ -483,7 +487,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                         "val_idle_rotation_p95_deg"
                                     ],
                                     active_translation_mm=physical_metrics[
-                                        "val_active_left_translation_mae_mm"
+                                        f"val_active_{active_metric_arm}_translation_mae_mm"
                                     ],
                                     active_translation_baseline_mm=(
                                         active_baselines["translation_mm"]
@@ -491,7 +495,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                         else None
                                     ),
                                     active_rotation_deg=physical_metrics[
-                                        "val_active_left_rotation_mae_deg"
+                                        f"val_active_{active_metric_arm}_rotation_mae_deg"
                                     ],
                                     active_rotation_baseline_deg=(
                                         active_baselines["rotation_deg"]

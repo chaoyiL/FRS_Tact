@@ -101,15 +101,18 @@ def test_legacy_v1_remains_the_default():
     )
 
 
-def test_zero_centered_v2_rejects_non_bimanual_action_layout():
-    actions = np.zeros((8, 10), dtype=np.float32)
+def test_zero_centered_v2_supports_single_arm_10d_layout():
+    actions = _actions()[:, :10]
 
-    try:
-        get_action_normalizer(actions, version="zero_centered_v2")
-    except ValueError as exc:
-        assert "20D bimanual" in str(exc)
-    else:
-        raise AssertionError("zero_centered_v2 accepted a non-20D action layout")
+    normalizer = get_action_normalizer(actions, version="zero_centered_v2")
+    normalized = normalizer.normalize(actions).detach().cpu().numpy()
+    restored = normalizer.unnormalize(normalized).detach().cpu().numpy()
+
+    assert np.max(np.abs(restored - actions)) < 1e-7
+    np.testing.assert_array_equal(
+        normalizer.params_dict["offset"].detach().cpu().numpy()[3:9],
+        -IDENTITY_6D,
+    )
 
 
 def test_pick_tube_training_configs_select_v2_normalization_and_physical_loss():
@@ -119,12 +122,25 @@ def test_pick_tube_training_configs_select_v2_normalization_and_physical_loss():
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         at_cfg = compose(config_name="train_pick_tube_at_workspace")
         ldp_cfg = compose(config_name="train_pick_tube_ldp_workspace")
+        single_at_cfg = compose(
+            config_name="train_pick_tube_single_right_at_workspace"
+        )
+        single_ldp_cfg = compose(
+            config_name="train_pick_tube_single_right_ldp_workspace"
+        )
 
     assert at_cfg.task.dataset.action_normalizer_version == "zero_centered_v2"
     assert ldp_cfg.task.dataset.action_normalizer_version == "zero_centered_v2"
     assert at_cfg.policy.action_loss_version == "physical_v2"
     assert ldp_cfg.policy.at.action_loss_version == "physical_v2"
     assert ldp_cfg.task.dataset.at.action_loss_version == "physical_v2"
+    assert single_at_cfg.task.shape_meta.action.shape == [10]
+    assert single_ldp_cfg.task.shape_meta.action.shape == [10]
+    assert single_at_cfg.task.shape_meta.obs.observation_state.shape == [7]
+    assert single_at_cfg.task.state_action_profile == "single-right-arm-7x10"
+    assert single_ldp_cfg.task.dataset.state_action_profile == (
+        "single-right-arm-7x10"
+    )
     for vae_cfg in (at_cfg.policy, ldp_cfg.policy.at, ldp_cfg.task.dataset.at):
         assert vae_cfg.idle_weight == 1.0
         assert vae_cfg.position_scale == 1e-3

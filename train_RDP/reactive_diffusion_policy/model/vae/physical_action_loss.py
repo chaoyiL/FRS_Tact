@@ -5,7 +5,17 @@ import torch
 import torch.nn.functional as F
 
 
-_ARM_SLICES = ((slice(0, 3), slice(3, 9), 9), (slice(10, 13), slice(13, 19), 19))
+def action_arm_slices(action_dim: int):
+    if action_dim not in (10, 20):
+        raise ValueError(
+            f"physical_v2 requires a 10D single-arm or 20D bimanual action, got {action_dim}D"
+        )
+    return tuple(
+        (slice(offset, offset + 3), slice(offset + 3, offset + 9), offset + 9)
+        for offset in range(0, action_dim, 10)
+    )
+
+
 _DEFAULT_WEIGHTS = {
     "position_scale": 1e-3,
     "rotation_scale": math.radians(1.0),
@@ -95,19 +105,22 @@ def _resolve_weights(weights: Mapping[str, float] | None) -> dict[str, float]:
     return resolved
 
 
-def compute_bimanual_physical_loss(
+def compute_physical_action_loss(
         target: torch.Tensor,
         prediction: torch.Tensor,
         valid_mask: torch.Tensor,
         idle_arm_mask: torch.Tensor,
         weights: Mapping[str, float] | None = None) -> dict[str, torch.Tensor]:
-    """Compute mask-aware physical-domain reconstruction losses for 20D actions."""
-    if target.shape != prediction.shape or target.shape[-1] != 20:
-        raise ValueError("target and prediction must have matching [..., 20] shapes")
+    """Compute mask-aware physical reconstruction losses for 10D or 20D actions."""
+    if target.shape != prediction.shape:
+        raise ValueError("target and prediction must have matching shapes")
+    arm_slices = action_arm_slices(target.shape[-1])
     if valid_mask.shape != target.shape[:-1]:
         raise ValueError("valid_mask must match target batch/time dimensions")
-    if idle_arm_mask.shape != (*target.shape[:-1], 2):
-        raise ValueError("idle_arm_mask must have shape [..., 2]")
+    if idle_arm_mask.shape != (*target.shape[:-1], len(arm_slices)):
+        raise ValueError(
+            f"idle_arm_mask must have shape [..., {len(arm_slices)}]"
+        )
 
     resolved = _resolve_weights(weights)
     valid_mask = valid_mask.to(device=target.device, dtype=torch.bool)
@@ -121,7 +134,7 @@ def compute_bimanual_physical_loss(
     idle_terms = []
     degenerate_terms = []
     rot6_aux_terms = []
-    for arm_index, (position_slice, rotation_slice, gripper_index) in enumerate(_ARM_SLICES):
+    for arm_index, (position_slice, rotation_slice, gripper_index) in enumerate(arm_slices):
         target_position = target[..., position_slice]
         predicted_position = prediction[..., position_slice]
         position_error = torch.linalg.vector_norm(
@@ -185,3 +198,7 @@ def compute_bimanual_physical_loss(
         "degenerate_loss": degenerate_loss,
         "rot6_aux_loss": rot6_aux_loss,
     }
+
+
+# Backward-compatible public name used by existing dual-arm callers and tests.
+compute_bimanual_physical_loss = compute_physical_action_loss
