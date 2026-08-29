@@ -1,0 +1,40 @@
+# 单张 RTX 4090 上验证纯视觉 Pi0.5 JAX 完整训练链路。
+# 该配置只用于 smoke test：真实读取 insert_01、加载 pi05_base、执行反向更新并保存 checkpoint。
+profile: pi05_single
+checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/insert_01
+    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+    action_key: action
+
+dataset_contract:
+  state_key: observation.state
+  state_dim: 7
+  action_dim: 10
+  image_keys:
+    - observation.images.camera1
+
+# 一键测试脚本会先用 insert_01 的抽样帧生成这套测试统计。
+norm_stats:
+  dir: ./assets
+  asset_id: insert_01_4090_smoke
+
+training:
+  output: /workspace/outputs/pi05_4090_insert01_smoke
+  batch_size: 1
+  num_workers: 2
+  steps: 2
+  log_interval: 1
+  save_interval: 1
+  keep_period: null
+  seed: 42
+  fsdp_devices: 1
+  overwrite: true
+  resume: false
+
+wandb:
+  enable: false
+  project: pi05-vision-smoke
+  exp_name: pi05_4090_insert01_smoke

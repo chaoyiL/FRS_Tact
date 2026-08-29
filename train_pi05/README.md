@@ -38,6 +38,9 @@ bash scripts/download_data.sh \
   --dataset pick_tube_06
 ```
 
+本仓库的 v2.1 → v3.0 转换器会在首次生成 Parquet 和统计文件时直接把旧字段
+`actions` 写成 LeRobot 标准字段 `action`，转换后只做只读校验，不再逐分片二次 rewrite。
+
 ## 环境与训练
 
 建议使用 Linux/WSL2、Python 3.11 和 NVIDIA GPU：
@@ -53,14 +56,38 @@ Pi0.5 JAX 训练固定使用 `/workspace/venvs/pi05_train`（Python 3.11）；
 `download_data.sh` 固定使用 `/workspace/venvs/lerobot_data_tools`（Python 3.12）。
 这是因为当前 LeRobot 转换器包含 Python 3.12 语法，两者不能共用解释器。
 
+### 新服务器单张 RTX 4090 完整链路测试
+
+新服务器需要上述两套环境，但只需要执行一个入口。下面的测试固定使用
+`insert_01`，检查 7D state、10D action 和 `camera1`，抽样 512 帧生成测试专用
+归一化统计，然后执行 2 步真实 JAX 前向、反向和参数更新，最后检查 checkpoint：
+
+```bash
+cd /workspace/FRS_Tact
+bash train_pi05/scripts/test_pi05_4090_insert01.sh --setup
+```
+
+如果两套环境和转换后的数据已经存在，可以跳过安装与下载：
+
+```bash
+bash train_pi05/scripts/test_pi05_4090_insert01.sh --skip-download
+```
+
+首次运行还会下载 `pi05_base`，并进行耗时较长的 XLA 编译。测试输出位于
+`/workspace/outputs/pi05_4090_insert01_smoke`。抽样统计只用于验证链路，正式训练
+前仍应使用正式 YAML 对完整训练数据重新运行 `compute_norm_stats.py`。
+
 如果服务器访问 PyPI 较慢，可以仅在安装时指定镜像；PyTorch CPU wheel 仍从
 PyTorch 官方索引获取，JAX CUDA wheel 和其他包从所选 PyPI 镜像获取：
 
 ```bash
 FRS_PYPI_MIRROR=https://pypi.tuna.tsinghua.edu.cn/simple \
-FRS_PYTORCH_INDEX=https://mirrors.aliyun.com/pytorch-wheels/cpu \
   bash scripts/setup_env.sh --pi05_train
 ```
+
+不要把 `FRS_PYTORCH_INDEX` 设置为阿里云的 `pytorch-wheels/cpu` 地址；该索引
+可能缺少本项目固定的 `torch==2.7.1`。不设置时会使用项目中配置的 PyTorch
+官方 CPU wheel 索引。
 
 Pi0.5 使用 JAX 访问 GPU。环境中的 PyTorch 只用于读取 LeRobot 数据，因而固定使用
 CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内置所需的 LeRobot v3

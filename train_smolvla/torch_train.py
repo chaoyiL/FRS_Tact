@@ -24,7 +24,7 @@ if TYPE_CHECKING:
     from train_deco.input_adapter import LowLightAugmentationConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_pytorch.yaml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_smolvla.yaml"
 OUTPUT_DIR_OVERRIDE_ENV = "FRS_SMOLVLA_OUTPUT_DIR"
 
 
@@ -142,6 +142,18 @@ def validate_cuda_runtime(config: dict[str, Any]) -> None:
         f"[smolvla] CUDA ready: {available} GPU(s); using {requested}, "
         f"batch_per_gpu={batch_per_gpu}, global_batch={batch_per_gpu * requested}"
     )
+
+
+def _configure_single_gpu_precision(config: dict[str, Any]) -> None:
+    """Make a direct single-GPU launch honor distributed.mixed_precision."""
+    precision = str(config["distributed"].get("mixed_precision", "no")).lower()
+    if precision not in {"no", "fp16", "bf16"}:
+        raise ValueError(
+            "distributed.mixed_precision must be one of ['bf16', 'fp16', 'no'], "
+            f"got {precision!r}"
+        )
+    os.environ["ACCELERATE_MIXED_PRECISION"] = precision
+    print(f"[smolvla] single-GPU mixed precision={precision}")
 
 
 def _install_accelerate_timeout(config: dict[str, Any]) -> Callable[[], None]:
@@ -742,6 +754,8 @@ def run(config_path: Path, *, dry_run: bool = False, worker: bool = False) -> No
         _prepare_output_dir(config)
         validate_dataset_contract(config)
         validate_cuda_runtime(config)
+        if num_gpus == 1:
+            _configure_single_gpu_precision(config)
     if num_gpus > 1 and not worker:
         launcher = _accelerate_command(config_path, config, dry_run=dry_run)
         if dry_run:

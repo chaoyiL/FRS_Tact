@@ -8,11 +8,24 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
-CONFIG_PATH="${PROJECT_ROOT}/train_smolvla/configs/train_pytorch_right.yaml"
+CONFIG_PATH="${SMOLVLA_TRAIN_CONFIG:-${PROJECT_ROOT}/train_smolvla/configs/train_smolvla_right.yaml}"
 
 if [[ -f "${PROJECT_ROOT}/.env.frs" ]]; then
     # shellcheck disable=SC1091
     source "${PROJECT_ROOT}/.env.frs"
+fi
+
+if [[ "${SMOLVLA_USE_LOCAL_ARROW_CACHE:-1}" == "1" ]]; then
+    SMOLVLA_LOCAL_CACHE_ROOT="${SMOLVLA_LOCAL_CACHE_ROOT:-/tmp/frs_tact_smolvla}"
+    export HF_DATASETS_CACHE="${SMOLVLA_LOCAL_CACHE_ROOT}/datasets_arrow"
+    export TMPDIR="${SMOLVLA_LOCAL_CACHE_ROOT}/tmp"
+    mkdir -p "${HF_DATASETS_CACHE}" "${TMPDIR}"
+    [[ -w "${HF_DATASETS_CACHE}" && -w "${TMPDIR}" ]] || {
+        echo "[smolvla] 本地 Arrow/临时缓存目录不可写：${SMOLVLA_LOCAL_CACHE_ROOT}" >&2
+        exit 1
+    }
+    echo "[smolvla] local Arrow cache: ${HF_DATASETS_CACHE}"
+    echo "[smolvla] local temp dir: ${TMPDIR}"
 fi
 
 cd "${PROJECT_ROOT}"
