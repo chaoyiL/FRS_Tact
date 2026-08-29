@@ -75,5 +75,5 @@ bash scripts/server_ljl_single_right.sh all press
 ```
 
 `prepare` 会自动完成触觉 embedding、独立 PCA30 和 Zarr 转换；`train` 只训练已有
-Zarr。默认使用 GPU 0、bf16、AT 20 epoch、LDP 10 epoch；需要时可在命令前覆盖，
-例如 `GPU_ID=1 AT_BATCH=32 LDP_BATCH=32 bash scripts/server_ljl_single_right.sh all insert`。
+Zarr。默认使用 GPU 0、32 个训练 DataLoader workers、AT/LDP batch size 512、bf16、
+AT 20 epoch、LDP 10 epoch；需要时仍可在命令前覆盖这些参数。
