@@ -14,7 +14,7 @@ STATE_LAYOUT = "relative_start_pose6d_gripper_plus_left_relative_right"
 DUAL_ARM_PROFILE = "dual-arm-20x20"
 SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
 _PROFILE_CONTRACTS = {
-    DUAL_ARM_PROFILE: ((1, 20), 20, STATE_LAYOUT, None),
+    DUAL_ARM_PROFILE: ((1, 20), 20, STATE_LAYOUT, ["left", "right"]),
     SINGLE_RIGHT_ARM_PROFILE: (
         (1, 7),
         10,
@@ -86,6 +86,8 @@ def validate_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("DECO TorchScript images_range must be [0.0, 1.0]")
     if input_contract.get("state_layout") != expected_layout:
         raise ValueError(f"DECO {profile} state layout does not match")
+    if profile == DUAL_ARM_PROFILE and metadata.get("state_action_profile") is None:
+        expected_arms = None
     if metadata.get("controlled_arms") != expected_arms:
         raise ValueError(f"DECO {profile} controlled_arms must be {expected_arms!r}")
     if output_contract.get("action_mode") != ACTION_MODE:

@@ -1,0 +1,43 @@
+# Dedicated deployment config for the single phase-conditioned Bread DECO weight.
+# Export the new artifact to this path before launching the Bread phase client.
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0829/bread/bread_phase_v3.ts
+device: cuda:0
+seed: 0
+model:
+  state_action_profile: dual-arm-20x20
+
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+observation:
+  data_type: vision
+  observation_profile: deco_vision_224
+  language_prompt: Use the right hand to place the bread, then use the left hand to squeeze ketchup onto it.
+  single_arm_mode: false
+  no_state_obs_mode: false
+
+control:
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  action_horizon: 32
+  steps_per_inference: 16
+
+runtime:
+  auto_start: false
+  warmup_runs: 5
+  max_iterations: 0
+  right_phase_timeout_s: 15.0
+
+bread_phase:
+  phase_count: 2
+  right_phase_id: 0
+  left_phase_id: 1
