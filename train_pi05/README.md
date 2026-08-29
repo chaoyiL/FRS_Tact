@@ -113,6 +113,9 @@ bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
 ```
 
+`source env_path` 后也可以使用不歧义的快捷命令：`hf`、`wandb`、
+`data-python`、`pi05-python`、`pi05-deploy-python` 和 `smolvla-python`。
+
 当前右手配置按顺序合并 `insert_01` 和 `insert_02`，随后在 563,414 帧组成的
 统一数据流上 shuffle。两个数据集按帧数自然采样，约为 45% 与 55%；归一化统计
 必须通过上面的 YAML 命令重新计算，不能复用任一单数据集的 stats。

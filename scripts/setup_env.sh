@@ -399,6 +399,8 @@ write_environment_file() {
         printf 'export HF_LEROBOT_HOME=%q\n' "${HF_LEROBOT_HOME}"
         printf 'export OPENPI_DATA_HOME=%q\n' "${OPENPI_DATA_HOME}"
         printf 'export TMPDIR=%q\n' "${TMPDIR}"
+        printf 'export FRS_PROJECT_ROOT=%q\n' "${PROJECT_ROOT}"
+        printf 'source %q\n' "${PROJECT_ROOT}/scripts/env_shortcuts.sh"
         if [[ -n "${UV_LINK_MODE:-}" ]]; then
             printf 'export UV_LINK_MODE=%q\n' "${UV_LINK_MODE}"
         fi
