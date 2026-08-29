@@ -1,0 +1,41 @@
+name: pick_tube_image_tactile_emb_at_30fps
+dataset_path: data/pick_tube_01_06_pca30_rdp_zarr
+tactile_embedding_dim: 30
+action_representation_version: 2
+action_contract: bimanual_relative_pose20d_v2
+
+shape_meta: &shape_meta
+  obs:
+    observation_state:
+      shape: [20]
+      type: low_dim
+    tactile_embedding:
+      shape: ["${task.tactile_embedding_dim}"]
+      type: low_dim
+  extended_obs:
+    tactile_embedding:
+      shape: ["${task.tactile_embedding_dim}"]
+      type: low_dim
+  action:
+    shape: [20]
+
+dataset:
+  _target_: reactive_diffusion_policy.dataset.real_image_tactile_dataset.RealImageTactileDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  obs_temporal_downsample_ratio: ${dataset_obs_temporal_downsample_ratio}
+  n_latency_steps: ${n_latency_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null
+  use_episode_repeats: false
+  delta_action: false
+  relative_action: false
+  transform_params: null
+  load_to_memory: false
+  bimanual_contiguous_action: true
+  action_normalizer_version: zero_centered_v2

@@ -1,0 +1,13 @@
+gpu_ids: [0, 1, 2, 3]
+
+paths:
+  python: .venv/bin/python
+  accelerate: .venv/bin/accelerate
+  jax_python: .venv-jax/bin/python
+  dataset_root: /home/hillbot/datasets
+  encoder_dir: data/encoder_ckpt_0809
+  tactile_cache_root: data/tactile_embeddings_encoder0809
+  tactile_pca_path: data/PCA_Transform_PickTube/tactile_pca_2x15.npz
+  dataset_path: data/pick_tube_01_06_pca30_rdp_zarr
+  output_root: data/outputs/pick_tube_01_06
+

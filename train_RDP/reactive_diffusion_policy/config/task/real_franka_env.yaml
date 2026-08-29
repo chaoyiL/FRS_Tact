@@ -1,0 +1,39 @@
+robot_name: 'franka'
+robot_server:
+  host_ip: "192.168.110.111"
+  port: 8092
+  robot_ip: "172.16.1.1"
+  robot_port: 50051
+  gripper_ip: "172.16.1.1"
+  gripper_port: 50052
+  bimanual_teleop: &bimanual_teleop False
+publisher:
+  vr_server_ip: &vr_server_ip '192.168.110.118'
+  vr_server_port: 10002
+  robot_publisher:
+    robot_server_ip: ${task.robot_server.host_ip}
+    robot_server_port: ${task.robot_server.port}
+    fps: 120
+    vr_server_ip: *vr_server_ip
+    vr_server_tcp_port: 10001
+    vr_server_force_port: 10005
+    bimanual_teleop: *bimanual_teleop
+teleop_server:
+  host_ip: "192.168.110.111"
+  port: 8092
+  fps: 60
+  use_force_control_for_gripper: False
+  max_gripper_width: 0.078 # 0.078 for FrankaHand
+  min_gripper_width: 0.0
+  grasp_force: 7.0
+  gripper_velocity: 0.1 # 0.1 for FrankaHand
+  gripper_control_time_interval: 30  # 30 for FrankaHand
+  gripper_control_width_precision: 0.01  # 0.01 for FrankaHand
+  bimanual_teleop: *bimanual_teleop
+device_mapping_server:
+  host_ip: '127.0.0.1'
+  port: 8062
+transforms:
+  calibration_path: 'data/calibration/v6'
+logger:
+  level: DEBUG
