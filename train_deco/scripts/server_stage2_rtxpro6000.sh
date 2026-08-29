@@ -24,17 +24,24 @@ WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-${WANDB_DIR}/config}"
 WANDB_DATA_DIR="${WANDB_DATA_DIR:-${WANDB_DIR}/data}"
 
 DECO_REVISION="ebce57a643f108e0f52a408e4bf2721861f78baf"
+DECO_0828_REVISION="9a22afc0f56901aff152c44c466487c69ec082c1"
 ENCODER_REVISION="1a432a8b9c1a38f75cb40c58a4924a401486d832"
 INSERT_01_REVISION="deead6367f0a2d817306a28bcaecc089b5cfe653"
 INSERT_02_REVISION="babbcf401b84640b599c084a9121e80561944e8f"
 BREAD_01_REVISION="5f6613a7137d4827b3e3def106ac576f759fd10f"
 BREAD_02_REVISION="41198c2da2c23951b4141fdb97b799530d72d658"
 BREAD_03_REVISION="f32e32b936e656338c96a164d8896e5156e66811"
+TWO_TUBES_01_REVISION="0d67dc5053979ca18035f673d35830a50780fc54"
+TWO_TUBES_02_REVISION="25425182efdf8d9f139a2059fd308c5c87bb412a"
+TWO_TUBES_03_REVISION="87c23e991475ba2af62d7362e59f47ceb5bbc3f3"
+TWO_TUBES_04_REVISION="d18735848c908cc9c33caf06fbb53e25910c708e"
 
 INSERT_MANIFEST="${MANIFEST_ROOT}/insert_01_02.json"
 BREAD_MANIFEST="${MANIFEST_ROOT}/bread_01_03.json"
+TWO_TUBES_MANIFEST="${MANIFEST_ROOT}/two_tubes_01_04.json"
 INSERT_STAGE1="${INSERT_STAGE1_CHECKPOINT:-${STAGE1_ROOT}/insert/deco_stage1_latest.pt}"
 BREAD_STAGE1="${BREAD_STAGE1_CHECKPOINT:-${STAGE1_ROOT}/bread/deco_stage1_latest.pt}"
+TWO_TUBES_STAGE1="${TWO_TUBES_STAGE1_CHECKPOINT:-${STAGE1_ROOT}/pick_two_tubes/deco_stage1_best.pt}"
 PYTHON_BIN="${VENV_PATH}/bin/python"
 HF_BIN="${VENV_PATH}/bin/hf"
 SERVER_ENV_FILE="${SERVER_ENV_FILE:-/workspace/secrets/deco-stage2.env}"
@@ -59,13 +66,13 @@ usage() {
   bash train_deco/scripts/server_stage2_rtxpro6000.sh download
   bash train_deco/scripts/server_stage2_rtxpro6000.sh prepare
   bash train_deco/scripts/server_stage2_rtxpro6000.sh doctor
-  bash train_deco/scripts/server_stage2_rtxpro6000.sh train  insert|bread
-  bash train_deco/scripts/server_stage2_rtxpro6000.sh upload insert|bread [RUN_ID]
-  bash train_deco/scripts/server_stage2_rtxpro6000.sh run    insert|bread
+  bash train_deco/scripts/server_stage2_rtxpro6000.sh train  insert|bread|two_tubes
+  bash train_deco/scripts/server_stage2_rtxpro6000.sh upload insert|bread|two_tubes [RUN_ID]
+  bash train_deco/scripts/server_stage2_rtxpro6000.sh run    insert|bread|two_tubes
   bash train_deco/scripts/server_stage2_rtxpro6000.sh all
 
 all：配置环境、下载、准备 manifest，然后依次训练并上传 Insert 01~02 和
-Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=512；
+Bread 01~03、Two Tubes 01~04。bread_04 不下载、不使用。默认单卡物理 batch size=512；
 workers 使用全部可用 vCPU，所以 16 vCPU 对应 16 workers；每个 worker
 只预取 1 个 batch，以控制大 batch 的主机内存峰值。
 EOF
@@ -99,7 +106,7 @@ require_runtime() {
 }
 
 wandb_enabled() {
-    case "${WANDB_ENABLED:-1}" in
+    case "${WANDB_ENABLED:-0}" in
         1|true|TRUE|yes|YES|on|ON) return 0 ;;
         0|false|FALSE|no|NO|off|OFF) return 1 ;;
         *) fail "WANDB_ENABLED 必须是布尔值，当前为：${WANDB_ENABLED}" ;;
@@ -139,7 +146,7 @@ setup_environment() {
 }
 
 check_disk() {
-    local free_kb free_gb minimum_gb="${MIN_FREE_GB:-90}"
+    local free_kb free_gb minimum_gb="${MIN_FREE_GB:-200}"
     free_kb="$(df -Pk /workspace | awk 'NR == 2 {print $4}')"
     free_gb=$((free_kb / 1024 / 1024))
     log "/workspace 可用空间：${free_gb} GiB"
@@ -166,11 +173,20 @@ download_assets() {
     download_dataset bread_01 "${BREAD_01_REVISION}"
     download_dataset bread_02 "${BREAD_02_REVISION}"
     download_dataset bread_03 "${BREAD_03_REVISION}"
+    download_dataset two_tubes_01 "${TWO_TUBES_01_REVISION}"
+    download_dataset two_tubes_02 "${TWO_TUBES_02_REVISION}"
+    download_dataset two_tubes_03 "${TWO_TUBES_03_REVISION}"
+    download_dataset two_tubes_04 "${TWO_TUBES_04_REVISION}"
 
     "${HF_BIN}" download wjstx/deco_0829 \
         bread/config.json bread/dataset_stats.json bread/deco_stage1_latest.pt \
         insert/config.json insert/dataset_stats.json insert/deco_stage1_latest.pt \
         --revision "${DECO_REVISION}" --local-dir "${STAGE1_ROOT}" \
+        --max-workers "${HF_DOWNLOAD_WORKERS:-8}"
+    "${HF_BIN}" download wjstx/deco_0828 \
+        pick_two_tubes/config.json pick_two_tubes/dataset_stats.json \
+        pick_two_tubes/deco_stage1_best.pt \
+        --revision "${DECO_0828_REVISION}" --local-dir "${STAGE1_ROOT}" \
         --max-workers "${HF_DOWNLOAD_WORKERS:-8}"
     "${HF_BIN}" download KaiyueChen/encoder_ckpt_0824 \
         --revision "${ENCODER_REVISION}" --local-dir "${ENCODER_ROOT}" \
@@ -190,6 +206,11 @@ prepare_manifests() {
         --root "${DATA_ROOT}/bread_03" \
         --output "${BREAD_MANIFEST}" --dataset-id bread_01_02_03 \
         --state-action-profile dual-arm-20x20
+    PYTHON_BIN="${PYTHON_BIN}" bash "${prepare}" --mode server \
+        --root "${DATA_ROOT}/two_tubes_01" --root "${DATA_ROOT}/two_tubes_02" \
+        --root "${DATA_ROOT}/two_tubes_03" --root "${DATA_ROOT}/two_tubes_04" \
+        --output "${TWO_TUBES_MANIFEST}" --dataset-id two_tubes_01_02_03_04 \
+        --state-action-profile dual-arm-20x20
 }
 
 set_task() {
@@ -207,7 +228,13 @@ set_task() {
             TASK_RUN_ID="${BREAD_RUN_ID:-bread-stage2-rtxpro6000-${timestamp}}"
             TASK_REPO="${HF_OUTPUT_BREAD_REPO:-}"
             ;;
-        *) fail "task 只能是 insert 或 bread" ;;
+        two_tubes)
+            TASK_MANIFEST="${TWO_TUBES_MANIFEST}"
+            TASK_STAGE1="${TWO_TUBES_STAGE1}"
+            TASK_RUN_ID="${TWO_TUBES_RUN_ID:-two-tubes-stage2-rtxpro6000-${timestamp}}"
+            TASK_REPO="${HF_OUTPUT_TWO_TUBES_REPO:-}"
+            ;;
+        *) fail "task 只能是 insert、bread 或 two_tubes" ;;
     esac
 }
 
@@ -230,7 +257,7 @@ train_task() {
     warn "BATCH_SIZE 是单卡物理 batch；如 CUDA OOM，请显式降低 BATCH_SIZE"
     printf '%s\n' "${TASK_RUN_ID}" > "${STATE_ROOT}/last_${task}_run_id"
 
-    export WANDB_ENABLED="${WANDB_ENABLED:-1}"
+    export WANDB_ENABLED="${WANDB_ENABLED:-0}"
     export WANDB_PROJECT="${WANDB_PROJECT:-deco-stage2}"
     export WANDB_GROUP="${WANDB_GROUP:-deco-stage2-rtxpro6000}"
     export WANDB_TAGS="${WANDB_TAGS:-stage2,rtxpro6000,${task}}"
@@ -328,6 +355,9 @@ main() {
             unset WANDB_TAGS WANDB_RUN_ID
             train_task bread
             upload_task bread
+            unset WANDB_TAGS WANDB_RUN_ID
+            train_task two_tubes
+            upload_task two_tubes
             ;;
         *) fail "未知命令：${command}" ;;
     esac
