@@ -59,6 +59,7 @@ PYTHON_VERSION="3.12"
 SMOLVLA_TORCH_VERSION="${SMOLVLA_TORCH_VERSION:-0.6.1}"
 SMOLVLA_TORCH_VERSION_PYTORCH="${SMOLVLA_TORCH_VERSION_PYTORCH:-2.7.1}"
 SMOLVLA_TORCH_VERSION_TORCHVISION="${SMOLVLA_TORCH_VERSION_TORCHVISION:-0.22.1}"
+SMOLVLA_TORCHCODEC_VERSION="${SMOLVLA_TORCHCODEC_VERSION:-0.5.0}"
 # train_pi05 的依赖约束与另外两套项目不同，因此固定使用独立的 Python 3.11 环境。
 PI05_TRAIN_PYTHON_VERSION="3.11"
 ENV_FILE="${PROJECT_ROOT}/.env.frs"
@@ -430,6 +431,9 @@ sync_smolvla_torch_environment() {
         --index https://download.pytorch.org/whl/cu128
     "${UV_BIN}" pip install --python "${smolvla_python}" \
         "lerobot[training,smolvla,peft]==${SMOLVLA_TORCH_VERSION}"
+    # torchcodec 0.5 is the newest release compatible with torch 2.7.
+    "${UV_BIN}" pip install --python "${smolvla_python}" \
+        "torchcodec==${SMOLVLA_TORCHCODEC_VERSION}"
 }
 
 verify_smolvla_torch_environment() {
@@ -439,17 +443,30 @@ verify_smolvla_torch_environment() {
     (
         cd /
         FRS_EXPECT_GPU="$([[ -x "$(command -v nvidia-smi 2>/dev/null || true)" ]] && echo 1 || echo 0)" \
+            FRS_SMOLVLA_TORCH_VERSION="${SMOLVLA_TORCH_VERSION_PYTORCH}" \
+            FRS_SMOLVLA_TORCHCODEC_VERSION="${SMOLVLA_TORCHCODEC_VERSION}" \
             "${smolvla_python}" - <<'PY'
 import os
+from importlib.metadata import version
 
 import lerobot
 import torch
+import torchcodec
 from lerobot.scripts import lerobot_train
 from lerobot.policies.smolvla.configuration_smolvla import SmolVLAConfig
 
 del lerobot_train, SmolVLAConfig
 print(f"official lerobot={lerobot.__version__}")
+print(f"torchcodec={getattr(torchcodec, '__version__', 'installed')}")
 print(f"SmolVLA PyTorch CUDA available: {torch.cuda.is_available()}")
+expected_torch = os.environ["FRS_SMOLVLA_TORCH_VERSION"]
+expected_torchcodec = os.environ["FRS_SMOLVLA_TORCHCODEC_VERSION"]
+if torch.__version__.split("+", 1)[0] != expected_torch:
+    raise RuntimeError(f"需要 torch {expected_torch}，当前为 {torch.__version__}")
+if version("torchcodec") != expected_torchcodec:
+    raise RuntimeError(
+        f"需要 torchcodec {expected_torchcodec}，当前为 {version('torchcodec')}"
+    )
 if os.environ.get("FRS_EXPECT_GPU") == "1" and not torch.cuda.is_available():
     raise RuntimeError("nvidia-smi 可用，但 SmolVLA PyTorch 环境没有识别到 CUDA")
 PY

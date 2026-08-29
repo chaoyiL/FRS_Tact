@@ -7,6 +7,7 @@ from bisect import bisect_right
 import copy
 import inspect
 import json
+import netrc as netrc_module
 import os
 import shlex
 import shutil
@@ -43,6 +44,101 @@ def _bool(value: Any) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"))
+
+
+def _wandb_has_credentials() -> bool:
+    if os.environ.get("WANDB_API_KEY"):
+        return True
+    try:
+        credentials = netrc_module.netrc().authenticators("api.wandb.ai")
+    except (FileNotFoundError, netrc_module.NetrcParseError, OSError, UnicodeError):
+        return False
+    return bool(credentials and credentials[2])
+
+
+def resolve_wandb_mode(config: dict[str, Any]) -> str:
+    """Resolve a non-interactive W&B mode before distributed workers launch."""
+    wandb = config["wandb"]
+    if not bool(wandb.get("enable", True)):
+        return "disabled"
+    requested = str(wandb.get("mode", "auto")).lower()
+    allowed = {"auto", "online", "offline", "disabled"}
+    if requested not in allowed:
+        raise ValueError(f"wandb.mode must be one of {sorted(allowed)}, got {requested!r}")
+    environment_mode = os.environ.get("WANDB_MODE", "").lower()
+    if requested == "auto" and environment_mode in allowed - {"auto"}:
+        if environment_mode == "online" and not _wandb_has_credentials():
+            return "offline"
+        return environment_mode
+    if requested == "auto":
+        return "online" if _wandb_has_credentials() else "offline"
+    return requested
+
+
+def validate_constructed_policy(
+    policy: Any,
+    config: dict[str, Any],
+    training_image_keys: tuple[str, ...],
+) -> None:
+    """Fail before the first batch if pretrained defaults leaked into the policy."""
+    policy_config = policy.config
+    expected_inputs = {
+        "observation.state",
+        *training_image_keys,
+    }
+    actual_inputs = set(policy_config.input_features)
+    if actual_inputs != expected_inputs:
+        raise ValueError(
+            "constructed SmolVLA inputs do not match the FRS_Tact contract: "
+            f"expected {sorted(expected_inputs)}, got {sorted(actual_inputs)}"
+        )
+    shape_contract = {
+        "observation.state": int(config["dataset"]["state_dim"]),
+        "action": int(config["dataset"]["action_dim"]),
+    }
+    all_features = {
+        **policy_config.input_features,
+        **policy_config.output_features,
+    }
+    for key, expected_dim in shape_contract.items():
+        feature = all_features.get(key)
+        actual_shape = None if feature is None else list(feature.shape)
+        if actual_shape != [expected_dim]:
+            raise ValueError(
+                f"constructed SmolVLA {key} must have shape [{expected_dim}], "
+                f"got {actual_shape}"
+            )
+    for name in ("chunk_size", "n_action_steps", "num_vlm_layers", "num_expert_layers"):
+        expected = int(config["policy"][name])
+        actual = int(getattr(policy_config, name))
+        if actual != expected:
+            raise ValueError(f"constructed SmolVLA {name} must be {expected}, got {actual}")
+    if int(os.environ.get("LOCAL_RANK", "0")) == 0:
+        print(
+            "[smolvla] policy contract ready: "
+            f"state={shape_contract['observation.state']}D "
+            f"action={shape_contract['action']}D "
+            f"cameras={list(training_image_keys)}"
+        )
+
+
+def validate_cuda_runtime(config: dict[str, Any]) -> None:
+    """Validate the requested GPU count before starting distributed workers."""
+    if not str(config["policy"].get("device", "cuda")).startswith("cuda"):
+        return
+    import torch
+
+    requested = int(config["distributed"].get("num_gpus", 1))
+    available = torch.cuda.device_count()
+    if not torch.cuda.is_available() or available < requested:
+        raise RuntimeError(
+            f"SmolVLA requested {requested} CUDA GPU(s), but PyTorch detects {available}"
+        )
+    batch_per_gpu = int(config["training"]["batch_size"])
+    print(
+        f"[smolvla] CUDA ready: {available} GPU(s); using {requested}, "
+        f"batch_per_gpu={batch_per_gpu}, global_batch={batch_per_gpu * requested}"
+    )
 
 
 def dataset_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
@@ -360,6 +456,7 @@ def build_command(config: dict[str, Any]) -> list[str]:
     peft = config.get("peft", {})
     transforms = dataset.get("image_transforms", {})
     primary_source = dataset_sources(config)[0]
+    wandb_mode = resolve_wandb_mode(config)
 
     steps = int(training["steps"])
     resume_from = training.get("resume_from")
@@ -416,7 +513,7 @@ def build_command(config: dict[str, Any]) -> list[str]:
             f"--job_name={training.get('job_name') or output_dir.name}",
             f"--wandb.enable={_bool(wandb.get('enable', True))}",
             f"--wandb.project={wandb['project']}",
-            f"--wandb.mode={wandb.get('mode', 'online')}",
+            f"--wandb.mode={wandb_mode}",
             f"--wandb.disable_artifact={_bool(wandb.get('disable_artifact', True))}",
             f"--wandb.add_tags={_bool(wandb.get('add_tags', True))}",
         ]
@@ -487,6 +584,7 @@ def _accelerate_command(config_path: Path, config: dict[str, Any], *, dry_run: b
         f"--num_processes={int(distributed['num_gpus'])}",
         f"--num_machines={int(distributed.get('num_machines', 1))}",
         f"--mixed_precision={distributed.get('mixed_precision', 'bf16')}",
+        "--dynamo_backend=no",
         "--module",
         "train_smolvla.torch_train",
         "--config",
@@ -532,7 +630,9 @@ def _run_worker(config: dict[str, Any], command: list[str]) -> None:
                 for name, feature in features.items()
                 if name in selected_inputs
             }
-        return upstream_make(cfg=cfg, ds_meta=ds_meta, env_cfg=env_cfg, rename_map=rename_map)
+        policy = upstream_make(cfg=cfg, ds_meta=ds_meta, env_cfg=env_cfg, rename_map=rename_map)
+        validate_constructed_policy(policy, config, training_image_keys)
+        return policy
 
     lerobot_train.update_policy = update_policy
     lerobot_train.make_policy = make_policy
@@ -540,17 +640,29 @@ def _run_worker(config: dict[str, Any], command: list[str]) -> None:
         config, upstream_make_datasets
     )
     sys.argv = ["lerobot-train", *command]
-    lerobot_train.main()
+    try:
+        lerobot_train.main()
+    finally:
+        import torch.distributed as distributed
+
+        if distributed.is_available() and distributed.is_initialized():
+            distributed.destroy_process_group()
 
 
 def run(config_path: Path, *, dry_run: bool = False, worker: bool = False) -> None:
     config_path = config_path.expanduser().resolve()
     config = _load(config_path)
+    wandb_mode = resolve_wandb_mode(config)
+    if not worker and config["wandb"].get("enable", True):
+        requested_mode = str(config["wandb"].get("mode", "auto")).lower()
+        if requested_mode == "auto":
+            print(f"[smolvla] wandb.mode auto -> {wandb_mode}")
     num_gpus = int(config["distributed"].get("num_gpus", 1))
     if num_gpus < 1:
         raise ValueError("distributed.num_gpus must be at least 1")
     if not dry_run and not worker:
         validate_dataset_contract(config)
+        validate_cuda_runtime(config)
     if num_gpus > 1 and not worker:
         launcher = _accelerate_command(config_path, config, dry_run=dry_run)
         if dry_run:

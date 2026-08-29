@@ -2,6 +2,11 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.metadata]
+# 兼容旧锁文件或下游临时添加的固定 Git 依赖。当前训练项目已经内置所需的
+# LeRobot v3 读取代码，本身不再依赖 GitHub 上的 LeRobot。
+allow-direct-references = true
+
 [project]
 name = "pi05-vision-training"
 version = "0.1.0"

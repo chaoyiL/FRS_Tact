@@ -130,7 +130,8 @@ wandb:
   enable: true
   project: smolvla-task1
   entity: null
-  mode: online
+  # auto: online when WANDB_API_KEY/~/.netrc exists, otherwise offline.
+  mode: auto
   notes: PyTorch SmolVLA pure-vision dual-arm training
   run_id: null
   disable_artifact: true

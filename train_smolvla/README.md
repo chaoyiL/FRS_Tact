@@ -65,6 +65,28 @@ bash scripts/setup_env.sh --smolvla
 bash train_smolvla/scripts/start_smolvla_train.sh
 ```
 
+The setup pins TorchCodec 0.5 for the PyTorch 2.7 runtime. If an existing
+RunPod environment was created before that pin, repair it once without
+rebuilding the rest of the environment:
+
+```bash
+uv pip install --python /workspace/venvs/smolvla_torch/bin/python \
+  'torchcodec==0.5.0'
+```
+
+W&B uses `mode: auto`: it runs online when `WANDB_API_KEY` or the credential in
+`~/.netrc` exists, and otherwise records an offline run instead of aborting a
+distributed job. To enable online logging, run:
+
+```bash
+/workspace/venvs/smolvla_torch/bin/wandb login
+```
+
+After the base checkpoint is loaded, the wrapper validates the final policy
+contract before reading the first batch. The dual-arm launcher must report
+`state=20D action=20D` and exactly `camera1`, `camera2`; the 6D/three-camera
+values printed earlier are only defaults from the base checkpoint configuration.
+
 The default dual-arm YAML enables DECO's exact `balanced-light-v2` training
 augmentation. It calls the same DECO implementation at batch level, so both
 cameras in one sample share the branch and all sampled parameters. Official
