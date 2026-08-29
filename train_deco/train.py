@@ -224,7 +224,7 @@ def create_training_datasets(args):
     if args.dataset_format == "lerobot-v21":
         from .lerobot_vision_dataset import build_lerobot_vision_datasets
 
-        return build_lerobot_vision_datasets(
+        datasets = build_lerobot_vision_datasets(
             training_dataset_source(args),
             action_chunk_size=args.action_chunk_size or 32,
             validation_ratio=args.validation_ratio,
@@ -233,6 +233,11 @@ def create_training_datasets(args):
             val_limit=val_limit,
             include_tactile=getattr(args, "stage", 1) == 2,
         )
+        if getattr(args, "bread_phase", False):
+            from .bread_phase.dataset import build_bread_phase_datasets
+
+            return build_bread_phase_datasets(*datasets)
+        return datasets
     raise ValueError(f"Unsupported dataset format: {args.dataset_format!r}")
 
 
@@ -1048,6 +1053,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("DECO_STAGE", "1")),
     )
     parser.add_argument(
+        "--bread-phase",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--stage1-checkpoint", default=os.environ.get("STAGE1_CHECKPOINT")
     )
     parser.add_argument(
@@ -1308,6 +1319,10 @@ def validate_stage_arguments(args) -> None:
 
 def main(argv=None):
     args = build_argument_parser().parse_args(argv)
+    if args.bread_phase:
+        if args.stage != 1 or args.dataset_format != "lerobot-v21":
+            raise ValueError("Bread phase training requires Stage 1 LeRobot v2.1 data")
+        args.use_task_condition = True
     resumed_stage2 = restore_stage2_resume_arguments(args)
     validate_stage_arguments(args)
     augmentation_config = augmentation_config_from_args(args)
@@ -1485,6 +1500,7 @@ def main(argv=None):
         "rank_seed_scheme": "base-plus-rank-v1",
         "augmentation_preset": augmentation_config.version,
         "augmentation": asdict(augmentation_config),
+        "bread_phase_version": "bread-phase-v1" if args.bread_phase else None,
     }
     tactile_artifact = None
     stage1_payload = None

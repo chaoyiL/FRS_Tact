@@ -5,7 +5,16 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_PATH="${1:-${PROJECT_ROOT}/train_smolvla_frs/configs/train_frs.yaml}"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
 TMUX_SESSION="${FRS_TMUX_SESSION:-frs_pick_tube}"
 
 log() { echo "[frs] $*"; }
@@ -39,7 +48,7 @@ else
     fail "找不到 uv；请先运行 scripts/setup_env.sh"
 fi
 
-# setup_env.sh may have been interrupted after writing .env.frs but before
+# setup_env.sh may have been interrupted after writing env_path but before
 # syncing its external virtualenv.  Prefer that environment when usable;
 # otherwise fall back to a complete project-local .venv.
 CONFIGURED_PYTHON="${UV_PROJECT_ENVIRONMENT:-}/bin/python"

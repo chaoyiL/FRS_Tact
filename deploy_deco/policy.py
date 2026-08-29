@@ -34,6 +34,13 @@ class DECOPolicy:
         self.action_horizon = int(self.metadata["output"]["action"][1])
         self.action_dim = int(self.metadata["output"]["action"][2])
         self.expected_sample_hz = float(self.metadata["expected_sample_hz"])
+        phase_count = self.metadata.get("phase_count")
+        if phase_count is None:
+            self.phase_count: int | None = None
+        elif isinstance(phase_count, bool) or not isinstance(phase_count, int) or phase_count <= 0:
+            raise ValueError("DECO phase_count must be a positive integer")
+        else:
+            self.phase_count = phase_count
 
     @staticmethod
     def _image(value: Any, key: str) -> np.ndarray:
@@ -72,16 +79,38 @@ class DECOPolicy:
             torch.from_numpy(np.ascontiguousarray(state_batch)).to(self.device),
         )
 
-    def predict(self, observation: Mapping[str, Any], *, seed: int) -> np.ndarray:
+    def predict(
+        self,
+        observation: Mapping[str, Any],
+        *,
+        seed: int,
+        phase_id: int | None = None,
+    ) -> np.ndarray:
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValueError("DECO inference seed must be a nonnegative integer")
+        if self.phase_count is not None:
+            if (
+                isinstance(phase_id, bool)
+                or not isinstance(phase_id, int)
+                or phase_id < 0
+                or phase_id >= self.phase_count
+            ):
+                raise ValueError(
+                    f"DECO phase_id must be an integer in [0,{self.phase_count - 1}]"
+                )
         torch = self.torch
         torch.manual_seed(seed)
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
         images, state = self.prepare_inputs(observation)
         with torch.inference_mode():
-            output = self.model(images, state)
+            if self.phase_count is None:
+                output = self.model(images, state)
+            else:
+                phase = torch.tensor(
+                    [phase_id], dtype=torch.long, device=self.device
+                )
+                output = self.model(images, state, phase)
         action = output.detach().to(device="cpu", dtype=torch.float32).numpy()
         expected = (1, self.action_horizon, self.action_dim)
         if action.shape != expected or not np.isfinite(action).all():

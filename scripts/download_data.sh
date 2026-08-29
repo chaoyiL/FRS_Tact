@@ -3,13 +3,48 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
+DATA_TOOL_PYTHON_OVERRIDE="${DATA_TOOL_PYTHON:-}"
 
 if [[ -f "${ENV_FILE}" ]]; then
-    # 复用 setup_env.sh 创建的 uv 环境，避免在 workspace 中重复安装依赖。
+    # 读取 setup_env.sh 写入的各项目解释器路径；下面会显式选择一个可执行环境，
+    # 不再依赖全局 UV_PROJECT_ENVIRONMENT 猜测当前项目。
     # shellcheck disable=SC1090
     source "${ENV_FILE}"
 fi
+
+resolve_data_python() {
+    local candidate=""
+    if [[ -n "${DATA_TOOL_PYTHON_OVERRIDE}" ]]; then
+        [[ -x "${DATA_TOOL_PYTHON_OVERRIDE}" ]] || {
+            echo "DATA_TOOL_PYTHON 不可执行: ${DATA_TOOL_PYTHON_OVERRIDE}" >&2
+            return 1
+        }
+        printf '%s\n' "${DATA_TOOL_PYTHON_OVERRIDE}"
+        return 0
+    fi
+    # 转换器包含 Python 3.12 语法，禁止回退到 Pi0.5 的 Python 3.11 环境。
+    for candidate in "${DATA_TOOL_PYTHON:-}" "${FRS_PYTHON:-}" "${PROJECT_ROOT}/.venv/bin/python"; do
+        if [[ -n "${candidate}" && -x "${candidate}" ]]; then
+            printf '%s\n' "${candidate}"
+            return 0
+        fi
+    done
+    echo "找不到 Python 3.12 数据工具环境；请先运行 scripts/setup_env.sh --smolvla 或 --pi05_train" >&2
+    return 1
+}
+
+DATA_PYTHON="$(resolve_data_python)"
+DATA_HF="$(dirname -- "${DATA_PYTHON}")/hf"
 
 # ===================== 配置区域 =====================
 HF_NAMESPACE="KaiyueChen"
@@ -87,12 +122,19 @@ DATASETS=(
     # pick_tube_02
     # pick_tube_03
     # pick_tube_04
-    pick_tube_05
+    # pick_tube_05
     # pick_tube_06
     # pick_cube_01
     # pick_cube_02
     # pick_cube_03
     # pick_cube_fix
+    # two_tubes_01
+    # two_tubes_02
+    # two_tubes_03
+    # two_tubes_04
+    # two_tubes_05
+    # insert_01
+    # insert_02
 )
 if (( ${#REQUESTED_DATASETS[@]} > 0 )); then
     DATASETS=("${REQUESTED_DATASETS[@]}")
@@ -110,32 +152,34 @@ load_lerobot_config() {
 }
 
 check_deps() {
-    if ! command -v uv &>/dev/null; then
+    if [[ ! -x "${DATA_PYTHON}" ]]; then
         echo "=========================================="
-        echo " 未检测到 uv，请先安装 uv:"
-        echo "   curl -LsSf https://astral.sh/uv/install.sh | sh"
-        echo ""
-        echo " 然后在项目环境中安装依赖:"
-        echo "   uv add huggingface_hub lerobot"
+        echo " 数据工具 Python 不可执行：${DATA_PYTHON}"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo "=========================================="
         exit 1
     fi
 
-    if ! uv run --no-sync hf version &>/dev/null; then
+    if ! "${DATA_PYTHON}" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+        echo "数据转换必须使用 Python 3.12，当前解释器为: ${DATA_PYTHON}" >&2
+        exit 1
+    fi
+
+    if [[ ! -x "${DATA_HF}" ]] || ! "${DATA_HF}" version &>/dev/null; then
         echo "=========================================="
-        echo " uv 环境中未检测到 hf 命令，请执行:"
-        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
+        echo " 数据工具环境中未检测到 hf 命令：${DATA_HF}"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo ""
         echo " 安装后如需登录，请执行:"
-        echo "   uv run --no-sync hf auth login"
+        echo "   ${DATA_HF} auth login"
         echo "=========================================="
         exit 1
     fi
 
-    if ! uv run --no-sync python -c "import lerobot" &>/dev/null; then
+    if ! "${DATA_PYTHON}" -c "import av, draccus, jsonlines, torchvision; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
         echo "=========================================="
-        echo " uv 环境中未检测到 lerobot，请执行:"
-        echo "   bash ${PROJECT_ROOT}/scripts/setup_env.sh"
+        echo " 数据工具环境缺少 LeRobot 转换依赖（av/draccus/jsonlines/torchvision）。"
+        echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
         echo "=========================================="
         exit 1
     fi
@@ -150,7 +194,7 @@ get_dataset_version() {
         return 0
     fi
 
-    python - "$info_json" <<'PY'
+    "${DATA_PYTHON}" - "$info_json" <<'PY'
 import json
 import sys
 
@@ -213,6 +257,20 @@ get_v30_dataset_dir() {
 get_v30_work_dataset_dir() {
     local dataset_name="$1"
     echo "${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}"
+}
+
+canonicalize_v30_action_key() {
+    local dataset_dir="$1"
+    log "检查 v3.0 动作字段（actions -> action）: ${dataset_dir}"
+    "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
+        "${dataset_dir}" >&2
+}
+
+verify_v30_action_key() {
+    local dataset_dir="$1"
+    log "验证 v3.0 动作字段已在转换时写为 action: ${dataset_dir}"
+    "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
+        --check "${dataset_dir}" >&2
 }
 
 get_hf_repo_cache_dir() {
@@ -412,7 +470,7 @@ link_snapshot_for_convert() {
 # 检查 snapshot 内 parquet 是否完整；返回损坏文件列表（每行一个绝对路径）
 find_corrupt_parquets() {
     local dataset_dir="$1"
-    python - "$dataset_dir" <<'PY'
+    "${DATA_PYTHON}" - "$dataset_dir" <<'PY'
 from pathlib import Path
 import sys
 
@@ -462,7 +520,7 @@ repair_corrupt_parquets() {
 
     log "重新下载缺失文件: ${repo_id}"
     # stdout 重定向，避免污染外层 $(...) 路径捕获
-    uv run --no-sync hf download "$repo_id" \
+    "${DATA_HF}" download "$repo_id" \
         --repo-type dataset \
         --cache-dir "$HF_DATASET_CACHE_DIR" >&2
 
@@ -495,6 +553,7 @@ upgrade_dataset_to_v30() {
     if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
+            canonicalize_v30_action_key "$final_dir"
             log "本地已存在 v3.0 数据集，跳过升级: ${final_dir}"
             cleanup_local_convert_work "$dataset_name"
             UPGRADED_DATASET_DIR="$final_dir"
@@ -505,6 +564,7 @@ upgrade_dataset_to_v30() {
     version="$(get_dataset_version "$snapshot_dir")"
     if [[ "$version" == "v3.0" ]]; then
         log "下载产物已是 v3.0，直接作为升级结果: ${snapshot_dir}"
+        verify_v30_action_key "$snapshot_dir"
         rm -rf "$old_backup" "$leftover_v30" "$work_dir"
         UPGRADED_DATASET_DIR="$snapshot_dir"
         return 0
@@ -536,7 +596,7 @@ upgrade_dataset_to_v30() {
     # 仅本地升级：指定 --root，跳过 hub 上 v3.0 检索；不上传
     # 显式指定转换工作目录，避免改写原始 Hub snapshot
     # convert 的 print 走 stderr，避免污染路径变量
-    if ! uv run --no-sync python -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
+    if ! "${DATA_PYTHON}" -m lerobot.datasets.v30.convert_dataset_v21_to_v30 \
         --repo-id="$repo_id" \
         --root="$work_dir" \
         --push-to-hub=false \
@@ -563,6 +623,10 @@ upgrade_dataset_to_v30() {
         return 1
     fi
 
+    # 本仓库的转换器在首次写出 parquet 和 stats 时已经把 actions 规范为 action；
+    # 此处只验证，不再对所有 parquet 做第二遍 rewrite。
+    verify_v30_action_key "$work_dir"
+
     # 转换完成后删除旧版缓存，再放入 workspace 最终目录
     promote_v30_to_workspace "$dataset_name"
 
@@ -588,6 +652,7 @@ download_dataset() {
     if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
+            canonicalize_v30_action_key "$final_dir"
             log "最终目录已是 v3.0，跳过下载与转换: ${final_dir}"
             create_lerobot_symlink "$dataset_name" "$final_dir"
             return 0
@@ -596,7 +661,7 @@ download_dataset() {
 
     log "开始下载 ${repo_id} (cache: ${HF_DATASET_CACHE_DIR})"
 
-    uv run --no-sync hf download "$repo_id" \
+    "${DATA_HF}" download "$repo_id" \
         --repo-type dataset \
         --cache-dir "$HF_DATASET_CACHE_DIR" >&2
 
@@ -628,6 +693,7 @@ main() {
 
     log "============================================"
     log "Hugging Face smash 数据集下载脚本启动"
+    log "数据工具 Python: ${DATA_PYTHON} ($("${DATA_PYTHON}" -c 'import platform; print(platform.python_version())'))"
     log "workspace 根目录: ${WORKSPACE_ROOT}"
     log "HF_HOME: ${HF_HOME}"
     log "命名空间: ${HF_NAMESPACE}"

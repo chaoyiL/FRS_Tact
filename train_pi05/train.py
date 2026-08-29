@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
+import json
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,55 @@ import yaml
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_pi05.yaml"
 PURE_VISION_PROFILES = {"pi05_single", "pi05_bi", "pi05_bi_no_state"}
+
+
+def _feature_dim(features: dict[str, Any], key: str, *, dataset_index: int) -> int:
+    feature = features.get(key)
+    if not isinstance(feature, dict):
+        raise ValueError(f"datasets[{dataset_index}] is missing required feature {key!r}")
+    shape = feature.get("shape")
+    if not isinstance(shape, list) or not shape or not isinstance(shape[-1], int):
+        raise ValueError(f"datasets[{dataset_index}] feature {key!r} has invalid shape: {shape!r}")
+    return shape[-1]
+
+
+def _validate_dataset_contract(
+    config: dict[str, Any], source: dict[str, Any], info_path: Path, *, dataset_index: int
+) -> None:
+    """Validate the optional state/action/camera contract from LeRobot metadata."""
+    contract = config.get("dataset_contract")
+    if contract is None:
+        return
+    if not isinstance(contract, dict):
+        raise ValueError("dataset_contract must be a mapping")
+    with info_path.open(encoding="utf-8") as info_file:
+        info = json.load(info_file)
+    features = info.get("features")
+    if not isinstance(features, dict):
+        raise ValueError(f"datasets[{dataset_index}] meta/info.json has no features mapping")
+
+    state_key = str(contract.get("state_key", "observation.state"))
+    expected_state_dim = int(contract["state_dim"])
+    actual_state_dim = _feature_dim(features, state_key, dataset_index=dataset_index)
+    if actual_state_dim != expected_state_dim:
+        raise ValueError(
+            f"datasets[{dataset_index}] {state_key} must be {expected_state_dim}D, got {actual_state_dim}D"
+        )
+
+    action_key = str(source.get("action_key", "action"))
+    expected_action_dim = int(contract["action_dim"])
+    actual_action_dim = _feature_dim(features, action_key, dataset_index=dataset_index)
+    if actual_action_dim != expected_action_dim:
+        raise ValueError(
+            f"datasets[{dataset_index}] {action_key} must be {expected_action_dim}D, got {actual_action_dim}D"
+        )
+
+    image_keys = contract.get("image_keys", [])
+    if not isinstance(image_keys, list) or not all(isinstance(key, str) for key in image_keys):
+        raise ValueError("dataset_contract.image_keys must be a list of feature names")
+    missing_images = [key for key in image_keys if key not in features]
+    if missing_images:
+        raise ValueError(f"datasets[{dataset_index}] is missing required image features: {missing_images}")
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -32,6 +82,7 @@ def load_config(path: Path) -> dict[str, Any]:
         info = root / "meta" / "info.json"
         if not info.is_file():
             raise FileNotFoundError(f"datasets[{index}] is not LeRobot v3: {info}")
+        _validate_dataset_contract(config, source, info, dataset_index=index)
     training = config.get("training")
     if not isinstance(training, dict) or not training.get("output"):
         raise ValueError("training.output is required")
@@ -56,9 +107,15 @@ def build_train_config(raw: dict[str, Any]):
         for item in raw["datasets"]
     )
     norm = raw.get("norm_stats") or {}
+    assets_dir = str(norm.get("dir", "./assets"))
+    if "://" not in assets_dir:
+        assets_path = Path(assets_dir).expanduser()
+        if not assets_path.is_absolute():
+            assets_path = Path(__file__).resolve().parent / assets_path
+        assets_dir = str(assets_path.resolve())
     assets = replace(
         base.data.assets,
-        assets_dir=str(norm.get("dir", "./assets")),
+        assets_dir=assets_dir,
         asset_id=str(norm.get("asset_id", sources[0].repo_id)),
     )
     data = replace(base.data, repo_id=sources[0].repo_id, sources=sources, assets=assets)
@@ -102,11 +159,10 @@ def main() -> None:
         print(output)
     if args.check:
         return
-    from scripts.train import main as train_main
+    from tools.train_core import main as train_main
 
     train_main(build_train_config(raw))
 
 
 if __name__ == "__main__":
     main()
-

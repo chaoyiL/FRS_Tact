@@ -82,6 +82,8 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+/env_path
+/environment_paths.sh
 *.pem
 *.key
 secrets/

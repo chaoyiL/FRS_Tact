@@ -1,5 +1,5 @@
 # Standalone DECO Stage 1 deployment using the CUDA-traced best checkpoint.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0828/bread/deco_stage1_best_gpu.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0829/bread/deco_stage1_latest.ts
 device: cuda:0
 seed: 0
 
@@ -19,7 +19,7 @@ observation:
   data_type: vision
   # Existing robot server profile: two 224x224 RGB wrist cameras.
   observation_profile: deco_vision_224
-  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  language_prompt: Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
   single_arm_mode: false
   no_state_obs_mode: false
 
@@ -30,7 +30,7 @@ control:
   # Must match artifact output [1,32,20].
   action_horizon: 32
   # Execute 24 actions (0.8s) before obtaining a new observation and replanning.
-  steps_per_inference: 32
+  steps_per_inference: 
 
 runtime:
   auto_start: false

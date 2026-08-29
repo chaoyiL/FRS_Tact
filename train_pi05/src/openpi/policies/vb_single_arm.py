@@ -7,13 +7,13 @@ from openpi import transforms
 from openpi.models import model as _model
 
 VIS_IMAGE_KEYS: tuple[str, ...] = (
-    "wrist_image",
+    "right_wrist_0_rgb",
 )
 
-def make_vis_only_example(image_shape=(224, 224, 3), state_dim=20) -> dict:
-    """Creates a random input example for the VB policy."""
+def make_vis_only_example(image_shape=(224, 224, 3), state_dim=7) -> dict:
+    """Create a right-hand-only visual example with the 7D state contract."""
     return {
-        "observation.images.camera0": np.random.randint(256, size=image_shape, dtype=np.uint8),
+        "observation.images.camera1": np.random.randint(256, size=image_shape, dtype=np.uint8),
         "observation.state": np.random.rand(state_dim),
         "task": "do something",
     }
@@ -38,7 +38,9 @@ class VBInputs(transforms.DataTransformFn):
 
         # Possibly need to parse images to uint8 (H,W,C) since LeRobot automatically
         # stores as float32 (C,H,W), gets skipped for policy inference
-        wrist_image = _parse_image(data["observation.images.camera0"])
+        # insert_02 keeps camera0 as a black placeholder and stores the active
+        # right-hand visual stream in camera1. Do not create a left-image token.
+        wrist_image = _parse_image(data["observation.images.camera1"])
 
         match self.model_type:
             case _model.ModelType.PI0 | _model.ModelType.PI05:
@@ -68,5 +70,5 @@ class VBInputs(transforms.DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class VBOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
-        # Only return the first 8 dims.
+        # The single-arm dataset already exposes the complete 10D right-hand action.
         return {"actions": np.asarray(data["actions"])}

@@ -43,6 +43,13 @@ def right_metadata(payload: bytes) -> dict:
     return contract
 
 
+def explicit_dual_metadata(payload: bytes) -> dict:
+    contract = metadata(payload)
+    contract["state_action_profile"] = "dual-arm-20x20"
+    contract["controlled_arms"] = ["left", "right"]
+    return contract
+
+
 def test_sidecar_and_hash_are_required(tmp_path):
     payload = b"fake torchscript archive"
     artifact = tmp_path / "policy.ts"
@@ -69,6 +76,27 @@ def test_wrong_action_semantics_are_rejected():
 
 def test_single_right_arm_contract_is_accepted():
     assert validate_metadata(right_metadata(b""))["controlled_arms"] == ["right"]
+
+
+def test_explicit_dual_arm_contract_is_accepted():
+    assert validate_metadata(explicit_dual_metadata(b""))["controlled_arms"] == [
+        "left",
+        "right",
+    ]
+
+
+@pytest.mark.parametrize("controlled_arms", [None, ["right"]])
+def test_explicit_dual_arm_contract_rejects_wrong_controlled_arms(controlled_arms):
+    contract = explicit_dual_metadata(b"")
+    contract["controlled_arms"] = controlled_arms
+    with pytest.raises(ValueError, match="controlled_arms"):
+        validate_metadata(contract)
+
+
+def test_legacy_dual_arm_contract_without_profile_remains_accepted():
+    validated = validate_metadata(metadata(b""))
+    assert "state_action_profile" not in validated
+    assert "controlled_arms" not in validated
 
 
 def test_single_right_arm_contract_rejects_bimanual_action_width():

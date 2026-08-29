@@ -1,0 +1,109 @@
+# 纯视觉 SmolVLA 右手单臂训练配置，字段与官方 LeRobot 训练流程对齐。
+# 数据合同必须是：7D observation.state、10D action、右腕相机。
+# 启动：bash train_smolvla/scripts/start_smolvla_right_train.sh
+
+dataset:
+  # TODO：换成实际的右手单臂数据集 ID 和 scripts/download_data.sh 生成的 v3.0 路径。
+  repo_id: local/pick_tube_right
+  root: /workspace/lerobot_v30/KaiyueChen/pick_tube_right
+  expected_fps: 30
+  state_dim: 7
+  action_dim: 10
+  image_keys:
+    - observation.images.camera0
+  eval_split: 0.10
+  image_transforms:
+    enable: true
+    max_num_transforms: 2
+    random_order: false
+    tfs:
+      brightness:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          brightness: [0.8, 1.2]
+      contrast:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          contrast: [0.8, 1.2]
+      saturation:
+        weight: 1.0
+        type: ColorJitter
+        kwargs:
+          saturation: [0.85, 1.15]
+      hue:
+        weight: 0.5
+        type: ColorJitter
+        kwargs:
+          hue: [-0.01, 0.01]
+      sharpness:
+        weight: 0.5
+        type: SharpnessJitter
+        kwargs:
+          sharpness: [0.8, 1.2]
+
+policy:
+  path: lerobot/smolvla_base
+  chunk_size: 20
+  n_action_steps: 10
+  empty_cameras: 0
+  num_vlm_layers: 16
+  num_expert_layers: 16
+  freeze_vision_encoder: true
+  train_expert_only: false
+  train_state_proj: true
+  optimizer_lr: 5.0e-5
+  scheduler_warmup_steps: 1500
+  scheduler_decay_steps: 30000
+  device: cuda
+  push_to_hub: false
+
+# 原始右腕相机 camera0 映射为模型输入 camera1。
+rename_map:
+  observation.images.camera0: observation.images.camera1
+
+peft:
+  enable: true
+  method_type: LORA
+  target_modules: 'model\.vlm_with_expert\.vlm\.model\.text_model\.layers\..*\.self_attn\.(q|v)_proj'
+  full_training_modules:
+    - model.vlm_with_expert.lm_expert
+    - model.state_proj
+    - model.action_in_proj
+    - model.action_out_proj
+    - model.action_time_mlp_in
+    - model.action_time_mlp_out
+  rank: 16
+  lora_alpha: 16
+
+training:
+  output_dir: /workspace/outputs/smolvla_right
+  existing_output: increment
+  job_name: smolvla_right
+  batch_size: 64
+  num_workers: 8
+  steps: 30000
+  eval_steps: 500
+  max_eval_samples: 0
+  save_freq: 2000
+  log_freq: 20
+  seed: 1000
+  resume_from: null
+
+distributed:
+  num_gpus: 1
+  num_machines: 1
+  mixed_precision: bf16
+  timeout_seconds: 7200
+
+wandb:
+  enable: true
+  project: smolvla-right
+  entity: null
+  # auto: online when WANDB_API_KEY/~/.netrc exists, otherwise offline.
+  mode: auto
+  notes: PyTorch SmolVLA pure-vision right-hand 7D-state 10D-action training
+  run_id: null
+  disable_artifact: true
+  add_tags: true

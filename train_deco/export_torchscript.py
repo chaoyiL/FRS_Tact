@@ -30,6 +30,8 @@ EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
 STAGE2_EXPORT_FORMAT = "sudo-upstream-deco-stage2-torchscript-v1"
 STAGE2_CHECKPOINT_SCHEMA_VERSION = 1
 TACTILE_TARGET_SIZE = (224, 224)
+BREAD_PHASE_VERSION = "bread-phase-v1"
+BREAD_PHASE_LABELS = {"0": "right_bread", "1": "left_ketchup"}
 
 
 class UpstreamDECODeployment(nn.Module):
@@ -82,6 +84,32 @@ class UpstreamDECODeployment(nn.Module):
                 obs=deco_observation,
                 training=False,
             )
+        return normalized_action * self.action_std + self.action_mean
+
+
+class BreadPhaseDECODeployment(UpstreamDECODeployment):
+    """Three-input deployment boundary for the single Bread phase policy."""
+
+    def forward(
+        self,
+        images: torch.Tensor,
+        observation: torch.Tensor,
+        phase_id: torch.Tensor,
+    ) -> torch.Tensor:
+        normalized_source = (
+            observation - self.observation_mean
+        ) / self.observation_std
+        deco_observation = select_deco_observation(
+            normalized_source, self.observation_indices
+        )
+        normalized_images = letterbox_and_normalize(images, self.image_size)
+        normalized_action = self.policy(
+            normalized_images[:, 0],
+            normalized_images[:, 1],
+            obs=deco_observation,
+            task_idx=phase_id,
+            training=False,
+        )
         return normalized_action * self.action_std + self.action_mean
 
 
@@ -180,16 +208,26 @@ def _validate_config(config: dict) -> None:
         raise ValueError(
             f"Expected {MODEL_TYPE!r} or {STAGE2_MODEL_TYPE!r}, got {model_type!r}"
         )
-    if config.get("use_task_condition", False):
+    bread_phase = config.get("bread_phase_version") == BREAD_PHASE_VERSION
+    if config.get("use_task_condition", False) and not bread_phase:
         raise ValueError(
             "The TorchScript deployment contract does not support "
             "task-conditioned policies"
         )
+    if bread_phase:
+        if model_type != MODEL_TYPE:
+            raise ValueError("Bread phase TorchScript export requires a Stage 1 policy")
+        if config.get("use_task_condition") is not True:
+            raise ValueError("Bread phase TorchScript export requires task conditioning")
+        if int(config.get("num_tasks", 0)) != 2:
+            raise ValueError("Bread phase TorchScript export requires exactly two tasks")
     camera_count = len(config.get("camera_names", []))
     if model_type == STAGE2_MODEL_TYPE and camera_count != 2:
         raise ValueError("Stage2 TorchScript export requires exactly two cameras")
     if model_type == MODEL_TYPE and camera_count not in (2, 3):
         raise ValueError("TorchScript export requires two or three camera names")
+    if bread_phase and camera_count != 2:
+        raise ValueError("Bread phase TorchScript export requires exactly two cameras")
     action_mode = config.get("action_mode", "absolute")
     if action_mode not in {
         "absolute",
@@ -428,7 +466,13 @@ def _snapshot(policy: nn.Module, config: dict) -> nn.Module:
 def _trace(policy, stats, config, image_height, image_width):
     device = next(policy.parameters()).device
     stage2 = config.get("model_type") == STAGE2_MODEL_TYPE
-    deployment_type = Stage2DECODeployment if stage2 else UpstreamDECODeployment
+    bread_phase = config.get("bread_phase_version") == BREAD_PHASE_VERSION
+    if stage2:
+        deployment_type = Stage2DECODeployment
+    elif bread_phase:
+        deployment_type = BreadPhaseDECODeployment
+    else:
+        deployment_type = UpstreamDECODeployment
     deployment = deployment_type(policy, stats, config).eval().to(device)
     images = torch.zeros(
         1, len(config["camera_names"]), 3, image_height, image_width,
@@ -443,6 +487,9 @@ def _trace(policy, stats, config, image_height, image_width):
             1, 4, 3, image_height, image_width, device=device
         )
         inputs = (images, tactile_images, observation)
+    elif bread_phase:
+        phase_id = torch.zeros(1, dtype=torch.long, device=device)
+        inputs = (images, observation, phase_id)
     with torch.inference_mode():
         traced = torch.jit.trace(
             deployment, inputs, check_trace=False, strict=True
@@ -474,6 +521,7 @@ def _metadata(
 ):
     action_mode = config.get("action_mode", "absolute")
     stage2 = config.get("model_type") == STAGE2_MODEL_TYPE
+    bread_phase = config.get("bread_phase_version") == BREAD_PHASE_VERSION
     metadata = {
         "format": STAGE2_EXPORT_FORMAT if stage2 else EXPORT_FORMAT,
         "source": source,
@@ -520,6 +568,11 @@ def _metadata(
         "inference_steps": int(config["inference_steps"]),
         "stochastic": True,
     }
+    if bread_phase:
+        metadata["input"]["phase_id"] = [1]
+        metadata["input"]["phase_id_dtype"] = "int64"
+        metadata["phase_count"] = 2
+        metadata["phase_labels"] = BREAD_PHASE_LABELS
     if stage2:
         if stage2_metadata is None:
             raise ValueError("Stage2 export requires checkpoint provenance metadata")

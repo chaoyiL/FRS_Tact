@@ -3,7 +3,26 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-TRAIN_PYTHON="${TRAIN_PI05_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"
+PROJECT_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
+
+# setup_env.sh --pi05_train 会把唯一的训练解释器路径写入 env_path。
+# 调用者显式传入的 TRAIN_PI05_PYTHON 优先级最高，便于临时覆盖。
+TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_PYTHON:-}"
+if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+fi
+TRAIN_PYTHON="${TRAIN_PYTHON_OVERRIDE:-${TRAIN_PI05_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}}"
 export PYTHONPATH="${TRAIN_ROOT}/src:${TRAIN_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONSAFEPATH=1
 TMUX_SESSION="${PI05_TMUX_SESSION:-pi05_vision_train}"
@@ -23,7 +42,8 @@ while (($#)); do
 done
 config_path="${config_path:-${TRAIN_ROOT}/configs/train_pi05.yaml}"
 
-[[ -x "${TRAIN_PYTHON}" ]] || fail "training Python is not executable: ${TRAIN_PYTHON}"
+[[ -x "${TRAIN_PYTHON}" ]] || fail \
+    "training Python is not executable: ${TRAIN_PYTHON}; run: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
 [[ -f "${config_path}" ]] || fail "configuration does not exist: ${config_path}"
 config_path="$(realpath -- "${config_path}")"
 cd "${TRAIN_ROOT}"
