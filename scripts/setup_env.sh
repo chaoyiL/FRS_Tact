@@ -532,7 +532,7 @@ sync_pi05_train_environment() {
             log "Pi0.5 训练使用 PyTorch CPU 镜像：${FRS_PYTORCH_INDEX}"
         fi
         UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}" \
-            "${UV_BIN}" sync --verbose --python "${PI05_TRAIN_PYTHON_VERSION}" \
+            "${UV_BIN}" sync --verbose --no-dev --python "${PI05_TRAIN_PYTHON_VERSION}" \
             --project "${PI05_TRAIN_PROJECT_ROOT}" "${pi05_sync_indexes[@]}"
     )
 }
@@ -541,19 +541,15 @@ sync_data_tools_environment() {
     log "LeRobot 数据工具环境目录：${DATA_TOOLS_VENV_DIR}"
     log "同步 Python 3.12 下载与 v2.1 -> v3.0 转换依赖"
     (
-        local -a data_sync_indexes=()
         export UV_HTTP_CONNECT_TIMEOUT="${UV_HTTP_CONNECT_TIMEOUT:-15}"
         export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"
         export UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-8}"
         if [[ -n "${FRS_PYPI_MIRROR:-}" ]]; then
             export UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"
         fi
-        if [[ -n "${FRS_PYTORCH_INDEX:-}" ]]; then
-            data_sync_indexes=(--index "pytorch-cpu=${FRS_PYTORCH_INDEX}")
-        fi
         UV_PROJECT_ENVIRONMENT="${DATA_TOOLS_VENV_DIR}" \
             "${UV_BIN}" sync --verbose --python "${PYTHON_VERSION}" \
-            --project "${DATA_TOOLS_PROJECT_ROOT}" "${data_sync_indexes[@]}"
+            --project "${DATA_TOOLS_PROJECT_ROOT}"
     )
 }
 
@@ -570,13 +566,10 @@ verify_data_tools_environment() {
             "${data_python}" - <<'PY'
 import sys
 
-import av
-import draccus
 import jsonlines
-import torchvision
 from lerobot.datasets.v30 import convert_dataset_v21_to_v30
 
-del av, draccus, jsonlines, torchvision, convert_dataset_v21_to_v30
+del jsonlines, convert_dataset_v21_to_v30
 if sys.version_info[:2] != (3, 12):
     raise RuntimeError(f"LeRobot data conversion requires Python 3.12, got {sys.version}")
 print(f"LeRobot data tools python={sys.version.split()[0]}")
@@ -669,11 +662,8 @@ import flax
 import jax
 import orbax.checkpoint
 import torch
-import torchvision
 import yaml
 
-import av
-import draccus
 import openpi.training.config
 import openpi.training.data_loader
 
@@ -683,7 +673,6 @@ print(f"pi05 train python={sys.version.split()[0]}")
 print(f"pi05 train jax={jax.__version__}")
 print(f"pi05 train flax={flax.__version__}")
 print(f"pi05 train torch={torch.__version__}")
-print(f"pi05 train torchvision={torchvision.__version__}")
 PY
     )
 }

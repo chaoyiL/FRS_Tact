@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +25,9 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.dataset as pa_ds
 import pyarrow.parquet as pq
-import torch
 from datasets import Dataset
 from datasets.table import embed_table_storage
 from PIL import Image as PILImage
-from torchvision import transforms
 
 from lerobot.utils.io_utils import load_json, write_json
 from lerobot.utils.utils import SuppressProgressBars, flatten_dict, unflatten_dict
@@ -258,9 +258,20 @@ def pil_to_chw_tensor(img: PILImage.Image) -> torch.Tensor:
     ``uint16`` depth maps become ``float32 (1, H, W)`` in native units (``ToTensor``
     would overflow them to ``int16``); all other modes use the standard ``ToTensor`` path.
     """
+    import torch
+
     if img.mode in UINT16_PIL_MODES:
         return torch.from_numpy(np.array(img, dtype=np.float32))[None, ...]
-    return transforms.ToTensor()(img)
+    array = np.asarray(img)
+    if not array.flags.writeable:
+        array = np.array(array, copy=True)
+    tensor = torch.from_numpy(array)
+    if tensor.ndim == 2:
+        tensor = tensor.unsqueeze(-1)
+    tensor = tensor.permute(2, 0, 1).contiguous()
+    if tensor.dtype == torch.uint8:
+        return tensor.to(dtype=torch.float32).div_(255.0)
+    return tensor.to(dtype=torch.float32)
 
 
 def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[torch.Tensor | str]]:
@@ -279,6 +290,8 @@ def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[to
     Returns:
         dict: The batch with items converted to torch tensors.
     """
+    import torch
+
     for key in items_dict:
         if key in LANGUAGE_COLUMNS:
             continue
@@ -349,6 +362,8 @@ def item_to_torch(item: dict) -> dict:
         dict: Dictionary with all tensor-like items converted to torch.Tensor.
     """
     skip_keys = {"task", *LANGUAGE_COLUMNS}
+    import torch
+
     for key, val in item.items():
         if key in skip_keys:
             continue

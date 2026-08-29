@@ -20,12 +20,6 @@
 from lerobot.utils.import_utils import require_package
 
 require_package("datasets", extra="dataset")
-require_package("av", extra="dataset")
-
-from .compute_stats import aggregate_stats, get_feature_stats
-from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
-from .lerobot_dataset import LeRobotDataset
-from .pyav_utils import check_video_encoder_parameters_pyav, detect_available_encoders_pyav
 
 __all__ = [
     "CODEBASE_VERSION",
@@ -36,3 +30,34 @@ __all__ = [
     "detect_available_encoders_pyav",
     "get_feature_stats",
 ]
+
+
+def __getattr__(name: str):
+    """Load optional dataset surfaces only when a caller actually uses them."""
+
+    if name in {"aggregate_stats", "get_feature_stats"}:
+        from .compute_stats import aggregate_stats, get_feature_stats
+
+        value = {"aggregate_stats": aggregate_stats, "get_feature_stats": get_feature_stats}[name]
+    elif name in {"CODEBASE_VERSION", "LeRobotDatasetMetadata"}:
+        from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
+
+        value = {
+            "CODEBASE_VERSION": CODEBASE_VERSION,
+            "LeRobotDatasetMetadata": LeRobotDatasetMetadata,
+        }[name]
+    elif name == "LeRobotDataset":
+        from .lerobot_dataset import LeRobotDataset
+
+        value = LeRobotDataset
+    elif name in {"check_video_encoder_parameters_pyav", "detect_available_encoders_pyav"}:
+        from .pyav_utils import check_video_encoder_parameters_pyav, detect_available_encoders_pyav
+
+        value = {
+            "check_video_encoder_parameters_pyav": check_video_encoder_parameters_pyav,
+            "detect_available_encoders_pyav": detect_available_encoders_pyav,
+        }[name]
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value

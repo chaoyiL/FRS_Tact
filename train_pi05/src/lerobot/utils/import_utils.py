@@ -16,9 +16,10 @@
 import importlib
 import importlib.metadata
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from draccus.choice_types import ChoiceRegistry
+if TYPE_CHECKING:
+    from draccus.choice_types import ChoiceRegistry
 
 
 def is_package_available(
@@ -146,7 +147,7 @@ _wallx_deps_available = (
 )
 
 
-def make_device_from_device_class(config: ChoiceRegistry) -> Any:
+def make_device_from_device_class(config: "ChoiceRegistry") -> Any:
     """
     Dynamically instantiates an object from its `ChoiceRegistry` configuration.
 
@@ -156,6 +157,10 @@ def make_device_from_device_class(config: ChoiceRegistry) -> Any:
     class name and tries a few candidate modules where the device implementation is
     commonly located.
     """
+    # Robot/device plugins are not part of the offline Pi0.5 training path.
+    # Keep draccus optional and import it only if this factory is actually used.
+    from draccus.choice_types import ChoiceRegistry
+
     if not isinstance(config, ChoiceRegistry):
         raise ValueError(f"Config should be an instance of `ChoiceRegistry`, got {type(config)}")
 

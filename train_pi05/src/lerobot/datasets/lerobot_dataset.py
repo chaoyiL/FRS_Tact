@@ -26,6 +26,7 @@ from huggingface_hub.errors import RevisionNotFoundError
 
 from lerobot.configs import DEFAULT_DEPTH_UNIT, DepthEncoderConfig, RGBEncoderConfig
 from lerobot.utils.constants import HF_LEROBOT_HUB_CACHE
+from lerobot.utils.import_utils import get_safe_default_video_backend
 
 from .dataset_metadata import CODEBASE_VERSION, LeRobotDatasetMetadata
 from .dataset_reader import DatasetReader
@@ -33,10 +34,6 @@ from .utils import (
     create_lerobot_dataset_card,
     get_safe_version,
     is_valid_version,
-)
-from .video_utils import (
-    StreamingVideoEncoder,
-    get_safe_default_video_backend,
 )
 
 logger = logging.getLogger(__name__)
@@ -346,7 +343,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
         depth_encoder: DepthEncoderConfig | None,
         encoder_queue_maxsize: int,
         encoder_threads: int | None,
-    ) -> StreamingVideoEncoder:
+    ) -> "StreamingVideoEncoder":
+        from .video_utils import StreamingVideoEncoder
+
         return StreamingVideoEncoder(
             fps=fps,
             rgb_encoder=rgb_encoder,

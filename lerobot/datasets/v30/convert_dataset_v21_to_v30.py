@@ -41,7 +41,8 @@ from datasets import Dataset, Features, Image
 from huggingface_hub import HfApi, snapshot_download
 from requests import HTTPError
 
-from lerobot.datasets import CODEBASE_VERSION, LeRobotDataset, aggregate_stats
+from lerobot.datasets.compute_stats import aggregate_stats
+from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
 from lerobot.datasets.io_utils import (
     cast_stats_to_numpy,
     get_file_size_in_mb,
@@ -64,7 +65,6 @@ from lerobot.datasets.utils import (
     LEGACY_TASKS_PATH,
     update_chunk_file_indices,
 )
-from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.utils.utils import flatten_dict, init_logging
 
@@ -270,6 +270,8 @@ def convert_videos_of_camera(
     video_key: str,
     video_file_size_in_mb: int,
 ) -> list[dict]:
+    from lerobot.datasets.video_utils import concatenate_video_files, get_video_duration_in_s
+
     ep_paths = sorted((root / "videos").glob(f"*/{video_key}/*.mp4"))
 
     ep_idx = 0
@@ -485,6 +487,8 @@ def convert_dataset(
     shutil.move(new_root, root)
 
     if push_to_hub:
+        from lerobot.datasets import LeRobotDataset
+
         hub_api = HfApi()
         try:
             hub_api.delete_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")

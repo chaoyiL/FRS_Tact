@@ -13,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from __future__ import annotations
+
 import contextlib
 import dataclasses
 import importlib.resources
@@ -24,7 +26,6 @@ from pathlib import Path
 import datasets
 import numpy as np
 import packaging.version
-import torch
 from huggingface_hub import DatasetCard, DatasetCardData, HfApi
 from huggingface_hub.errors import RevisionNotFoundError
 
@@ -260,6 +261,8 @@ def serialize_dict(stats: dict[str, torch.Tensor | np.ndarray | dict]) -> dict:
     Raises:
         NotImplementedError: If a value has an unsupported type.
     """
+    import torch
+
     serialized_dict = {}
     for key, value in flatten_dict(stats).items():
         if isinstance(value, (torch.Tensor | np.ndarray)):

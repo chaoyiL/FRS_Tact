@@ -29,7 +29,6 @@ from lerobot.configs import (
 )
 
 from .dataset_metadata import LeRobotDatasetMetadata
-from .depth_utils import MM_PER_METRE, dequantize_depth
 from .feature_utils import (
     check_delta_timestamps,
     get_delta_indices,
@@ -39,7 +38,6 @@ from .io_utils import (
     hf_transform_to_torch,
     load_nested_dataset,
 )
-from .video_utils import decode_video_frames
 
 
 class DatasetReader:
@@ -337,6 +335,9 @@ class DatasetReader:
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
         Segmentation Fault.
         """
+        from .depth_utils import dequantize_depth
+        from .video_utils import decode_video_frames
+
         ep = self._meta.episodes[ep_idx]
 
         def _decode_single(vid_key: str, query_ts: list[float]) -> tuple[str, torch.Tensor]:
@@ -414,6 +415,9 @@ class DatasetReader:
                 item[cam] = self._image_transforms(item[cam])
 
         # Convert depth features to the output unit.
+        if self._image_depth_units:
+            from .depth_utils import MM_PER_METRE
+
         for key, stored_unit in self._image_depth_units.items():
             if key in item and stored_unit is not None and stored_unit != self._depth_output_unit:
                 item[key] = (

@@ -27,7 +27,6 @@ import torch
 from datasets import Dataset
 from datasets.table import embed_table_storage
 from PIL import Image as PILImage
-from torchvision import transforms
 
 from lerobot.utils.io_utils import load_json, write_json
 from lerobot.utils.utils import SuppressProgressBars, flatten_dict, unflatten_dict
@@ -255,12 +254,21 @@ UINT16_PIL_MODES = {"I;16", "I;16B", "I;16L"}
 def pil_to_chw_tensor(img: PILImage.Image) -> torch.Tensor:
     """Convert a PIL image to a channel-first tensor.
 
-    ``uint16`` depth maps become ``float32 (1, H, W)`` in native units (``ToTensor``
-    would overflow them to ``int16``); all other modes use the standard ``ToTensor`` path.
+    ``uint16`` depth maps become ``float32 (1, H, W)`` in native units. RGB images
+    become ``float32 (C, H, W)`` in ``[0, 1]`` without requiring torchvision.
     """
     if img.mode in UINT16_PIL_MODES:
         return torch.from_numpy(np.array(img, dtype=np.float32))[None, ...]
-    return transforms.ToTensor()(img)
+    array = np.asarray(img)
+    if not array.flags.writeable:
+        array = np.array(array, copy=True)
+    tensor = torch.from_numpy(array)
+    if tensor.ndim == 2:
+        tensor = tensor.unsqueeze(-1)
+    tensor = tensor.permute(2, 0, 1).contiguous()
+    if tensor.dtype == torch.uint8:
+        return tensor.to(dtype=torch.float32).div_(255.0)
+    return tensor.to(dtype=torch.float32)
 
 
 def hf_transform_to_torch(items_dict: dict[str, list[Any]]) -> dict[str, list[torch.Tensor | str]]:

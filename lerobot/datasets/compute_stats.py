@@ -19,7 +19,6 @@ import logging
 
 import numpy as np
 
-from lerobot.processor import RelativeActionsProcessorStep
 from lerobot.utils.constants import ACTION, OBS_STATE
 
 from .io_utils import load_image_as_numpy
@@ -708,6 +707,8 @@ def compute_relative_action_stats(
         ValueError: If the dataset has fewer frames than ``chunk_size``.
         RuntimeError: If no valid (single-episode) chunks are found.
     """
+    from lerobot.processor import RelativeActionsProcessorStep
+
     if exclude_joints is None:
         exclude_joints = []
 

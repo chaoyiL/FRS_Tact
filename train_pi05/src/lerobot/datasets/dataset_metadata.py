@@ -31,7 +31,6 @@ from lerobot.utils.constants import DEFAULT_FEATURES, HF_LEROBOT_HOME, HF_LEROBO
 from lerobot.utils.feature_utils import _validate_feature_names
 from lerobot.utils.utils import flatten_dict
 
-from .depth_utils import MM_PER_METRE
 from .feature_utils import create_empty_dataset_info
 from .io_utils import (
     get_file_size_in_mb,
@@ -52,7 +51,6 @@ from .utils import (
     is_valid_version,
     update_chunk_file_indices,
 )
-from .video_utils import get_video_info
 
 CODEBASE_VERSION = "v3.0"
 
@@ -366,8 +364,9 @@ class LeRobotDatasetMetadata:
         ``output_unit`` on read. This converts the unit-bearing stat entries so
         stats match the frames consumers see.
         """
+        depth_keys = self.depth_keys
         missing_unit_keys = [
-            key for key in self.depth_keys if (self.features[key].get("info") or {}).get("depth_unit") is None
+            key for key in depth_keys if (self.features[key].get("info") or {}).get("depth_unit") is None
         ]
         if missing_unit_keys:
             logging.warning(
@@ -378,7 +377,12 @@ class LeRobotDatasetMetadata:
             )
         if self.stats is None:
             return
-        for key in self.depth_keys:
+        # RGB-only datasets never import the optional depth/video stack (PyAV).
+        if not depth_keys:
+            return
+        from .depth_utils import MM_PER_METRE
+
+        for key in depth_keys:
             stored_unit = (self.features[key].get("info") or {}).get("depth_unit")
             if stored_unit is None or stored_unit == output_unit or key not in self.stats:
                 continue
@@ -655,6 +659,8 @@ class LeRobotDatasetMetadata:
             preserve_keys: Keys whose existing values are kept instead of being
                 recomputed. ``None`` (default) recomputes every key.
         """
+        from .video_utils import get_video_info
+
         if video_key is not None and video_key not in self.video_keys:
             raise ValueError(f"Video key {video_key} not found in dataset")
 
