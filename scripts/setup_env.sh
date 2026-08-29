@@ -362,6 +362,7 @@ write_environment_file() {
         echo "# 由 setup_env.sh 生成；供训练脚本复用。"
         printf 'export PATH=%q\n' "${HOME}/.local/bin:${HOME}/.cargo/bin:${PATH}"
         printf 'export UV_PROJECT_ENVIRONMENT=%q\n' "${UV_PROJECT_ENVIRONMENT}"
+        printf 'export FRS_PYTHON=%q\n' "${VENV_DIR}/bin/python"
         printf 'export SMOLVLA_TORCH_PYTHON=%q\n' "${SMOLVLA_TORCH_VENV_DIR}/bin/python"
         printf 'export PI05_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"
         printf 'export PI05_FRS_PYTHON=%q\n' "${PI05_VENV_DIR}/bin/python"

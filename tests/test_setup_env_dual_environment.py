@@ -37,6 +37,7 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"' in source
     assert 'SMOLVLA_TORCH_VENV_DIR="${SMOLVLA_TORCH_VENV_DIR:-${DEFAULT_SMOLVLA_TORCH_VENV_DIR}}"' in source
     assert 'export SMOLVLA_TORCH_PYTHON=%q' in source
+    assert 'export FRS_PYTHON=%q' in source
     assert '"torchcodec==${SMOLVLA_TORCHCODEC_VERSION}"' in source
     assert 'PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}"' in source
