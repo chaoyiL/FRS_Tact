@@ -23,7 +23,8 @@ while (($#)); do
 done
 config_path="${config_path:-${TRAIN_ROOT}/configs/train_pi05.yaml}"
 
-[[ -x "${TRAIN_PYTHON}" ]] || fail "training Python is not executable: ${TRAIN_PYTHON}"
+[[ -x "${TRAIN_PYTHON}" ]] || fail \
+    "training Python is not executable: ${TRAIN_PYTHON}; run: bash ${TRAIN_ROOT}/../scripts/setup_env.sh --pi05_train"
 [[ -f "${config_path}" ]] || fail "configuration does not exist: ${config_path}"
 config_path="$(realpath -- "${config_path}")"
 cd "${TRAIN_ROOT}"

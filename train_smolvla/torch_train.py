@@ -305,7 +305,7 @@ def augment_smolvla_training_batch(
 
 
 def build_command(config: dict[str, Any]) -> list[str]:
-    """Build the official LeRobot arguments, following VB3's training contract."""
+    """Build the official LeRobot arguments for FRS_Tact training."""
     dataset = config["dataset"]
     policy = config["policy"]
     training = config["training"]
@@ -417,8 +417,8 @@ def _import_official_lerobot():
         from lerobot.utils.feature_utils import dataset_to_policy_features
     except ImportError as error:
         raise ImportError(
-            "PyTorch training requires the official LeRobot environment used by VB3; "
-            "set SMOLVLA_TORCH_PYTHON to that environment's Python"
+            "PyTorch training requires FRS_Tact's isolated official LeRobot environment; "
+            "run `bash scripts/setup_env.sh --smolvla`"
         ) from error
     finally:
         for index, entry in sorted(removed):

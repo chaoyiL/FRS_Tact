@@ -1,9 +1,25 @@
 # SmolVLA training
 
 Pure-vision SmolVLA training uses the official PyTorch LeRobot implementation,
-following the command construction and dataset-contract handling used by VB3.
+wrapped by FRS_Tact for multi-dataset training and dataset-contract handling.
 The older JAX model modules remain package-internal because SmolVLA-FRS training
 and deployment still consume converted JAX checkpoints.
+
+## Package layout
+
+- `torch_train.py`, `configs/train_pytorch*.yaml`, and `scripts/` are the active
+  pure-vision PyTorch training path.
+- `architecture.py`, `configuration.py`, `functional.py`, `modeling.py`,
+  `preprocessing.py`, `rtc.py`, and `policy.py` are the JAX inference runtime
+  retained for FRS, deployment, and likelihood evaluation.
+- `checkpoint.py` and `validation.py` define the shared converted-checkpoint
+  loading, publishing, and contract validation path.
+- `data.py` contains the LeRobot/JAX input helpers still used while preparing
+  FRS caches and running modality evaluation.
+
+There is intentionally no direct JAX training entrypoint in this package. The
+supported source-policy training path is PyTorch; JAX is retained only for the
+downstream compatibility runtime described above.
 
 ## PyTorch vision training
 
@@ -40,10 +56,12 @@ concatenates the splits, aggregates normalization statistics, and globally
 shuffles their frames. Sources must have identical FPS and feature schemas;
 their natural sampling share is proportional to frame count.
 
-Use the Python environment that runs VB3 and contains official LeRobot SmolVLA:
+Install FRS_Tact's isolated official LeRobot SmolVLA environment. Under RunPod
+it is stored at `/workspace/venvs/smolvla_torch`; `.env.frs` records the Python
+path automatically:
 
 ```bash
-export SMOLVLA_TORCH_PYTHON=/home/typhon/vb3/.venv/bin/python
+bash scripts/setup_env.sh --smolvla
 bash train_smolvla/scripts/start_smolvla_train.sh
 ```
 

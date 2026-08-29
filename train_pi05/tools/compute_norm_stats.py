@@ -5,6 +5,9 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import sys
+from pathlib import Path
+
 import numpy as np
 import tqdm
 import tyro
@@ -87,7 +90,19 @@ def create_rlds_dataloader(
 
 
 def main(config_name: str, max_frames: int | None = None):
-    config = _config.get_config(config_name)
+    config_path = Path(config_name).expanduser()
+    if config_path.suffix.lower() in {".yaml", ".yml"}:
+        # Reuse the formal training path so ordered datasets, per-source
+        # action keys, transforms and the asset ID stay exactly consistent.
+        train_root = Path(__file__).resolve().parents[1]
+        if str(train_root) not in sys.path:
+            sys.path.insert(0, str(train_root))
+        from train import build_train_config, load_config
+
+        config = build_train_config(load_config(config_path.resolve()))
+    else:
+        # Keep the original named-profile interface for existing workflows.
+        config = _config.get_config(config_name)
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if data_config.rlds_data_dir is not None:
@@ -108,8 +123,9 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    print("dir check: ", config.assets_dirs, data_config.asset_id)
-    output_path = config.assets_dirs / data_config.asset_id
+    assets_dir = Path(config.data.assets.assets_dir or config.assets_dirs).expanduser().resolve()
+    print("dir check: ", assets_dir, data_config.asset_id)
+    output_path = assets_dir / data_config.asset_id
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 

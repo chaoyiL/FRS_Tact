@@ -8,13 +8,13 @@
 
 用法:
     # 检查LeRobot数据集
-    uv run scripts/check_dataset.py --config-name your_config_name
+    uv run python tools/check_dataset.py --config-name your_config_name
 
     # 检查LeRobot数据集（指定数据集repo_id）
-    uv run scripts/check_dataset.py --repo-id your_username/your_dataset_name
+    uv run python tools/check_dataset.py --repo-id your_username/your_dataset_name
 
     # 检查RLDS数据集（DROID）
-    uv run scripts/check_dataset.py --config-name pi05_full_droid_finetune
+    uv run python tools/check_dataset.py --config-name pi05_bi
 """
 
 import json

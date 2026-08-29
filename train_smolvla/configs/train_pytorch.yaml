@@ -1,4 +1,4 @@
-# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与 VB3/官方 LeRobot 训练流程对齐。
+# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与官方 LeRobot 训练流程对齐。
 # 启动：bash train_smolvla/scripts/start_smolvla_train.sh
 
 dataset:
@@ -91,7 +91,7 @@ rename_map:
   observation.images.camera0: observation.images.camera1
   observation.images.camera1: observation.images.camera2
 
-# VB3 使用的混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
+# FRS_Tact 混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
 peft:
   enable: true
   method_type: LORA

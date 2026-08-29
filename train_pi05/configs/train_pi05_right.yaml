@@ -1,0 +1,54 @@
+# 纯视觉 Pi0.5 右手单臂训练。
+# 数据必须已经转换为单臂合同：
+#   - observation.state：7D 右臂状态；
+#   - actions：10D 右臂动作；
+#   - observation.images.camera1：有效的右手视觉画面。
+# insert_01 和 insert_02 的 camera0 都是黑色占位图，训练不会读取它们。
+# 本配置不会从双臂 20D 数据中自动猜测或截取右手维度。
+profile: pi05_single
+checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
+allow_download: true
+
+# 多个右手单臂数据集可继续按顺序追加；训练时会合并并统一 shuffle。
+datasets:
+  - repo_id: KaiyueChen/insert_01
+    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+    action_key: actions
+
+  - repo_id: KaiyueChen/insert_02
+    root: /workspace/lerobot_v30/KaiyueChen/insert_02
+    action_key: actions
+  # - repo_id: KaiyueChen/insert_03
+  #   root: /workspace/lerobot_v30/KaiyueChen/insert_03
+  #   action_key: actions
+
+# --check 会读取每个数据集的 meta/info.json 并验证下面的右手合同。
+dataset_contract:
+  state_key: observation.state
+  state_dim: 7
+  action_dim: 10
+  image_keys:
+    - observation.images.camera1
+
+# 必须是用相同 7D state / 10D action 定义计算出的归一化统计。
+norm_stats:
+  dir: ./assets
+  asset_id: insert_0102
+
+training:
+  output: /workspace/outputs/pi05_right
+  batch_size: 128
+  num_workers: 8
+  steps: 30000
+  log_interval: 20
+  save_interval: 2000
+  keep_period: 10000
+  seed: 42
+  fsdp_devices: 1
+  overwrite: false
+  resume: false
+
+wandb:
+  enable: true
+  project: pi05-vision-right
+  exp_name: pi05_right_insert_01_02

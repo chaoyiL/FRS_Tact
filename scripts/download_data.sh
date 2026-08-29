@@ -87,12 +87,17 @@ DATASETS=(
     # pick_tube_02
     # pick_tube_03
     # pick_tube_04
-    pick_tube_05
+    # pick_tube_05
     # pick_tube_06
     # pick_cube_01
     # pick_cube_02
     # pick_cube_03
     # pick_cube_fix
+    two_tubes_01
+    two_tubes_02
+    two_tubes_03    
+    two_tubes_04
+    two_tubes_05
 )
 if (( ${#REQUESTED_DATASETS[@]} > 0 )); then
     DATASETS=("${REQUESTED_DATASETS[@]}")

@@ -26,16 +26,23 @@ def test_setup_env_help_is_safe_to_execute_directly() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
-    assert "--root" in completed.stdout
+    assert "--smolvla" in completed.stdout
     assert "--pi05_deploy" in completed.stdout
+    assert "--pi05_train" in completed.stdout
 
 
-def test_setup_env_declares_two_distinct_environment_targets() -> None:
+def test_setup_env_declares_three_distinct_environment_targets() -> None:
     source = SETUP.read_text(encoding="utf-8")
     assert 'PI05_PROJECT_ROOT="${PROJECT_ROOT}/deploy_pi05"' in source
-    assert 'PI05_VENV_DIR="${PI05_VENV_DIR:-${PI05_PROJECT_ROOT}/.venv}"' in source
+    assert 'SMOLVLA_TORCH_VENV_DIR="${SMOLVLA_TORCH_VENV_DIR:-${DEFAULT_SMOLVLA_TORCH_VENV_DIR}}"' in source
+    assert 'export SMOLVLA_TORCH_PYTHON=%q' in source
+    assert 'PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}"' in source
     assert '--project "${PI05_PROJECT_ROOT}"' in source
+    assert 'PI05_TRAIN_PROJECT_ROOT="${PROJECT_ROOT}/train_pi05"' in source
+    assert 'PI05_TRAIN_VENV_DIR="${PI05_TRAIN_VENV_DIR:-${DEFAULT_PI05_TRAIN_VENV_DIR}}"' in source
+    assert 'UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"' in source
+    assert '--project "${PI05_TRAIN_PROJECT_ROOT}"' in source
     assert "sync_environments" in source
 
 
@@ -165,12 +172,17 @@ configure_uv_storage() {{ export UV_PROJECT_ENVIRONMENT="$VENV_DIR"; export UV_C
 configure_runtime_storage() {{ export HF_HOME=/tmp/hf; export HF_HUB_CACHE=/tmp/hf/hub; export HF_DATASETS_CACHE=/tmp/hf/data; export HF_LEROBOT_HOME=/tmp/hf/lerobot; export TMPDIR=/tmp/frs; record runtime-storage; }}
 install_python() {{ record python; }}
 sync_root_environment() {{ record sync-root; }}
+sync_smolvla_torch_environment() {{ record sync-smolvla-torch; }}
 sync_pi05_environment() {{ record sync-pi05; }}
+sync_pi05_train_environment() {{ record sync-pi05-train; }}
 write_environment_file() {{ record env-file; }}
 verify_python_environment() {{ record verify-root; }}
+verify_smolvla_torch_environment() {{ record verify-smolvla-torch; }}
 verify_pi05_environment() {{ record verify-pi05; }}
+verify_pi05_train_environment() {{ record verify-pi05-train; }}
 check_root_gpu() {{ record gpu-root; }}
 check_pi05_gpu() {{ record gpu-pi05; }}
+check_pi05_train_gpu() {{ record gpu-pi05-train; }}
 print_summary() {{ record summary; }}
 main {quoted_args}
 """
@@ -194,19 +206,23 @@ def test_main_without_selector_preserves_dual_environment_setup(tmp_path: Path) 
     assert completed.returncode == 0, completed.stderr
     events = read_events(tmp_path)
     assert "sync-root" in events
+    assert "sync-smolvla-torch" in events
     assert "sync-pi05" in events
     assert "verify-root" in events
+    assert "verify-smolvla-torch" in events
     assert "verify-pi05" in events
     assert "gpu-root" in events
     assert "gpu-pi05" in events
 
 
-def test_root_selector_skips_pi05_setup(tmp_path: Path) -> None:
-    completed = run_stubbed_main(tmp_path, "--root")
+def test_smolvla_selector_skips_pi05_setup(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path, "--smolvla")
     assert completed.returncode == 0, completed.stderr
     events = read_events(tmp_path)
     assert "sync-root" in events
+    assert "sync-smolvla-torch" in events
     assert "verify-root" in events
+    assert "verify-smolvla-torch" in events
     assert "gpu-root" in events
     assert not any("pi05" in event for event in events)
 
@@ -221,6 +237,17 @@ def test_pi05_deploy_selector_skips_root_setup(tmp_path: Path) -> None:
     assert not any(event.endswith("root") for event in events)
 
 
+def test_pi05_train_selector_only_sets_up_training_environment(tmp_path: Path) -> None:
+    completed = run_stubbed_main(tmp_path, "--pi05_train")
+    assert completed.returncode == 0, completed.stderr
+    events = read_events(tmp_path)
+    assert "sync-pi05-train" in events
+    assert "verify-pi05-train" in events
+    assert "gpu-pi05-train" in events
+    assert "sync-root" not in events
+    assert "sync-pi05" not in events
+
+
 def test_help_has_no_side_effects(tmp_path: Path) -> None:
     completed = run_stubbed_main(tmp_path, "--help")
     assert completed.returncode == 0
@@ -232,12 +259,12 @@ def test_help_has_no_side_effects(tmp_path: Path) -> None:
     ("args", "case_name"),
     [
         ((selector, help_flag), f"{selector.removeprefix('--')}_{help_flag.removeprefix('-')}")
-        for selector in ("--root", "--pi05_deploy")
+        for selector in ("--smolvla", "--pi05_deploy", "--pi05_train")
         for help_flag in ("-h", "--help")
     ]
     + [
         ((help_flag, selector), f"{help_flag.removeprefix('-')}_{selector.removeprefix('--')}")
-        for selector in ("--root", "--pi05_deploy")
+        for selector in ("--smolvla", "--pi05_deploy", "--pi05_train")
         for help_flag in ("-h", "--help")
     ],
 )
@@ -255,7 +282,7 @@ def test_help_cannot_be_combined_with_a_selector_in_either_order(
 
 
 def test_invalid_or_conflicting_selectors_fail_before_side_effects(tmp_path: Path) -> None:
-    for args in [("--unknown",), ("--root", "--pi05_deploy")]:
+    for args in [("--unknown",), ("--smolvla", "--pi05_deploy")]:
         case_dir = tmp_path / args[0].removeprefix("-").replace("-", "_")
         case_dir.mkdir(exist_ok=True)
         completed = run_stubbed_main(case_dir, *args)
@@ -264,7 +291,7 @@ def test_invalid_or_conflicting_selectors_fail_before_side_effects(tmp_path: Pat
         assert read_events(case_dir) == []
 
 
-def test_root_storage_setup_does_not_create_unselected_pi05_parent(
+def test_smolvla_storage_setup_does_not_create_unselected_pi05_parent(
     tmp_path: Path,
 ) -> None:
     root_venv = tmp_path / "root" / ".venv"
@@ -272,7 +299,7 @@ def test_root_storage_setup_does_not_create_unselected_pi05_parent(
     command = f"""
 set -euo pipefail
 source {SETUP}
-SETUP_MODE=root
+SETUP_MODE=smolvla
 VENV_DIR={root_venv}
 PI05_VENV_DIR={pi05_venv}
 UV_CACHE_DIR_VALUE={tmp_path / 'uv-cache'}
