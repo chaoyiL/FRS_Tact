@@ -1,0 +1,31 @@
+{
+  "format": "deco-lerobot-v21-multiroot-v1",
+  "dataset_id": "insert_01_02",
+  "state_action_profile": "single-right-arm-7x10",
+  "sources": [
+    {
+      "name": "insert_01",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_01",
+      "source_dataset_id": "insert_01",
+      "total_episodes": 500,
+      "total_frames": 252795,
+      "camera0_black_preflight": {
+        "pure_black": true,
+        "frames": 252795,
+        "unique_payloads_decoded": 1
+      }
+    },
+    {
+      "name": "insert_02",
+      "path": "/DATA/ljl/substage/lerobot_v21/KaiyueChen/insert_02",
+      "source_dataset_id": "insert_02",
+      "total_episodes": 711,
+      "total_frames": 310619,
+      "camera0_black_preflight": {
+        "pure_black": true,
+        "frames": 310619,
+        "unique_payloads_decoded": 1
+      }
+    }
+  ]
+}
