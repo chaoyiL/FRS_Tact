@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pi05-vision-training"
+version = "0.1.0"
+description = "Standalone pure-vision JAX pi0.5 fine-tuning"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "augmax>=0.3.4",
+    "beartype==0.19.0",
+    "chex",
+    "dm-tree>=0.1.8",
+    "datasets>=4.7.0,<5.0.0",
+    "einops>=0.8.0",
+    "etils[epath]",
+    "filelock>=3.16.1",
+    "flax==0.10.2",
+    "fsspec>=2024.6.0,<2026.0.0",
+    "gcsfs>=2024.6.0,<2026.0.0",
+    "huggingface-hub",
+    "jax[cuda12]==0.5.3; sys_platform == 'linux'",
+    "jax==0.5.3; sys_platform != 'linux'",
+    "jaxtyping==0.2.36",
+    "lerobot @ git+https://github.com/huggingface/lerobot.git@0cf864870cf29f4738d3ade893e6fd13fbd7cdb5",
+    "ml-collections==1.0.0",
+    "msgpack>=1.0.5",
+    "numpy>=1.22.4,<2.0.0",
+    "numpydantic>=1.6.6",
+    "opencv-python==4.11.0.86",
+    "optax",
+    "orbax-checkpoint==0.11.13",
+    "pillow>=11.0.0",
+    "pandas>=2.0.0,<3.0.0",
+    "pyarrow>=21.0.0,<30.0.0",
+    "PyYAML>=6.0.0,<7.0.0",
+    "pydantic>=2.0",
+    "pynvml>=12.0.0",
+    "pytest>=8.3.4",
+    "safetensors",
+    "sentencepiece>=0.2.0",
+    "torch==2.7.1",
+    "torchcodec>=0.7.0,<0.12.0; sys_platform == 'win32'",
+    "torchcodec>=0.3.0,<0.12.0; sys_platform == 'linux'",
+    "tqdm>=4.66.0",
+    "tqdm-loggable>=0.2",
+    "transformers==4.53.2",
+    "treescope>=0.1.7",
+    "typing-extensions>=4.12.2",
+    "tyro>=0.9.5",
+    "wandb>=0.19.1",
+    "websockets>=11.0",
+]
+
+[dependency-groups]
+dev = ["ruff>=0.8.6"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openpi", "src/openpi_client", "src/lerobot"]
+
+[tool.uv]
+override-dependencies = ["ml-dtypes==0.4.1", "tensorstore==0.1.74"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", marker = "sys_platform == 'linux'" }]
+
+[tool.pytest.ini_options]
+testpaths = ["src/openpi"]
+markers = ["manual: should be run manually"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
