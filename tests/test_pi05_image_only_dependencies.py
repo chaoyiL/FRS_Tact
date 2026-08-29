@@ -84,9 +84,14 @@ def test_converter_does_not_eagerly_import_video_stack() -> None:
     )
 
 
+def test_data_tools_package_initializers_do_not_eagerly_import_torch() -> None:
+    for relative_path in ("lerobot/utils/__init__.py", "lerobot/datasets/__init__.py"):
+        imports = _top_level_imports(ROOT / relative_path)
+        assert "torch" not in imports, relative_path
+
+
 def test_private_lerobot_utility_parses_as_python_311() -> None:
     source = (ROOT / "train_pi05" / "src" / "lerobot" / "utils" / "io_utils.py").read_text(
         encoding="utf-8"
     )
     ast.parse(source, feature_version=(3, 11))
-

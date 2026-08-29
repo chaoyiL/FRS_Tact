@@ -42,7 +42,6 @@ from huggingface_hub import HfApi, snapshot_download
 from requests import HTTPError
 
 from lerobot.datasets.compute_stats import aggregate_stats
-from lerobot.datasets.dataset_metadata import CODEBASE_VERSION
 from lerobot.datasets.io_utils import (
     cast_stats_to_numpy,
     get_file_size_in_mb,
@@ -491,16 +490,16 @@ def convert_dataset(
 
         hub_api = HfApi()
         try:
-            hub_api.delete_tag(repo_id, tag=CODEBASE_VERSION, repo_type="dataset")
+            hub_api.delete_tag(repo_id, tag=V30, repo_type="dataset")
         except HTTPError as error:
-            print(f"tag={CODEBASE_VERSION} probably doesn't exist. Skipping exception ({error})")
+            print(f"tag={V30} probably doesn't exist. Skipping exception ({error})")
         hub_api.delete_files(
             delete_patterns=["data/chunk*/episode_*", "meta/*.jsonl", "videos/chunk*"],
             repo_id=repo_id,
             revision=branch,
             repo_type="dataset",
         )
-        hub_api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
+        hub_api.create_tag(repo_id, tag=V30, revision=branch, repo_type="dataset")
         LeRobotDataset(repo_id).push_to_hub()
 
 

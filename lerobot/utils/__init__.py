@@ -24,7 +24,6 @@ from .constants import (
     OBS_STR,
     REWARD,
 )
-from .device_utils import auto_select_torch_device, get_safe_torch_device, is_torch_device_available
 from .import_utils import is_package_available, require_package
 
 __all__ = [
@@ -44,3 +43,28 @@ __all__ = [
     "is_package_available",
     "require_package",
 ]
+
+
+def __getattr__(name: str):
+    """Load PyTorch device helpers only when a caller requests them."""
+
+    if name not in {
+        "auto_select_torch_device",
+        "get_safe_torch_device",
+        "is_torch_device_available",
+    }:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from .device_utils import (
+        auto_select_torch_device,
+        get_safe_torch_device,
+        is_torch_device_available,
+    )
+
+    value = {
+        "auto_select_torch_device": auto_select_torch_device,
+        "get_safe_torch_device": get_safe_torch_device,
+        "is_torch_device_available": is_torch_device_available,
+    }[name]
+    globals()[name] = value
+    return value
