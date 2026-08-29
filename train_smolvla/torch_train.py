@@ -116,18 +116,28 @@ def validate_dataset_contract(config: dict[str, Any]) -> None:
                 )
         expected_images = set(dataset["image_keys"])
         actual_images = {key for key in features if key.startswith("observation.images.")}
-        if actual_images != expected_images:
+        missing_images = expected_images - actual_images
+        if missing_images:
             raise ValueError(
-                f"dataset {source['repo_id']} cameras must be {sorted(expected_images)}, "
-                f"got {sorted(actual_images)}"
+                f"dataset {source['repo_id']} is missing required cameras "
+                f"{sorted(missing_images)}; available cameras are {sorted(actual_images)}"
             )
+        selected_features = {
+            key: {
+                field: features[key].get(field)
+                for field in ("dtype", "shape", "names")
+                if features[key].get(field) is not None
+            }
+            for key in ("observation.state", "action", *sorted(expected_images))
+        }
         if reference_features is None:
-            reference_features = features
+            reference_features = selected_features
             reference_repo_id = source["repo_id"]
-        elif features != reference_features:
+        elif selected_features != reference_features:
             raise ValueError(
-                f"dataset feature schemas differ between {reference_repo_id} and "
-                f"{source['repo_id']}; multi-dataset SmolVLA requires identical feature schemas"
+                f"selected feature schemas differ between {reference_repo_id} and "
+                f"{source['repo_id']}; multi-dataset SmolVLA requires identical state, "
+                "action, and selected camera schemas"
             )
 
 
@@ -200,11 +210,48 @@ class CombinedLeRobotDataset:
         return self._datasets[dataset_index][index - start]
 
 
+def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
+    """Hide unselected camera features before LeRobot decodes training samples."""
+    meta = dataset.meta
+    features = dict(meta.features)
+    missing = selected_images - set(features)
+    if missing:
+        raise KeyError(f"dataset is missing selected cameras: {sorted(missing)}")
+    selected_features = {
+        key: value
+        for key, value in features.items()
+        if not key.startswith("observation.images.") or key in selected_images
+    }
+    # LeRobotDatasetMetadata properties read from ``info`` dynamically.  The
+    # DatasetReader holds this same metadata object, so pruning it here prevents
+    # tactile/unused videos from being decoded by DataLoader workers.
+    if isinstance(meta.info, dict):
+        meta.info["features"] = selected_features
+    else:
+        meta.info.features = selected_features
+    meta.stats = {
+        key: value for key, value in meta.stats.items() if key in selected_features
+    }
+    if getattr(dataset, "delta_timestamps", None) is not None:
+        dataset.delta_timestamps = {
+            key: value
+            for key, value in dataset.delta_timestamps.items()
+            if key in selected_features
+        }
+    reader = getattr(dataset, "reader", None)
+    if reader is not None and reader.delta_indices is not None:
+        reader.delta_indices = {
+            key: value
+            for key, value in reader.delta_indices.items()
+            if key in selected_features
+        }
+    return dataset
+
+
 def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) -> Any:
     """Create a LeRobot-compatible factory that concatenates all configured sources."""
     sources = dataset_sources(config)
-    if len(sources) == 1:
-        return upstream_factory
+    selected_images = set(config["dataset"]["image_keys"])
 
     def make_train_eval_datasets(cfg):
         from lerobot.datasets.compute_stats import aggregate_stats
@@ -222,9 +269,9 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
                 cfg.dataset.root = source["root"]
                 cfg.dataset.revision = source["revision"]
                 train_dataset, eval_dataset = upstream_factory(cfg)
-                train_datasets.append(train_dataset)
+                train_datasets.append(_select_dataset_cameras(train_dataset, selected_images))
                 if eval_dataset is not None:
-                    eval_datasets.append(eval_dataset)
+                    eval_datasets.append(_select_dataset_cameras(eval_dataset, selected_images))
         finally:
             cfg.dataset.repo_id = saved["repo_id"]
             cfg.dataset.root = saved["root"]
@@ -476,10 +523,14 @@ def _run_worker(config: dict[str, Any], command: list[str]) -> None:
         if ds_meta is not None:
             features = dataset_to_policy_features(ds_meta.features)
             rename_map = rename_map or {}
+            selected_inputs = {
+                "observation.state",
+                *config["dataset"]["image_keys"],
+            }
             cfg.input_features = {
                 rename_map.get(name, name): feature
                 for name, feature in features.items()
-                if not name.startswith("action")
+                if name in selected_inputs
             }
         return upstream_make(cfg=cfg, ds_meta=ds_meta, env_cfg=env_cfg, rename_map=rename_map)
 
