@@ -107,9 +107,15 @@ def build_train_config(raw: dict[str, Any]):
         for item in raw["datasets"]
     )
     norm = raw.get("norm_stats") or {}
+    assets_dir = str(norm.get("dir", "./assets"))
+    if "://" not in assets_dir:
+        assets_path = Path(assets_dir).expanduser()
+        if not assets_path.is_absolute():
+            assets_path = Path(__file__).resolve().parent / assets_path
+        assets_dir = str(assets_path.resolve())
     assets = replace(
         base.data.assets,
-        assets_dir=str(norm.get("dir", "./assets")),
+        assets_dir=assets_dir,
         asset_id=str(norm.get("asset_id", sources[0].repo_id)),
     )
     data = replace(base.data, repo_id=sources[0].repo_id, sources=sources, assets=assets)

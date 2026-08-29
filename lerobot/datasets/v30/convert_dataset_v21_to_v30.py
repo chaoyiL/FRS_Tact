@@ -70,6 +70,36 @@ from lerobot.utils.utils import flatten_dict, init_logging
 
 V21 = "v2.1"
 V30 = "v3.0"
+LEGACY_ACTION_KEY = "actions"
+CANONICAL_ACTION_KEY = "action"
+
+
+def canonicalize_action_mapping(mapping: dict[str, Any], *, source: str) -> dict[str, Any]:
+    """Return a mapping whose legacy ``actions`` key is renamed to ``action``."""
+    if LEGACY_ACTION_KEY not in mapping:
+        return mapping
+    if CANONICAL_ACTION_KEY in mapping:
+        raise ValueError(
+            f"Both '{LEGACY_ACTION_KEY}' and '{CANONICAL_ACTION_KEY}' exist in {source}; "
+            "refusing to overwrite either field."
+        )
+    return {
+        CANONICAL_ACTION_KEY if key == LEGACY_ACTION_KEY else key: value
+        for key, value in mapping.items()
+    }
+
+
+def canonicalize_action_dataframe(dataframe: pd.DataFrame, *, source: str) -> pd.DataFrame:
+    """Rename the action column before the v3 parquet shard is written."""
+    columns = set(dataframe.columns)
+    if LEGACY_ACTION_KEY not in columns:
+        return dataframe
+    if CANONICAL_ACTION_KEY in columns:
+        raise ValueError(
+            f"Both '{LEGACY_ACTION_KEY}' and '{CANONICAL_ACTION_KEY}' exist in {source}; "
+            "refusing to create duplicate parquet columns."
+        )
+    return dataframe.rename(columns={LEGACY_ACTION_KEY: CANONICAL_ACTION_KEY})
 
 
 def load_jsonlines(fpath: Path) -> list[Any]:
@@ -85,7 +115,10 @@ def legacy_load_episodes(local_dir: Path) -> dict:
 def legacy_load_episodes_stats(local_dir: Path) -> dict:
     episodes_stats = load_jsonlines(local_dir / LEGACY_EPISODES_STATS_PATH)
     return {
-        item["episode_index"]: cast_stats_to_numpy(item["stats"])
+        item["episode_index"]: canonicalize_action_mapping(
+            cast_stats_to_numpy(item["stats"]),
+            source=f"{LEGACY_EPISODES_STATS_PATH} episode {item['episode_index']}",
+        )
         for item in sorted(episodes_stats, key=lambda x: x["episode_index"])
     }
 
@@ -126,7 +159,10 @@ def concat_data_files(
     file_idx: int,
     image_keys: list[str],
 ) -> None:
-    dataframes = [pd.read_parquet(file) for file in paths_to_cat]
+    dataframes = [
+        canonicalize_action_dataframe(pd.read_parquet(file), source=str(file))
+        for file in paths_to_cat
+    ]
     concatenated_df = pd.concat(dataframes, ignore_index=True)
 
     path = new_root / DEFAULT_DATA_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
@@ -385,6 +421,7 @@ def convert_info(
     info.data_path = DEFAULT_DATA_PATH
     info.video_path = DEFAULT_VIDEO_PATH if info.video_path is not None else None
     info.fps = int(info.fps)
+    info.features = canonicalize_action_mapping(info.features, source=str(root / "meta/info.json"))
 
     logging.info("Converting info from %s to %s", root, new_root)
     for feature in info.features.values():

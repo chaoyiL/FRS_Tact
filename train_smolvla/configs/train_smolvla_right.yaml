@@ -1,4 +1,4 @@
-# PyTorch 纯视觉 SmolVLA 右手单臂训练配置，字段与官方 LeRobot 训练流程对齐。
+# 纯视觉 SmolVLA 右手单臂训练配置，字段与官方 LeRobot 训练流程对齐。
 # 数据合同必须是：7D observation.state、10D action、右腕相机。
 # 启动：bash train_smolvla/scripts/start_smolvla_right_train.sh
 
