@@ -220,6 +220,13 @@ get_v30_work_dataset_dir() {
     echo "${V30_CONVERT_WORK_ROOT}/${LEROBOT_NAMESPACE}/${dataset_name}"
 }
 
+canonicalize_v30_action_key() {
+    local dataset_dir="$1"
+    log "检查 v3.0 动作字段（actions -> action）: ${dataset_dir}"
+    uv run --no-sync python "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
+        "${dataset_dir}" >&2
+}
+
 get_hf_repo_cache_dir() {
     local dataset_name="$1"
     echo "${HF_DATASET_CACHE_DIR}/datasets--${HF_NAMESPACE//\//--}--${dataset_name}"
@@ -500,6 +507,7 @@ upgrade_dataset_to_v30() {
     if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
+            canonicalize_v30_action_key "$final_dir"
             log "本地已存在 v3.0 数据集，跳过升级: ${final_dir}"
             cleanup_local_convert_work "$dataset_name"
             UPGRADED_DATASET_DIR="$final_dir"
@@ -568,6 +576,8 @@ upgrade_dataset_to_v30() {
         return 1
     fi
 
+    canonicalize_v30_action_key "$work_dir"
+
     # 转换完成后删除旧版缓存，再放入 workspace 最终目录
     promote_v30_to_workspace "$dataset_name"
 
@@ -593,6 +603,7 @@ download_dataset() {
     if [[ -d "$final_dir" && ! -L "$final_dir" ]]; then
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
+            canonicalize_v30_action_key "$final_dir"
             log "最终目录已是 v3.0，跳过下载与转换: ${final_dir}"
             create_lerobot_symlink "$dataset_name" "$final_dir"
             return 0

@@ -122,7 +122,7 @@ training:
   resume_from: null
 
 distributed:
-  num_gpus: 1
+  num_gpus: 2
   num_machines: 1
   mixed_precision: bf16
 
