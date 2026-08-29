@@ -47,7 +47,7 @@ bash scripts/download_data.sh \
 
 ```bash
 bash scripts/setup_env.sh --pi05_train
-# 训练入口会自动读取仓库根目录的 .env.frs，无需手动激活虚拟环境。
+# 训练入口会自动读取仓库根目录的 env_path，无需手动激活虚拟环境。
 bash train_pi05/scripts/start_pi05_train.sh --check
 bash train_pi05/scripts/start_pi05_train.sh
 ```
@@ -107,7 +107,7 @@ CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内�
 
 ```bash
 # 先修改 train_pi05/configs/train_pi05_right.yaml 中的数据路径和 norm_stats。
-source .env.frs
+source env_path
 "$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py train_pi05/configs/train_pi05_right.yaml
 bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
@@ -120,7 +120,7 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 辅助工具需要时单独调用，例如：
 
 ```bash
-source .env.frs
+source env_path
 "$TRAIN_PI05_PYTHON" train_pi05/tools/smoke_test.py
 "$TRAIN_PI05_PYTHON" train_pi05/tools/check_dataset.py --config-name pi05_bi
 "$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py pi05_bi

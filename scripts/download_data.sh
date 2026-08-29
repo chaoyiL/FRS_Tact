@@ -3,7 +3,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
 DATA_TOOL_PYTHON_OVERRIDE="${DATA_TOOL_PYTHON:-}"
 
 if [[ -f "${ENV_FILE}" ]]; then
@@ -119,11 +128,13 @@ DATASETS=(
     # pick_cube_02
     # pick_cube_03
     # pick_cube_fix
-    two_tubes_01
-    two_tubes_02
-    two_tubes_03    
-    two_tubes_04
-    two_tubes_05
+    # two_tubes_01
+    # two_tubes_02
+    # two_tubes_03
+    # two_tubes_04
+    # two_tubes_05
+    # insert_01
+    # insert_02
 )
 if (( ${#REQUESTED_DATASETS[@]} > 0 )); then
     DATASETS=("${REQUESTED_DATASETS[@]}")

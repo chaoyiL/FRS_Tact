@@ -10,9 +10,19 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
 CONFIG_PATH="${SMOLVLA_TRAIN_CONFIG:-${PROJECT_ROOT}/train_smolvla/configs/train_smolvla_right.yaml}"
 
-if [[ -f "${PROJECT_ROOT}/.env.frs" ]]; then
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
+if [[ -f "${ENV_FILE}" ]]; then
     # shellcheck disable=SC1091
-    source "${PROJECT_ROOT}/.env.frs"
+    source "${ENV_FILE}"
 fi
 
 if [[ "${SMOLVLA_USE_LOCAL_ARROW_CACHE:-1}" == "1" ]]; then

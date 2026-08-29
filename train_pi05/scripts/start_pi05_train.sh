@@ -4,9 +4,18 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 PROJECT_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
-ENV_FILE="${PROJECT_ROOT}/.env.frs"
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
 
-# setup_env.sh --pi05_train 会把唯一的训练解释器路径写入 .env.frs。
+# setup_env.sh --pi05_train 会把唯一的训练解释器路径写入 env_path。
 # 调用者显式传入的 TRAIN_PI05_PYTHON 优先级最高，便于临时覆盖。
 TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_PYTHON:-}"
 if [[ -f "${ENV_FILE}" ]]; then

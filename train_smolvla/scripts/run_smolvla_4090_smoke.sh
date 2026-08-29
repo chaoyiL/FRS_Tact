@@ -27,12 +27,22 @@ else
     log "2/3 跳过数据下载"
 fi
 
-[[ -f "${PROJECT_ROOT}/.env.frs" ]] || {
-    echo "[smolvla-smoke] 缺少 ${PROJECT_ROOT}/.env.frs" >&2
+ENV_FILE="${PROJECT_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${PROJECT_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${PROJECT_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
+[[ -f "${ENV_FILE}" ]] || {
+    echo "[smolvla-smoke] 缺少 ${PROJECT_ROOT}/env_path" >&2
     exit 1
 }
 # shellcheck disable=SC1091
-source "${PROJECT_ROOT}/.env.frs"
+source "${ENV_FILE}"
 [[ -x "${SMOLVLA_TORCH_PYTHON:-}" ]] || {
     echo "[smolvla-smoke] SmolVLA Python 不可执行：${SMOLVLA_TORCH_PYTHON:-unset}" >&2
     exit 1
