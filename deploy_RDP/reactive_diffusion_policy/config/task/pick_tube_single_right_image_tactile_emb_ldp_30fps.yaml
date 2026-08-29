@@ -1,0 +1,79 @@
+name: pick_tube_single_right_image_tactile_emb_ldp_30fps
+dataset_path: data/insert_01_02_pca30_single_right_rdp_zarr
+image_shape: [3, 224, 224]
+tactile_embedding_dim: 30
+action_representation_version: 2
+action_contract: single_right_relative_pose10d_v2
+state_action_profile: single-right-arm-7x10
+controlled_arms: [right]
+
+shape_meta: &shape_meta
+  obs:
+    camera1:
+      shape: ${task.image_shape}
+      type: rgb
+    camera2:
+      shape: ${task.image_shape}
+      type: rgb
+    observation_state:
+      shape: [7]
+      type: low_dim
+    tactile_embedding:
+      shape: ["${task.tactile_embedding_dim}"]
+      type: low_dim
+  extended_obs:
+    tactile_embedding:
+      shape: ["${task.tactile_embedding_dim}"]
+      type: low_dim
+  action:
+    shape: [10]
+
+dataset:
+  _target_: reactive_diffusion_policy.dataset.real_image_tactile_latent_diffusion_dataset.RealImageTactileLatentDiffusionDataset
+  shape_meta: *shape_meta
+  dataset_path: ${task.dataset_path}
+  horizon: ${horizon}
+  pad_before: ${eval:'${dataset_obs_steps}-1+${n_latency_steps}'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  n_obs_steps: ${dataset_obs_steps}
+  obs_temporal_downsample_ratio: ${dataset_obs_temporal_downsample_ratio}
+  n_latency_steps: ${n_latency_steps}
+  seed: 42
+  val_ratio: 0.1
+  max_train_episodes: null
+  use_episode_repeats: false
+  delta_action: false
+  relative_action: false
+  transform_params: null
+  load_to_memory: false
+  bimanual_contiguous_action: false
+  action_normalizer_version: zero_centered_v2
+  state_action_profile: ${task.state_action_profile}
+  use_latent_action_before_vq: false
+  at:
+    _target_: reactive_diffusion_policy.model.vae.model.VAE
+    shape_meta: ${shape_meta}
+    horizon: ${at.policy.horizon}
+    n_latent_dims: ${at.policy.n_latent_dims}
+    mlp_layer_num: ${at.policy.mlp_layer_num}
+    use_conv_encoder: ${at.policy.use_conv_encoder}
+    conv_latent_dims: ${at.policy.conv_latent_dims}
+    conv_layer_num: ${at.policy.conv_layer_num}
+    use_rnn_decoder: ${at.policy.use_rnn_decoder}
+    rnn_latent_dims: ${at.policy.rnn_latent_dims}
+    rnn_layer_num: ${at.policy.rnn_layer_num}
+    use_vq: ${at.policy.use_vq}
+    n_embed: ${at.policy.n_embed}
+    vqvae_groups: ${at.policy.vqvae_groups}
+    eval: true
+    load_dir: ${at_load_dir}
+    act_scale: ${at.policy.act_scale}
+    action_loss_version: ${at.policy.action_loss_version}
+    position_scale: ${at.policy.position_scale}
+    rotation_scale: ${at.policy.rotation_scale}
+    gripper_scale: ${at.policy.gripper_scale}
+    idle_position_scale: ${at.policy.idle_position_scale}
+    idle_rotation_scale: ${at.policy.idle_rotation_scale}
+    idle_weight: ${at.policy.idle_weight}
+    degenerate_weight: ${at.policy.degenerate_weight}
+    rot6_aux_weight: ${at.policy.rot6_aux_weight}

@@ -22,6 +22,8 @@ from reactive_diffusion_policy.common.pick_tube_action_contract import (
     LOW_ROTATION_DELTA_DEG,
     LOW_TRANSLATION_DELTA_M,
     TERMINAL_ACTION_POLICY,
+    SINGLE_RIGHT_ACTION_CONTRACT,
+    SINGLE_RIGHT_ARM_PROFILE,
     canonical_noop_from_state,
     canonicalize_episode_actions,
 )
@@ -226,3 +228,60 @@ def test_converter_rejects_non_float32_action_schema():
 
     with pytest.raises(ValueError, match="float32 values"):
         extract_float32_matrix(column, expected_width=3, name="actions")
+
+
+
+def test_single_right_action_contract_repairs_terminal_and_labels_idle():
+    state = np.zeros((12, 7), dtype=np.float32)
+    state[:, 6] = 0.03
+    action = np.zeros((12, 10), dtype=np.float32)
+    action[:, 3:9] = IDENTITY_6D
+    action[:, 9] = state[:, 6]
+
+    result = canonicalize_episode_actions(
+        state,
+        action,
+        state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+    )
+
+    assert result.action.shape == (12, 10)
+    assert result.idle_arm_mask.shape == (12, 1)
+    assert not result.idle_arm_mask[:7, 0].any()
+    assert result.idle_arm_mask[7:11, 0].all()
+    assert not result.idle_arm_mask[-1, 0]
+    assert not result.action_valid[-1]
+    np.testing.assert_allclose(result.action[-1, 3:9], IDENTITY_6D)
+    assert result.action[-1, 9] == state[-1, 6]
+
+
+def test_single_right_converter_schema_and_manifest(tmp_path):
+    zarr_path = tmp_path / "single.zarr"
+    pca_path = tmp_path / "pca.npz"
+    pca_path.write_bytes(b"single-pca")
+    tactile_path = tmp_path / "embeddings.npy"
+    tactile_path.write_bytes(b"single-tactile")
+    _, arrays = create_output(
+        zarr_path,
+        tactile_embedding_dim=30,
+        state_dim=7,
+        action_dim=10,
+        arm_count=1,
+    )
+
+    manifest = build_v2_manifest(
+        arrays=arrays,
+        pca_path=pca_path,
+        tactile_cache_paths={"insert_01": tactile_path},
+        tactile_embedding_dim=30,
+        episode_manifest=[],
+        repair_counts={"terminal_actions": 0},
+        idle_coverage_by_source={"insert_01": {"right": 0.0}},
+        git_commit="deadbeef",
+        state_action_profile=SINGLE_RIGHT_ARM_PROFILE,
+    )
+
+    assert arrays["observation_state"].shape == (0, 7)
+    assert arrays["action"].shape == (0, 10)
+    assert arrays["idle_arm_mask"].shape == (0, 1)
+    assert manifest["action_contract"] == SINGLE_RIGHT_ACTION_CONTRACT
+    assert manifest["controlled_arms"] == ["right"]

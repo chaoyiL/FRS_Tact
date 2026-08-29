@@ -272,18 +272,28 @@ def get_action_normalizer(
 
     D = actions.shape[-1]
     if version == "zero_centered_v2":
-        if D != 20 or not bimanual_contiguous:
+        if D not in (10, 20) or (D == 20 and not bimanual_contiguous):
             raise ValueError(
-                "zero_centered_v2 requires the contiguous 20D bimanual action layout"
+                "zero_centered_v2 requires a contiguous 10D single-arm or "
+                "20D bimanual relative-pose action layout"
             )
-        normalizers = [
-            _get_zero_centered_translation_normalizer(actions[..., :3]),
-            _get_identity_residual_rotation_normalizer(actions[..., 3:9]),
-            get_range_normalizer_from_stat(array_to_stats(actions[..., 9:10])),
-            _get_zero_centered_translation_normalizer(actions[..., 10:13]),
-            _get_identity_residual_rotation_normalizer(actions[..., 13:19]),
-            get_range_normalizer_from_stat(array_to_stats(actions[..., 19:20])),
-        ]
+        normalizers = []
+        for action_offset in range(0, D, 10):
+            normalizers.extend(
+                (
+                    _get_zero_centered_translation_normalizer(
+                        actions[..., action_offset : action_offset + 3]
+                    ),
+                    _get_identity_residual_rotation_normalizer(
+                        actions[..., action_offset + 3 : action_offset + 9]
+                    ),
+                    get_range_normalizer_from_stat(
+                        array_to_stats(
+                            actions[..., action_offset + 9 : action_offset + 10]
+                        )
+                    ),
+                )
+            )
     elif D == 3 or D == 4 or D == 6 or D == 8: # (x, y, z, gripper_width)
         normalizers = [get_range_normalizer_from_stat(array_to_stats(actions))]
     elif D == 9 or D == 10: # (x, y, z, rx1, rx2, rx3, ry1, ry2, ry3)

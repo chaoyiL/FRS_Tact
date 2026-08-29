@@ -5,16 +5,14 @@ from reactive_diffusion_policy.common.replay_buffer import ReplayBuffer
 
 
 def canonical_action_padding_value(edge_action: np.ndarray) -> np.ndarray:
-    """Create a pick-tube 20D relative no-op holding the edge gripper widths."""
-    if edge_action.shape != (20,):
+    """Create a 10D/20D relative no-op holding edge gripper widths."""
+    if edge_action.shape not in ((10,), (20,)):
         return edge_action
     noop = np.zeros_like(edge_action)
-    noop[3] = 1
-    noop[7] = 1
-    noop[9] = edge_action[9]
-    noop[13] = 1
-    noop[17] = 1
-    noop[19] = edge_action[19]
+    for offset in range(0, edge_action.shape[0], 10):
+        noop[offset + 3] = 1
+        noop[offset + 7] = 1
+        noop[offset + 9] = edge_action[offset + 9]
     return noop
 
 

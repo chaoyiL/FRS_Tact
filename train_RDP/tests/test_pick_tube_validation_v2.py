@@ -306,3 +306,43 @@ def test_pick_tube_launchers_allow_missing_baseline():
         script = launcher.read_text(encoding="utf-8")
         assert "BASELINE_JSON is required" not in script
         assert "checkpoints will remain non-deployable" in script
+
+
+
+def test_single_right_metrics_and_baseline_use_right_arm(tmp_path):
+    target = np.zeros((1, 29, 10), dtype=np.float64)
+    target[..., 3:9] = IDENTITY_6D
+    prediction = target.copy()
+    prediction[..., 0] = 0.001
+    idle_mask = np.ones((1, 29, 1), dtype=bool)
+
+    metrics = compute_idle_rollout_metrics(
+        target,
+        prediction,
+        idle_mask,
+        horizon=29,
+        state_action_profile="single-right-arm-7x10",
+    )
+    assert metrics["val_idle_right_translation_29_mm"] == pytest.approx(29.0)
+    assert "val_idle_left_translation_29_mm" not in metrics
+
+    baseline_path = tmp_path / "single-right-baseline.json"
+    baseline_path.write_text(
+        json.dumps(
+            {
+                "val_active_right_translation_mae_mm": 1.5,
+                "val_active_right_rotation_mae_deg": 2.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = OmegaConf.create(
+        {
+            "task": {"controlled_arms": ["right"]},
+            "validation": {"baseline_json": str(baseline_path)},
+        }
+    )
+    assert load_active_metric_baselines(config) == {
+        "translation_mm": 1.5,
+        "rotation_deg": 2.5,
+    }

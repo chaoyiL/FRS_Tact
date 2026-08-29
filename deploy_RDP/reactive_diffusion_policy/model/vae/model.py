@@ -9,7 +9,8 @@ import einops
 from reactive_diffusion_policy.model.common.normalizer import LinearNormalizer
 from reactive_diffusion_policy.model.common.shape_util import get_output_shape
 from reactive_diffusion_policy.model.vae.physical_action_loss import (
-    compute_bimanual_physical_loss,
+    action_arm_slices,
+    compute_physical_action_loss,
     project_rotation_6d,
 )
 from reactive_diffusion_policy.model.vae.vector_quantize_pytorch.residual_vq import ResidualVQ
@@ -153,8 +154,10 @@ class VAE:
         self.act_scale = act_scale
         if action_loss_version not in {"legacy_v1", "physical_v2"}:
             raise ValueError(f"unsupported action loss version: {action_loss_version}")
-        if action_loss_version == "physical_v2" and self.input_dim_w != 20:
-            raise ValueError("physical_v2 requires 20D bimanual actions")
+        if action_loss_version == "physical_v2" and self.input_dim_w not in (10, 20):
+            raise ValueError(
+                "physical_v2 requires 10D single-arm or 20D bimanual actions"
+            )
         self.action_loss_version = action_loss_version
         self.physical_loss_weights = {
             "position_scale": position_scale,
@@ -251,7 +254,7 @@ class VAE:
             return normalized_action
         physical_action = self.normalizer['action'].unnormalize(normalized_action)
         projected_action = physical_action.clone()
-        for rotation_slice in (slice(3, 9), slice(13, 19)):
+        for _, rotation_slice, _ in action_arm_slices(self.input_dim_w):
             rotation, _ = project_rotation_6d(physical_action[..., rotation_slice])
             projected_action[..., rotation_slice] = rotation[..., :2, :].flatten(-2)
         return self.normalizer['action'].normalize(projected_action)
@@ -344,7 +347,7 @@ class VAE:
             predicted_action = self.normalizer['action'].unnormalize(
                 predicted_normalized_action
             )
-            physical_losses = compute_bimanual_physical_loss(
+            physical_losses = compute_physical_action_loss(
                 target=target_action,
                 prediction=predicted_action,
                 valid_mask=batch["valid_mask"],

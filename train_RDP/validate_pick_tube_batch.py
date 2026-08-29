@@ -11,9 +11,15 @@ from torch.utils.data import DataLoader
 from reactive_diffusion_policy.dataset.real_image_tactile_dataset import RealImageTactileDataset
 
 
-def shape_meta(include_rgb: bool, tactile_embedding_dim: int = 30) -> dict:
+def shape_meta(
+    include_rgb: bool,
+    *,
+    state_dim: int,
+    action_dim: int,
+    tactile_embedding_dim: int = 30,
+) -> dict:
     obs = {
-        "observation_state": {"shape": [20], "type": "low_dim"},
+        "observation_state": {"shape": [state_dim], "type": "low_dim"},
         "tactile_embedding": {"shape": [tactile_embedding_dim], "type": "low_dim"},
     }
     if include_rgb:
@@ -27,7 +33,7 @@ def shape_meta(include_rgb: bool, tactile_embedding_dim: int = 30) -> dict:
         "extended_obs": {
             "tactile_embedding": {"shape": [tactile_embedding_dim], "type": "low_dim"}
         },
-        "action": {"shape": [20]},
+        "action": {"shape": [action_dim]},
     }
 
 
@@ -44,10 +50,17 @@ def main() -> None:
     tactile_embedding_dim = int(
         replay_buffer["data"]["tactile_embedding"].shape[1]
     )
+    state_dim = int(replay_buffer["data"]["observation_state"].shape[1])
+    action_dim = int(replay_buffer["data"]["action"].shape[1])
+    state_action_profile = replay_buffer["meta"].attrs.get(
+        "state_action_profile", "dual-arm-20x20"
+    )
 
     dataset = RealImageTactileDataset(
         shape_meta=shape_meta(
             include_rgb=args.mode == "ldp",
+            state_dim=state_dim,
+            action_dim=action_dim,
             tactile_embedding_dim=tactile_embedding_dim,
         ),
         dataset_path=args.dataset_path,
@@ -62,7 +75,13 @@ def main() -> None:
         delta_action=False,
         relative_action=False,
         load_to_memory=False,
-        bimanual_contiguous_action=True,
+        bimanual_contiguous_action=action_dim == 20,
+        action_normalizer_version="zero_centered_v2",
+        state_action_profile=state_action_profile,
+    )
+    print(
+        f"profile={state_action_profile} state={state_dim}D action={action_dim}D "
+        f"tactile=PCA{tactile_embedding_dim}"
     )
     batch = next(iter(DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0)))
     for group in ("obs", "extended_obs"):

@@ -16,6 +16,10 @@ from reactive_diffusion_policy.common.sampler import (
 from reactive_diffusion_policy.common.pick_tube_validation import (
     build_episode_split_manifest,
 )
+from reactive_diffusion_policy.common.pick_tube_action_contract import (
+    DUAL_ARM_PROFILE,
+    resolve_state_action_profile,
+)
 from reactive_diffusion_policy.common.artifact_manifest import stable_json_digest
 from reactive_diffusion_policy.common.normalize_util import (
     get_image_range_normalizer,
@@ -44,6 +48,7 @@ class RealImageTactileDataset(BaseImageDataset):
                  bimanual_contiguous_action=False,
                  allow_legacy_action_contract=False,
                  action_normalizer_version: str = "legacy_v1",
+                 state_action_profile: str | None = None,
                  ):
         assert os.path.isdir(dataset_path)
 
@@ -69,6 +74,36 @@ class RealImageTactileDataset(BaseImageDataset):
 
         zarr_path = os.path.join(dataset_path, 'replay_buffer.zarr')
         zarr_root = zarr.open_group(zarr_path, mode="r")
+        action_dim = int(shape_meta["action"]["shape"][0])
+        dataset_profile = zarr_root["meta"].attrs.get("state_action_profile")
+        requested_profile = state_action_profile or dataset_profile
+        if requested_profile is None and action_dim == 20:
+            requested_profile = DUAL_ARM_PROFILE
+        profile = (
+            resolve_state_action_profile(requested_profile)
+            if requested_profile is not None
+            else None
+        )
+        if profile is not None:
+            if profile.action_dim != action_dim:
+                raise ValueError(
+                    f"{profile.name} requires a {profile.action_dim}D action, "
+                    f"but shape_meta declares {action_dim}D"
+                )
+            if dataset_profile is not None and dataset_profile != profile.name:
+                raise ValueError(
+                    f"dataset state_action_profile={dataset_profile!r} does not match "
+                    f"requested {profile.name!r}"
+                )
+            if "observation_state" in shape_meta["obs"]:
+                configured_state_dim = int(
+                    shape_meta["obs"]["observation_state"]["shape"][0]
+                )
+                if configured_state_dim != profile.state_dim:
+                    raise ValueError(
+                        f"{profile.name} requires a {profile.state_dim}D state, "
+                        f"but shape_meta declares {configured_state_dim}D"
+                    )
         artifact_manifest_raw = zarr_root["meta"].attrs.get("v2_manifest_json")
         artifact_manifest = None
         if artifact_manifest_raw is not None:
@@ -125,6 +160,8 @@ class RealImageTactileDataset(BaseImageDataset):
         self.relative_tcp_obs_for_relative_action = relative_tcp_obs_for_relative_action
         self.bimanual_contiguous_action = bimanual_contiguous_action
         self.action_normalizer_version = action_normalizer_version
+        self.state_action_profile = profile.name if profile is not None else None
+        self.state_action_arm_count = profile.arm_count if profile is not None else 2
         self.artifact_manifest_raw = artifact_manifest_raw
         self.artifact_manifest = artifact_manifest
         self.has_v2_action_contract = has_v2_action_contract
@@ -329,7 +366,10 @@ class RealImageTactileDataset(BaseImageDataset):
             valid_mask = np.zeros(self.sampler.sequence_length, dtype=bool)
             _, _, sample_start, sample_end = self.sampler.indices[idx]
             valid_mask[sample_start:sample_end] = True
-            idle_arm_mask = np.zeros((self.sampler.sequence_length, 2), dtype=bool)
+            idle_arm_mask = np.zeros(
+                (self.sampler.sequence_length, self.state_action_arm_count),
+                dtype=bool,
+            )
 
         # to save RAM, only return first n_obs_steps of OBS
         # since the rest will be discarded anyway.

@@ -24,8 +24,8 @@ from PIL import Image
 from tqdm.auto import tqdm
 
 from reactive_diffusion_policy.common.pick_tube_action_contract import (
-    ACTION_CONTRACT,
     ACTION_REPRESENTATION_VERSION,
+    DUAL_ARM_PROFILE,
     HIGH_GRIPPER_DELTA_M,
     HIGH_ROTATION_DELTA_DEG,
     HIGH_TRANSLATION_DELTA_M,
@@ -34,8 +34,10 @@ from reactive_diffusion_policy.common.pick_tube_action_contract import (
     LOW_GRIPPER_DELTA_M,
     LOW_ROTATION_DELTA_DEG,
     LOW_TRANSLATION_DELTA_M,
+    STATE_ACTION_PROFILES,
     TERMINAL_ACTION_POLICY,
     canonicalize_episode_actions,
+    resolve_state_action_profile,
 )
 from reactive_diffusion_policy.model.tactile_pca import BimanualTactilePCA
 
@@ -80,6 +82,14 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("data/PCA_Transform_PickTube/tactile_pca_2x15.npz"),
         help="Two-arm PCA artifact produced by fit_pick_tube_tactile_pca.py",
+    )
+    parser.add_argument(
+        "--state-action-profile",
+        choices=tuple(STATE_ACTION_PROFILES),
+        default=DUAL_ARM_PROFILE,
+        help=(
+            "Explicit LeRobot state/action contract; single-arm handedness is never guessed."
+        ),
     )
     parser.add_argument("--datasets", nargs="+", default=list(DEFAULT_DATASETS))
     parser.add_argument(
@@ -305,8 +315,10 @@ def build_v2_manifest(
     repair_counts: dict[str, int],
     idle_coverage_by_source: dict[str, dict[str, float]],
     git_commit: str,
+    state_action_profile: str = DUAL_ARM_PROFILE,
 ) -> dict:
     """Build the JSON-serializable audit manifest for a completed conversion."""
+    profile = resolve_state_action_profile(state_action_profile)
     canonical_action_sha256 = sha256_array_content(arrays["action"])
     source_action_sha256 = sha256_array_content(arrays["action_raw"])
     dataset_digest = stable_json_sha256(
@@ -318,7 +330,11 @@ def build_v2_manifest(
     )
     return {
         "action_representation_version": ACTION_REPRESENTATION_VERSION,
-        "action_contract": ACTION_CONTRACT,
+        "action_contract": profile.action_contract,
+        "state_action_profile": profile.name,
+        "controlled_arms": list(profile.controlled_arms),
+        "state_dim": profile.state_dim,
+        "action_dim": profile.action_dim,
         "normalizer_version": "zero_centered_v2",
         "terminal_action_policy": TERMINAL_ACTION_POLICY,
         "idle_thresholds": {
@@ -361,11 +377,14 @@ def build_v2_manifest(
 def create_output(
     path: Path,
     tactile_embedding_dim: int,
-    frame_count: int,
+    frame_count: int = 0,
     *,
-    rgb_chunk_frames: int,
-    compressor_name: str,
-    compression_level: int,
+    rgb_chunk_frames: int = 64,
+    compressor_name: str = "none",
+    compression_level: int = 0,
+    state_dim: int = 20,
+    action_dim: int = 20,
+    arm_count: int = 2,
 ) -> tuple[zarr.Group, dict[str, zarr.Array]]:
     root = zarr.open_group(str(path), mode="w")
     data = root.create_group("data")
@@ -394,7 +413,11 @@ def create_output(
             compressor=compressor,
         ),
         "observation_state": data.create_dataset(
-            "observation_state", shape=(frame_count, 20), chunks=(low_dim_chunk, 20), dtype="f4", compressor=compressor
+            "observation_state",
+            shape=(frame_count, state_dim),
+            chunks=(low_dim_chunk, state_dim),
+            dtype="f4",
+            compressor=compressor,
         ),
         "tactile_embedding": data.create_dataset(
             "tactile_embedding",
@@ -404,16 +427,28 @@ def create_output(
             compressor=compressor,
         ),
         "action": data.create_dataset(
-            "action", shape=(frame_count, 20), chunks=(low_dim_chunk, 20), dtype="f4", compressor=compressor
+            "action",
+            shape=(frame_count, action_dim),
+            chunks=(low_dim_chunk, action_dim),
+            dtype="f4",
+            compressor=compressor,
         ),
         "action_raw": data.create_dataset(
-            "action_raw", shape=(frame_count, 20), chunks=(low_dim_chunk, 20), dtype="f4", compressor=compressor
+            "action_raw",
+            shape=(frame_count, action_dim),
+            chunks=(low_dim_chunk, action_dim),
+            dtype="f4",
+            compressor=compressor,
         ),
         "action_valid": data.create_dataset(
             "action_valid", shape=(frame_count,), chunks=(low_dim_chunk,), dtype="bool", compressor=compressor
         ),
         "idle_arm_mask": data.create_dataset(
-            "idle_arm_mask", shape=(frame_count, 2), chunks=(low_dim_chunk, 2), dtype="bool", compressor=compressor
+            "idle_arm_mask",
+            shape=(frame_count, arm_count),
+            chunks=(low_dim_chunk, arm_count),
+            dtype="bool",
+            compressor=compressor,
         ),
     }
     return root, arrays
@@ -421,6 +456,7 @@ def create_output(
 
 def main() -> None:
     args = parse_args()
+    profile = resolve_state_action_profile(args.state_action_profile)
     if args.num_workers < 0:
         raise ValueError("num-workers must be non-negative")
     if args.rgb_chunk_frames < 1:
@@ -452,13 +488,17 @@ def main() -> None:
         rgb_chunk_frames=args.rgb_chunk_frames,
         compressor_name=args.compressor,
         compression_level=args.compression_level,
+        state_dim=profile.state_dim,
+        action_dim=profile.action_dim,
+        arm_count=profile.arm_count,
     )
     episode_ends: list[int] = []
     episode_repeats: list[int] = []
     episode_dataset_ids: list[int] = []
     episode_manifest: list[dict] = []
     source_idle_counts = {
-        dataset_name: np.zeros(2, dtype=np.int64) for dataset_name in args.datasets
+        dataset_name: np.zeros(profile.arm_count, dtype=np.int64)
+        for dataset_name in args.datasets
     }
     source_valid_counts = {dataset_name: 0 for dataset_name in args.datasets}
     tactile_cache_paths = {
@@ -542,10 +582,14 @@ def main() -> None:
                 camera2 = decoded_cameras[expected_length:]
                 stage_started = time.perf_counter()
                 state = extract_float32_matrix(
-                    table[STATE_KEY], expected_width=20, name=STATE_KEY
+                    table[STATE_KEY],
+                    expected_width=profile.state_dim,
+                    name=STATE_KEY,
                 )
                 action = extract_float32_matrix(
-                    table[ACTION_KEY], expected_width=20, name=ACTION_KEY
+                    table[ACTION_KEY],
+                    expected_width=profile.action_dim,
+                    name=ACTION_KEY,
                 )
                 timings["parquet_materialize_seconds"] += (
                     time.perf_counter() - stage_started
@@ -565,13 +609,14 @@ def main() -> None:
                     raise ValueError(
                         f"{dataset_name} episode {episode_index}: RGB shape mismatch"
                     )
-                if state.shape != (expected_length, 20) or action.shape != (
+                if state.shape != (expected_length, profile.state_dim) or action.shape != (
                     expected_length,
-                    20,
+                    profile.action_dim,
                 ):
                     raise ValueError(
                         f"{dataset_name} episode {episode_index}: "
-                        "state/action must be [T,20]"
+                        f"state/action must be [T,{profile.state_dim}]/"
+                        f"[T,{profile.action_dim}] for {profile.name}"
                     )
                 if tactile.shape != (expected_length, tactile_embedding_dim):
                     raise ValueError(
@@ -579,7 +624,11 @@ def main() -> None:
                     )
 
                 stage_started = time.perf_counter()
-                canonical_actions = canonicalize_episode_actions(state, action)
+                canonical_actions = canonicalize_episode_actions(
+                    state,
+                    action,
+                    state_action_profile=profile.name,
+                )
                 timings["action_seconds"] += time.perf_counter() - stage_started
 
                 write_slice = slice(total_frames, total_frames + expected_length)
@@ -646,6 +695,9 @@ def main() -> None:
         compressor=None,
     )
     root["meta"].attrs["dataset_names"] = list(args.datasets)
+    root["meta"].attrs["state_action_profile"] = profile.name
+    root["meta"].attrs["controlled_arms"] = list(profile.controlled_arms)
+    root["meta"].attrs["action_contract"] = profile.action_contract
     root["meta"].attrs["tactile_pca_path"] = str(args.tactile_pca_path.resolve())
     root["meta"].attrs["tactile_embedding_dim"] = tactile_embedding_dim
     idle_coverage_by_source = {}
@@ -653,15 +705,21 @@ def main() -> None:
         denominator = source_valid_counts[dataset_name]
         counts = source_idle_counts[dataset_name]
         idle_coverage_by_source[dataset_name] = {
-            "left": float(counts[0] / denominator) if denominator else 0.0,
-            "right": float(counts[1] / denominator) if denominator else 0.0,
+            arm_name: float(counts[arm_index] / denominator) if denominator else 0.0
+            for arm_index, arm_name in enumerate(profile.controlled_arms)
         }
     repair_counts = {
         "terminal_actions": len(episode_manifest),
         "invalid_nonterminal_actions": 0,
-        "idle_frames_left": int(sum(counts[0] for counts in source_idle_counts.values())),
-        "idle_frames_right": int(sum(counts[1] for counts in source_idle_counts.values())),
     }
+    repair_counts.update(
+        {
+            f"idle_frames_{arm_name}": int(
+                sum(counts[arm_index] for counts in source_idle_counts.values())
+            )
+            for arm_index, arm_name in enumerate(profile.controlled_arms)
+        }
+    )
     stage_started = time.perf_counter()
     manifest = build_v2_manifest(
         arrays=arrays,
@@ -672,6 +730,7 @@ def main() -> None:
         repair_counts=repair_counts,
         idle_coverage_by_source=idle_coverage_by_source,
         git_commit=converter_git_commit(),
+        state_action_profile=profile.name,
     )
     root["meta"].attrs["v2_manifest_json"] = json.dumps(
         manifest, sort_keys=True, separators=(",", ":")
