@@ -1738,6 +1738,7 @@ def main(argv=None):
                 mode=args.wandb_mode,
                 output_dir=output_dir,
                 config=config,
+                resume="allow" if args.resume_from else None,
             )
             print(json.dumps({
                 "event": "wandb_initialized", "url": wandb_logger.url,
