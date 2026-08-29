@@ -18,7 +18,7 @@ def _actions(length=20):
 
 def _valid_actions():
     actions = _actions()
-    actions[2, 19] = 0.08  # right close
+    actions[2:5, 19] = 0.08  # right close and remain closed
     actions[5, 19] = 0.11  # right reopen
     actions[7:12, 0] = 0.003  # sustained left translation
     return actions
@@ -26,6 +26,16 @@ def _valid_actions():
 
 def test_phase_labels_wait_for_right_reopen_then_left_motion():
     labels = derive_bread_phase_labels(_valid_actions())
+
+    assert labels[:7].tolist() == [0] * 7
+    assert labels[7:].tolist() == [1] * 13
+
+
+def test_phase_labels_ignore_left_adjustment_before_right_reopen():
+    actions = _valid_actions()
+    actions[0:5, 0] = 0.003
+
+    labels = derive_bread_phase_labels(actions)
 
     assert labels[:7].tolist() == [0] * 7
     assert labels[7:].tolist() == [1] * 13

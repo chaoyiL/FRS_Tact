@@ -30,7 +30,7 @@ control:
   # Must match artifact output [1,32,20].
   action_horizon: 32
   # Execute 24 actions (0.8s) before obtaining a new observation and replanning.
-  steps_per_inference: 32
+  steps_per_inference: 
 
 runtime:
   auto_start: false
