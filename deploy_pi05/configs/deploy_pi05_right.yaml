@@ -1,8 +1,8 @@
 # Right-hand single-arm, plain-vision Pi0.5 deployment.
 # This profile requires a checkpoint trained with 7D right-arm state and 10D robot actions.
 
-# TODO: replace with the right-hand Pi0.5 checkpoint.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_right/checkpoint
+# Right-hand Pi0.5 checkpoint trained on insert_01.
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_single_insert_01_step2000/checkpoint
 seed: 0
 num_steps: 10
 
@@ -24,13 +24,12 @@ model:
   paligemma_variant: gemma_2b_lora
   action_expert_variant: gemma_300m_lora
   camera_map:
-    left_wrist_0_rgb: observation.images.camera0
     right_wrist_0_rgb: observation.images.camera1
   empty_cameras: []
 
 norm_stats:
-  # TODO: replace both values with the assets produced by the same right-hand fine-tune.
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_right/checkpoint/assets
+  # Assets produced by the same right-hand fine-tune.
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_single_insert_01_step2000/checkpoint/assets
   asset_id: insert_01
   use_quantile_norm: true
 
@@ -49,7 +48,7 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Use the right hand to complete the task.
+  language_prompt: Firstly, use the hand to pick up the tube and then insert it back.
   single_arm_mode: true
   controlled_arm: right
   no_state_obs_mode: false
@@ -59,6 +58,18 @@ control:
   controller_frequency: 80.0
   action_horizon: 50
   steps_per_inference: 50
+  max_consecutive_unsafe_chunks: 3
+
+# The bimanual wire server requires a complete gripper contract. Task 0 keeps
+# hysteresis disabled so the right-hand model controls its gripper directly.
+gripper:
+  hysteresis_enabled: false
+  left_close_threshold: 0.09
+  left_reopen_threshold: 0.10
+  left_closed_command: 0.01
+  right_close_threshold: 0.09
+  right_reopen_threshold: 0.10
+  right_closed_command: 0.01
 
 runtime:
   # Keep manual confirmation enabled for the first hardware runs.

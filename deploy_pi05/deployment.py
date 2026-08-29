@@ -42,9 +42,14 @@ _STATE_ACTION_PROFILES = {
 }
 _ACTION_HORIZON = 50
 _SUPPORTED_MODEL_ACTION_DIMS = frozenset({10, 20, 32})
-_CAMERA_MAP_CONTRACT = {
-    "left_wrist_0_rgb": "observation.images.camera0",
-    "right_wrist_0_rgb": "observation.images.camera1",
+_CAMERA_MAP_CONTRACTS = {
+    DUAL_ARM_PROFILE: {
+        "left_wrist_0_rgb": "observation.images.camera0",
+        "right_wrist_0_rgb": "observation.images.camera1",
+    },
+    SINGLE_RIGHT_ARM_PROFILE: {
+        "right_wrist_0_rgb": "observation.images.camera1",
+    },
 }
 _EMPTY_CAMERAS_CONTRACT: list[str] = []
 PI05_OBSERVATION_PROFILE = "pi05_vision_224"
@@ -248,6 +253,11 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
             f"observation.controlled_arm must be {profile['controlled_arm']!r} for "
             f"state_action_profile={profile_name!r}"
         )
+    if "black_camera0" in observation:
+        raise ValueError(
+            "observation.black_camera0 is not supported; single-right-arm Pi0.5 "
+            "must expose only the real right-wrist camera"
+        )
     action_dim = _as_int(model["action_dim"], "model.action_dim")
     if action_dim not in _SUPPORTED_MODEL_ACTION_DIMS:
         supported = ", ".join(
@@ -256,10 +266,19 @@ def validate_common_config(config: Mapping[str, Any]) -> None:
         raise ValueError(
             f"model.action_dim must be one of {{{supported}}} for this pi0.5 deployment"
         )
-    if tuple(model["camera_map"].items()) != tuple(_CAMERA_MAP_CONTRACT.items()):
-        raise ValueError("model.camera_map must match the pi0.5 deployment camera contract")
+    camera_map = model["camera_map"]
+    if not isinstance(camera_map, Mapping):
+        raise ValueError("model.camera_map must be a mapping")
+    expected_camera_map = _CAMERA_MAP_CONTRACTS[profile_name]
+    if dict(camera_map) != expected_camera_map:
+        if profile_name == SINGLE_RIGHT_ARM_PROFILE:
+            raise ValueError(
+                "single-right-arm Pi0.5 camera_map must contain only "
+                "right_wrist_0_rgb -> observation.images.camera1"
+            )
+        raise ValueError("model.camera_map must match the dual-arm Pi0.5 camera contract")
     if model["empty_cameras"] != _EMPTY_CAMERAS_CONTRACT:
-        raise ValueError("model.empty_cameras must be empty for this two-image pi0.5 deployment")
+        raise ValueError("model.empty_cameras must be empty for this Pi0.5 deployment")
 
     horizon = _ACTION_HORIZON
     if _as_int(control["action_horizon"], "control.action_horizon") != horizon:
@@ -410,6 +429,20 @@ def make_server_config(
     control = section(config, "control")
     if observation.get("data_type") != expected_data_type:
         raise ValueError(f"observation.data_type must be {expected_data_type!r} for {mode}")
+    model_value = config.get("model")
+    profile_name = (
+        DUAL_ARM_PROFILE
+        if model_value is None
+        else str(section(config, "model").get("state_action_profile", DUAL_ARM_PROFILE))
+    )
+    configured_single_arm_mode = _as_bool(
+        observation["single_arm_mode"], "observation.single_arm_mode"
+    )
+    wire_single_arm_mode = (
+        False
+        if profile_name == SINGLE_RIGHT_ARM_PROFILE
+        else configured_single_arm_mode
+    )
     result = {
         "data_type": observation["data_type"],
         "language_prompt": observation["language_prompt"],
@@ -419,9 +452,7 @@ def make_server_config(
         "controller_frequency": _as_float(
             control["controller_frequency"], "control.controller_frequency"
         ),
-        "single_arm_mode": _as_bool(
-            observation["single_arm_mode"], "observation.single_arm_mode"
-        ),
+        "single_arm_mode": wire_single_arm_mode,
         "no_state_obs_mode": _as_bool(
             observation["no_state_obs_mode"], "observation.no_state_obs_mode"
         ),

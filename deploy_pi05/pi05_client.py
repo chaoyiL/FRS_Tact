@@ -14,6 +14,7 @@ import numpy as np
 
 from .bridge_client import RobotBridgeClient
 from .deployment import (
+    SINGLE_RIGHT_ARM_PROFILE,
     ObservationSaver,
     cleanup_deployment_resources,
     configure_deployment_logging,
@@ -27,6 +28,7 @@ from .deployment import (
     start_observation_saver,
     submit_observation,
 )
+from .right_arm_adapter import expand_right_action, project_right_observation
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05.yaml"
 LOGGER = logging.getLogger(__name__)
@@ -66,6 +68,35 @@ def predict_robot_action_chunk(
     return np.ascontiguousarray(action)
 
 
+def _prepare_policy_observation(
+    raw_observation: Mapping[str, Any],
+    policy: Any,
+    image_keys: Sequence[str],
+) -> dict[str, Any]:
+    observation = (
+        project_right_observation(raw_observation)
+        if getattr(policy.config, "state_action_profile", None)
+        == SINGLE_RIGHT_ARM_PROFILE
+        else raw_observation
+    )
+    return prepare_observation(
+        observation,
+        state_dim=policy.config.state_dim,
+        image_keys=image_keys,
+    )
+
+
+def _wire_action(
+    action: np.ndarray, raw_observation: Mapping[str, Any], policy: Any
+) -> np.ndarray:
+    if (
+        getattr(policy.config, "state_action_profile", None)
+        == SINGLE_RIGHT_ARM_PROFILE
+    ):
+        return expand_right_action(action, raw_observation)
+    return action
+
+
 def run_legacy_loop(
     bridge: RobotBridgeClient,
     policy: Any,
@@ -82,16 +113,16 @@ def run_legacy_loop(
     completed = 0
     while max_iterations <= 0 or completed < max_iterations:
         obs_seq, raw_observation = bridge.receive_observation(timeout=observation_timeout_s)
-        observation = prepare_observation(
+        observation = _prepare_policy_observation(
             raw_observation,
-            state_dim=policy.config.state_dim,
-            image_keys=image_keys,
+            policy,
+            image_keys,
         )
         submit_observation(saver, completed + 1, obs_seq, raw_observation, logger=LOGGER)
         action = predict_robot_action_chunk(
             policy, observation, task, seed=seed, num_steps=sample_steps
         )
-        bridge.send_action(action, obs_seq)
+        bridge.send_action(_wire_action(action, raw_observation, policy), obs_seq)
         completed += 1
 
 
@@ -156,10 +187,10 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
 
         print("[client] Waiting for robot warmup observation")
         obs_seq, raw_observation = bridge.receive_observation(timeout=timeout)
-        warmup_observation = prepare_observation(
+        warmup_observation = _prepare_policy_observation(
             raw_observation,
-            state_dim=policy.config.state_dim,
-            image_keys=image_keys,
+            policy,
+            image_keys,
         )
         for _ in range(warmup_runs):
             predict_robot_action_chunk(
@@ -184,6 +215,10 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             max_iterations=max_iterations,
             saver=saver,
         )
+        if max_iterations > 0:
+            # Keep the DECO wire protocol: consume the observation produced after
+            # the final action chunk before cleanup sends STOP.
+            bridge.receive_observation(timeout=timeout)
     except KeyboardInterrupt:
         print("[client] Interrupted")
     finally:

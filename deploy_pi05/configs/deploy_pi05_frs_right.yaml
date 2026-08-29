@@ -27,7 +27,6 @@ model:
   paligemma_variant: gemma_2b_lora
   action_expert_variant: gemma_300m_lora
   camera_map:
-    left_wrist_0_rgb: observation.images.camera0
     right_wrist_0_rgb: observation.images.camera1
   empty_cameras: []
 
