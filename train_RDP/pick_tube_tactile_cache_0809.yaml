@@ -1,0 +1,33 @@
+datasets:
+  - repo_id: KaiyueChen/pick_tube_01
+    root: /home/hillbot/datasets/pick_tube_01
+  - repo_id: KaiyueChen/pick_tube_02
+    root: /home/hillbot/datasets/pick_tube_02
+  - repo_id: KaiyueChen/pick_tube_03
+    root: /home/hillbot/datasets/pick_tube_03
+  - repo_id: KaiyueChen/pick_tube_04
+    root: /home/hillbot/datasets/pick_tube_04
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /home/hillbot/datasets/pick_tube_05
+  - repo_id: KaiyueChen/pick_tube_06
+    root: /home/hillbot/datasets/pick_tube_06
+
+tactile_embedding_cache:
+  root: data/tactile_embeddings_encoder0809
+  dtype: float16
+  precompute_batch_size: 64
+  precompute_num_workers: 16
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+model:
+  use_tactile_encoder: true
+  tactile_encoder_path: data/encoder_ckpt_0809
+  tactile_keys:
+    - observation.images.tactile_left_0
+    - observation.images.tactile_right_0
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_image_size: 224

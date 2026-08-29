@@ -2,7 +2,7 @@ import csv
 import json
 import os
 from pathlib import Path
-
+from typing import Any
 
 EPOCH_FIELDS = (
     "epoch",
@@ -95,3 +95,80 @@ class MetricsLogger:
             writer = csv.DictWriter(handle, fieldnames=EPOCH_FIELDS)
             writer.writerow(row)
             self._sync(handle)
+
+
+def wandb_payload(record: dict[str, Any]) -> dict[str, Any]:
+    """Flatten a DECO metric record into stable W&B metric names."""
+
+    event = str(record.get("event", "metrics"))
+    payload: dict[str, Any] = {"event": event}
+    control_fields = {
+        "epoch", "batch", "batches_in_epoch", "global_step",
+        "elapsed_seconds", "lr", "backbone_lr", "backbone_frozen",
+    }
+
+    def add_value(prefix: str, value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                add_value(f"{prefix}/{key}" if prefix else str(key), nested)
+        elif isinstance(value, (bool, int, float, str)) or value is None:
+            payload[prefix] = value
+
+    for key, value in record.items():
+        if key == "event":
+            continue
+        if event == "train_step" and key not in control_fields:
+            add_value(f"train/{key}", value)
+        else:
+            add_value(key, value)
+    return payload
+
+
+class WandbMetricsLogger:
+    """Optional rank-zero W&B logger; importing wandb stays opt-in."""
+
+    def __init__(
+        self,
+        *,
+        project: str,
+        entity: str | None,
+        name: str,
+        run_id: str,
+        group: str | None,
+        tags: list[str],
+        mode: str,
+        output_dir: Path,
+        config: dict[str, Any],
+        resume: str | None = None,
+    ) -> None:
+        try:
+            import wandb
+        except ImportError as exc:
+            raise RuntimeError(
+                "W&B logging is enabled but wandb is not installed; "
+                "rerun train_deco/setup_environment.sh"
+            ) from exc
+
+        init_options = {
+            "project": project,
+            "entity": entity or None,
+            "name": name,
+            "id": run_id,
+            "group": group or None,
+            "tags": tags,
+            "mode": mode,
+            "dir": str(output_dir),
+            "config": config,
+        }
+        if resume is not None:
+            init_options["resume"] = resume
+        self._run = wandb.init(**init_options)
+        self._run.define_metric("global_step")
+        self._run.define_metric("*", step_metric="global_step")
+
+    @property
+    def url(self) -> str | None:
+        return getattr(self._run, "url", None)
+
+    def log(self, record: dict[str, Any]) -> None:
+        self._run.log(wandb_payload(record))

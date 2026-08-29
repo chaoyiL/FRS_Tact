@@ -157,6 +157,7 @@ def test_plain_pi05_client_starts_without_config_handshake(
         ("receive", 1.25),
         ("predict", 2, "move the block", 7, 2),
         ("action", (2, 2), 20),
+        ("receive", 1.25),
         "cleanup",
     ]
 

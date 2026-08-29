@@ -123,3 +123,14 @@ docs/
 /train_deco/pretrained/resnet34-b627a593
 /deploy_deco/checkpoints/*.ts
 /deploy_deco/checkpoints/*.ts.json
+/deploy_deco/offline_results/
+
+# Standalone RDP projects
+/train_RDP/.venv/
+/train_RDP/.venv-jax/
+/train_RDP/data/
+/train_RDP/outputs/
+/train_RDP/wandb/
+/deploy_RDP/.venv/
+/deploy_RDP/checkpoints/
+/deploy_RDP/eval_outputs/

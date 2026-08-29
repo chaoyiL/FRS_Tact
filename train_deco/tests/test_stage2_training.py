@@ -21,9 +21,11 @@ from train_deco.train import (
     build_argument_parser,
     STAGE2_CHECKPOINT_SCHEMA_VERSION,
     build_stage2_checkpoint_metadata,
+    build_stage2_parity_inputs,
     export_stage2_torchscript_artifacts,
     create_training_datasets,
     apply_restored_dataset_stats,
+    resolve_dataloader_prefetch_factor,
     resolve_tactile_encoder_distributed,
     restore_stage2_training_state,
     restore_stage2_resume_arguments,
@@ -130,6 +132,33 @@ def _optimizer(model: nn.Module):
     return optimizer, constant_lr_scheduler(optimizer)
 
 
+def test_stage2_parity_inputs_keep_observation_and_action_dimensions_distinct() -> None:
+    inputs, tactile = build_stage2_parity_inputs(
+        {
+            "camera_names": ["camera0", "camera1"],
+            "image_size": 256,
+            "obs_dim": 7,
+            "action_dim": 10,
+            "chunk_size": 32,
+            "use_task_condition": False,
+        },
+        torch.device("cpu"),
+    )
+
+    assert inputs["obs"].shape == (1, 7)
+    assert inputs["act"].shape == (1, 32, 10)
+    assert tactile.shape == (1, 4, 3, 224, 224)
+
+
+def test_dataloader_prefetch_factor_is_configurable(monkeypatch) -> None:
+    monkeypatch.setenv("DATALOADER_PREFETCH_FACTOR", "1")
+
+    assert resolve_dataloader_prefetch_factor(0) is None
+    assert resolve_dataloader_prefetch_factor(12) == 1
+
+    monkeypatch.setenv("DATALOADER_PREFETCH_FACTOR", "0")
+    with pytest.raises(ValueError, match="must be positive"):
+        resolve_dataloader_prefetch_factor(12)
 
 
 class _RecordingGradScaler:

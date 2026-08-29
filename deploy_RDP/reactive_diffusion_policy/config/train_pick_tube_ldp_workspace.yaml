@@ -1,0 +1,36 @@
+defaults:
+  - train_latent_diffusion_unet_real_image_workspace
+  - override /task: pick_tube_image_tactile_emb_ldp_30fps
+  - override /at: at_pick_tube
+  - _self_
+
+policy:
+  obs_encoder:
+    resize_shape: [224, 224]
+  at:
+    action_loss_version: ${at.policy.action_loss_version}
+    position_scale: ${at.policy.position_scale}
+    rotation_scale: ${at.policy.rotation_scale}
+    gripper_scale: ${at.policy.gripper_scale}
+    idle_position_scale: ${at.policy.idle_position_scale}
+    idle_rotation_scale: ${at.policy.idle_rotation_scale}
+    idle_weight: ${at.policy.idle_weight}
+    degenerate_weight: ${at.policy.degenerate_weight}
+    rot6_aux_weight: ${at.policy.rot6_aux_weight}
+
+# Keep the official method/model settings, but shorten training for this much
+# larger dataset.
+training:
+  num_epochs: 10
+  checkpoint_every: 2
+
+validation:
+  baseline_json: null
+  # Keep epoch-time validation cheap and OmegaConf-compatible. Multi-seed
+  # release validation belongs in a separate final-validation stage.
+  seeds: [0]
+
+checkpoint:
+  periodic:
+    keep: 10
+    format_str: 'epoch={epoch:04d}.ckpt'

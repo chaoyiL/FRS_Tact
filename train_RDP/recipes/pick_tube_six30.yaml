@@ -1,0 +1,45 @@
+name: picktube6-pca30-at20-ldp20
+datasets:
+  - pick_tube_01
+  - pick_tube_02
+  - pick_tube_03
+  - pick_tube_04
+  - pick_tube_05
+  - pick_tube_06
+
+data:
+  tactile_dim: 30
+  components_per_arm: 15
+  dataset_repeats:
+    - pick_tube_05=2
+    - pick_tube_06=2
+
+precompute:
+  batch_size: 64
+  workers_per_gpu: 16
+  prefetch_factor: 2
+  flush_every: 20
+
+pca:
+  batch_size: 32768
+
+conversion:
+  num_workers: 32
+  rgb_chunk_frames: 64
+  compressor: zstd
+  compression_level: 3
+
+training:
+  gpu_id: 0
+  mixed_precision: bf16
+  logging_mode: online
+  at_epochs: 20
+  ldp_epochs: 20
+  at_batch: 64
+  ldp_batch: 64
+  num_workers: 8
+  checkpoint_every: 2
+  periodic_keep: 10
+  topk_keep: 1
+  resume: true
+

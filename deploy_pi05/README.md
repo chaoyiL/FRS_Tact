@@ -14,6 +14,7 @@ FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使�
 | 模式 | 配置 | 启动脚本 | 服务器协议 |
 | --- | --- | --- | --- |
 | 纯视觉 Pi0.5 | `configs/deploy_pi05.yaml` | `scripts/start_pi05.sh` | 旧版 `obs` / `action` 交换，无通用 ACK |
+| 纯视觉右手 Pi0.5 | `configs/deploy_pi05_right.yaml` | `scripts/start_pi05_right.sh` | 双臂 20D wire，客户端适配右手 7D/10D |
 | Pi0.5 + FRS | `configs/deploy_pi05_frs.yaml` | `scripts/start_pi05_frs.sh` | `frs_steering_v1` |
 
 两个 YAML 都是完整、独立的配置。纯视觉配置使用 `observation.data_type: vision`，
@@ -64,6 +65,10 @@ export VB_ROBOT_TOKEN='...'
 # 纯视觉 Pi0.5
 bash deploy_pi05/scripts/start_pi05.sh --check
 bash deploy_pi05/scripts/start_pi05.sh --max-iterations 2
+
+# 纯视觉右手 Pi0.5（7D/10D model，20D 双臂 wire）
+bash deploy_pi05/scripts/start_pi05_right.sh --check
+bash deploy_pi05/scripts/start_pi05_right.sh --max-iterations 1
 
 # Pi0.5 + FRS：只在支持 frs_steering_v1 的真实 server 上运行
 bash deploy_pi05/scripts/start_pi05_frs.sh --check
@@ -139,3 +144,29 @@ bash deploy_pi05/scripts/start_pi05.sh --max-iterations 2
 
 若发生断连、意外观测或动作错误，立即停止客户端并重新检查服务器和机器人状态；
 客户端不会自动重连。
+
+## 纯视觉右手 Pi0.5
+
+右手模式复用 DECO 的状态/动作适配策略：`vb3_robot_server` 仍以双臂模式发布 20D
+state、接收 20D action。客户端取 state 的 `[7:14]` 作为右手 7D 输入，并且只把真实
+右腕 `camera1` 映射到模型的 `right_wrist_0_rgb`；不会创建或传入左腕黑图 token。
+模型产生的 10D action 放入 wire action 的右手块；左手块使用零平移、单位
+Rotation6D 和当前左夹爪宽度保持。
+
+服务端与客户端必须显式使用同一份右手 YAML：
+
+```bash
+# Terminal A: robot server
+cd /home/typhon/vb3_robot_server
+bash scripts/bimanual_pi05.sh --mode vision \
+  --config /home/typhon/FRS_Tact/deploy_pi05/configs/deploy_pi05_right.yaml
+
+# Terminal B: policy client
+cd /home/typhon/FRS_Tact
+bash deploy_pi05/scripts/start_pi05_right.sh --check
+bash deploy_pi05/scripts/start_pi05_right.sh --max-iterations 1
+```
+
+两端会打印同一 YAML 的 SHA256；发送 START 前必须确认完全一致。不要给该模式启用
+现有 `single_arm_mode=True` 的机器人底层路径：那条旧路径表示物理左臂。右手模型的
+单臂语义只存在于客户端，服务端硬件和安全校验仍是双臂模式。

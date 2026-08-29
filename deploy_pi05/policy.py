@@ -62,12 +62,21 @@ class Pi05DeploymentConfig:
             raise ValueError("robot state/action dimensions cannot exceed model.action_dim")
         mapped = set(self.camera_map)
         empty = set(self.empty_cameras)
-        expected = {"left_wrist_0_rgb", "right_wrist_0_rgb"}
+        expected = (
+            {"right_wrist_0_rgb"}
+            if self.state_action_profile == "single-right-arm-7x10"
+            else {"left_wrist_0_rgb", "right_wrist_0_rgb"}
+        )
         if mapped & empty:
             raise ValueError(f"camera slots cannot be both mapped and empty: {sorted(mapped & empty)}")
         if mapped != expected or empty:
+            contract = (
+                "only the right wrist camera"
+                if self.state_action_profile == "single-right-arm-7x10"
+                else "exactly the left/right wrist cameras"
+            )
             raise ValueError(
-                "pi0.5 pick_tube deployment requires exactly the left/right wrist cameras "
+                f"pi0.5 {self.state_action_profile} deployment requires {contract} "
                 f"and no empty camera slots; got mapped={sorted(mapped)}, empty={sorted(empty)}"
             )
         if len(set(self.camera_map.values())) != len(self.camera_map):

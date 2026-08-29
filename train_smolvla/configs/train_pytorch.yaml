@@ -1,10 +1,8 @@
-# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与 VB3/官方 LeRobot 训练流程对齐。
+# PyTorch 纯视觉 SmolVLA 双臂训练配置，字段与官方 LeRobot 训练流程对齐。
 # 启动：bash train_smolvla/scripts/start_smolvla_train.sh
 
 dataset:
   # 数据必须先通过 scripts/download_data.sh 下载并转换为 LeRobot v3.0。
-  repo_id: KaiyueChen/pick_tube_05
-  root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
   expected_fps: 30
   state_dim: 20
   action_dim: 20
@@ -12,8 +10,11 @@ dataset:
     - observation.images.camera0
     - observation.images.camera1
   eval_split: 0.10
+  # DECO balanced-light-v2 is applied jointly at batch level below. Keep the
+  # per-camera LeRobot transforms disabled to avoid double augmentation and
+  # independent random parameters for the two views.
   image_transforms:
-    enable: true
+    enable: false
     max_num_transforms: 2
     random_order: false
     tfs:
@@ -43,6 +44,32 @@ dataset:
         kwargs:
           sharpness: [0.8, 1.2]
 
+# Add one entry per LeRobot v3.0 source. Training splits each source into
+# train/eval episodes, concatenates them, and globally shuffles all frames.
+# Without explicit weights, sampling is proportional to each source's frames.
+datasets:
+  - repo_id: KaiyueChen/two_tubes_01
+    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_01
+
+  - repo_id: KaiyueChen/two_tubes_02
+    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_02
+
+  - repo_id: KaiyueChen/two_tubes_03
+    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_03
+
+  - repo_id: KaiyueChen/two_tubes_04
+    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_04
+
+  - repo_id: KaiyueChen/two_tubes_05
+    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_05
+
+# Exact DECO balanced-light-v2 behavior: 25% identity and 75% mild
+# brightness/contrast/saturation jitter, with one shared draw for both cameras
+# in each sample. Non-identity samples have a 20% blur probability.
+augmentation:
+  preset: balanced-light-v2
+  enabled: true
+
 policy:
   path: lerobot/smolvla_base
   chunk_size: 20
@@ -64,7 +91,7 @@ rename_map:
   observation.images.camera0: observation.images.camera1
   observation.images.camera1: observation.images.camera2
 
-# VB3 使用的混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
+# FRS_Tact 混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
 peft:
   enable: true
   method_type: LORA
@@ -80,8 +107,10 @@ peft:
   lora_alpha: 16
 
 training:
-  output_dir: /workspace/outputs/smolvla_pick_tube_05
-  job_name: smolvla_pick_tube_05
+  output_dir: /workspace/outputs/smolvla_task1
+  # Preserve an existing/failed run and choose a timestamped directory.
+  existing_output: increment
+  job_name: smolvla_task1
   # batch_size 和 num_workers 均为每张 GPU 的数值。
   batch_size: 64
   num_workers: 8
@@ -95,15 +124,19 @@ training:
   resume_from: null
 
 distributed:
-  num_gpus: 1
+  num_gpus: 2
   num_machines: 1
   mixed_precision: bf16
+  # LeRobot lets rank 0 prepare all local datasets before rank 1. Five datasets
+  # can exceed Accelerate/NCCL's 600-second default on network-backed storage.
+  timeout_seconds: 7200
 
 wandb:
   enable: true
-  project: smolvla-pick-tube-05
+  project: smolvla-task1
   entity: null
-  mode: online
+  # auto: online when WANDB_API_KEY/~/.netrc exists, otherwise offline.
+  mode: auto
   notes: PyTorch SmolVLA pure-vision dual-arm training
   run_id: null
   disable_artifact: true

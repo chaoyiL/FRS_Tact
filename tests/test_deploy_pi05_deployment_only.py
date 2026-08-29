@@ -27,8 +27,14 @@ def test_pi05_right_arm_profile_accepts_7d_state_and_10d_action() -> None:
         state_dim=7,
         robot_action_dim=10,
         action_dim=10,
+        camera_map={
+            "right_wrist_0_rgb": "observation.images.camera1",
+        },
     )
-    config["observation"].update(single_arm_mode=True, controlled_arm="right")
+    config["observation"].update(
+        single_arm_mode=True,
+        controlled_arm="right",
+    )
 
     loaded = load_deployment_config_bytes(
         yaml.safe_dump(config).encode(), mode="pi05"
@@ -36,6 +42,62 @@ def test_pi05_right_arm_profile_accepts_7d_state_and_10d_action() -> None:
 
     assert loaded["model"]["state_dim"] == 7
     assert loaded["model"]["robot_action_dim"] == 10
+
+
+def test_checked_in_pi05_right_config_uses_only_real_right_wrist_camera() -> None:
+    from deploy_pi05.deployment import load_deployment_config
+
+    loaded = load_deployment_config(
+        DEPLOY / "configs/deploy_pi05_right.yaml", mode="pi05"
+    )
+
+    assert loaded["model"]["state_action_profile"] == "single-right-arm-7x10"
+    assert loaded["model"]["camera_map"] == {
+        "right_wrist_0_rgb": "observation.images.camera1",
+    }
+    assert "black_camera0" not in loaded["observation"]
+
+
+def test_pi05_rejects_deprecated_black_camera0() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load((DEPLOY / "configs/deploy_pi05.yaml").read_bytes())
+    config["observation"]["black_camera0"] = True
+
+    with pytest.raises(ValueError, match="black_camera0.*not supported"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="pi05")
+
+
+def test_single_right_pi05_rejects_extra_left_camera_slot() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load(
+        (DEPLOY / "configs/deploy_pi05_right.yaml").read_bytes()
+    )
+    config["model"]["camera_map"] = {
+        "left_wrist_0_rgb": "observation.images.camera0",
+        "right_wrist_0_rgb": "observation.images.camera1",
+    }
+
+    with pytest.raises(ValueError, match="single-right-arm.*only.*right_wrist_0_rgb"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="pi05")
+
+
+def test_single_right_server_projection_keeps_bimanual_wire_mode() -> None:
+    from deploy_pi05.deployment import load_deployment_config, make_server_config
+
+    config = load_deployment_config(
+        DEPLOY / "configs/deploy_pi05_right.yaml", mode="pi05"
+    )
+
+    projected = make_server_config(config, mode="pi05")
+
+    assert projected["single_arm_mode"] is False
+    assert projected["action_horizon"] == 50
 
 
 def test_pi05_right_arm_profile_rejects_dual_arm_dimensions() -> None:
@@ -63,6 +125,9 @@ def test_pi05_frs_right_arm_uses_only_right_tactile_inputs() -> None:
         state_dim=7,
         robot_action_dim=10,
         action_dim=10,
+        camera_map={
+            "right_wrist_0_rgb": "observation.images.camera1",
+        },
     )
     config["observation"].update(single_arm_mode=True, controlled_arm="right")
     config["frs"]["tactile_keys"] = [
@@ -107,6 +172,7 @@ def test_only_deployment_configs_and_launchers_remain() -> None:
     assert {path.name for path in (DEPLOY / "scripts").glob("*.sh")} == {
         "start_pi05.sh",
         "start_pi05_frs.sh",
+        "start_pi05_right.sh",
         "start_remote_client.sh",
     }
 
