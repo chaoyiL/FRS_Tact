@@ -1,0 +1,37 @@
+# Pure-vision pi0.5 fine-tuning. Dataset entries are opened in this order and
+# concatenated into one shuffled training stream.
+profile: pi05_bi
+checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
+allow_download: true
+
+datasets:
+  - repo_id: KaiyueChen/pick_tube_05
+    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+    action_key: action
+  # Add more converted LeRobot v3 datasets here:
+  # - repo_id: KaiyueChen/pick_tube_06
+  #   root: /workspace/lerobot_v30/KaiyueChen/pick_tube_06
+  #   action_key: action
+
+norm_stats:
+  dir: ./assets
+  asset_id: 0118_data_smooth
+
+training:
+  output: /workspace/outputs/pi05_vision
+  batch_size: 64
+  num_workers: 8
+  steps: 100000
+  log_interval: 200
+  save_interval: 5000
+  keep_period: 5000
+  seed: 42
+  fsdp_devices: 1
+  overwrite: false
+  resume: false
+
+wandb:
+  enable: true
+  project: pi05-vision
+  exp_name: pi05_vision
+
