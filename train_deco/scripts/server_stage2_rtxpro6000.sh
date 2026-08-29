@@ -65,7 +65,7 @@ usage() {
   bash train_deco/scripts/server_stage2_rtxpro6000.sh all
 
 all：配置环境、下载、准备 manifest，然后依次训练并上传 Insert 01~02 和
-Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=1024；
+Bread 01~03。bread_04 不下载、不使用。默认单卡物理 batch size=512；
 workers 使用 vCPU 的 75%，所以 16 vCPU 对应 12 workers。
 EOF
 }
@@ -222,7 +222,7 @@ train_task() {
     nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
     workers="${WORKERS:-$(detect_workers)}"
-    batch_size="${BATCH_SIZE:-1024}"
+    batch_size="${BATCH_SIZE:-512}"
     run_dir="${OUTPUT_ROOT}/${TASK_RUN_ID}"
     log "task=${task} run=${TASK_RUN_ID} batch=${batch_size} workers=${workers}"
     warn "BATCH_SIZE 是单卡物理 batch；如 CUDA OOM，请显式降低 BATCH_SIZE"
@@ -287,7 +287,7 @@ doctor() {
     create_roots
     log "code=${CODE_ROOT}"
     log "python=$("${PYTHON_BIN}" --version 2>&1)"
-    log "cpu=$(nproc) workers=${WORKERS:-$(detect_workers)} batch=${BATCH_SIZE:-1024}"
+    log "cpu=$(nproc) workers=${WORKERS:-$(detect_workers)} batch=${BATCH_SIZE:-512}"
     df -h /workspace
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
     "${PYTHON_BIN}" -c \
