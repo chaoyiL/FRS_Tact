@@ -25,6 +25,8 @@ model:
   robot_action_dim: 10
   # 必须等于训练该 checkpoint 时的模型 action_dim（10、20 或 32）。
   action_dim: 10
+  camera_map:
+    right_wrist_0_rgb: observation.images.camera1
 
 norm_stats:
   dir: /path/to/single_right_pi05/checkpoint/assets
@@ -37,8 +39,11 @@ observation:
   no_state_obs_mode: false
 ```
 
-Pi0.5 客户端沿用既有协议，不会替机器人服务端切换硬件模式。启动客户端前，必须把
-`vb3_robot_server` 启动为右手单臂模式，使其发送 7D state 并接收 10D action。
+Pi0.5 右手模式复用 DECO adapter，不切换机器人底层的 `single_arm_mode`。服务端保持
+双臂模式并发送 20D state；客户端取 `[7:14]` 作为右臂 7D state。模型输出 10D 后，
+客户端把它放入 20D wire action 的右臂块，左臂使用 identity delta 和当前夹爪宽度保持。
+模型输入只包含真实右腕 `camera1` 对应的 `right_wrist_0_rgb`，不传左腕图或有效黑图
+token。当前旧版机器人 `single_arm_mode=True` 实际表示左臂，右手部署不得启用它。
 
 ## Pi0.5 + FRS
 
@@ -101,6 +106,9 @@ frs:
 # Pi0.5 纯视觉
 PI05_DEPLOY_CONFIG=/path/to/pi05_right.yaml \
   bash deploy_pi05/scripts/start_pi05.sh --check
+
+# checked-in 右手快捷启动器
+bash deploy_pi05/scripts/start_pi05_right.sh --check
 
 # Pi0.5 + FRS
 PI05_DEPLOY_CONFIG=/path/to/pi05_frs_right.yaml \
