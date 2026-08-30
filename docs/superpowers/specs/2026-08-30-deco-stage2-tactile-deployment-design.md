@@ -54,9 +54,12 @@ uses `data_type=vitac`, `observation_profile=deco_vitac_224`, two cameras,
 224-by-224 RGB observations, 30 Hz, a 32-step action horizon, and the legacy
 bimanual chunk protocol. Its `policy_family` is the distinct value
 `deco-stage2`, which selects Stage 2-only wire validation without changing
-Stage 1 behavior. Its default deployment-config path points to
-`deploy_deco/configs/deploy_deco_stage2_right.yaml` and remains overridable by
-the server's existing `--config` option.
+Stage 1 behavior. As in the existing DECO legacy-chunk path, the client owns
+the deployment YAML and sends its validated runtime projection during the
+bridge handshake. The shared server's `--config` option belongs to its separate
+SmolVLA local-config startup path and is not used by either DECO Stage 1 or
+Stage 2; the dedicated Stage 2 client launcher is therefore the sole selector
+of `deploy_deco/configs/deploy_deco_stage2_right.yaml`.
 
 The Stage 2 server entrypoint selects
 `configs.deco_stage2_server_config` through `VB3_SERVER_CONFIG_MODULE` before
