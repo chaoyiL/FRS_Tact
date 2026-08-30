@@ -26,6 +26,8 @@ class Pi0Config(_model.BaseModelConfig):
     # This is used to keep training and inference image ordering consistent.
     # If None, the model will use the insertion order of `observation.images`.
     image_keys: tuple[str, ...] | None = None
+    # Training-only image augmentation. Inference and validation never augment.
+    image_augmentation: str | None = "openpi-default"
 
     # Set the model specific defaults.
     action_dim: int = 32
@@ -40,6 +42,11 @@ class Pi0Config(_model.BaseModelConfig):
     discrete_state_input: bool = None  # type: ignore
 
     def __post_init__(self):
+        if self.image_augmentation is not None and self.image_augmentation not in _model.IMAGE_AUGMENTATION_PRESETS:
+            raise ValueError(
+                f"unknown image augmentation preset {self.image_augmentation!r}; expected one of "
+                f"{_model.IMAGE_AUGMENTATION_PRESETS} or None"
+            )
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:

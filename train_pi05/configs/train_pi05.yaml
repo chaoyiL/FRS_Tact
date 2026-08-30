@@ -4,6 +4,12 @@ profile: pi05_bi
 checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
 allow_download: true
 
+# 与 SmolVLA 双手训练一致的 DECO 场景光照增强。两路相机对同一样本共享全部随机参数。
+# 训练时启用，验证和部署时自动关闭。
+augmentation:
+  preset: balanced-light-v2
+  enabled: true
+
 datasets:
   - repo_id: KaiyueChen/pick_tube_05
     root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
@@ -13,25 +19,46 @@ datasets:
   #   root: /workspace/lerobot_v30/KaiyueChen/pick_tube_06
   #   action_key: action
 
+dataset_contract:
+  state_key: observation.state
+  state_dim: 20
+  action_dim: 20
+  image_keys:
+    - observation.images.camera0
+    - observation.images.camera1
+
 norm_stats:
   dir: ./assets
-  asset_id: 0118_data_smooth
+  # 只使用 90% 训练 episode 计算，val_unseen 不参与统计。
+  asset_id: task1
+
+validation:
+  # 每个数据集分别按 episode 固定拆分 90% train / 10% val_unseen。
+  ratio: 0.10
+  seed: 42
+  interval: 2000
+  # val_seen 从训练 episode 的 frame 中固定抽样，但评估时关闭图像增强。
+  track_seen: true
+  # 每个 split 最多 20 个完整 batch；batch_size=128 时即约 2560 frames。
+  max_batches_per_split: 20
 
 training:
-  output: /workspace/outputs/pi05_vision
-  batch_size: 64
+  # 使用新目录，避免与无双验证或旧增强实验混合续训。
+  output: /workspace/outputs/pi05_vision_balanced_light_v2_train90_val10_seen_unseen
+  batch_size: 128
   num_workers: 8
   steps: 100000
   log_interval: 200
-  save_interval: 5000
-  keep_period: 5000
+  # 与验证间隔一致，确保 2000/4000/6000/8000... 均有可部署 checkpoint。
+  save_interval: 2000
+  # 保留每个验证节点，方便根据 val_unseen 选择 2000/4000/6000/8000... checkpoint。
+  keep_period: 2000
   seed: 42
-  fsdp_devices: 1
+  fsdp_devices: 2
   overwrite: false
   resume: false
 
 wandb:
   enable: true
   project: pi05-vision
-  exp_name: pi05_vision
-
+  exp_name: pi05_vision_balanced_light_v2_train90_val10_seen_unseen

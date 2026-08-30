@@ -13,6 +13,7 @@ import yaml
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_pi05.yaml"
 PURE_VISION_PROFILES = {"pi05_single", "pi05_bi", "pi05_bi_no_state"}
+IMAGE_AUGMENTATION_PRESETS = {"openpi-default", "balanced-light-v2"}
 
 
 def _fit_schedule_steps(total_steps: int, configured_warmup_steps: int) -> tuple[int, int]:
@@ -102,11 +103,37 @@ def load_config(path: Path) -> dict[str, Any]:
     validation = config.get("validation") or {}
     if not isinstance(validation, dict):
         raise ValueError("validation must be a mapping")
+    unknown_validation_fields = set(validation) - {
+        "ratio",
+        "seed",
+        "interval",
+        "track_seen",
+        "max_batches_per_split",
+    }
+    if unknown_validation_fields:
+        raise ValueError(f"unknown validation fields: {sorted(unknown_validation_fields)}")
     validation_ratio = float(validation.get("ratio", 0.0))
     if not 0.0 <= validation_ratio < 1.0:
         raise ValueError("validation.ratio must satisfy 0 <= ratio < 1")
     if validation_ratio > 0 and int(validation.get("interval", 2000)) <= 0:
         raise ValueError("validation.interval must be positive")
+    if bool(validation.get("track_seen", False)) and validation_ratio == 0.0:
+        raise ValueError("validation.track_seen requires validation.ratio > 0")
+    max_validation_batches = validation.get("max_batches_per_split")
+    if max_validation_batches is not None and int(max_validation_batches) <= 0:
+        raise ValueError("validation.max_batches_per_split must be positive")
+    augmentation = config.get("augmentation") or {}
+    if not isinstance(augmentation, dict):
+        raise ValueError("augmentation must be a mapping")
+    unknown_augmentation_fields = set(augmentation) - {"preset", "enabled"}
+    if unknown_augmentation_fields:
+        raise ValueError(f"unknown augmentation fields: {sorted(unknown_augmentation_fields)}")
+    augmentation_preset = str(augmentation.get("preset", "balanced-light-v2"))
+    if augmentation_preset not in IMAGE_AUGMENTATION_PRESETS:
+        raise ValueError(
+            f"unknown augmentation preset {augmentation_preset!r}; expected one of "
+            f"{sorted(IMAGE_AUGMENTATION_PRESETS)}"
+        )
     return config
 
 
@@ -161,6 +188,13 @@ def build_train_config(raw: dict[str, Any]):
     from openpi.training import optimizer, weight_loaders
 
     base = openpi_config.get_config(str(raw["profile"]))
+    augmentation = raw.get("augmentation") or {}
+    image_augmentation = (
+        str(augmentation.get("preset", "balanced-light-v2"))
+        if bool(augmentation.get("enabled", True))
+        else None
+    )
+    model = replace(base.model, image_augmentation=image_augmentation)
     sources, validation_sources = _split_sources(raw, openpi_config)
     norm = raw.get("norm_stats") or {}
     assets_dir = str(norm.get("dir", "./assets"))
@@ -194,6 +228,17 @@ def build_train_config(raw: dict[str, Any]):
         if validation_sources
         else None
     )
+    validation_seen_data = (
+        replace(
+            base.data,
+            repo_id=sources[0].repo_id,
+            sources=sources,
+            assets=assets,
+            visual_keys=visual_keys,
+        )
+        if bool((raw.get("validation") or {}).get("track_seen", False))
+        else None
+    )
     training = raw["training"]
     wandb = raw.get("wandb") or {}
     validation = raw.get("validation") or {}
@@ -204,8 +249,10 @@ def build_train_config(raw: dict[str, Any]):
         lr = replace(lr, warmup_steps=warmup_steps, decay_steps=decay_steps)
     return replace(
         base,
+        model=model,
         data=data,
         validation_data=validation_data,
+        validation_seen_data=validation_seen_data,
         weight_loader=weight_loaders.CheckpointWeightLoader(str(raw["checkpoint"])),
         lr_schedule=lr,
         checkpoint_dir_override=str(training["output"]),
@@ -217,6 +264,11 @@ def build_train_config(raw: dict[str, Any]):
         num_train_steps=steps,
         log_interval=int(training.get("log_interval", base.log_interval)),
         validation_interval=int(validation.get("interval", base.validation_interval)),
+        validation_max_batches=(
+            int(validation["max_batches_per_split"])
+            if validation.get("max_batches_per_split") is not None
+            else None
+        ),
         save_interval=int(training.get("save_interval", base.save_interval)),
         keep_period=training.get("keep_period", base.keep_period),
         seed=int(training.get("seed", base.seed)),
@@ -254,6 +306,9 @@ def main() -> None:
     if args.print_norm_stats:
         print(norm_stats_path(raw))
     if args.check:
+        # Exercise the complete YAML -> OpenPI configuration conversion so
+        # factory/model-field mismatches fail before tmux is started.
+        build_train_config(raw)
         return
     from tools.train_core import main as train_main
 
