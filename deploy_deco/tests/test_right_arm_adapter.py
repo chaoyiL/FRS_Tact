@@ -1,6 +1,7 @@
 import numpy as np
 import pytest
 
+from deploy_deco.artifact import TACTILE_FIELD_ORDER
 from deploy_deco.right_arm_adapter import expand_right_action, project_right_observation
 
 
@@ -36,6 +37,17 @@ def test_project_right_observation_can_replace_camera0_with_black_without_mutati
     assert projected["observation.images.camera0"].shape == source[
         "observation.images.camera0"
     ].shape
+
+
+def test_project_right_observation_preserves_tactile_field_references():
+    source = observation()
+    for index, key in enumerate(TACTILE_FIELD_ORDER):
+        source[key] = np.full((2, 3, 3), index, dtype=np.uint8)
+
+    projected = project_right_observation(source, black_camera0=True)
+
+    for key in TACTILE_FIELD_ORDER:
+        assert projected[key] is source[key]
 
 
 def test_project_right_observation_requires_camera0_when_black_replacement_is_enabled():

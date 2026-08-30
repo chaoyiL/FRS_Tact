@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from deploy_deco import bridge_client, policy, remote_client
+from deploy_deco.artifact import TACTILE_FIELD_ORDER
 
 
 def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch) -> None:
@@ -257,3 +260,275 @@ def test_right_arm_loop_projects_state_and_sends_bimanual_action(monkeypatch) ->
     np.testing.assert_array_equal(sent_action[:, 10:], right_action)
     np.testing.assert_array_equal(sent_action[:, [3, 7]], 1.0)
     np.testing.assert_array_equal(sent_action[:, 9], 6.0)
+
+
+def test_server_dry_run_stops_without_post_action_observation(monkeypatch) -> None:
+    events: list[tuple[str, int | str] | str] = []
+    observations = iter([(0, {"frame": "warmup"}), (1, {"frame": "action-input"})])
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
+        "observation": {},
+        "control": {},
+        "runtime": {"auto_start": True, "warmup_runs": 0},
+    }
+
+    class FakeBridge:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def send_config(self, server_config: dict) -> None:
+            pass
+
+        def receive_observation(self, timeout: float | None = None):
+            obs_seq, observation = next(observations)
+            events.append(("observation", obs_seq))
+            return obs_seq, observation
+
+        def send_state(self, state: str) -> None:
+            events.append(("state", state))
+
+        def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            events.append(("action", obs_seq))
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakePolicy:
+        state_dim = 20
+        action_dim = 20
+        action_horizon = 32
+        expected_sample_hz = 30.0
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+        def predict(self, observation: dict, *, seed: int) -> np.ndarray:
+            return np.zeros((32, 20), dtype=np.float32)
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(remote_client, "make_server_config", lambda _config: {})
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", FakeBridge)
+    monkeypatch.setattr(policy, "DECOPolicy", FakePolicy)
+
+    remote_client.run(
+        Path("unused.yaml"), max_iterations_override=1, server_dry_run=True
+    )
+
+    assert events == [
+        ("observation", 0),
+        ("state", "start"),
+        ("observation", 1),
+        ("action", 1),
+        ("state", "stop"),
+        "close",
+    ]
+
+
+def test_server_dry_run_requires_positive_max_iterations(monkeypatch) -> None:
+    monkeypatch.setattr(remote_client, "check", lambda _path: {"runtime": {}})
+
+    with pytest.raises(ValueError, match="max-iterations"):
+        remote_client.run(Path("unused.yaml"), server_dry_run=True)
+
+
+def test_observe_only_requires_six_stream_stage2_artifact(monkeypatch) -> None:
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
+        "observation": {"black_camera0": True},
+        "control": {},
+        "runtime": {"auto_start": True, "warmup_runs": 0},
+    }
+
+    class Stage1Policy:
+        state_dim = 20
+        action_dim = 20
+        action_horizon = 32
+        expected_sample_hz = 30.0
+        image_keys = ("observation.images.camera0", "observation.images.camera1")
+        tactile_keys = ()
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+    class BridgeMustNotConnect:
+        def __init__(self, **kwargs) -> None:
+            raise AssertionError("Stage 1 observe-only must reject before connecting")
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", BridgeMustNotConnect)
+    monkeypatch.setattr(policy, "DECOPolicy", Stage1Policy)
+
+    with pytest.raises(ValueError, match="Stage 2"):
+        remote_client.run(Path("unused.yaml"), observe_only=True)
+
+
+def test_observe_only_requires_black_camera0_before_connecting(monkeypatch) -> None:
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
+        "observation": {"black_camera0": False},
+        "control": {},
+        "runtime": {"auto_start": True, "warmup_runs": 0},
+    }
+
+    class Stage2Policy:
+        state_dim = 7
+        action_dim = 10
+        action_horizon = 32
+        expected_sample_hz = 30.0
+        image_keys = ("observation.images.camera0", "observation.images.camera1")
+        tactile_keys = TACTILE_FIELD_ORDER
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+    class BridgeMustNotConnect:
+        def __init__(self, **kwargs) -> None:
+            raise AssertionError("observe-only must reject before connecting")
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", BridgeMustNotConnect)
+    monkeypatch.setattr(policy, "DECOPolicy", Stage2Policy)
+
+    with pytest.raises(ValueError, match="black_camera0"):
+        remote_client.run(Path("unused.yaml"), observe_only=True)
+
+
+def test_observe_only_projects_and_saves_tactile_observation(monkeypatch, tmp_path) -> None:
+    events: list[tuple[str, str] | str] = []
+    saved: dict[str, object] = {}
+    receive_calls = 0
+    camera0 = np.full((3, 4, 3), 255, dtype=np.uint8)
+    tactile_left_0 = np.full((3, 4, 3), 37, dtype=np.uint8)
+    observation = {
+        "observation.state": np.arange(20, dtype=np.float32),
+        "observation.images.camera0": camera0,
+        "observation.images.camera1": np.full((3, 4, 3), 21, dtype=np.uint8),
+        TACTILE_FIELD_ORDER[0]: tactile_left_0,
+        TACTILE_FIELD_ORDER[1]: np.full((3, 4, 3), 38, dtype=np.uint8),
+        TACTILE_FIELD_ORDER[2]: np.full((3, 4, 3), 39, dtype=np.uint8),
+        TACTILE_FIELD_ORDER[3]: np.full((3, 4, 3), 40, dtype=np.uint8),
+    }
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "seed": 3,
+        "model": {"state_action_profile": "single-right-arm-7x10"},
+        "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
+        "observation": {"black_camera0": True},
+        "control": {},
+        "runtime": {"auto_start": False, "warmup_runs": 0},
+    }
+
+    class FakeBridge:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def send_config(self, server_config: dict) -> None:
+            pass
+
+        def receive_observation(self, timeout: float | None = None):
+            nonlocal receive_calls
+            receive_calls += 1
+            return 0, observation
+
+        def send_state(self, state: str) -> None:
+            events.append(("state", state))
+
+        def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            events.append("action")
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakePolicy:
+        state_dim = 7
+        action_dim = 10
+        action_horizon = 32
+        expected_sample_hz = 30.0
+        image_keys = ("observation.images.camera0", "observation.images.camera1")
+        tactile_keys = TACTILE_FIELD_ORDER
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+        def predict(self, policy_observation: dict, *, seed: int) -> np.ndarray:
+            saved["predicted_observation"] = policy_observation
+            return np.zeros((32, 10), dtype=np.float32)
+
+    def save(output_root: Path, saved_observation: dict, saved_policy, action: np.ndarray) -> Path:
+        saved.update(
+            output_root=output_root,
+            observation=saved_observation,
+            policy=saved_policy,
+            action=action,
+        )
+        return tmp_path / "observe_only_test"
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(remote_client, "make_server_config", lambda _config: {})
+    monkeypatch.setattr(remote_client, "save_observe_only_bundle", save)
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", FakeBridge)
+    monkeypatch.setattr(policy, "DECOPolicy", FakePolicy)
+
+    remote_client.run(Path("unused.yaml"), observe_only=True)
+
+    assert receive_calls == 1
+    assert events == [("state", "stop"), "close"]
+    saved_observation = saved["observation"]
+    assert isinstance(saved_observation, dict)
+    assert tuple(
+        key
+        for key in saved_observation
+        if key.startswith("observation.images") or key in TACTILE_FIELD_ORDER
+    ) == (*FakePolicy.image_keys, *TACTILE_FIELD_ORDER)
+    np.testing.assert_array_equal(
+        saved_observation["observation.images.camera0"], np.zeros_like(camera0)
+    )
+    assert saved_observation[TACTILE_FIELD_ORDER[0]] is tactile_left_0
+    assert saved["predicted_observation"] is saved_observation
+
+
+def test_save_observe_only_bundle_writes_pngs_and_summary(tmp_path) -> None:
+    from PIL import Image
+
+    class FakePolicy:
+        image_keys = ("observation.images.camera0", "observation.images.camera1")
+        tactile_keys = TACTILE_FIELD_ORDER
+
+    observation = {
+        "observation.state": np.array([1.0, 2.0, 3.0], dtype=np.float32),
+        "observation.images.camera0": np.zeros((2, 3, 3), dtype=np.uint8),
+        "observation.images.camera1": np.ones((2, 3, 3), dtype=np.float32),
+        TACTILE_FIELD_ORDER[0]: np.full((2, 3, 3), 2, dtype=np.uint8),
+        TACTILE_FIELD_ORDER[1]: np.full((2, 3, 3), 0.5, dtype=np.float32),
+        TACTILE_FIELD_ORDER[2]: np.full((2, 3, 3), 4, dtype=np.uint8),
+        TACTILE_FIELD_ORDER[3]: np.full((2, 3, 3), 0.25, dtype=np.float32),
+    }
+    action = np.arange(20, dtype=np.float32).reshape(2, 10)
+
+    bundle = remote_client.save_observe_only_bundle(tmp_path, observation, FakePolicy(), action)
+
+    expected_keys = (*FakePolicy.image_keys, *FakePolicy.tactile_keys)
+    assert bundle.parent == tmp_path
+    assert sorted(path.name for path in bundle.iterdir()) == sorted(
+        [*(key.replace(".", "_") + ".png" for key in expected_keys), "summary.json"]
+    )
+    for key in expected_keys:
+        with Image.open(bundle / (key.replace(".", "_") + ".png")) as image:
+            image.load()
+            assert image.mode == "RGB"
+            assert image.size == (3, 2)
+    summary = json.loads((bundle / "summary.json").read_text())
+    assert [item["key"] for item in summary["images"]] == list(expected_keys)
+    assert summary["state"] == {"shape": [3], "min": 1.0, "max": 3.0}
+    assert summary["action"] == {"shape": [2, 10], "min": 0.0, "max": 19.0}

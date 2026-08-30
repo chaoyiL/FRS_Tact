@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from .artifact import load_torchscript
+from .artifact import TACTILE_FIELD_ORDER, artifact_uses_tactile, load_torchscript
 
 
 class DECOPolicy:
@@ -41,6 +41,16 @@ class DECOPolicy:
             raise ValueError("DECO phase_count must be a positive integer")
         else:
             self.phase_count = phase_count
+        self.uses_tactile = artifact_uses_tactile(self.metadata)
+        self.tactile_keys = TACTILE_FIELD_ORDER if self.uses_tactile else ()
+        self.visual_hw = tuple(self.metadata["input"]["images"][3:5])
+        self.tactile_hw = (
+            tuple(self.metadata["input"]["tactile_images"][3:5])
+            if self.uses_tactile
+            else None
+        )
+        if self.uses_tactile and self.phase_count is not None:
+            raise ValueError("DECO Stage 2 tactile artifacts cannot also be phase-conditioned")
 
     @staticmethod
     def _image(value: Any, key: str) -> np.ndarray:
@@ -56,28 +66,50 @@ class DECOPolicy:
             raise ValueError(f"{key} floating values must be finite in [0,1]")
         return result
 
+    @staticmethod
+    def _stack_images(
+        images: list[np.ndarray], keys: tuple[str, ...], expected_hw: tuple[int, int] | None = None
+    ) -> np.ndarray:
+        image_shapes = {image.shape for image in images}
+        if len(image_shapes) != 1:
+            raise ValueError(f"DECO image shapes must match, got {sorted(image_shapes)}")
+        if expected_hw is not None:
+            expected_shape = (*expected_hw, 3)
+            if any(image.shape != expected_shape for image in images):
+                raise ValueError(
+                    f"DECO Stage 2 {keys[0]} images must have shape {expected_shape}, "
+                    f"got {sorted(image_shapes)}"
+                )
+        return np.ascontiguousarray(np.stack(images, axis=0).transpose(0, 3, 1, 2)[None])
+
     def prepare_inputs(self, observation: Mapping[str, Any]):
         missing = [
-            key for key in (*self.image_keys, "observation.state") if key not in observation
+            key
+            for key in (*self.image_keys, *self.tactile_keys, "observation.state")
+            if key not in observation
         ]
         if missing:
             raise ValueError(f"robot observation is missing keys: {missing}")
         images = [self._image(observation[key], key) for key in self.image_keys]
-        image_shapes = {image.shape for image in images}
-        if len(image_shapes) != 1:
-            raise ValueError(f"DECO camera shapes must match, got {sorted(image_shapes)}")
+        image_batch = self._stack_images(
+            images, self.image_keys, self.visual_hw if self.uses_tactile else None
+        )
+        if self.uses_tactile:
+            tactile_images = [self._image(observation[key], key) for key in self.tactile_keys]
+            tactile_batch = self._stack_images(tactile_images, self.tactile_keys, self.tactile_hw)
         state = np.asarray(observation["observation.state"], dtype=np.float32)
         if state.shape != (self.state_dim,) or not np.isfinite(state).all():
             raise ValueError(
                 f"DECO state must be finite with shape ({self.state_dim},), got {state.shape}"
             )
-        image_batch = np.stack(images, axis=0).transpose(0, 3, 1, 2)[None]
         state_batch = state[None]
         torch = self.torch
-        return (
-            torch.from_numpy(np.ascontiguousarray(image_batch)).to(self.device),
-            torch.from_numpy(np.ascontiguousarray(state_batch)).to(self.device),
-        )
+        visual_tensor = torch.from_numpy(image_batch).to(self.device)
+        state_tensor = torch.from_numpy(np.ascontiguousarray(state_batch)).to(self.device)
+        if self.uses_tactile:
+            tactile_tensor = torch.from_numpy(tactile_batch).to(self.device)
+            return visual_tensor, tactile_tensor, state_tensor
+        return visual_tensor, state_tensor
 
     def predict(
         self,
@@ -102,15 +134,20 @@ class DECOPolicy:
         torch.manual_seed(seed)
         if self.device.type == "cuda":
             torch.cuda.manual_seed_all(seed)
-        images, state = self.prepare_inputs(observation)
+        inputs = self.prepare_inputs(observation)
         with torch.inference_mode():
-            if self.phase_count is None:
-                output = self.model(images, state)
-            else:
+            if self.uses_tactile:
+                images, tactile_images, state = inputs
+                output = self.model(images, tactile_images, state)
+            elif self.phase_count is not None:
+                images, state = inputs
                 phase = torch.tensor(
                     [phase_id], dtype=torch.long, device=self.device
                 )
                 output = self.model(images, state, phase)
+            else:
+                images, state = inputs
+                output = self.model(images, state)
         action = output.detach().to(device="cpu", dtype=torch.float32).numpy()
         expected = (1, self.action_horizon, self.action_dim)
         if action.shape != expected or not np.isfinite(action).all():

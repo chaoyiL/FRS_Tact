@@ -72,6 +72,42 @@ export VB_ROBOT_TOKEN='<token-list 中的一项>'
 bash deploy_deco/scripts/start_deco_right.sh --max-iterations 1
 ```
 
+### Stage 2 tactile right-arm deployment
+
+Stage 2 uses the four tactile fields in metadata order:
+`tactile_left_0`, `tactile_right_0`, `tactile_left_1`, `tactile_right_1`.
+Only the client blacks out `camera0`; the server remains bimanual.
+
+先检查配置和 artifact（不连接机器人）：
+
+```bash
+bash deploy_deco/scripts/start_deco_stage2_right.sh --check
+```
+
+配合 `scripts/bimanual_deco_stage2.sh --dry-run` 使用：客户端仍会连接服务端、发送配置/START 和有界动作；服务端 dry-run 会保持硬件未初始化，而客户端 flag 会跳过动作后的最终 observation 等待。不要与普通服务端配对，否则该命令不提供硬件安全保证：
+
+```bash
+bash deploy_deco/scripts/start_deco_stage2_right.sh --server-dry-run --max-iterations 1
+```
+
+仅观察客户端流程、不发送动作：
+
+```bash
+bash deploy_deco/scripts/start_deco_stage2_right.sh --observe-only
+```
+
+启动一次客户端迭代（服务端需已启动）：
+
+```bash
+bash deploy_deco/scripts/start_deco_stage2_right.sh --max-iterations 1
+```
+
+正式启动 Stage 2 客户端（服务端需已启动）：
+
+```bash
+bash deploy_deco/scripts/start_deco_stage2_right.sh
+```
+
 ## 服务端兼容
 
 当前 `vb3_robot_server` 已经提供与训练一致的：

@@ -13,9 +13,16 @@ from deploy_deco.artifact import (
     DUAL_ARM_PROFILE,
     SINGLE_RIGHT_ARM_PROFILE,
     artifact_profile,
+    artifact_uses_tactile,
 )
 
-DECO_OBSERVATION_PROFILE = "deco_vision_224"
+DECO_VISION_PROFILE = "deco_vision_224"
+DECO_VITAC_PROFILE = "deco_vitac_224"
+DECO_OBSERVATION_PROFILE = DECO_VISION_PROFILE  # compatibility
+_OBSERVATION_CONTRACTS = {
+    "vision": DECO_VISION_PROFILE,
+    "vitac": DECO_VITAC_PROFILE,
+}
 
 
 def deployment_profile(config: Mapping[str, Any]) -> str:
@@ -88,10 +95,18 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if "add_port" in connection and connection["add_port"] is not None:
         _boolean(connection["add_port"], "connection.add_port")
     _boolean(connection.get("require_token", True), "connection.require_token")
-    if observation.get("data_type") != "vision":
-        raise ValueError("observation.data_type must be 'vision'")
-    if observation.get("observation_profile", DECO_OBSERVATION_PROFILE) != DECO_OBSERVATION_PROFILE:
-        raise ValueError(f"observation_profile must be {DECO_OBSERVATION_PROFILE!r}")
+    data_type = observation.get("data_type")
+    expected_observation_profile = _OBSERVATION_CONTRACTS.get(data_type)
+    if expected_observation_profile is None:
+        raise ValueError(
+            "observation.data_type must be one of "
+            f"{sorted(_OBSERVATION_CONTRACTS)!r}"
+        )
+    if observation.get("observation_profile") != expected_observation_profile:
+        raise ValueError(
+            f"observation_profile must be {expected_observation_profile!r} "
+            f"when data_type is {data_type!r}"
+        )
     profile = deployment_profile(config)
     single_arm_mode = _boolean(
         observation.get("single_arm_mode", False), "observation.single_arm_mode"
@@ -138,6 +153,10 @@ def resolve_checkpoint(config: Mapping[str, Any]) -> Path:
 
 
 def validate_artifact_contract(config: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
+    observation = section(config, "observation")
+    configured_uses_tactile = observation["data_type"] == "vitac"
+    if artifact_uses_tactile(metadata) != configured_uses_tactile:
+        raise ValueError("DECO tactile artifact does not match configured observation data_type")
     artifact = artifact_profile(metadata)
     configured = deployment_profile(config)
     if artifact != configured:
@@ -172,7 +191,7 @@ def make_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
     control = section(config, "control")
     return {
         "task": 0,
-        "data_type": "vision",
+        "data_type": str(observation["data_type"]),
         "language_prompt": str(observation.get("language_prompt", "")),
         "control_frequency": float(control["control_frequency"]),
         "controller_frequency": float(control["controller_frequency"]),
@@ -180,5 +199,5 @@ def make_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "no_state_obs_mode": False,
         "steps_per_inference": int(control["steps_per_inference"]),
         "action_horizon": int(control["action_horizon"]),
-        "observation_profile": DECO_OBSERVATION_PROFILE,
+        "observation_profile": str(observation["observation_profile"]),
     }

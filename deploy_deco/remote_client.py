@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from .artifact import load_sidecar
+import numpy as np
+
+from .artifact import TACTILE_FIELD_ORDER, load_sidecar
 from .config import (
     SINGLE_RIGHT_ARM_PROFILE,
     deployment_profile,
@@ -22,6 +26,7 @@ from .config import (
 from .right_arm_adapter import expand_right_action, project_right_observation
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_deco.yaml"
+DEFAULT_OBSERVE_ONLY_OUTPUT_ROOT = Path(__file__).resolve().parent / "outputs"
 
 
 def check(config_path: Path) -> dict[str, Any]:
@@ -38,17 +43,81 @@ def check(config_path: Path) -> dict[str, Any]:
     return config
 
 
-def run(config_path: Path, max_iterations_override: int | None = None) -> None:
+def _rgb_uint8(value: Any, key: str) -> np.ndarray:
+    image = np.asarray(value)
+    if image.ndim != 3 or image.shape[-1] != 3:
+        raise ValueError(f"{key} must be HWC RGB, got {image.shape}")
+    if image.dtype == np.uint8:
+        return image
+    if not np.issubdtype(image.dtype, np.floating):
+        raise ValueError(f"{key} must be uint8 or float RGB, got {image.dtype}")
+    if not np.isfinite(image).all() or image.min() < 0.0 or image.max() > 1.0:
+        raise ValueError(f"{key} float RGB values must be finite in [0,1]")
+    return np.rint(image * 255.0).astype(np.uint8)
+
+
+def _array_range(value: Any, name: str) -> dict[str, Any]:
+    array = np.asarray(value)
+    if not array.size or not np.isfinite(array).all():
+        raise ValueError(f"{name} must be non-empty and finite")
+    return {
+        "shape": list(array.shape),
+        "min": float(array.min()),
+        "max": float(array.max()),
+    }
+
+
+def save_observe_only_bundle(
+    output_root: Path, observation: dict[str, Any], policy: Any, action: Any
+) -> Path:
+    """Save the policy-bound observation and its predicted action for inspection."""
+    from PIL import Image
+
+    keys = (*policy.image_keys, *policy.tactile_keys)
+    if len(keys) != 6:
+        raise ValueError("observe-only bundles require exactly six image streams")
+    output_root.mkdir(parents=True, exist_ok=True)
+    bundle = output_root / datetime.now().strftime("observe_only_%Y%m%d_%H%M%S")
+    bundle.mkdir()
+    image_summaries: list[dict[str, Any]] = []
+    for key in keys:
+        if key not in observation:
+            raise ValueError(f"observe-only observation is missing {key}")
+        source = np.asarray(observation[key])
+        rgb = _rgb_uint8(source, key)
+        Image.fromarray(rgb, mode="RGB").save(bundle / f"{key.replace('.', '_')}.png")
+        image_summaries.append(
+            {
+                "key": key,
+                "shape": list(source.shape),
+                "dtype": str(source.dtype),
+                "min": float(source.min()),
+                "max": float(source.max()),
+            }
+        )
+    summary = {
+        "images": image_summaries,
+        "state": _array_range(observation["observation.state"], "state"),
+        "action": _array_range(action, "action"),
+    }
+    (bundle / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    return bundle
+
+
+def run(
+    config_path: Path,
+    max_iterations_override: int | None = None,
+    *,
+    server_dry_run: bool = False,
+    observe_only: bool = False,
+) -> None:
     from .bridge_client import RobotBridgeClient
     from .policy import DECOPolicy
+
+    if server_dry_run and observe_only:
+        raise ValueError("--server-dry-run and --observe-only cannot be used together")
     config = check(config_path)
-    profile = deployment_profile(config)
-    checkpoint = resolve_checkpoint(config)
-    connection = section(config, "connection")
-    observation_config = section(config, "observation")
     runtime = section(config, "runtime")
-    seed = int(config.get("seed", 0))
-    warmup_runs = int(runtime.get("warmup_runs", 1))
     max_iterations = (
         int(runtime.get("max_iterations", 0))
         if max_iterations_override is None
@@ -56,8 +125,18 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     )
     if max_iterations < 0:
         raise ValueError("max_iterations must be nonnegative")
+    if server_dry_run and max_iterations <= 0:
+        raise ValueError("--server-dry-run requires a positive --max-iterations")
+    profile = deployment_profile(config)
+    checkpoint = resolve_checkpoint(config)
+    connection = section(config, "connection")
+    observation_config = section(config, "observation")
+    seed = int(config.get("seed", 0))
+    warmup_runs = int(runtime.get("warmup_runs", 1))
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
     black_camera0 = bool(observation_config.get("black_camera0", False))
+    if observe_only and not black_camera0:
+        raise ValueError("--observe-only requires observation.black_camera0=true")
 
     def policy_observation(observation: dict[str, Any]) -> dict[str, Any]:
         return (
@@ -88,6 +167,13 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     )
     if black_camera0:
         print("[startup] camera0 input replaced with training-matched black frames")
+    tactile_keys = getattr(policy, "tactile_keys", ())
+    artifact_mode = "stage2_tactile" if tactile_keys else "stage1_vision"
+    print(f"[startup] artifact_mode={artifact_mode}")
+    if tactile_keys:
+        print(f"[startup] Stage 2 tactile key order: {tactile_keys}")
+    if observe_only and tuple(tactile_keys) != TACTILE_FIELD_ORDER:
+        raise ValueError("--observe-only requires a Stage 2 six-stream tactile artifact")
 
     bridge: RobotBridgeClient | None = None
     try:
@@ -103,9 +189,22 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         bridge.send_config(make_server_config(config))
         print("[client] Waiting for robot warmup observation")
         warmup_seq, warmup = bridge.receive_observation(timeout=observation_timeout)
+        warmup_policy_observation = policy_observation(warmup)
+        if observe_only:
+            action = None
+            for index in range(max(1, warmup_runs)):
+                action = policy.predict(warmup_policy_observation, seed=seed + index)
+            assert action is not None
+            bundle = save_observe_only_bundle(
+                DEFAULT_OBSERVE_ONLY_OUTPUT_ROOT,
+                warmup_policy_observation,
+                policy,
+                action,
+            )
+            print(f"[client] Observe-only bundle saved to {bundle}")
+            return
         for index in range(warmup_runs):
             warmup_started = time.perf_counter()
-            warmup_policy_observation = policy_observation(warmup)
             policy.predict(warmup_policy_observation, seed=seed + index)
             print(
                 f"[client] Warmup {index + 1}/{warmup_runs}: "
@@ -132,7 +231,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
                 f"[client] iteration={iteration} obs_seq={obs_seq} "
                 f"inference_ms={inference_ms:.1f} action_shape={action.shape}"
             )
-        if max_iterations > 0:
+        if max_iterations > 0 and not server_dry_run:
             bridge.receive_observation(timeout=observation_timeout)
     except KeyboardInterrupt:
         print("[client] Interrupted")
@@ -155,6 +254,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="validate config, metadata, and SHA256 without loading PyTorch or connecting",
     )
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
+        "--server-dry-run",
+        action="store_true",
+        help="run a bounded action loop without waiting for the final server observation",
+    )
+    modes.add_argument(
+        "--observe-only",
+        action="store_true",
+        help="run inference on the warmup observation and save a local inspection bundle",
+    )
     return parser.parse_args(argv)
 
 
@@ -163,7 +273,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.check:
         check(args.config)
     else:
-        run(args.config, args.max_iterations)
+        run(
+            args.config,
+            args.max_iterations,
+            server_dry_run=args.server_dry_run,
+            observe_only=args.observe_only,
+        )
     return 0
 
 
