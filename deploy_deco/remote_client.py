@@ -135,6 +135,8 @@ def run(
     warmup_runs = int(runtime.get("warmup_runs", 1))
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
     black_camera0 = bool(observation_config.get("black_camera0", False))
+    if observe_only and not black_camera0:
+        raise ValueError("--observe-only requires observation.black_camera0=true")
 
     def policy_observation(observation: dict[str, Any]) -> dict[str, Any]:
         return (

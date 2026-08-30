@@ -339,7 +339,7 @@ def test_observe_only_requires_six_stream_stage2_artifact(monkeypatch) -> None:
         "checkpoint": "/tmp/deco.ts",
         "device": "cuda:0",
         "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
-        "observation": {},
+        "observation": {"black_camera0": True},
         "control": {},
         "runtime": {"auto_start": True, "warmup_runs": 0},
     }
@@ -368,9 +368,44 @@ def test_observe_only_requires_six_stream_stage2_artifact(monkeypatch) -> None:
         remote_client.run(Path("unused.yaml"), observe_only=True)
 
 
+def test_observe_only_requires_black_camera0_before_connecting(monkeypatch) -> None:
+    config = {
+        "checkpoint": "/tmp/deco.ts",
+        "device": "cuda:0",
+        "connection": {"address": "127.0.0.1", "port": 26421, "require_token": False},
+        "observation": {"black_camera0": False},
+        "control": {},
+        "runtime": {"auto_start": True, "warmup_runs": 0},
+    }
+
+    class Stage2Policy:
+        state_dim = 7
+        action_dim = 10
+        action_horizon = 32
+        expected_sample_hz = 30.0
+        image_keys = ("observation.images.camera0", "observation.images.camera1")
+        tactile_keys = TACTILE_FIELD_ORDER
+
+        def __init__(self, checkpoint: Path, *, device: str, verify_hash: bool) -> None:
+            pass
+
+    class BridgeMustNotConnect:
+        def __init__(self, **kwargs) -> None:
+            raise AssertionError("observe-only must reject before connecting")
+
+    monkeypatch.setattr(remote_client, "check", lambda _path: config)
+    monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
+    monkeypatch.setattr(bridge_client, "RobotBridgeClient", BridgeMustNotConnect)
+    monkeypatch.setattr(policy, "DECOPolicy", Stage2Policy)
+
+    with pytest.raises(ValueError, match="black_camera0"):
+        remote_client.run(Path("unused.yaml"), observe_only=True)
+
+
 def test_observe_only_projects_and_saves_tactile_observation(monkeypatch, tmp_path) -> None:
     events: list[tuple[str, str] | str] = []
     saved: dict[str, object] = {}
+    receive_calls = 0
     camera0 = np.full((3, 4, 3), 255, dtype=np.uint8)
     tactile_left_0 = np.full((3, 4, 3), 37, dtype=np.uint8)
     observation = {
@@ -401,6 +436,8 @@ def test_observe_only_projects_and_saves_tactile_observation(monkeypatch, tmp_pa
             pass
 
         def receive_observation(self, timeout: float | None = None):
+            nonlocal receive_calls
+            receive_calls += 1
             return 0, observation
 
         def send_state(self, state: str) -> None:
@@ -445,6 +482,7 @@ def test_observe_only_projects_and_saves_tactile_observation(monkeypatch, tmp_pa
 
     remote_client.run(Path("unused.yaml"), observe_only=True)
 
+    assert receive_calls == 1
     assert events == [("state", "stop"), "close"]
     saved_observation = saved["observation"]
     assert isinstance(saved_observation, dict)
