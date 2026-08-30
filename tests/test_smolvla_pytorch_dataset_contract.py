@@ -62,10 +62,21 @@ def test_visual_contract_allows_and_prunes_tactile_cameras(tmp_path: Path) -> No
         info={"features": dict(features)},
         stats={key: {"mean": [0.0]} for key in features},
     )
+    class FakeHfDataset:
+        def __init__(self, column_names: list[str]):
+            self.column_names = column_names
+
+        def remove_columns(self, names: list[str]):
+            removed = set(names)
+            return FakeHfDataset([name for name in self.column_names if name not in removed])
+
     dataset = SimpleNamespace(
         meta=metadata,
         delta_timestamps={key: [0.0] for key in features},
-        reader=SimpleNamespace(delta_indices={key: [0] for key in features}),
+        reader=SimpleNamespace(
+            delta_indices={key: [0] for key in features},
+            hf_dataset=FakeHfDataset(list(features)),
+        ),
     )
     _select_dataset_cameras(
         dataset,
@@ -75,6 +86,9 @@ def test_visual_contract_allows_and_prunes_tactile_cameras(tmp_path: Path) -> No
     assert "observation.images.tactile_left_0" not in metadata.stats
     assert "observation.images.tactile_left_0" not in dataset.delta_timestamps
     assert "observation.images.tactile_left_0" not in dataset.reader.delta_indices
+    assert "observation.images.tactile_left_0" not in dataset.reader.hf_dataset.column_names
+    assert "observation.images.camera0" in dataset.reader.hf_dataset.column_names
+    assert "observation.images.camera1" in dataset.reader.hf_dataset.column_names
 
 
 def test_wandb_auto_is_offline_without_credentials(monkeypatch) -> None:

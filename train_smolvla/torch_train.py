@@ -381,7 +381,7 @@ class CombinedLeRobotDataset:
 
 
 def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
-    """Hide unselected camera features before LeRobot decodes training samples."""
+    """Hide unselected camera features before LeRobot returns training samples."""
     meta = dataset.meta
     features = dict(meta.features)
     missing = selected_images - set(features)
@@ -415,6 +415,20 @@ def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
             for key, value in reader.delta_indices.items()
             if key in selected_features
         }
+    # Official LeRobot 0.6.1 loads ``dtype: image`` cameras as columns in the
+    # Hugging Face Dataset before this selector runs. Pruning metadata is enough
+    # for MP4-backed video keys, but embedded Parquet image columns would still
+    # be returned by ``dataset[index]``. Remove those unused columns from the
+    # already-loaded reader as well, so tactile images never reach DataLoader.
+    hf_dataset = None if reader is None else getattr(reader, "hf_dataset", None)
+    if hf_dataset is not None:
+        unused_image_columns = [
+            key
+            for key in getattr(hf_dataset, "column_names", ())
+            if key.startswith("observation.images.") and key not in selected_images
+        ]
+        if unused_image_columns:
+            reader.hf_dataset = hf_dataset.remove_columns(unused_image_columns)
     return dataset
 
 
