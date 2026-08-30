@@ -158,16 +158,33 @@ def build_train_config(raw: dict[str, Any]):
     )
 
 
+def norm_stats_path(raw: dict[str, Any]) -> Path:
+    """Return the local norm_stats.json path selected by a YAML config."""
+
+    norm = raw.get("norm_stats") or {}
+    assets_dir = str(norm.get("dir", "./assets"))
+    if "://" in assets_dir:
+        raise ValueError("automatic norm stats generation requires a local norm_stats.dir")
+    assets_path = Path(assets_dir).expanduser()
+    if not assets_path.is_absolute():
+        assets_path = Path(__file__).resolve().parent / assets_path
+    asset_id = str(norm.get("asset_id", raw["datasets"][0]["repo_id"]))
+    return (assets_path / asset_id / "norm_stats.json").resolve()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--print-output", action="store_true")
+    parser.add_argument("--print-norm-stats", action="store_true")
     args = parser.parse_args()
     raw = load_config(args.config.expanduser().resolve())
     output = Path(str(raw["training"]["output"])).expanduser().resolve()
     if args.print_output:
         print(output)
+    if args.print_norm_stats:
+        print(norm_stats_path(raw))
     if args.check:
         return
     from tools.train_core import main as train_main

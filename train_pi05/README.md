@@ -87,10 +87,14 @@ CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内�
 ```bash
 # 先修改 train_pi05/configs/train_pi05_right.yaml 中的数据路径和 norm_stats。
 source env_path
-"$TRAIN_PI05_PYTHON" train_pi05/tools/compute_norm_stats.py --config-name train_pi05/configs/train_pi05_right.yaml
 bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
 ```
+
+一键入口会检查 YAML 对应的 `norm_stats.json`：不存在时先在同一个后台 tmux
+中完整计算 state/action 统计，成功后自动继续训练；已存在时直接训练。统计阶段不会
+加载或解码视频，默认使用 batch 1024、8 workers。可通过
+`PI05_NORM_BATCH_SIZE` 和 `PI05_NORM_NUM_WORKERS` 覆盖。
 
 最后一条命令默认在后台创建 `pi05_right_train` tmux 会话，不会自动进入。
 每次训练都会写入独立的时间戳日志文件，并更新 `latest.log` 链接：

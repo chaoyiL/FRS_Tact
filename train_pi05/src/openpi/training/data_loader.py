@@ -144,7 +144,11 @@ class FakeDataset(Dataset):
 
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    visual_keys: tuple[str, ...] | None = None,
 ) -> Dataset:
     """Create a dataset for training."""
     repo_id = data_config.repo_id
@@ -170,6 +174,7 @@ def create_torch_dataset(
                 source.action_key: [t / dataset_meta.fps for t in range(action_horizon)]
             },
             return_uint8=True,
+            visual_keys=visual_keys,
         )
         dataset = ActionKeyDataset(dataset, source.action_key)
         # LeRobot v3's reader already exposes the task text as ``sample["task"]``;

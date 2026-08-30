@@ -24,6 +24,16 @@ class RemoveStrings(transforms.DataTransformFn):
         return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
 
 
+class ExtractStateAndActions(transforms.DataTransformFn):
+    """Keep only the numeric values used by pure-vision normalization."""
+
+    def __call__(self, x: dict) -> dict:
+        return {
+            "state": np.atleast_1d(np.asarray(x["observation.state"])),
+            "actions": np.asarray(x["actions"]),
+        }
+
+
 def create_torch_dataloader(
     data_config: _config.DataConfig,
     action_horizon: int,
@@ -31,18 +41,28 @@ def create_torch_dataloader(
     model_config: _model.BaseModelConfig,
     num_workers: int,
     max_frames: int | None = None,
+    state_action_only: bool = False,
 ) -> tuple[_data_loader.Dataset, int]:
     if data_config.repo_id is None:
         raise ValueError("Data config must have a repo_id")
-    dataset = _data_loader.create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = _data_loader.TransformedDataset(
-        dataset,
-        [
+    dataset = _data_loader.create_torch_dataset(
+        data_config,
+        action_horizon,
+        model_config,
+        visual_keys=() if state_action_only else None,
+    )
+    input_transforms = (
+        [*data_config.repack_transforms.inputs, ExtractStateAndActions()]
+        if state_action_only
+        else [
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
-            # Remove strings since they are not supported by JAX and are not needed to compute norm stats.
             RemoveStrings(),
-        ],
+        ]
+    )
+    dataset = _data_loader.TransformedDataset(
+        dataset,
+        input_transforms,
     )
     if max_frames is not None and max_frames < len(dataset):
         num_batches = max_frames // batch_size
@@ -96,7 +116,8 @@ def main(
     num_workers: int | None = None,
 ):
     config_path = Path(config_name).expanduser()
-    if config_path.suffix.lower() in {".yaml", ".yml"}:
+    state_action_only = config_path.suffix.lower() in {".yaml", ".yml"}
+    if state_action_only:
         # Reuse the formal training path so ordered datasets, per-source
         # action keys, transforms and the asset ID stay exactly consistent.
         train_root = Path(__file__).resolve().parents[1]
@@ -129,6 +150,7 @@ def main(
             config.model,
             stats_num_workers,
             max_frames,
+            state_action_only,
         )
 
     keys = ["state", "actions"]

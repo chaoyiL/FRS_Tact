@@ -142,8 +142,8 @@ class DatasetReader:
             raise KeyError(
                 f"visual_keys not found among dataset cameras: {unknown}; available={list(available)}"
             )
-        if not resolved:
-            raise ValueError("visual_keys resolved to an empty set")
+        # An explicit empty sequence is useful for state/action-only passes such
+        # as normalization statistics, where decoding video would be wasted I/O.
         return tuple(dict.fromkeys(resolved))
 
     @property

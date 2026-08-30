@@ -57,14 +57,19 @@ if [[ "${check_only}" == 1 ]]; then
     exit 0
 fi
 
+norm_stats_file="$(${TRAIN_PYTHON} train.py --config "${config_path}" --check --print-norm-stats)"
+norm_batch_size="${PI05_NORM_BATCH_SIZE:-1024}"
+norm_num_workers="${PI05_NORM_NUM_WORKERS:-8}"
 log_dir="${output_dir}/logs"
 log_file="${log_dir}/train_$(date '+%Y%m%d_%H%M%S').log"
 inner=""
 prepare_log_command() {
     mkdir -p -- "${log_dir}"
     ln -sfn -- "$(basename -- "${log_file}")" "${log_dir}/latest.log"
-    printf -v inner 'set -o pipefail; env PYTHONPATH=%q PYTHONSAFEPATH=1 %q train.py --config %q 2>&1 | tee -a %q' \
-        "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}" "${log_file}"
+    printf -v inner 'set -Eeuo pipefail; { if [[ ! -s %q ]]; then printf "[pi05] norm stats missing; computing: %%s\n" %q; env PYTHONPATH=%q PYTHONSAFEPATH=1 %q tools/compute_norm_stats.py --config-name %q --batch-size %q --num-workers %q; else printf "[pi05] using norm stats: %%s\n" %q; fi; env PYTHONPATH=%q PYTHONSAFEPATH=1 %q train.py --config %q; } 2>&1 | tee -a %q' \
+        "${norm_stats_file}" "${norm_stats_file}" \
+        "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}" "${norm_batch_size}" "${norm_num_workers}" \
+        "${norm_stats_file}" "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}" "${log_file}"
 }
 
 if [[ "${PI05_FOREGROUND:-0}" != 1 && -z "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
