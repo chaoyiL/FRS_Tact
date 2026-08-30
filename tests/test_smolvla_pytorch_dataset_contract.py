@@ -301,6 +301,7 @@ def test_4090_smoke_launcher_has_real_staged_acceptance_checks() -> None:
     for stage in ("env", "data", "sample", "preflight", "train", "checkpoint"):
         assert f"should_run {stage}" in launcher
     assert 'video_backend="torchcodec"' in launcher
+    assert "Version(actual[name]) != Version(wanted)" in launcher
     assert "sample = dataset[0]" in launcher
     assert "five real forward/backward optimization steps" in launcher
     assert '"optimizer_state.safetensors"' in launcher

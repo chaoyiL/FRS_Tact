@@ -117,6 +117,7 @@ from importlib.metadata import version
 import os
 import platform
 
+from packaging.version import Version
 import torch
 
 expected = {
@@ -125,7 +126,7 @@ expected = {
 }
 actual = {name: version(name) for name in expected}
 for name, wanted in expected.items():
-    if actual[name] != wanted:
+    if Version(actual[name]) != Version(wanted):
         raise RuntimeError(f"{name} must be {wanted}, got {actual[name]}")
 if not version("torch").startswith("2.7.1"):
     raise RuntimeError(f"torch must be 2.7.1, got {version('torch')}")

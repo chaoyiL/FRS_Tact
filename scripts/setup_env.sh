@@ -479,6 +479,7 @@ verify_smolvla_torch_environment() {
             "${smolvla_python}" - <<'PY'
 import os
 from importlib.metadata import version
+from packaging.version import Version
 
 import lerobot
 import torch
@@ -494,7 +495,7 @@ expected_torch = os.environ["FRS_SMOLVLA_TORCH_VERSION"]
 expected_torchcodec = os.environ["FRS_SMOLVLA_TORCHCODEC_VERSION"]
 if torch.__version__.split("+", 1)[0] != expected_torch:
     raise RuntimeError(f"需要 torch {expected_torch}，当前为 {torch.__version__}")
-if version("torchcodec") != expected_torchcodec:
+if Version(version("torchcodec")) != Version(expected_torchcodec):
     raise RuntimeError(
         f"需要 torchcodec {expected_torchcodec}，当前为 {version('torchcodec')}"
     )

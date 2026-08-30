@@ -41,6 +41,7 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'export DATA_TOOL_PYTHON=%q' in source
     assert 'scripts/env_shortcuts.sh' in source
     assert '"torchcodec==${SMOLVLA_TORCHCODEC_VERSION}"' in source
+    assert 'Version(version("torchcodec")) != Version(expected_torchcodec)' in source
     assert 'PI05_VENV_DIR="${PI05_VENV_DIR:-${DEFAULT_PI05_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_VENV_DIR}"' in source
     assert '--project "${PI05_PROJECT_ROOT}"' in source
