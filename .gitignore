@@ -111,6 +111,10 @@ tensorboard/
 /train_pi05_frs/.cache/
 /train_pi05_frs/outputs/
 
+# 这两个环境由 setup_env.sh 在目标服务器上解析依赖；uv 自动生成的锁文件不提交。
+/data_tools/uv.lock
+/train_pi05/uv.lock
+
 # Hugging Face cache (local)
 .huggingface/
 
