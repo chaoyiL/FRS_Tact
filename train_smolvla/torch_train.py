@@ -311,6 +311,20 @@ def validate_dataset_contract(config: dict[str, Any]) -> None:
             )
 
 
+def _stats_tensors_to_numpy(value: Any) -> Any:
+    """Recursively convert Torch statistic leaves for LeRobot aggregation."""
+    if isinstance(value, dict):
+        return {key: _stats_tensors_to_numpy(item) for key, item in value.items()}
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        detached = detach()
+        cpu = getattr(detached, "cpu", None)
+        numpy = getattr(cpu() if callable(cpu) else detached, "numpy", None)
+        if callable(numpy):
+            return numpy()
+    return value
+
+
 class CombinedLeRobotDataset:
     """Map-style concatenation with aggregate stats and global episode boundaries."""
 
@@ -325,7 +339,16 @@ class CombinedLeRobotDataset:
             self._ends.append(frame_total)
 
         self.meta = copy.copy(datasets[0].meta)
-        self.meta.stats = aggregate_stats([child.meta.stats for child in datasets])
+        child_stats = [child.meta.stats for child in datasets]
+        if len(child_stats) == 1:
+            # Preserve official single-dataset behavior. In particular,
+            # use_imagenet_stats replaces visual mean/std with Torch tensors,
+            # while LeRobot's multi-dataset aggregate_stats only accepts NumPy.
+            self.meta.stats = copy.deepcopy(child_stats[0])
+        else:
+            self.meta.stats = aggregate_stats(
+                [_stats_tensors_to_numpy(stats) for stats in child_stats]
+            )
         starts: list[int] = []
         stops: list[int] = []
         tasks: list[Any] = []

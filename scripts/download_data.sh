@@ -176,9 +176,9 @@ check_deps() {
         exit 1
     fi
 
-    if ! "${DATA_PYTHON}" -c "import jsonlines; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
+    if ! "${DATA_PYTHON}" -c "import jsonlines; import torch; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
         echo "=========================================="
-        echo " 数据工具环境缺少 LeRobot 图像数据转换依赖。"
+        echo " 数据工具环境缺少 LeRobot 数据转换依赖（包括 CPU PyTorch）。"
         echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
         echo "=========================================="
         exit 1

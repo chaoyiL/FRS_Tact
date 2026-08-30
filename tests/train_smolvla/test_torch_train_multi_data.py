@@ -98,3 +98,42 @@ def test_combined_dataset_concatenates_frames_episodes_and_stats() -> None:
     assert combined.meta.episodes["tasks"] == [["one"], ["one"], ["two"], ["two"]]
     assert combined.meta.stats == {"combined": 2}
     assert len(aggregate_calls[0]) == 2
+
+
+def test_combined_single_dataset_preserves_stats_without_aggregation() -> None:
+    dataset = _FakeDataset("one", [2, 1])
+
+    def aggregate(_stats):
+        raise AssertionError("single-dataset stats must not be aggregated")
+
+    combined = CombinedLeRobotDataset([dataset], aggregate)
+
+    assert combined.meta.stats == dataset.meta.stats
+
+
+def test_combined_multi_dataset_converts_tensor_stats_before_aggregation() -> None:
+    class FakeTensor:
+        def detach(self):
+            return self
+
+        def cpu(self):
+            return self
+
+        def numpy(self):
+            return "numpy-value"
+
+    one = _FakeDataset("one", [1])
+    two = _FakeDataset("two", [1])
+    one.meta.stats = {"observation.images.camera0": {"mean": FakeTensor()}}
+    two.meta.stats = {"observation.images.camera0": {"mean": FakeTensor()}}
+
+    def aggregate(stats):
+        assert [item["observation.images.camera0"]["mean"] for item in stats] == [
+            "numpy-value",
+            "numpy-value",
+        ]
+        return {"combined": True}
+
+    combined = CombinedLeRobotDataset([one, two], aggregate)
+
+    assert combined.meta.stats == {"combined": True}

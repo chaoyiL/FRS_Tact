@@ -568,12 +568,14 @@ verify_data_tools_environment() {
 import sys
 
 import jsonlines
+import torch
 from lerobot.datasets.v30 import convert_dataset_v21_to_v30
 
 del jsonlines, convert_dataset_v21_to_v30
 if sys.version_info[:2] != (3, 12):
     raise RuntimeError(f"LeRobot data conversion requires Python 3.12, got {sys.version}")
 print(f"LeRobot data tools python={sys.version.split()[0]}")
+print(f"LeRobot data tools torch={torch.__version__}")
 PY
         "${data_hf}" version
     )
