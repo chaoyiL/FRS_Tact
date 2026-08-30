@@ -178,6 +178,8 @@ class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
     sources: Sequence[DatasetSource] = ()
+    # Exact raw dataset camera keys to decode. None keeps all available cameras.
+    visual_keys: Sequence[str] | None = None
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -194,6 +196,7 @@ class DataConfigFactory(abc.ABC):
             self.base_config or DataConfig(),
             repo_id=repo_id,
             sources=tuple(self.sources),
+            visual_keys=self.visual_keys,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
