@@ -92,6 +92,13 @@ bash train_pi05/scripts/start_pi05_right_train.sh --check
 bash train_pi05/scripts/start_pi05_right_train.sh
 ```
 
+第二条命令会默认创建并进入 `pi05_right_train` tmux 会话，实时显示训练日志。
+按 `Ctrl-b d` 可退出 tmux 界面而不停止训练；只想后台启动时使用：
+
+```bash
+bash train_pi05/scripts/start_pi05_right_train.sh --detach
+```
+
 `source env_path` 后也可以使用不歧义的快捷命令：`hf`、`wandb`、
 `data-python`、`pi05-python`、`pi05-deploy-python` 和 `smolvla-python`。
 

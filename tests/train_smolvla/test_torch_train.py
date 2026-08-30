@@ -4,10 +4,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from train_deco.input_adapter import augmentation_preset
+from train_smolvla.image_augmentation import augmentation_preset
 from train_smolvla.torch_train import (
     augment_smolvla_training_batch,
-    resolve_deco_augmentation,
+    resolve_smolvla_augmentation,
 )
 
 
@@ -24,19 +24,19 @@ def _config(*, preset: str = "balanced-light-v2", lerobot_transforms: bool = Fal
     }
 
 
-def test_resolve_deco_augmentation_uses_exact_balanced_light_v2_preset() -> None:
-    assert resolve_deco_augmentation(_config()) == augmentation_preset("balanced-light-v2")
+def test_resolve_smolvla_augmentation_uses_balanced_light_v2_preset() -> None:
+    assert resolve_smolvla_augmentation(_config()) == augmentation_preset("balanced-light-v2")
 
 
-def test_resolve_deco_augmentation_retains_low_light_v1_for_reproduction() -> None:
-    assert resolve_deco_augmentation(_config(preset="low-light-v1")) == augmentation_preset(
+def test_resolve_smolvla_augmentation_retains_low_light_v1_for_reproduction() -> None:
+    assert resolve_smolvla_augmentation(_config(preset="low-light-v1")) == augmentation_preset(
         "low-light-v1"
     )
 
 
-def test_deco_augmentation_rejects_double_augmentation() -> None:
+def test_smolvla_augmentation_rejects_double_augmentation() -> None:
     with pytest.raises(ValueError, match="image_transforms must be disabled"):
-        resolve_deco_augmentation(_config(lerobot_transforms=True))
+        resolve_smolvla_augmentation(_config(lerobot_transforms=True))
 
 
 def test_batch_augmentation_shares_parameters_across_cameras() -> None:

@@ -102,14 +102,15 @@ checkpoints in `/workspace`. Set `SMOLVLA_USE_LOCAL_ARROW_CACHE=0` only when the
 workspace quota is known to have enough headroom, or override the local path
 with `SMOLVLA_LOCAL_CACHE_ROOT`.
 
-The default dual-arm YAML enables DECO's exact `balanced-light-v2` training
-augmentation. It calls the same DECO implementation at batch level, so both
-cameras in one sample share the branch and all sampled parameters. Official
-LeRobot per-camera `dataset.image_transforms` must remain disabled while this
-preset is enabled. Evaluation batches are not augmented. Set `preset` to
-`low-light-v1` only when reproducing the older calibrated dark-light runs;
-`train_deco/configs/low_light_reference.yaml` is provenance for that v1 preset,
-not a separate v2 configuration.
+The default dual-arm YAML enables SmolVLA's `balanced-light-v2` training image
+augmentation. Its parameter values were calibrated from the DECO reference
+recipe, but the implementation is owned by `train_smolvla` and does not load or
+train DECO. Both cameras in one sample share the branch and all sampled
+parameters. Official LeRobot per-camera `dataset.image_transforms` must remain
+disabled while this preset is enabled. Evaluation batches are not augmented.
+Set `preset` to `low-light-v1` only when reproducing the older calibrated
+dark-light runs; `train_deco/configs/low_light_reference.yaml` is provenance
+for that v1 preset, not a runtime dependency or a separate v2 configuration.
 
 Right-hand single-arm training:
 

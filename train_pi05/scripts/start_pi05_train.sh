@@ -31,11 +31,13 @@ fail() { printf '[pi05] error: %s\n' "$*" >&2; return 1; }
 log() { printf '[pi05] %s\n' "$*"; }
 
 check_only=0
+detach_tmux=0
 config_path=""
 while (($#)); do
     case "$1" in
         --check) check_only=1 ;;
-        -*) fail "usage: $0 [--check] [CONFIG]"; exit 2 ;;
+        --detach) detach_tmux=1 ;;
+        -*) fail "usage: $0 [--check] [--detach] [CONFIG]"; exit 2 ;;
         *) [[ -z "${config_path}" ]] || { fail "only one CONFIG is allowed"; exit 2; }; config_path="$1" ;;
     esac
     shift
@@ -56,14 +58,27 @@ fi
 
 if [[ "${PI05_FOREGROUND:-0}" != 1 && -z "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
     inner=""
-    tmux has-session -t "${TMUX_SESSION}" 2>/dev/null \
-        && fail "tmux session already exists: ${TMUX_SESSION}"
+    if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
+        # 上一次训练已经结束时，自动清理只剩 dead pane 的会话；正在训练的会话绝不覆盖。
+        if [[ "$(tmux display-message -p -t "${TMUX_SESSION}:0.0" '#{pane_dead}')" == 1 ]]; then
+            tmux kill-session -t "${TMUX_SESSION}"
+        else
+            fail "tmux session already exists: ${TMUX_SESSION}; attach with: tmux attach -t ${TMUX_SESSION}"
+            exit 1
+        fi
+    fi
     printf -v inner 'env PYTHONPATH=%q PYTHONSAFEPATH=1 %q train.py --config %q' \
         "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}"
     tmux new-session -d -s "${TMUX_SESSION}" -c "${TRAIN_ROOT}" \
-        "${inner}"
-    log "started tmux session ${TMUX_SESSION}; attach with: tmux attach -t ${TMUX_SESSION}"
-    exit 0
+        "${inner}" \; set-option -w -t "${TMUX_SESSION}" remain-on-exit on
+
+    if [[ "${detach_tmux}" == 1 || "${PI05_TMUX_DETACHED:-0}" == 1 || ! -t 0 || ! -t 1 ]]; then
+        log "started detached tmux session ${TMUX_SESSION}; attach with: tmux attach -t ${TMUX_SESSION}"
+        exit 0
+    fi
+
+    log "started tmux session ${TMUX_SESSION}; attaching now (detach with Ctrl-b d)"
+    exec tmux attach-session -t "${TMUX_SESSION}"
 fi
 
 mkdir -p -- "${output_dir}"

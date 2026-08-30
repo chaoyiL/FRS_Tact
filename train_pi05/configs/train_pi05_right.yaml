@@ -44,7 +44,8 @@ training:
   save_interval: 2000
   keep_period: 10000
   seed: 42
-  fsdp_devices: 1
+  # 两张 A100 组成一个 2 卡 FSDP 分片组；batch_size=128 是全局 batch，等效每卡 64。
+  fsdp_devices: 2
   overwrite: false
   resume: false
 

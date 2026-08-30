@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Callable
 import yaml
 
 if TYPE_CHECKING:
-    from train_deco.input_adapter import LowLightAugmentationConfig
+    from train_smolvla.image_augmentation import ImageAugmentationConfig
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "train_smolvla.yaml"
@@ -506,9 +506,9 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
     return make_train_eval_datasets
 
 
-def resolve_deco_augmentation(config: dict[str, Any]) -> LowLightAugmentationConfig | None:
-    """Resolve the exact DECO batch-level augmentation selected by the YAML."""
-    from train_deco.input_adapter import (
+def resolve_smolvla_augmentation(config: dict[str, Any]) -> ImageAugmentationConfig | None:
+    """Resolve the SmolVLA image augmentation preset selected by the YAML."""
+    from train_smolvla.image_augmentation import (
         AUGMENTATION_PRESET_NAMES,
         augmentation_preset,
         validate_augmentation_config,
@@ -525,14 +525,14 @@ def resolve_deco_augmentation(config: dict[str, Any]) -> LowLightAugmentationCon
     preset = str(raw.get("preset", "balanced-light-v2"))
     if preset not in AUGMENTATION_PRESET_NAMES:
         raise ValueError(
-            f"unknown DECO augmentation preset {preset!r}; "
+            f"unknown SmolVLA image augmentation preset {preset!r}; "
             f"expected one of {AUGMENTATION_PRESET_NAMES}"
         )
     resolved = augmentation_preset(preset, enabled=bool(raw.get("enabled", True)))
     validate_augmentation_config(resolved)
     if resolved.enabled and bool(config["dataset"].get("image_transforms", {}).get("enable", False)):
         raise ValueError(
-            "dataset.image_transforms must be disabled when DECO augmentation is enabled"
+            "dataset.image_transforms must be disabled when SmolVLA image augmentation is enabled"
         )
     return resolved
 
@@ -540,14 +540,14 @@ def resolve_deco_augmentation(config: dict[str, Any]) -> LowLightAugmentationCon
 def augment_smolvla_training_batch(
     batch: Any,
     image_keys: tuple[str, ...],
-    augmentation: LowLightAugmentationConfig | None,
+    augmentation: ImageAugmentationConfig | None,
 ) -> Any:
-    """Apply the selected DECO preset jointly to all camera views in each training sample."""
+    """Apply SmolVLA augmentation jointly to all views in each training sample."""
     if augmentation is None or not augmentation.enabled:
         return batch
     import torch
 
-    from train_deco.input_adapter import augment_training_images
+    from train_smolvla.image_augmentation import augment_training_images
 
     if not isinstance(batch, dict):
         raise TypeError(f"SmolVLA training batch must be a dict, got {type(batch).__name__}")
@@ -560,15 +560,15 @@ def augment_smolvla_training_batch(
     shapes = {tuple(image.shape) for image in images}
     if len(shapes) != 1 or images[0].ndim not in (4, 5) or images[0].shape[-3] != 3:
         raise ValueError(
-            "DECO image augmentation requires equally shaped RGB camera batches "
+            "SmolVLA image augmentation requires equally shaped RGB camera batches "
             "[B,C,H,W] or [B,T,C,H,W], "
             f"got {[tuple(image.shape) for image in images]}"
         )
     if not all(image.is_floating_point() for image in images):
-        raise TypeError("DECO image augmentation requires floating-point camera tensors")
+        raise TypeError("SmolVLA image augmentation requires floating-point camera tensors")
 
     # LeRobot keeps an observation-time axis even when n_obs_steps=1. Flatten
-    # camera and time into DECO's view axis so its existing [B,N,C,H,W]
+    # camera and time into the augmentation view axis [B,N,C,H,W], so it
     # implementation samples exactly one transform per batch sample and shares
     # it across every camera and observation time.
     stacked = torch.stack(images, dim=1)
@@ -737,7 +737,7 @@ def _run_worker(config: dict[str, Any], command: list[str]) -> None:
     upstream_make = lerobot_train.make_policy
     upstream_make_datasets = lerobot_train.make_train_eval_datasets
     update_signature = inspect.signature(upstream_update)
-    augmentation = resolve_deco_augmentation(config)
+    augmentation = resolve_smolvla_augmentation(config)
     rename_map = config.get("rename_map") or {}
     training_image_keys = tuple(
         rename_map.get(key, key) for key in config["dataset"]["image_keys"]

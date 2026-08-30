@@ -10,7 +10,7 @@ dataset:
     - observation.images.camera0
     - observation.images.camera1
   eval_split: 0.10
-  # DECO balanced-light-v2 is applied jointly at batch level below. Keep the
+  # SmolVLA balanced-light-v2 is applied jointly at batch level below. Keep the
   # per-camera LeRobot transforms disabled to avoid double augmentation and
   # independent random parameters for the two views.
   image_transforms:
@@ -63,8 +63,8 @@ datasets:
   - repo_id: KaiyueChen/two_tubes_05
     root: /workspace/lerobot_v30/KaiyueChen/two_tubes_05
 
-# Exact DECO balanced-light-v2 behavior: 25% identity and 75% mild
-# brightness/contrast/saturation jitter, with one shared draw for both cameras
+# SmolVLA balanced-light-v2, calibrated from the reference recipe:
+# 25% identity and 75% mild brightness/contrast/saturation jitter, with one shared draw for both cameras
 # in each sample. Non-identity samples have a 20% blur probability.
 augmentation:
   preset: balanced-light-v2
