@@ -132,8 +132,9 @@ python -m train_smolvla.torch_train \
 The dedicated smoke path keeps the production dual-arm contract (20D state,
 20D action, camera1/camera2 after rename, PEFT, and balanced-light-v2) while
 using only `KaiyueChen/two_tubes_04`, one visible GPU, batch size 1, and five
-training steps. This is not a mocked pipeline: it decodes a real TorchCodec
-video sample, runs five forward/backward optimizer steps, saves the real PEFT
+training steps. This is not a mocked pipeline: it loads a real visual sample
+from either Parquet image columns or TorchCodec video according to dataset
+metadata, runs five forward/backward optimizer steps, saves the real PEFT
 checkpoint, and validates the exported model and optimizer state.
 
 Run the complete environment -> data -> decode -> preflight -> training ->

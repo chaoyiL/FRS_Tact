@@ -25,7 +25,7 @@ Run a real single-RTX-4090 SmolVLA acceptance pipeline with two_tubes_04.
 Stages:
   env         Install and validate the isolated SmolVLA environment and GPU
   data        Download/convert two_tubes_04 to the local LeRobot v3 dataset
-  sample      Validate metadata and decode one real two-camera video sample
+  sample      Validate metadata and load one real two-camera visual sample
   preflight   Validate and print the exact official LeRobot training command
   train       Run five real forward/backward optimization steps and save
   checkpoint  Validate weights, optimizer state, step, dimensions, and cameras
@@ -185,9 +185,16 @@ parquets = list(root.glob("data/**/*.parquet"))
 videos = list(root.glob("videos/**/*.mp4"))
 if not parquets:
     raise RuntimeError(f"no parquet files found under {root / 'data'}")
+visual_storage = {}
 for key in config["dataset"]["image_keys"]:
-    if not any(key in str(path) for path in videos):
-        raise RuntimeError(f"no mp4 files found for required camera {key}")
+    dtype = info.get("features", {}).get(key, {}).get("dtype")
+    if dtype not in {"image", "video"}:
+        raise RuntimeError(
+            f"required camera {key} must use image or video storage, got {dtype!r}"
+        )
+    visual_storage[key] = dtype
+    if dtype == "video" and not any(key in str(path) for path in videos):
+        raise RuntimeError(f"no mp4 files found for video camera {key}")
 
 _import_official_lerobot()
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -226,7 +233,7 @@ print(
 )
 print(
     f"[smolvla-smoke] files: parquet={len(parquets)} mp4={len(videos)}; "
-    "TorchCodec decoded sample 0"
+    f"visual_storage={visual_storage}; loaded sample 0"
 )
 print(
     "[smolvla-smoke] sample contract: state=20D action=20D cameras="
@@ -346,7 +353,7 @@ if should_run data; then
 fi
 
 if should_run sample; then
-    log "[3/6] metadata contract and real TorchCodec frame decode"
+    log "[3/6] metadata contract and real visual sample load"
     load_environment
     configure_local_runtime_cache
     validate_and_decode_sample
