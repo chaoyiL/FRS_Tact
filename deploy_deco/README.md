@@ -84,7 +84,7 @@ Only the client blacks out `camera0`; the server remains bimanual.
 bash deploy_deco/scripts/start_deco_stage2_right.sh --check
 ```
 
-查看服务端启动参数但不连接服务端：
+配合 `scripts/bimanual_deco_stage2.sh --dry-run` 使用：客户端仍会连接服务端、发送配置/START 和有界动作；服务端 dry-run 会保持硬件未初始化，而客户端 flag 会跳过动作后的最终 observation 等待。不要与普通服务端配对，否则该命令不提供硬件安全保证：
 
 ```bash
 bash deploy_deco/scripts/start_deco_stage2_right.sh --server-dry-run --max-iterations 1
