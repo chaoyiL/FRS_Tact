@@ -7,7 +7,16 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
+STAGE1_EXPORT_FORMAT = "sudo-upstream-deco-stage1-torchscript-v1"
+STAGE2_EXPORT_FORMAT = "sudo-upstream-deco-stage2-torchscript-v1"
+EXPORT_FORMAT = STAGE1_EXPORT_FORMAT  # compatibility for existing imports
+SUPPORTED_EXPORT_FORMATS = frozenset({STAGE1_EXPORT_FORMAT, STAGE2_EXPORT_FORMAT})
+TACTILE_FIELD_ORDER = (
+    "observation.images.tactile_left_0",
+    "observation.images.tactile_right_0",
+    "observation.images.tactile_left_1",
+    "observation.images.tactile_right_1",
+)
 ACTION_MODE = "tcp_delta_absolute_gripper"
 ROTATION_REPRESENTATION = "rotation_6d_matrix_columns"
 STATE_LAYOUT = "relative_start_pose6d_gripper_plus_left_relative_right"
@@ -27,6 +36,10 @@ _PROFILE_CONTRACTS = {
 def artifact_profile(metadata: Mapping[str, Any]) -> str:
     value = metadata.get("state_action_profile")
     return DUAL_ARM_PROFILE if value is None else str(value)
+
+
+def artifact_uses_tactile(metadata: Mapping[str, Any]) -> bool:
+    return metadata.get("format") == STAGE2_EXPORT_FORMAT
 
 
 def sha256_file(path: Path) -> str:
@@ -52,8 +65,8 @@ def _shape(metadata: Mapping[str, Any], section: str, name: str) -> tuple[int, .
 
 
 def validate_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the fixed VB3 DECO Stage 1 deployment contract."""
-    if metadata.get("format") != EXPORT_FORMAT:
+    """Validate the fixed VB3 DECO deployment contract."""
+    if metadata.get("format") not in SUPPORTED_EXPORT_FORMATS:
         raise ValueError(f"unsupported DECO artifact format: {metadata.get('format')!r}")
     cameras = metadata.get("camera_names")
     expected_cameras = [
@@ -67,6 +80,8 @@ def validate_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     action = _shape(metadata, "output", "action")
     if len(images) != 5 or images[:3] != (1, 2, 3) or min(images[3:]) <= 0:
         raise ValueError(f"DECO images must have shape [1,2,3,H,W], got {images}")
+    if artifact_uses_tactile(metadata) and images != (1, 2, 3, 224, 224):
+        raise ValueError(f"DECO Stage 2 images must have shape [1,2,3,224,224], got {images}")
     profile = artifact_profile(metadata)
     try:
         expected_observation, expected_action_width, expected_layout, expected_arms = (
@@ -103,6 +118,27 @@ def validate_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("DECO deployment requires embedded normalization")
     if metadata.get("stochastic") is not True:
         raise ValueError("DECO Stage 1 metadata must declare stochastic inference")
+    if artifact_uses_tactile(metadata):
+        if profile != SINGLE_RIGHT_ARM_PROFILE:
+            raise ValueError("DECO Stage 2 state_action_profile must be single-right-arm-7x10")
+        if observation != (1, 7):
+            raise ValueError("DECO Stage 2 observation must have shape [1,7]")
+        if action != (1, 32, 10):
+            raise ValueError("DECO Stage 2 action must have shape [1,32,10]")
+        tactile = _shape(metadata, "input", "tactile_images")
+        if tactile != (1, 4, 3, 224, 224):
+            raise ValueError("DECO Stage 2 tactile_images must have shape [1,4,3,224,224]")
+        if input_contract.get("tactile_images_dtype") != "float32":
+            raise ValueError("DECO Stage 2 tactile_images_dtype must be float32")
+        if input_contract.get("tactile_images_range") != [0.0, 1.0]:
+            raise ValueError("DECO Stage 2 tactile_images_range must be [0.0, 1.0]")
+        if metadata.get("tactile_field_order") != list(TACTILE_FIELD_ORDER):
+            raise ValueError(
+                f"DECO Stage 2 tactile field order must be {list(TACTILE_FIELD_ORDER)}"
+            )
+        expected_stream_order = expected_cameras + list(TACTILE_FIELD_ORDER)
+        if input_contract.get("stream_order") != expected_stream_order:
+            raise ValueError(f"DECO Stage 2 stream_order must be {expected_stream_order}")
     return dict(metadata)
 
 

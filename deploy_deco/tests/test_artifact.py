@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from deploy_deco.artifact import load_sidecar, validate_metadata
+from deploy_deco.artifact import artifact_uses_tactile, load_sidecar, validate_metadata
 
 
 def metadata(payload: bytes) -> dict:
@@ -40,6 +40,24 @@ def right_metadata(payload: bytes) -> dict:
     contract["input"]["observation"] = [1, 7]
     contract["input"]["state_layout"] = "single_right_relative_start_pose6d_gripper"
     contract["output"]["action"] = [1, 32, 10]
+    return contract
+
+
+def stage2_metadata(payload: bytes) -> dict:
+    contract = right_metadata(payload)
+    contract["format"] = "sudo-upstream-deco-stage2-torchscript-v1"
+    contract["input"]["tactile_images"] = [1, 4, 3, 224, 224]
+    contract["input"]["tactile_images_dtype"] = "float32"
+    contract["input"]["tactile_images_range"] = [0.0, 1.0]
+    contract["tactile_field_order"] = [
+        "observation.images.tactile_left_0",
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_1",
+        "observation.images.tactile_right_1",
+    ]
+    contract["input"]["stream_order"] = (
+        contract["camera_names"] + contract["tactile_field_order"]
+    )
     return contract
 
 
@@ -103,4 +121,30 @@ def test_single_right_arm_contract_rejects_bimanual_action_width():
     contract = right_metadata(b"")
     contract["output"]["action"] = [1, 32, 20]
     with pytest.raises(ValueError, match="single-right-arm"):
+        validate_metadata(contract)
+
+
+def test_stage2_contract_is_accepted_and_detected_as_tactile():
+    validated = validate_metadata(stage2_metadata(b""))
+    assert artifact_uses_tactile(validated) is True
+
+
+def test_stage1_contract_is_not_detected_as_tactile():
+    assert artifact_uses_tactile(right_metadata(b"")) is False
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda value: value["input"].update(tactile_images=[1, 3, 3, 224, 224]), "tactile_images"),
+        (lambda value: value.update(tactile_field_order=list(reversed(value["tactile_field_order"]))), "tactile field order"),
+        (lambda value: value["input"].update(stream_order=value["camera_names"]), "stream_order"),
+        (lambda value: value["input"].update(tactile_images_dtype="uint8"), "tactile_images_dtype"),
+        (lambda value: value["input"].update(tactile_images_range=[-1.0, 1.0]), "tactile_images_range"),
+    ],
+)
+def test_stage2_rejects_wrong_tactile_contract(mutation, message):
+    contract = stage2_metadata(b"")
+    mutation(contract)
+    with pytest.raises(ValueError, match=message):
         validate_metadata(contract)
