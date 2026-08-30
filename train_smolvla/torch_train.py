@@ -558,15 +558,28 @@ def augment_smolvla_training_batch(
     if not all(isinstance(image, torch.Tensor) for image in images):
         raise TypeError("SmolVLA camera batch values must be torch tensors")
     shapes = {tuple(image.shape) for image in images}
-    if len(shapes) != 1 or images[0].ndim != 4:
+    if len(shapes) != 1 or images[0].ndim not in (4, 5) or images[0].shape[-3] != 3:
         raise ValueError(
-            "DECO image augmentation requires equally shaped camera batches [B,C,H,W], "
+            "DECO image augmentation requires equally shaped RGB camera batches "
+            "[B,C,H,W] or [B,T,C,H,W], "
             f"got {[tuple(image.shape) for image in images]}"
         )
     if not all(image.is_floating_point() for image in images):
         raise TypeError("DECO image augmentation requires floating-point camera tensors")
 
-    augmented = augment_training_images(torch.stack(images, dim=1), augmentation)
+    # LeRobot keeps an observation-time axis even when n_obs_steps=1. Flatten
+    # camera and time into DECO's view axis so its existing [B,N,C,H,W]
+    # implementation samples exactly one transform per batch sample and shares
+    # it across every camera and observation time.
+    stacked = torch.stack(images, dim=1)
+    if images[0].ndim == 5:
+        batch_size, cameras, times, channels, height, width = stacked.shape
+        deco_images = stacked.reshape(
+            batch_size, cameras * times, channels, height, width
+        )
+        augmented = augment_training_images(deco_images, augmentation).reshape_as(stacked)
+    else:
+        augmented = augment_training_images(stacked, augmentation)
     for camera_index, key in enumerate(image_keys):
         batch[key] = augmented[:, camera_index]
     return batch

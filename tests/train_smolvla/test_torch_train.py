@@ -60,6 +60,28 @@ def test_batch_augmentation_shares_parameters_across_cameras() -> None:
     torch.testing.assert_close(batch["camera1"], batch["camera2"])
 
 
+def test_batch_augmentation_supports_lerobot_observation_time_axis() -> None:
+    image = torch.linspace(0.0, 1.0, 2 * 3 * 8 * 8).reshape(1, 2, 3, 8, 8)
+    batch = {"camera1": image.clone(), "camera2": image.clone()}
+    config = replace(
+        augmentation_preset("low-light-v1"),
+        identity_probability=0.0,
+        low_light_probability=1.0,
+        mild_probability=0.0,
+        exposure_probability=1.0,
+        exposure_range=(0.7, 0.7),
+        contrast_range=(1.0, 1.0),
+        saturation_range=(1.0, 1.0),
+        blur_probability=0.0,
+    )
+
+    augment_smolvla_training_batch(batch, ("camera1", "camera2"), config)
+
+    assert batch["camera1"].shape == (1, 2, 3, 8, 8)
+    torch.testing.assert_close(batch["camera1"], image * 0.7)
+    torch.testing.assert_close(batch["camera1"], batch["camera2"])
+
+
 def test_disabled_batch_augmentation_is_identity() -> None:
     batch = {"camera1": torch.rand(2, 3, 4, 4), "camera2": torch.rand(2, 3, 4, 4)}
     original = {key: value.clone() for key, value in batch.items()}
