@@ -31,13 +31,14 @@ fail() { printf '[pi05] error: %s\n' "$*" >&2; return 1; }
 log() { printf '[pi05] %s\n' "$*"; }
 
 check_only=0
-detach_tmux=0
+attach_tmux=0
 config_path=""
 while (($#)); do
     case "$1" in
         --check) check_only=1 ;;
-        --detach) detach_tmux=1 ;;
-        -*) fail "usage: $0 [--check] [--detach] [CONFIG]"; exit 2 ;;
+        --attach) attach_tmux=1 ;;
+        --detach) attach_tmux=0 ;; # 兼容旧命令；现在默认就是后台启动。
+        -*) fail "usage: $0 [--check] [--attach] [CONFIG]"; exit 2 ;;
         *) [[ -z "${config_path}" ]] || { fail "only one CONFIG is allowed"; exit 2; }; config_path="$1" ;;
     esac
     shift
@@ -56,8 +57,17 @@ if [[ "${check_only}" == 1 ]]; then
     exit 0
 fi
 
+log_dir="${output_dir}/logs"
+log_file="${log_dir}/train_$(date '+%Y%m%d_%H%M%S').log"
+inner=""
+prepare_log_command() {
+    mkdir -p -- "${log_dir}"
+    ln -sfn -- "$(basename -- "${log_file}")" "${log_dir}/latest.log"
+    printf -v inner 'set -o pipefail; env PYTHONPATH=%q PYTHONSAFEPATH=1 %q train.py --config %q 2>&1 | tee -a %q' \
+        "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}" "${log_file}"
+}
+
 if [[ "${PI05_FOREGROUND:-0}" != 1 && -z "${TMUX:-}" ]] && command -v tmux >/dev/null 2>&1; then
-    inner=""
     if tmux has-session -t "${TMUX_SESSION}" 2>/dev/null; then
         # 上一次训练已经结束时，自动清理只剩 dead pane 的会话；正在训练的会话绝不覆盖。
         if [[ "$(tmux display-message -p -t "${TMUX_SESSION}:0.0" '#{pane_dead}')" == 1 ]]; then
@@ -67,20 +77,23 @@ if [[ "${PI05_FOREGROUND:-0}" != 1 && -z "${TMUX:-}" ]] && command -v tmux >/dev
             exit 1
         fi
     fi
-    printf -v inner 'env PYTHONPATH=%q PYTHONSAFEPATH=1 %q train.py --config %q' \
-        "${PYTHONPATH}" "${TRAIN_PYTHON}" "${config_path}"
+    prepare_log_command
+    tmux_command=""
+    printf -v tmux_command 'bash -lc %q' "${inner}"
     tmux new-session -d -s "${TMUX_SESSION}" -c "${TRAIN_ROOT}" \
-        "${inner}" \; set-option -w -t "${TMUX_SESSION}" remain-on-exit on
+        "${tmux_command}"
 
-    if [[ "${detach_tmux}" == 1 || "${PI05_TMUX_DETACHED:-0}" == 1 || ! -t 0 || ! -t 1 ]]; then
-        log "started detached tmux session ${TMUX_SESSION}; attach with: tmux attach -t ${TMUX_SESSION}"
-        exit 0
+    log "started detached tmux session: ${TMUX_SESSION}"
+    log "log file: ${log_file}"
+    log "follow log: tail -F ${log_dir}/latest.log"
+
+    if [[ "${attach_tmux}" == 1 && "${PI05_TMUX_DETACHED:-0}" != 1 && -t 0 && -t 1 ]]; then
+        exec tmux attach-session -t "${TMUX_SESSION}"
     fi
-
-    log "started tmux session ${TMUX_SESSION}; attaching now (detach with Ctrl-b d)"
-    exec tmux attach-session -t "${TMUX_SESSION}"
+    exit 0
 fi
 
-mkdir -p -- "${output_dir}"
+prepare_log_command
 log "training output: ${output_dir}"
-exec "${TRAIN_PYTHON}" train.py --config "${config_path}"
+log "log file: ${log_file}"
+exec bash -lc "${inner}"
