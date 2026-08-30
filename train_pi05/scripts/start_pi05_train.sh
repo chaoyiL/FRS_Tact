@@ -60,7 +60,8 @@ fi
 norm_stats_file="$(${TRAIN_PYTHON} train.py --config "${config_path}" --check --print-norm-stats)"
 norm_batch_size="${PI05_NORM_BATCH_SIZE:-1024}"
 norm_num_workers="${PI05_NORM_NUM_WORKERS:-8}"
-log_dir="${output_dir}/logs"
+# 日志必须位于 checkpoint 目录之外，否则 Orbax 会把日志目录误判为已有训练输出。
+log_dir="${output_dir%/}_logs"
 log_file="${log_dir}/train_$(date '+%Y%m%d_%H%M%S').log"
 inner=""
 prepare_log_command() {

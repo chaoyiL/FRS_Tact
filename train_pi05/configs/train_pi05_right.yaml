@@ -47,7 +47,8 @@ training:
   # 两张 A100 组成一个 2 卡 FSDP 分片组；batch_size=128 是全局 batch，等效每卡 64。
   fsdp_devices: 2
   overwrite: false
-  resume: false
+  # 目录不存在时从头训练；存在 checkpoint 时自动续训；只有失败残留时安全重新开始。
+  resume: true
 
 wandb:
   enable: true

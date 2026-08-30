@@ -100,7 +100,7 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 每次训练都会写入独立的时间戳日志文件，并更新 `latest.log` 链接：
 
 ```bash
-tail -F /workspace/outputs/pi05_right/logs/latest.log
+tail -F /workspace/outputs/pi05_right_logs/latest.log
 ```
 
 确实需要进入 tmux 时，可显式运行
