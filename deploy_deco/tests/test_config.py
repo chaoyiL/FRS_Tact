@@ -17,6 +17,7 @@ from deploy_deco.config import (
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "deploy_deco" / "configs" / "deploy_deco.yaml"
 RIGHT_CONFIG = ROOT / "deploy_deco" / "configs" / "deploy_deco_right.yaml"
+STAGE2_CONFIG = ROOT / "deploy_deco" / "configs" / "deploy_deco_stage2_right.yaml"
 
 
 def test_checked_in_config_matches_checked_in_external_artifact():
@@ -26,7 +27,7 @@ def test_checked_in_config_matches_checked_in_external_artifact():
     server = make_server_config(config)
     assert server["observation_profile"] == "deco_vision_224"
     assert server["action_horizon"] == 32
-    assert server["steps_per_inference"] == 24
+    assert server["steps_per_inference"] == 32
     assert "execution_protocol" not in server
 
 
@@ -43,7 +44,7 @@ def test_checked_in_right_config_matches_insert_artifact():
     assert deployment_profile(config) == "single-right-arm-7x10"
     server = make_server_config(config)
     assert server["single_arm_mode"] is False
-    assert server["steps_per_inference"] == 24
+    assert server["steps_per_inference"] == 32
     assert config["observation"]["black_camera0"] is True
 
 
@@ -52,6 +53,34 @@ def test_right_config_rejects_bimanual_artifact():
     bimanual = load_sidecar(load_config(CONFIG)["checkpoint"])
     with pytest.raises(ValueError, match="profile"):
         validate_artifact_contract(right, bimanual)
+
+
+def test_checked_in_stage2_config_matches_tactile_artifact():
+    config = load_config(STAGE2_CONFIG)
+    metadata = load_sidecar(config["checkpoint"])
+    validate_artifact_contract(config, metadata)
+    server = make_server_config(config)
+    assert server["data_type"] == "vitac"
+    assert server["observation_profile"] == "deco_vitac_224"
+    assert server["single_arm_mode"] is False
+    assert server["action_horizon"] == 32
+    assert server["steps_per_inference"] == 32
+
+
+def test_stage2_config_rejects_vision_artifact():
+    stage2 = load_config(STAGE2_CONFIG)
+    vision = load_sidecar(load_config(RIGHT_CONFIG)["checkpoint"])
+
+    with pytest.raises(ValueError, match="tactile"):
+        validate_artifact_contract(stage2, vision)
+
+
+def test_right_config_rejects_stage2_tactile_artifact():
+    right = load_config(RIGHT_CONFIG)
+    tactile = load_sidecar(load_config(STAGE2_CONFIG)["checkpoint"])
+
+    with pytest.raises(ValueError, match="tactile"):
+        validate_artifact_contract(right, tactile)
 
 
 def test_dual_arm_config_rejects_black_camera0():
@@ -96,6 +125,33 @@ def test_right_launcher_selects_right_config_and_forwards_arguments(tmp_path):
 
     assert output.read_text().splitlines() == [
         str(tmp_path / "deploy_deco" / "configs" / "deploy_deco_right.yaml"),
+        "--max-iterations",
+        "1",
+    ]
+
+
+def test_stage2_launcher_selects_stage2_config_and_forwards_arguments(tmp_path):
+    scripts = tmp_path / "deploy_deco" / "scripts"
+    scripts.mkdir(parents=True)
+    stage2_launcher = scripts / "start_deco_stage2_right.sh"
+    shutil.copy(
+        ROOT / "deploy_deco" / "scripts" / "start_deco_stage2_right.sh", stage2_launcher
+    )
+
+    output = tmp_path / "delegated.txt"
+    delegated_launcher = scripts / "start_deco.sh"
+    delegated_launcher.write_text('printf "%s\\n" "$CONFIG" "$@" > "$OUTPUT"\n')
+    env = {**os.environ, "OUTPUT": str(output)}
+    env.pop("CONFIG", None)
+
+    subprocess.run(
+        ["bash", str(stage2_launcher), "--max-iterations", "1"],
+        check=True,
+        env=env,
+    )
+
+    assert output.read_text().splitlines() == [
+        str(tmp_path / "deploy_deco" / "configs" / "deploy_deco_stage2_right.yaml"),
         "--max-iterations",
         "1",
     ]
