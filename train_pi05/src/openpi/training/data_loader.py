@@ -158,6 +158,7 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     sources = data_config.sources or (_config.DatasetSource(repo_id=repo_id),)
+    selected_visual_keys = data_config.visual_keys if visual_keys is None else visual_keys
     datasets: list[Dataset] = []
     for source in sources:
         dataset_meta = LeRobotDatasetMetadata(
@@ -174,7 +175,7 @@ def create_torch_dataset(
                 source.action_key: [t / dataset_meta.fps for t in range(action_horizon)]
             },
             return_uint8=True,
-            visual_keys=visual_keys,
+            visual_keys=selected_visual_keys,
         )
         dataset = ActionKeyDataset(dataset, source.action_key)
         # LeRobot v3's reader already exposes the task text as ``sample["task"]``;
@@ -261,6 +262,7 @@ def create_data_loader(
     sharding: jax.sharding.Sharding | None = None,
     shuffle: bool = False,
     num_batches: int | None = None,
+    one_epoch: bool = False,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
@@ -285,6 +287,7 @@ def create_data_loader(
             sharding=sharding,
             shuffle=shuffle,
             num_batches=num_batches,
+            one_epoch=one_epoch,
             skip_norm_stats=skip_norm_stats,
             framework=framework,
         )
@@ -296,6 +299,7 @@ def create_data_loader(
         sharding=sharding,
         shuffle=shuffle,
         num_batches=num_batches,
+        one_epoch=one_epoch,
         num_workers=config.num_workers,
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
@@ -313,6 +317,7 @@ def create_torch_data_loader(
     skip_norm_stats: bool = False,
     shuffle: bool = False,
     num_batches: int | None = None,
+    one_epoch: bool = False,
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
@@ -357,6 +362,10 @@ def create_torch_data_loader(
         local_batch_size = batch_size // jax.process_count()
 
     logging.info(f"local_batch_size: {local_batch_size}")
+    if one_epoch:
+        num_batches = len(dataset) // local_batch_size
+        if num_batches < 1:
+            raise ValueError("Validation split is smaller than one complete batch")
     data_loader = TorchDataLoader(
         dataset,
         local_batch_size=local_batch_size,
@@ -381,6 +390,7 @@ def create_rlds_data_loader(
     skip_norm_stats: bool = False,
     shuffle: bool = False,
     num_batches: int | None = None,
+    one_epoch: bool = False,
     framework: str = "jax",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create an RLDS data loader for training.
@@ -403,6 +413,8 @@ def create_rlds_data_loader(
         raise NotImplementedError("PyTorch RLDS data loader is not supported yet")
     dataset = create_rlds_dataset(data_config, action_horizon, batch_size, shuffle=shuffle)
     dataset = transform_iterable_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats, is_batched=True)
+    if one_epoch:
+        num_batches = len(dataset) // batch_size
 
     data_loader = RLDSDataLoader(
         dataset,

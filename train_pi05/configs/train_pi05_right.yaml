@@ -33,13 +33,21 @@ dataset_contract:
 # 必须是用相同 7D state / 10D action 定义计算出的归一化统计。
 norm_stats:
   dir: ./assets
-  asset_id: insert_0102
+  # 只使用 90% 训练 episode 计算，不能复用之前基于全部数据的统计。
+  asset_id: insert_0102_train90
+
+validation:
+  # 每个数据集分别按 episode 固定划分 90% 训练、10% 验证，避免相邻帧泄漏。
+  ratio: 0.10
+  seed: 42
+  # 每 2000 个训练 step 在完整验证集上计算一次 val_loss，最后一步也会验证。
+  interval: 2000
 
 training:
-  output: /workspace/outputs/pi05_right
+  output: /workspace/outputs/pi05_right_train90_val10
   batch_size: 128
   num_workers: 8
-  steps: 30000
+  steps: 20000
   log_interval: 20
   save_interval: 2000
   keep_period: 10000
@@ -53,4 +61,4 @@ training:
 wandb:
   enable: true
   project: pi05-vision-right
-  exp_name: pi05_right_insert_01_02
+  exp_name: pi05_right_insert_01_02_train90_val10

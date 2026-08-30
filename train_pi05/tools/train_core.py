@@ -11,7 +11,6 @@ import flax.traverse_util as traverse_util
 import jax
 import jax.experimental
 import jax.numpy as jnp
-import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
@@ -232,6 +231,21 @@ def train_step(
     return new_state, info
 
 
+@at.typecheck
+def validation_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> at.Array:
+    """Compute validation loss without gradients or image augmentation."""
+
+    model = nnx.merge(state.model_def, state.params)
+    model.eval()
+    observation, actions = batch
+    return jnp.mean(model.compute_loss(rng, observation, actions, train=False))
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
@@ -267,12 +281,15 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
-    wandb.log({"camera_views": images_to_log}, step=0)
+    validation_loader = None
+    if config.validation_data is not None:
+        validation_config = dataclasses.replace(config, data=config.validation_data)
+        validation_loader = _data_loader.create_data_loader(
+            validation_config,
+            sharding=data_sharding,
+            shuffle=False,
+            one_epoch=True,
+        )
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     jax.block_until_ready(train_state)
@@ -287,6 +304,12 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+    pvalidation_step = jax.jit(
+        functools.partial(validation_step, config),
+        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        out_shardings=replicated_sharding,
+    )
+    validation_rng = jax.random.key(config.seed + 1)
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -308,6 +331,25 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+        should_validate = validation_loader is not None and (
+            (step > start_step and step % config.validation_interval == 0)
+            or step == config.num_train_steps - 1
+        )
+        if should_validate:
+            validation_loss_sum = 0.0
+            validation_batch_count = 0
+            for validation_index, validation_batch in enumerate(validation_loader):
+                batch_rng = jax.random.fold_in(validation_rng, validation_index)
+                with sharding.set_mesh(mesh):
+                    validation_loss = pvalidation_step(batch_rng, train_state, validation_batch)
+                validation_loss_sum += float(jax.device_get(validation_loss))
+                validation_batch_count += 1
+            if validation_batch_count == 0:
+                raise RuntimeError("Validation loader produced no batches")
+            mean_validation_loss = validation_loss_sum / validation_batch_count
+            pbar.write(f"Step {step}: val_loss={mean_validation_loss:.4f}")
+            wandb.log({"val_loss": mean_validation_loss}, step=step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

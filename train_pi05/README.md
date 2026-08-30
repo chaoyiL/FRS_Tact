@@ -100,7 +100,7 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 每次训练都会写入独立的时间戳日志文件，并更新 `latest.log` 链接：
 
 ```bash
-tail -F /workspace/outputs/pi05_right_logs/latest.log
+tail -F /workspace/outputs/pi05_right_train90_val10_logs/latest.log
 ```
 
 确实需要进入 tmux 时，可显式运行
@@ -109,9 +109,10 @@ tail -F /workspace/outputs/pi05_right_logs/latest.log
 `source env_path` 后也可以使用不歧义的快捷命令：`hf`、`wandb`、
 `data-python`、`pi05-python`、`pi05-deploy-python` 和 `smolvla-python`。
 
-当前右手配置按顺序合并 `insert_01` 和 `insert_02`，随后在 563,414 帧组成的
-统一数据流上 shuffle。两个数据集按帧数自然采样，约为 45% 与 55%；归一化统计
-必须通过上面的 YAML 命令重新计算，不能复用任一单数据集的 stats。
+当前右手配置分别从 `insert_01` 和 `insert_02` 中按 episode 固定留出 10% 作为
+验证集，其余 90% 合并后统一 shuffle。验证 episode 不参与训练或归一化统计；
+训练每 2000 step 在完整验证集上记录一次 `val_loss`。W&B 只记录数值指标，
+不会上传相机画面。
 
 辅助工具需要时单独调用，例如：
 

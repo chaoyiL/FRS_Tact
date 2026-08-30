@@ -68,6 +68,8 @@ class DataConfig:
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
     norm_stats: dict[str, _transforms.NormStats] | None = None
+    # Exact raw dataset camera keys to decode. None keeps all available cameras.
+    visual_keys: Sequence[str] | None = None
 
     # Used to adopt the inputs from a dataset specific format to a common format
     # which is expected by the data transforms.
@@ -267,6 +269,8 @@ class TrainConfig:
 
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
+    # Optional held-out data used only for validation.
+    validation_data: DataConfigFactory | None = None
 
     # Base directory for config assets (e.g., norm stats).
     assets_base_dir: str = "./assets"
@@ -287,6 +291,8 @@ class TrainConfig:
 
     # How often (in steps) to log training metrics.
     log_interval: int = 200
+    # How often to evaluate the complete held-out validation split.
+    validation_interval: int = 2000
     # How often (in steps) to save checkpoints.
     save_interval: int = 5000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.

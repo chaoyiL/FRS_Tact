@@ -6,6 +6,7 @@ import argparse
 from dataclasses import replace
 import json
 from pathlib import Path
+import random
 from typing import Any
 
 import yaml
@@ -98,7 +99,61 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("training.output is required")
     if bool(training.get("resume")) and bool(training.get("overwrite")):
         raise ValueError("training.resume and training.overwrite cannot both be true")
+    validation = config.get("validation") or {}
+    if not isinstance(validation, dict):
+        raise ValueError("validation must be a mapping")
+    validation_ratio = float(validation.get("ratio", 0.0))
+    if not 0.0 <= validation_ratio < 1.0:
+        raise ValueError("validation.ratio must satisfy 0 <= ratio < 1")
+    if validation_ratio > 0 and int(validation.get("interval", 2000)) <= 0:
+        raise ValueError("validation.interval must be positive")
     return config
+
+
+def _make_source(openpi_config, item: dict[str, Any], episodes: list[int] | None):
+    return openpi_config.DatasetSource(
+        repo_id=str(item["repo_id"]),
+        root=str(Path(str(item["root"])).expanduser().resolve()),
+        revision=item.get("revision"),
+        episodes=episodes,
+        action_key=str(item.get("action_key", "action")),
+    )
+
+
+def _split_sources(raw: dict[str, Any], openpi_config):
+    validation = raw.get("validation") or {}
+    ratio = float(validation.get("ratio", 0.0))
+    split_seed = int(validation.get("seed", raw["training"].get("seed", 42)))
+    train_sources = []
+    validation_sources = []
+
+    for index, item in enumerate(raw["datasets"]):
+        info_path = Path(str(item["root"])).expanduser() / "meta" / "info.json"
+        with info_path.open(encoding="utf-8") as info_file:
+            info = json.load(info_file)
+        all_episodes = item.get("episodes")
+        episode_pool = (
+            [int(episode) for episode in all_episodes]
+            if all_episodes is not None
+            else list(range(int(info["total_episodes"])))
+        )
+
+        if ratio == 0.0:
+            train_sources.append(_make_source(openpi_config, item, episode_pool))
+            continue
+        if len(episode_pool) < 2:
+            raise ValueError(f"datasets[{index}] needs at least 2 episodes for a validation split")
+
+        shuffled = episode_pool.copy()
+        random.Random(split_seed + index).shuffle(shuffled)
+        validation_count = min(len(shuffled) - 1, max(1, int(len(shuffled) * ratio + 0.5)))
+        held_out = set(shuffled[:validation_count])
+        train_episodes = sorted(episode for episode in episode_pool if episode not in held_out)
+        validation_episodes = sorted(held_out)
+        train_sources.append(_make_source(openpi_config, item, train_episodes))
+        validation_sources.append(_make_source(openpi_config, item, validation_episodes))
+
+    return tuple(train_sources), tuple(validation_sources)
 
 
 def build_train_config(raw: dict[str, Any]):
@@ -106,16 +161,7 @@ def build_train_config(raw: dict[str, Any]):
     from openpi.training import optimizer, weight_loaders
 
     base = openpi_config.get_config(str(raw["profile"]))
-    sources = tuple(
-        openpi_config.DatasetSource(
-            repo_id=str(item["repo_id"]),
-            root=str(Path(str(item["root"])).expanduser().resolve()),
-            revision=item.get("revision"),
-            episodes=item.get("episodes"),
-            action_key=str(item.get("action_key", "action")),
-        )
-        for item in raw["datasets"]
-    )
+    sources, validation_sources = _split_sources(raw, openpi_config)
     norm = raw.get("norm_stats") or {}
     assets_dir = str(norm.get("dir", "./assets"))
     if "://" not in assets_dir:
@@ -128,9 +174,29 @@ def build_train_config(raw: dict[str, Any]):
         assets_dir=assets_dir,
         asset_id=str(norm.get("asset_id", sources[0].repo_id)),
     )
-    data = replace(base.data, repo_id=sources[0].repo_id, sources=sources, assets=assets)
+    contract = raw.get("dataset_contract") or {}
+    visual_keys = tuple(str(key) for key in contract.get("image_keys", ())) or None
+    data = replace(
+        base.data,
+        repo_id=sources[0].repo_id,
+        sources=sources,
+        assets=assets,
+        visual_keys=visual_keys,
+    )
+    validation_data = (
+        replace(
+            base.data,
+            repo_id=validation_sources[0].repo_id,
+            sources=validation_sources,
+            assets=assets,
+            visual_keys=visual_keys,
+        )
+        if validation_sources
+        else None
+    )
     training = raw["training"]
     wandb = raw.get("wandb") or {}
+    validation = raw.get("validation") or {}
     steps = int(training.get("steps", base.num_train_steps))
     lr = base.lr_schedule
     if isinstance(lr, optimizer.CosineDecaySchedule):
@@ -139,6 +205,7 @@ def build_train_config(raw: dict[str, Any]):
     return replace(
         base,
         data=data,
+        validation_data=validation_data,
         weight_loader=weight_loaders.CheckpointWeightLoader(str(raw["checkpoint"])),
         lr_schedule=lr,
         checkpoint_dir_override=str(training["output"]),
@@ -149,6 +216,7 @@ def build_train_config(raw: dict[str, Any]):
         num_workers=int(training.get("num_workers", base.num_workers)),
         num_train_steps=steps,
         log_interval=int(training.get("log_interval", base.log_interval)),
+        validation_interval=int(validation.get("interval", base.validation_interval)),
         save_interval=int(training.get("save_interval", base.save_interval)),
         keep_period=training.get("keep_period", base.keep_period),
         seed=int(training.get("seed", base.seed)),
