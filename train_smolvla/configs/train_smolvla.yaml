@@ -60,9 +60,6 @@ datasets:
   - repo_id: KaiyueChen/two_tubes_04
     root: /workspace/lerobot_v30/KaiyueChen/two_tubes_04
 
-  - repo_id: KaiyueChen/two_tubes_05
-    root: /workspace/lerobot_v30/KaiyueChen/two_tubes_05
-
 # SmolVLA balanced-light-v2, calibrated from the reference recipe:
 # 25% identity and 75% mild brightness/contrast/saturation jitter, with one shared draw for both cameras
 # in each sample. Non-identity samples have a 20% blur probability.

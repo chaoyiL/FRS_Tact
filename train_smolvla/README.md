@@ -128,48 +128,6 @@ python -m train_smolvla.torch_train \
   --config train_smolvla/configs/train_smolvla_right.yaml --dry-run
 ```
 
-## RTX 4090 end-to-end smoke test
-
-The dedicated smoke path keeps the production dual-arm contract (20D state,
-20D action, camera1/camera2 after rename, PEFT, and balanced-light-v2) while
-using only `KaiyueChen/two_tubes_04`, one visible GPU, batch size 1, and five
-training steps. This is not a mocked pipeline: it loads a real visual sample
-from either Parquet image columns or TorchCodec video according to dataset
-metadata, runs five forward/backward optimizer steps, saves the real PEFT
-checkpoint, and validates the exported model and optimizer state.
-
-Run the complete environment -> data -> decode -> preflight -> training ->
-checkpoint pipeline:
-
-```bash
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh
-```
-
-For step-by-step acceptance, run each stage independently and continue only
-after it prints `PASS`:
-
-```bash
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage env
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage data
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage sample
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage preflight
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage train
-bash train_smolvla/scripts/run_smolvla_4090_smoke.sh --stage checkpoint
-```
-
-The stages verify, in order: pinned Python/package versions and exactly one
-RTX 4090; local LeRobot v3.0 data; the 20D state/action and two selected source
-cameras after a real frame decode; the official LeRobot CLI command; five real
-optimization steps; and finally step 5, optimizer/RNG/scheduler state, model
-weights, 20D exported features, and renamed camera1/camera2 in the checkpoint.
-The setup and data stages are idempotent. `SMOLVLA_SMOKE_SKIP_SETUP=1` and
-`SMOLVLA_SMOKE_SKIP_DOWNLOAD=1` skip their mutations while retaining all later
-validations. Use `SMOLVLA_SMOKE_ALLOW_NON_4090=1` only when deliberately running
-the same development check on another CUDA GPU.
-
-The smoke configuration is `configs/train_smolvla_4090_smoke.yaml`; it must not
-replace the two-GPU production configuration in `configs/train_smolvla.yaml`.
-
 ## RunPod training issues already addressed
 
 - An obsolete `/home/typhon/vb3` Python path was replaced by the managed

@@ -278,54 +278,6 @@ def test_training_configs_use_smolvla_names() -> None:
     assert not (config_dir / "train_pytorch_right.yaml").exists()
 
 
-def test_4090_smoke_config_keeps_contract_and_minimizes_training() -> None:
-    config_path = (
-        Path(__file__).parents[1]
-        / "train_smolvla/configs/train_smolvla_4090_smoke.yaml"
-    )
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-
-    assert config["datasets"] == [
-        {
-            "repo_id": "KaiyueChen/two_tubes_04",
-            "root": "/workspace/lerobot_v30/KaiyueChen/two_tubes_04",
-        }
-    ]
-    assert config["dataset"]["state_dim"] == 20
-    assert config["dataset"]["action_dim"] == 20
-    assert len(config["dataset"]["image_keys"]) == 2
-    assert config["augmentation"] == {
-        "preset": "balanced-light-v2",
-        "enabled": True,
-    }
-    assert config["training"]["batch_size"] == 1
-    assert config["training"]["steps"] == 5
-    assert config["training"]["save_freq"] == 5
-    assert config["training"]["eval_steps"] == 0
-    assert config["distributed"]["num_gpus"] == 1
-    assert config["wandb"]["enable"] is False
-
-
-def test_4090_smoke_launcher_has_real_staged_acceptance_checks() -> None:
-    launcher = (
-        Path(__file__).parents[1]
-        / "train_smolvla/scripts/run_smolvla_4090_smoke.sh"
-    ).read_text(encoding="utf-8")
-
-    for stage in ("env", "data", "sample", "preflight", "train", "checkpoint"):
-        assert f"should_run {stage}" in launcher
-    assert 'video_backend="torchcodec"' in launcher
-    assert "Version(actual[name]) != Version(wanted)" in launcher
-    assert 'dtype not in {"image", "video"}' in launcher
-    assert 'dtype == "video"' in launcher
-    assert "sample = dataset[0]" in launcher
-    assert "five real forward/backward optimization steps" in launcher
-    assert '"optimizer_state.safetensors"' in launcher
-    assert 'step_state.get("step") != 5' in launcher
-    assert '"observation.images.camera1"' in launcher
-    assert '"observation.images.camera2"' in launcher
-
-
 def test_single_gpu_precision_uses_yaml_value(monkeypatch) -> None:
     monkeypatch.delenv("ACCELERATE_MIXED_PRECISION", raising=False)
 
