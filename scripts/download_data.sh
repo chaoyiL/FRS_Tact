@@ -15,6 +15,12 @@ if [[ ! -f "${ENV_FILE}" ]]; then
 fi
 DATA_TOOL_PYTHON_OVERRIDE="${DATA_TOOL_PYTHON:-}"
 
+if [[ "${PROJECT_ROOT}" == /workspace/* ]]; then
+    DEFAULT_SMOLVLA_DATA_PYTHON="${FRS_WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python"
+else
+    DEFAULT_SMOLVLA_DATA_PYTHON="${PROJECT_ROOT}/.venv-smolvla-torch/bin/python"
+fi
+
 if [[ -f "${ENV_FILE}" ]]; then
     # 读取 setup_env.sh 写入的各项目解释器路径；下面会显式选择一个可执行环境，
     # 不再依赖全局 UV_PROJECT_ENVIRONMENT 猜测当前项目。
@@ -25,21 +31,26 @@ fi
 resolve_data_python() {
     local candidate=""
     if [[ -n "${DATA_TOOL_PYTHON_OVERRIDE}" ]]; then
-        [[ -x "${DATA_TOOL_PYTHON_OVERRIDE}" ]] || {
-            echo "DATA_TOOL_PYTHON 不可执行: ${DATA_TOOL_PYTHON_OVERRIDE}" >&2
-            return 1
-        }
-        printf '%s\n' "${DATA_TOOL_PYTHON_OVERRIDE}"
-        return 0
+        if [[ -x "${DATA_TOOL_PYTHON_OVERRIDE}" ]]; then
+            printf '%s\n' "${DATA_TOOL_PYTHON_OVERRIDE}"
+            return 0
+        fi
+        echo "警告: DATA_TOOL_PYTHON 不可执行，尝试其他 Python 3.12 环境: ${DATA_TOOL_PYTHON_OVERRIDE}" >&2
     fi
     # 转换器包含 Python 3.12 语法，禁止回退到 Pi0.5 的 Python 3.11 环境。
-    for candidate in "${DATA_TOOL_PYTHON:-}" "${FRS_PYTHON:-}" "${PROJECT_ROOT}/.venv/bin/python"; do
+    for candidate in \
+        "${DATA_TOOL_PYTHON:-}" \
+        "${SMOLVLA_TORCH_PYTHON:-}" \
+        "${DEFAULT_SMOLVLA_DATA_PYTHON}" \
+        "${FRS_PYTHON:-}" \
+        "${PROJECT_ROOT}/.venv/bin/python"
+    do
         if [[ -n "${candidate}" && -x "${candidate}" ]]; then
             printf '%s\n' "${candidate}"
             return 0
         fi
     done
-    echo "找不到 Python 3.12 数据工具环境；请先运行 scripts/setup_env.sh --smolvla 或 --pi05_train" >&2
+    echo "找不到可用的 Python 3.12 LeRobot 环境；请安装 SmolVLA 或独立数据工具环境" >&2
     return 1
 }
 

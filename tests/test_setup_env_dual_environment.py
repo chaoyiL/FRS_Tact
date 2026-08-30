@@ -10,6 +10,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SETUP = ROOT / "scripts/setup_env.sh"
+DOWNLOAD_DATA = ROOT / "scripts/download_data.sh"
 PI05_TRAIN_LAUNCHER = ROOT / "train_pi05/scripts/start_pi05_train.sh"
 
 
@@ -54,6 +55,14 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"' in source
     assert 'pytorch-cpu=${FRS_PYTORCH_INDEX}' in source
     assert "sync_environments" in source
+
+
+def test_download_data_falls_back_to_the_smolvla_training_environment() -> None:
+    source = DOWNLOAD_DATA.read_text(encoding="utf-8")
+
+    assert 'DEFAULT_SMOLVLA_DATA_PYTHON="${FRS_WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python"' in source
+    assert '"${SMOLVLA_TORCH_PYTHON:-}"' in source
+    assert "DATA_TOOL_PYTHON 不可执行，尝试其他 Python 3.12 环境" in source
 
 
 def test_pi05_train_launcher_loads_canonical_environment_file() -> None:

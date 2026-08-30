@@ -258,12 +258,15 @@ def test_existing_output_directory_is_preserved_and_incremented(
     "launcher_name",
     ["start_smolvla_train.sh", "start_smolvla_right_train.sh"],
 )
-def test_launcher_uses_local_regenerable_arrow_cache(launcher_name: str) -> None:
+def test_launcher_uses_persistent_arrow_cache_by_default(launcher_name: str) -> None:
     launcher = (
         Path(__file__).parents[1] / "train_smolvla" / "scripts" / launcher_name
     ).read_text(encoding="utf-8")
 
-    assert 'SMOLVLA_USE_LOCAL_ARROW_CACHE:-1' in launcher
+    assert 'SMOLVLA_USE_LOCAL_ARROW_CACHE:-0' in launcher
+    assert 'SMOLVLA_PERSISTENT_CACHE_ROOT' in launcher
+    assert 'export HF_DATASETS_CACHE="${SMOLVLA_PERSISTENT_CACHE_ROOT}/huggingface/datasets_arrow"' in launcher
+    assert 'export TMPDIR="${SMOLVLA_PERSISTENT_CACHE_ROOT}/tmp"' in launcher
     assert '/tmp/frs_tact_smolvla' in launcher
     assert 'export HF_DATASETS_CACHE="${SMOLVLA_LOCAL_CACHE_ROOT}/datasets_arrow"' in launcher
     assert 'export TMPDIR="${SMOLVLA_LOCAL_CACHE_ROOT}/tmp"' in launcher

@@ -25,7 +25,7 @@ if [[ -f "${ENV_FILE}" ]]; then
     source "${ENV_FILE}"
 fi
 
-if [[ "${SMOLVLA_USE_LOCAL_ARROW_CACHE:-1}" == "1" ]]; then
+if [[ "${SMOLVLA_USE_LOCAL_ARROW_CACHE:-0}" == "1" ]]; then
     SMOLVLA_LOCAL_CACHE_ROOT="${SMOLVLA_LOCAL_CACHE_ROOT:-/tmp/frs_tact_smolvla}"
     export HF_DATASETS_CACHE="${SMOLVLA_LOCAL_CACHE_ROOT}/datasets_arrow"
     export TMPDIR="${SMOLVLA_LOCAL_CACHE_ROOT}/tmp"
@@ -36,6 +36,17 @@ if [[ "${SMOLVLA_USE_LOCAL_ARROW_CACHE:-1}" == "1" ]]; then
     }
     echo "[smolvla] local Arrow cache: ${HF_DATASETS_CACHE}"
     echo "[smolvla] local temp dir: ${TMPDIR}"
+else
+    SMOLVLA_PERSISTENT_CACHE_ROOT="${SMOLVLA_PERSISTENT_CACHE_ROOT:-${WORKSPACE_ROOT:-/workspace}}"
+    export HF_DATASETS_CACHE="${SMOLVLA_PERSISTENT_CACHE_ROOT}/huggingface/datasets_arrow"
+    export TMPDIR="${SMOLVLA_PERSISTENT_CACHE_ROOT}/tmp"
+    mkdir -p "${HF_DATASETS_CACHE}" "${TMPDIR}"
+    [[ -w "${HF_DATASETS_CACHE}" && -w "${TMPDIR}" ]] || {
+        echo "[smolvla-right] Workspace Arrow/temp cache is not writable: ${SMOLVLA_PERSISTENT_CACHE_ROOT}" >&2
+        exit 1
+    }
+    echo "[smolvla-right] persistent Arrow cache: ${HF_DATASETS_CACHE}"
+    echo "[smolvla-right] persistent temp dir: ${TMPDIR}"
 fi
 
 cd "${PROJECT_ROOT}"
