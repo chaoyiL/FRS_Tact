@@ -23,7 +23,7 @@ GPU_ID=${GPU_ID:-0}
 MIXED_PRECISION=${MIXED_PRECISION:-bf16}
 LOGGING_MODE=${LOGGING_MODE:-offline}
 AT_BATCH=${AT_BATCH:-512}
-LDP_BATCH=${LDP_BATCH:-512}
+LDP_BATCH=${LDP_BATCH:-128}
 NUM_WORKERS=${NUM_WORKERS:-32}
 AT_EPOCHS=${AT_EPOCHS:-20}
 LDP_EPOCHS=${LDP_EPOCHS:-10}
@@ -69,7 +69,7 @@ usage() {
 
 任务：
   insert     合并 insert_01 + insert_02，训练一个模型
-  press      使用 press_01，训练另一个模型
+  press      合并 press_01 + press_02，训练另一个模型
   both       顺序执行 insert 和 press
 
 固定默认路径：
@@ -80,7 +80,7 @@ usage() {
   输出       /DATA/ljl/substage/rdp_single_right/outputs
 
 常用可选覆盖：
-  GPU_ID=0 NUM_WORKERS=32 AT_BATCH=512 LDP_BATCH=512
+  GPU_ID=0 NUM_WORKERS=32 AT_BATCH=512 LDP_BATCH=128
   PRECOMPUTE_BATCH=512 PRECOMPUTE_WORKERS=32
   AT_EPOCHS=20 LDP_EPOCHS=10 LOGGING_MODE=offline
   EXPERIMENT_ID=v1 RESUME=true DRY_RUN=1
@@ -244,8 +244,8 @@ select_task() {
       DATASETS=(insert_01 insert_02)
       ;;
     press)
-      TASK_TAG=press_01
-      DATASETS=(press_01)
+      TASK_TAG=press_01_02
+      DATASETS=(press_01 press_02)
       ;;
     *)
       echo "未知任务：${task}；只能使用 insert、press 或 both" >&2

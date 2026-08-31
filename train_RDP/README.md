@@ -63,7 +63,7 @@ bash scripts/server_ljl_single_right.sh setup
 # 正式运行前检查 GPU、encoder 以及三个数据集的 shape/fps 合同
 bash scripts/server_ljl_single_right.sh doctor both
 
-# 两个模型顺序训练：insert_01+insert_02 一个，press_01 一个
+# 两个模型顺序训练：insert_01+insert_02 一个，press_01+press_02 一个
 bash scripts/server_ljl_single_right.sh all both
 ```
 
@@ -75,5 +75,5 @@ bash scripts/server_ljl_single_right.sh all press
 ```
 
 `prepare` 会自动完成触觉 embedding、独立 PCA30 和 Zarr 转换；`train` 只训练已有
-Zarr。默认使用 GPU 0；触觉预计算和 AT/LDP 训练的 batch size 都是 512，workers
-都是 32；训练使用 bf16、AT 20 epoch、LDP 10 epoch。需要时仍可在命令前覆盖。
+Zarr。默认使用 GPU 0；触觉预计算和 AT 的 batch size 是512，LDP物理 batch size
+是128，workers都是32；训练使用bf16、AT 20 epoch、LDP 10 epoch。需要时仍可覆盖。
