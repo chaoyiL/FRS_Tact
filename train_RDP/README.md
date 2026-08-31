@@ -83,7 +83,10 @@ Zarr。默认使用 GPU 0；触觉预计算和 AT 的 batch size 是512，LDP物
 `server_ljl_bread_dual.sh` 会把 `bread_01`、`bread_02`、`bread_03` 合并成一个
 双臂数据集，使用 `dual-arm-20x20` 合同（20D state、20D action）训练一个模型。
 它固定复用 `/home/ljl/RDP_vitamin/.venv`、`.venv-jax` 和
-`data/encoder_ckpt_0824`；`all` 不会创建或下载环境。
+`data/encoder_ckpt_0824`；`all` 不会创建或下载环境。脚本只接受 `BREAD_*`
+路径/参数覆盖，因此同一 shell 中遗留的 `DATASET_PATH`、`PCA_PATH`、`WORK_ROOT`
+等其他任务变量不会污染 Bread。无进度标记的触觉半成品会先重命名为
+`embeddings.npy.orphan.<时间戳>`，再安全地重新计算。
 
 ```bash
 cd /home/ljl/FRS_Tact/train_RDP
@@ -92,7 +95,7 @@ cd /home/ljl/FRS_Tact/train_RDP
 GPU_ID=1 bash scripts/server_ljl_bread_dual.sh doctor
 
 # 生成/续算 embedding、PCA30、RDP Zarr，然后训练 AT -> LDP
-GPU_ID=1 EXPERIMENT_ID=bread_v1 \
+GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 \
   bash scripts/server_ljl_bread_dual.sh all
 ```
 

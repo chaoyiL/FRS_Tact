@@ -5,47 +5,51 @@ set -euo pipefail
 # Combines bread_01, bread_02 and bread_03 into one PCA30 RDP dataset/model.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-RDP_CODE_DIR=${RDP_CODE_DIR:-/home/ljl/FRS_Tact/train_RDP}
+# Only BREAD_* path overrides are accepted here. Generic variables such as
+# DATASET_PATH and PCA_PATH are deliberately ignored because operators often
+# export them while running another task in the same shell.
+RDP_CODE_DIR=${BREAD_RDP_CODE_DIR:-/home/ljl/FRS_Tact/train_RDP}
 cd "${RDP_CODE_DIR}"
 
 STAGE=${1:-help}
 GPU_ID=${GPU_ID:-0}
 
-LEROBOT_ROOT=${LEROBOT_ROOT:-/DATA/ljl/substage/lerobot_v21/KaiyueChen}
-WORK_ROOT=${WORK_ROOT:-/DATA/ljl/substage/rdp_bread_dual}
-TACTILE_CACHE_ROOT=${TACTILE_CACHE_ROOT:-${WORK_ROOT}/tactile_embeddings_encoder0824}
-PCA_PATH=${PCA_PATH:-${WORK_ROOT}/pca/tactile_pca_bread_01_02_03_encoder0824_2x15.npz}
-DATASET_PATH=${DATASET_PATH:-${WORK_ROOT}/datasets/bread_01_02_03_pca30_dual_arm_rdp_zarr}
-OUTPUT_ROOT=${OUTPUT_ROOT:-${WORK_ROOT}/outputs/bread_01_02_03}
+LEROBOT_ROOT=${BREAD_LEROBOT_ROOT:-/DATA/ljl/substage/lerobot_v21/KaiyueChen}
+WORK_ROOT=${BREAD_WORK_ROOT:-/DATA/ljl/substage/rdp_bread_dual}
+TACTILE_CACHE_ROOT=${BREAD_TACTILE_CACHE_ROOT:-${WORK_ROOT}/tactile_embeddings_encoder0824}
+PCA_PATH=${BREAD_PCA_PATH:-${WORK_ROOT}/pca/tactile_pca_bread_01_02_03_encoder0824_2x15.npz}
+DATASET_PATH=${BREAD_DATASET_PATH:-${WORK_ROOT}/datasets/bread_01_02_03_pca30_dual_arm_rdp_zarr}
+OUTPUT_ROOT=${BREAD_OUTPUT_ROOT:-${WORK_ROOT}/outputs/bread_01_02_03}
 
 # Reuse the already-installed environments and encoder. This script never
 # creates environments or downloads packages/models.
-PYTHON_BIN=${PYTHON_BIN:-/home/ljl/RDP_vitamin/.venv/bin/python}
-ACCELERATE_BIN=${ACCELERATE_BIN:-/home/ljl/RDP_vitamin/.venv/bin/accelerate}
-JAX_PYTHON=${JAX_PYTHON:-/home/ljl/RDP_vitamin/.venv-jax/bin/python}
-ENCODER_DIR=${ENCODER_DIR:-/home/ljl/RDP_vitamin/data/encoder_ckpt_0824}
+PYTHON_BIN=${BREAD_PYTHON_BIN:-/home/ljl/RDP_vitamin/.venv/bin/python}
+ACCELERATE_BIN=${BREAD_ACCELERATE_BIN:-/home/ljl/RDP_vitamin/.venv/bin/accelerate}
+JAX_PYTHON=${BREAD_JAX_PYTHON:-/home/ljl/RDP_vitamin/.venv-jax/bin/python}
+ENCODER_DIR=${BREAD_ENCODER_DIR:-/home/ljl/RDP_vitamin/data/encoder_ckpt_0824}
 
 DATASETS=(bread_01 bread_02 bread_03)
 TASK_TAG=bread_01_02_03
-PRECOMPUTE_BATCH=${PRECOMPUTE_BATCH:-512}
-PRECOMPUTE_WORKERS=${PRECOMPUTE_WORKERS:-32}
-CONVERT_WORKERS=${CONVERT_WORKERS:-32}
-AT_BATCH=${AT_BATCH:-512}
+PRECOMPUTE_BATCH=${BREAD_PRECOMPUTE_BATCH:-512}
+PRECOMPUTE_WORKERS=${BREAD_PRECOMPUTE_WORKERS:-32}
+CONVERT_WORKERS=${BREAD_CONVERT_WORKERS:-32}
+AT_BATCH=${BREAD_AT_BATCH:-512}
 # LDP is substantially heavier than AT; 64 is the stable physical batch.
-LDP_BATCH=${LDP_BATCH:-64}
-NUM_WORKERS=${NUM_WORKERS:-32}
-AT_EPOCHS=${AT_EPOCHS:-20}
-LDP_EPOCHS=${LDP_EPOCHS:-10}
-AT_CHECKPOINT_EVERY=${AT_CHECKPOINT_EVERY:-2}
-LDP_CHECKPOINT_EVERY=${LDP_CHECKPOINT_EVERY:-2}
-AT_CHECKPOINT_KEEP=${AT_CHECKPOINT_KEEP:-20}
-LDP_CHECKPOINT_KEEP=${LDP_CHECKPOINT_KEEP:-20}
-MIXED_PRECISION=${MIXED_PRECISION:-bf16}
-LOGGING_MODE=${LOGGING_MODE:-offline}
-EXPERIMENT_ID=${EXPERIMENT_ID:-$(date +%Y%m%d_%H%M%S)}
-RESUME=${RESUME:-true}
-FORCE_PREPARE=${FORCE_PREPARE:-0}
-OVERWRITE_TACTILE=${OVERWRITE_TACTILE:-0}
+LDP_BATCH=${BREAD_LDP_BATCH:-64}
+NUM_WORKERS=${BREAD_NUM_WORKERS:-32}
+AT_EPOCHS=${BREAD_AT_EPOCHS:-20}
+LDP_EPOCHS=${BREAD_LDP_EPOCHS:-10}
+AT_CHECKPOINT_EVERY=${BREAD_AT_CHECKPOINT_EVERY:-2}
+LDP_CHECKPOINT_EVERY=${BREAD_LDP_CHECKPOINT_EVERY:-2}
+AT_CHECKPOINT_KEEP=${BREAD_AT_CHECKPOINT_KEEP:-20}
+LDP_CHECKPOINT_KEEP=${BREAD_LDP_CHECKPOINT_KEEP:-20}
+MIXED_PRECISION=${BREAD_MIXED_PRECISION:-bf16}
+LOGGING_MODE=${BREAD_LOGGING_MODE:-offline}
+EXPERIMENT_ID=${BREAD_EXPERIMENT_ID:-$(date +%Y%m%d_%H%M%S)}
+RESUME=${BREAD_RESUME:-true}
+FORCE_PREPARE=${BREAD_FORCE_PREPARE:-0}
+OVERWRITE_TACTILE=${BREAD_OVERWRITE_TACTILE:-0}
+REPAIR_ORPHAN_CACHE=${BREAD_REPAIR_ORPHAN_CACHE:-1}
 DRY_RUN=${DRY_RUN:-0}
 
 usage() {
@@ -75,13 +79,16 @@ usage() {
   encoder    /home/ljl/RDP_vitamin/data/encoder_ckpt_0824
 
 默认参数：
-  GPU_ID=0 PRECOMPUTE_BATCH=512 PRECOMPUTE_WORKERS=32
-  AT_BATCH=512 LDP_BATCH=64 NUM_WORKERS=32
-  AT_EPOCHS=20 LDP_EPOCHS=10 MIXED_PRECISION=bf16
+  GPU_ID=0 BREAD_PRECOMPUTE_BATCH=512 BREAD_PRECOMPUTE_WORKERS=32
+  BREAD_AT_BATCH=512 BREAD_LDP_BATCH=64 BREAD_NUM_WORKERS=32
+  BREAD_AT_EPOCHS=20 BREAD_LDP_EPOCHS=10 BREAD_MIXED_PRECISION=bf16
+
+路径和训练参数只接受 BREAD_* 覆盖，避免被其他任务导出的 DATASET_PATH、
+PCA_PATH、WORK_ROOT 等变量污染。
 
 示例：
   GPU_ID=1 bash scripts/server_ljl_bread_dual.sh all
-  GPU_ID=1 EXPERIMENT_ID=bread_v1 bash scripts/server_ljl_bread_dual.sh train
+  GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 bash scripts/server_ljl_bread_dual.sh train
 USAGE
 }
 
@@ -202,7 +209,30 @@ for dataset in sys.argv[2:]:
 PY
 }
 
+repair_orphan_tactile_cache() {
+  local dataset cache_dir output_path metadata_path progress_path backup_path
+  for dataset in "${DATASETS[@]}"; do
+    cache_dir="${TACTILE_CACHE_ROOT}/KaiyueChen/${dataset}"
+    output_path="${cache_dir}/embeddings.npy"
+    metadata_path="${cache_dir}/metadata.json"
+    progress_path="${cache_dir}/progress.json"
+    if [[ -f "${output_path}" && ! -f "${metadata_path}" && ! -f "${progress_path}" ]]; then
+      if [[ "${REPAIR_ORPHAN_CACHE}" != "1" ]]; then
+        echo "Orphan tactile cache found: ${output_path}" >&2
+        echo "Set BREAD_REPAIR_ORPHAN_CACHE=1 to quarantine and rebuild it." >&2
+        exit 1
+      fi
+      backup_path="${output_path}.orphan.$(date +%Y%m%d_%H%M%S)"
+      echo "检测到无进度标记的触觉半成品，将隔离后重新计算："
+      echo "  ${output_path}"
+      echo "  -> ${backup_path}"
+      run mv "${output_path}" "${backup_path}"
+    fi
+  done
+}
+
 precompute_tactile() {
+  repair_orphan_tactile_cache
   local args=(
     env -u LD_LIBRARY_PATH
     "CUDA_VISIBLE_DEVICES=${GPU_ID}"
