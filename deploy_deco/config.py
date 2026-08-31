@@ -63,6 +63,25 @@ def _boolean(value: Any, name: str) -> bool:
     return value
 
 
+def _observation_profile(observation: Mapping[str, Any]) -> str:
+    data_type = observation.get("data_type")
+    expected = _OBSERVATION_CONTRACTS.get(data_type)
+    if expected is None:
+        raise ValueError(
+            "observation.data_type must be one of "
+            f"{sorted(_OBSERVATION_CONTRACTS)!r}"
+        )
+    configured = observation.get("observation_profile")
+    if configured is None and data_type == "vision":
+        return expected
+    if configured != expected:
+        raise ValueError(
+            f"observation_profile must be {expected!r} "
+            f"when data_type is {data_type!r}"
+        )
+    return expected
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     config_path = Path(path).expanduser().resolve()
     if not config_path.is_file():
@@ -95,18 +114,7 @@ def validate_config(config: Mapping[str, Any]) -> None:
     if "add_port" in connection and connection["add_port"] is not None:
         _boolean(connection["add_port"], "connection.add_port")
     _boolean(connection.get("require_token", True), "connection.require_token")
-    data_type = observation.get("data_type")
-    expected_observation_profile = _OBSERVATION_CONTRACTS.get(data_type)
-    if expected_observation_profile is None:
-        raise ValueError(
-            "observation.data_type must be one of "
-            f"{sorted(_OBSERVATION_CONTRACTS)!r}"
-        )
-    if observation.get("observation_profile") != expected_observation_profile:
-        raise ValueError(
-            f"observation_profile must be {expected_observation_profile!r} "
-            f"when data_type is {data_type!r}"
-        )
+    _observation_profile(observation)
     profile = deployment_profile(config)
     single_arm_mode = _boolean(
         observation.get("single_arm_mode", False), "observation.single_arm_mode"
@@ -189,6 +197,7 @@ def resolve_token(connection: Mapping[str, Any]) -> str | None:
 def make_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
     observation = section(config, "observation")
     control = section(config, "control")
+    observation_profile = _observation_profile(observation)
     return {
         "task": 0,
         "data_type": str(observation["data_type"]),
@@ -199,5 +208,5 @@ def make_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "no_state_obs_mode": False,
         "steps_per_inference": int(control["steps_per_inference"]),
         "action_horizon": int(control["action_horizon"]),
-        "observation_profile": str(observation["observation_profile"]),
+        "observation_profile": observation_profile,
     }

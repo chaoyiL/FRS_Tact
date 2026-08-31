@@ -105,6 +105,15 @@ def test_legacy_config_does_not_require_action_ack_timeout():
     validate_config(config)
 
 
+def test_legacy_vision_config_defaults_observation_profile():
+    config = load_config(RIGHT_CONFIG)
+    config["observation"].pop("observation_profile")
+
+    validate_config(config)
+
+    assert make_server_config(config)["observation_profile"] == "deco_vision_224"
+
+
 def test_right_launcher_selects_right_config_and_forwards_arguments(tmp_path):
     scripts = tmp_path / "deploy_deco" / "scripts"
     scripts.mkdir(parents=True)
