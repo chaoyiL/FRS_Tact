@@ -116,3 +116,34 @@ def test_write_reports_writes_all_snapshot_artifacts(snapshot_dir: Path, tmp_pat
         "snapshot_responses",
     }
     assert all(path.is_file() and path.stat().st_size > 0 for path in paths.values())
+
+
+def test_predict_independent_snapshots_synchronizes_cuda_before_latency(
+    snapshot_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import time
+    from types import SimpleNamespace
+
+    snapshots = evaluator.load_snapshots(snapshot_dir)[:1]
+    runtime = _FakeRuntime()
+    runtime.device = SimpleNamespace(type="cuda")
+    synchronized: list[object] = []
+    clock_reads = 0
+
+    def perf_counter() -> float:
+        nonlocal clock_reads
+        clock_reads += 1
+        if clock_reads == 1:
+            return 10.0
+        assert synchronized == [runtime.device]
+        return 10.125
+
+    monkeypatch.setattr(time, "perf_counter", perf_counter)
+    monkeypatch.setattr(torch.cuda, "synchronize", synchronized.append)
+
+    results = evaluator.predict_independent_snapshots(
+        runtime, evaluator.SINGLE_RIGHT_ARM_7X10, snapshots, seed=7
+    )
+
+    assert clock_reads == 2
+    np.testing.assert_allclose(results["latency_ms"], [125.0])

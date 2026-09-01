@@ -185,8 +185,11 @@ class RobotBridgeClient:
     def send_config(self, config: dict[str, Any]) -> None:
         self._send({"type": "config", "config": config})
 
-    def send_state(self, state: str) -> None:
-        self._send({"type": "state", "state": state})
+    def send_state(self, state: str, obs_seq: int | None = None) -> None:
+        message: dict[str, Any] = {"type": "state", "state": state}
+        if obs_seq is not None:
+            message["obs_seq"] = _nonnegative_int(obs_seq, "obs_seq")
+        self._send(message)
 
     def receive_observation(self, timeout: float | None = None) -> tuple[int, dict[str, Any]]:
         message = self._receive(timeout=timeout)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -16,9 +17,271 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 SHARED_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_remote_client.sh"
 SMOLVLA_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_smolvla.sh"
+SMOLVLA_FRS_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_smolvla_frs.sh"
+SMOLVLA_RIGHT_LAUNCHER = ROOT / "deploy_smolvla" / "scripts" / "start_smolvla_right.sh"
 FRS_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_frs.yaml"
 DEFAULT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_pytorch.yaml"
+RIGHT_CONFIG = ROOT / "deploy_smolvla" / "configs" / "deploy_smolvla_pytorch_right.yaml"
 DEFAULT_MODEL_CACHE = ROOT / "checkpoints" / "model"
+PYTORCH_CLIENT = ROOT / "deploy_smolvla" / "pytorch_remote_client.py"
+
+
+def _load_pytorch_remote_client_for_test(monkeypatch):
+    def inference_mode():
+        def decorate(function):
+            return function
+
+        return decorate
+
+    def make_pre_post_processors(*args, **kwargs):
+        return None, None
+
+    def prepare_observation_for_inference(frame, **kwargs):
+        return frame
+
+    torch_module = ModuleType("torch")
+    torch_module.inference_mode = inference_mode
+    monkeypatch.setitem(sys.modules, "torch", torch_module)
+
+    lerobot_module = ModuleType("lerobot")
+    lerobot_module.__path__ = []
+    configs_module = ModuleType("lerobot.configs")
+    configs_module.__path__ = []
+    policies_module = ModuleType("lerobot.policies")
+    policies_module.__path__ = []
+    policies_module.make_pre_post_processors = make_pre_post_processors
+    monkeypatch.setitem(sys.modules, "lerobot", lerobot_module)
+    monkeypatch.setitem(sys.modules, "lerobot.configs", configs_module)
+    monkeypatch.setitem(sys.modules, "lerobot.policies", policies_module)
+
+    configs_policies_module = ModuleType("lerobot.configs.policies")
+    configs_policies_module.PreTrainedConfig = object
+    policies_smolvla_module = ModuleType("lerobot.policies.smolvla")
+    policies_smolvla_module.SmolVLAPolicy = object
+    policies_utils_module = ModuleType("lerobot.policies.utils")
+    policies_utils_module.prepare_observation_for_inference = prepare_observation_for_inference
+    monkeypatch.setitem(sys.modules, "lerobot.configs.policies", configs_policies_module)
+    monkeypatch.setitem(sys.modules, "lerobot.policies.smolvla", policies_smolvla_module)
+    monkeypatch.setitem(sys.modules, "lerobot.policies.utils", policies_utils_module)
+
+    peft_module = ModuleType("peft")
+    peft_module.PeftConfig = object
+    peft_module.PeftModel = object
+    monkeypatch.setitem(sys.modules, "peft", peft_module)
+
+    module_name = "deploy_smolvla._pytorch_remote_client_test"
+    spec = importlib.util.spec_from_file_location(module_name, PYTORCH_CLIENT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_pytorch_prepare_frame_passes_robot_native_camera_keys_to_preprocessor(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    captured: dict[str, object] = {}
+
+    def capture_frame(frame, **kwargs):
+        captured.update(frame)
+        return frame
+
+    monkeypatch.setattr(client, "prepare_observation_for_inference", capture_frame)
+    left = np.full((2, 3, 3), 11, dtype=np.uint8)
+    right = np.full((2, 3, 3), 22, dtype=np.uint8)
+    observation = {
+        "observation.state": np.zeros(2, dtype=np.float32),
+        "observation.images.camera0": left,
+        "observation.images.camera1": right,
+    }
+
+    client._prepare_frame(
+        observation,
+        task="pick up the block",
+        device=object(),
+        state_dim=2,
+        model_image_keys=(
+            "observation.images.camera1",
+            "observation.images.camera2",
+        ),
+        rename_map={
+            "observation.images.camera0": "observation.images.camera1",
+            "observation.images.camera1": "observation.images.camera2",
+        },
+    )
+
+    assert set(captured) == {
+        "observation.state",
+        "observation.images.camera0",
+        "observation.images.camera1",
+    }
+    np.testing.assert_array_equal(captured["observation.images.camera0"], left)
+    np.testing.assert_array_equal(captured["observation.images.camera1"], right)
+
+
+def test_pytorch_visual_legacy_loop_does_not_wait_for_action_ack() -> None:
+    source = PYTORCH_CLIENT.read_text(encoding="utf-8")
+
+    assert "receive_action_ack" not in source
+
+
+def test_pytorch_dual_config_sends_integer_task_from_yaml(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    config = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+
+    assert config["observation"]["task"] == 1
+    payload = client._server_config_payload(
+        config["observation"],
+        config["control"],
+        action_horizon=int(config["control"]["action_horizon"]),
+        task=int(config["observation"]["task"]),
+    )
+    assert payload == {
+        "data_type": "vision",
+        "observation_profile": "smolvla_vision_256",
+        "language_prompt": config["observation"]["language_prompt"],
+        "control_frequency": 20.0,
+        "controller_frequency": 80.0,
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+        "steps_per_inference": 20,
+        "action_horizon": 20,
+        "task": 1,
+    }
+
+
+def test_pytorch_dual_config_flattens_gripper_hysteresis_payload(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    config = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+
+    assert config["gripper"]["hysteresis_enabled"] is True
+    payload = client._server_config_payload(
+        config["observation"],
+        config["control"],
+        action_horizon=int(config["control"]["action_horizon"]),
+        gripper_config=config["gripper"],
+    )
+
+    assert payload["gripper_hysteresis_enabled"] is True
+    assert payload["left_gripper_close_threshold"] == pytest.approx(0.09)
+    assert payload["left_gripper_reopen_threshold"] == pytest.approx(0.10)
+    assert payload["left_gripper_closed_command"] == pytest.approx(0.01)
+    assert payload["right_gripper_close_threshold"] == pytest.approx(0.09)
+    assert payload["right_gripper_reopen_threshold"] == pytest.approx(0.10)
+    assert payload["right_gripper_closed_command"] == pytest.approx(0.01)
+
+
+def test_pytorch_dual_config_requires_gripper_hysteresis_enabled(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    config = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    config["gripper"].pop("hysteresis_enabled")
+
+    with pytest.raises(ValueError, match="gripper.hysteresis_enabled"):
+        client._server_config_payload(
+            config["observation"],
+            config["control"],
+            action_horizon=int(config["control"]["action_horizon"]),
+            gripper_config=config["gripper"],
+        )
+
+
+def test_pytorch_right_runtime_payload_preserves_single_arm_contract(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    sent_payloads: list[dict[str, object]] = []
+    events: list[object] = []
+
+    class FakeDevice:
+        type = "cpu"
+
+        def __str__(self) -> str:
+            return "cpu"
+
+    class FakeBridge:
+        def __init__(self, **kwargs) -> None:
+            del kwargs
+
+        def send_config(self, payload: dict[str, object]) -> None:
+            sent_payloads.append(payload)
+
+        def receive_observation(self, *, timeout: float) -> tuple[int, dict[str, object]]:
+            events.append(("receive", timeout))
+            return 10 * len(events), {
+                "observation.state": np.zeros(7, dtype=np.float32),
+                "observation.images.camera0": np.zeros((2, 2, 3), dtype=np.uint8),
+            }
+
+        def send_state(self, state: str, obs_seq: int | None = None) -> None:
+            events.append(("state", state, obs_seq))
+
+        def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            events.append(("action", action.shape, obs_seq))
+
+        def close(self) -> None:
+            events.append("close")
+
+    class FakePolicy:
+        config = SimpleNamespace(chunk_size=20)
+
+        def to(self, device: object):
+            del device
+            return self
+
+        def eval(self):
+            return self
+
+        def reset(self) -> None:
+            events.append("reset")
+
+    monkeypatch.setattr(client, "_load_policy", lambda *args, **kwargs: FakePolicy())
+    monkeypatch.setattr(client, "_policy_contract", lambda policy: (7, 10, ("observation.images.camera1",)))
+    monkeypatch.setattr(client, "_predict_chunk", lambda *args, **kwargs: np.zeros((20, 10), dtype=np.float32))
+    monkeypatch.setattr(client, "make_pre_post_processors", lambda *args, **kwargs: (None, None))
+    monkeypatch.setattr(client, "RobotBridgeClient", FakeBridge)
+    monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "")
+    monkeypatch.setattr(client.torch, "device", lambda value: FakeDevice(), raising=False)
+
+    client.run(RIGHT_CONFIG, max_iterations_override=1)
+
+    assert sent_payloads == [
+        {
+            "data_type": "vision",
+            "observation_profile": "smolvla_vision_256",
+            "language_prompt": "Use the right hand to complete the task.",
+            "control_frequency": 20.0,
+            "controller_frequency": 80.0,
+            "single_arm_mode": True,
+            "no_state_obs_mode": False,
+            "steps_per_inference": 5,
+            "action_horizon": 20,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "match"),
+    (
+        ("left_close_threshold", "0.09", "gripper.left_close_threshold"),
+        ("left_closed_command", 0.001, "gripper.left_closed_command"),
+        ("right_close_threshold", 0.10, "gripper.right_close_threshold"),
+    ),
+)
+def test_pytorch_dual_config_rejects_malformed_gripper_hysteresis(
+    monkeypatch,
+    field: str,
+    value: object,
+    match: str,
+) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    config = yaml.safe_load(DEFAULT_CONFIG.read_text(encoding="utf-8"))
+    config["gripper"][field] = value
+
+    with pytest.raises(ValueError, match=match):
+        client._server_config_payload(
+            config["observation"],
+            config["control"],
+            action_horizon=int(config["control"]["action_horizon"]),
+            gripper_config=config["gripper"],
+        )
 
 
 def test_pi05_path_loader_delegates_raw_bytes_to_bytes_loader(monkeypatch, tmp_path: Path) -> None:
@@ -474,6 +737,7 @@ def _run_launcher(
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["FRS_PYTHON"] = str(python)
+    env["SMOLVLA_TORCH_PYTHON"] = str(python)
     env["VB_ROBOT_TOKEN"] = "test-token"
     env["TRANSFORMERS_CACHE"] = str(project / "decoy/transformers")
     env["PYTORCH_TRANSFORMERS_CACHE"] = str(project / "decoy/pytorch-transformers")
@@ -503,6 +767,8 @@ def _run_check(
     *, token_file: Path, token: str | None = None, hub_cache: Path | None = None
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
+    env["SMOLVLA_TORCH_PYTHON"] = sys.executable
+    env["FRS_PYTHON"] = sys.executable
     env["VB3_TOKEN_FILE"] = str(token_file)
     env.pop("HF_HUB_CACHE", None)
     env.pop("HUGGINGFACE_HUB_CACHE", None)
@@ -527,13 +793,18 @@ def _run_wrapper_check(
     *,
     extra_args: tuple[str, ...] = (),
     config_override: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["VB_ROBOT_TOKEN"] = "test-token"
     env["HF_HUB_CACHE"] = str(ROOT / "checkpoints" / "model")
+    env["SMOLVLA_TORCH_PYTHON"] = sys.executable
+    env["FRS_PYTHON"] = sys.executable
     if config_override is not None:
         env["SMOLVLA_VISION_CONFIG"] = str(config_override)
         env["SMOLVLA_FRS_CONFIG"] = str(config_override)
+    if extra_env is not None:
+        env.update(extra_env)
     return subprocess.run(
         ["bash", str(wrapper), "--check", *extra_args],
         cwd=ROOT,
@@ -544,10 +815,10 @@ def _run_wrapper_check(
     )
 
 
-def test_smolvla_frs_mode_uses_frs_config_without_executable_nested_script() -> None:
+def test_smolvla_frs_wrapper_uses_frs_config_without_executable_nested_script() -> None:
     assert SHARED_LAUNCHER.stat().st_mode & 0o111 == 0
 
-    result = _run_wrapper_check(SMOLVLA_LAUNCHER, extra_args=("--mode", "frs"))
+    result = _run_wrapper_check(SMOLVLA_FRS_LAUNCHER)
 
     assert result.returncode == 0, result.stderr
     assert f"config={FRS_CONFIG}" in result.stdout
@@ -563,38 +834,207 @@ def test_smolvla_wrapper_uses_visual_config_without_executable_nested_script() -
 
 
 @pytest.mark.parametrize(
-    ("wrapper", "explicit_config"),
+    ("wrapper", "expected_config"),
     (
         (SMOLVLA_LAUNCHER, DEFAULT_CONFIG),
-        (SMOLVLA_LAUNCHER, FRS_CONFIG),
+        (SMOLVLA_FRS_LAUNCHER, FRS_CONFIG),
     ),
 )
-def test_wrapper_allows_later_explicit_config_override(
-    wrapper: Path, explicit_config: Path
+def test_smolvla_public_wrappers_ignore_config_override_environment(
+    wrapper: Path, expected_config: Path
 ) -> None:
-    result = _run_wrapper_check(
-        wrapper,
-        extra_args=("--config", str(explicit_config)),
+    result = _run_wrapper_check(wrapper, config_override=ROOT / "wrong.yaml")
+
+    assert result.returncode == 0, result.stderr
+    assert f"config={expected_config}" in result.stdout
+
+
+def test_smolvla_wrappers_select_backend_specific_python(tmp_path: Path) -> None:
+    torch_python = tmp_path / "torch-python"
+    frs_python = tmp_path / "frs-python"
+    shutil.copy2("/bin/true", torch_python)
+    shutil.copy2("/bin/true", frs_python)
+    environment = {
+        "SMOLVLA_TORCH_PYTHON": str(torch_python),
+        "FRS_PYTHON": str(frs_python),
+    }
+
+    vision = _run_wrapper_check(SMOLVLA_LAUNCHER, extra_env=environment)
+    frs = _run_wrapper_check(SMOLVLA_FRS_LAUNCHER, extra_env=environment)
+
+    assert vision.returncode == 0, vision.stderr
+    assert f"python={torch_python}" in vision.stdout
+    assert frs.returncode == 0, frs.stderr
+    assert f"python={frs_python}" in frs.stdout
+
+
+def test_smolvla_vision_forwards_max_iterations_to_remote_client(tmp_path: Path) -> None:
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "printf '%s\\n' \"$@\"\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        {
+            "SMOLVLA_TORCH_PYTHON": str(fake_python),
+            "VB_ROBOT_TOKEN": "test-token",
+        }
+    )
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(SMOLVLA_LAUNCHER),
+            "--max-iterations",
+            "2",
+        ],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
     )
 
     assert result.returncode == 0, result.stderr
-    assert f"config={explicit_config}" in result.stdout
+    assert result.stdout.splitlines()[-6:] == [
+        "-m",
+        "deploy_smolvla.remote_client",
+        "--config",
+        str(DEFAULT_CONFIG),
+        "--max-iterations",
+        "2",
+    ]
 
 
-@pytest.mark.parametrize(
-    ("wrapper", "config_override"),
-    (
-        (SMOLVLA_LAUNCHER, DEFAULT_CONFIG),
-        (SMOLVLA_LAUNCHER, FRS_CONFIG),
-    ),
-)
-def test_public_wrapper_preserves_frs_deploy_config_override(
-    wrapper: Path, config_override: Path
-) -> None:
-    result = _run_wrapper_check(wrapper, config_override=config_override)
+@pytest.mark.parametrize("wrapper", (SMOLVLA_LAUNCHER, SMOLVLA_FRS_LAUNCHER))
+@pytest.mark.parametrize("mode", ("vision", "frs"))
+def test_smolvla_public_wrappers_reject_mode_argument(wrapper: Path, mode: str) -> None:
+    result = _run_wrapper_check(wrapper, extra_args=("--mode", mode))
+
+    assert result.returncode == 2
+    assert "Unknown argument: --mode" in result.stderr
+
+
+def test_smolvla_right_wrapper_uses_only_the_right_vision_config() -> None:
+    result = _run_wrapper_check(
+        SMOLVLA_RIGHT_LAUNCHER,
+        extra_env={
+            "SMOLVLA_VISION_CONFIG": "/tmp/must-not-be-used.yaml",
+            "SMOLVLA_FRS_CONFIG": "/tmp/must-not-be-used.yaml",
+        },
+    )
 
     assert result.returncode == 0, result.stderr
-    assert f"config={config_override}" in result.stdout
+    assert f"config={RIGHT_CONFIG}" in result.stdout
+    assert "SMOLVLA_VISION_CONFIG" not in SMOLVLA_RIGHT_LAUNCHER.read_text(encoding="utf-8")
+    assert "SMOLVLA_FRS_CONFIG" not in SMOLVLA_RIGHT_LAUNCHER.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "1.5", "two"])
+def test_smolvla_launcher_rejects_invalid_max_iterations(value: str) -> None:
+    result = _run_wrapper_check(
+        SMOLVLA_LAUNCHER,
+        extra_args=("--max-iterations", value),
+    )
+
+    assert result.returncode == 2
+    assert "--max-iterations must be a positive integer" in result.stderr
+
+
+def test_smolvla_vision_rejects_missing_official_python(tmp_path: Path) -> None:
+    missing = tmp_path / "missing-smolvla-python"
+
+    result = _run_wrapper_check(
+        SMOLVLA_LAUNCHER,
+        extra_env={
+            "SMOLVLA_TORCH_PYTHON": str(missing),
+            "FRS_PYTHON": sys.executable,
+        },
+    )
+
+    assert result.returncode == 2
+    assert "SMOLVLA_TORCH_PYTHON" in result.stderr
+    assert str(missing) in result.stderr
+
+
+@pytest.mark.parametrize("variant", ("quoted", "nested-first"))
+def test_smolvla_backend_selection_reads_only_normalized_top_level_yaml(
+    tmp_path: Path,
+    variant: str,
+) -> None:
+    config = tmp_path / f"{variant}.yaml"
+    source = DEFAULT_CONFIG.read_text(encoding="utf-8")
+    if variant == "quoted":
+        source = source.replace(
+            "backend: pytorch_smolvla",
+            'backend: "pytorch_smolvla"',
+            1,
+        )
+    else:
+        source = "metadata:\n  backend: jax_smolvla\n" + source
+    config.write_text(source, encoding="utf-8")
+    torch_python = tmp_path / "torch-python"
+    frs_python = tmp_path / "frs-python"
+    shutil.copy2("/bin/true", torch_python)
+    shutil.copy2("/bin/true", frs_python)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "VB_ROBOT_TOKEN": "test-token",
+            "SMOLVLA_TORCH_PYTHON": str(torch_python),
+            "FRS_PYTHON": str(frs_python),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(SHARED_LAUNCHER), "--config", str(config), "--check"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"python={torch_python}" in result.stdout
+
+
+def test_smolvla_launcher_preserves_explicit_workspace_root(tmp_path: Path) -> None:
+    project = _copy_deploy_entry_points(tmp_path)
+    requested_workspace = tmp_path / "requested-workspace"
+    torch_python = requested_workspace / "venvs" / "smolvla_torch" / "bin" / "python"
+    torch_python.parent.mkdir(parents=True)
+    shutil.copy2("/bin/true", torch_python)
+    (project / "env_path").write_text(
+        f"export WORKSPACE_ROOT={tmp_path / 'stale-workspace'}\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["VB_ROBOT_TOKEN"] = "test-token"
+    env["WORKSPACE_ROOT"] = str(requested_workspace)
+    env.pop("SMOLVLA_TORCH_PYTHON", None)
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(project / "deploy_smolvla" / "scripts" / SHARED_LAUNCHER.name),
+            "--config",
+            str(project / "deploy_smolvla" / "configs" / DEFAULT_CONFIG.name),
+            "--check",
+        ],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert f"python={torch_python}" in result.stdout
 
 
 def test_shared_launcher_requires_explicit_config(tmp_path: Path) -> None:
@@ -692,6 +1132,7 @@ def test_launcher_creates_checkpoint_directories_in_fresh_project(tmp_path: Path
     project = _copy_deploy_entry_points(tmp_path)
     env = os.environ.copy()
     env["VB_ROBOT_TOKEN"] = "secret"
+    env["SMOLVLA_TORCH_PYTHON"] = sys.executable
     env.pop("HF_HUB_CACHE", None)
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 
@@ -725,6 +1166,7 @@ def test_launcher_keeps_existing_checkpoint_files_unchanged(tmp_path: Path) -> N
     encoder_sentinel.write_text("existing encoder checkpoint\n", encoding="utf-8")
     env = os.environ.copy()
     env["VB_ROBOT_TOKEN"] = "secret"
+    env["SMOLVLA_TORCH_PYTHON"] = sys.executable
     env.pop("HF_HUB_CACHE", None)
     env.pop("HUGGINGFACE_HUB_CACHE", None)
 

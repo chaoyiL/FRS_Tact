@@ -2,7 +2,7 @@
 # This profile requires a checkpoint trained with 7D right-arm state and 10D robot actions.
 
 # Right-hand Pi0.5 checkpoint trained on insert_01.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_single_insert_01_step2000/checkpoint
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
 seed: 0
 num_steps: 10
 
@@ -29,8 +29,8 @@ model:
 
 norm_stats:
   # Assets produced by the same right-hand fine-tune.
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_single_insert_01_step2000/checkpoint/assets
-  asset_id: insert_01
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  asset_id: insert_0102_train90
   use_quantile_norm: true
 
 connection:

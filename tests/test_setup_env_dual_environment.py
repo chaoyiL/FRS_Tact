@@ -57,6 +57,46 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert "sync_environments" in source
 
 
+def test_smolvla_setup_reuses_an_existing_torch_environment(tmp_path: Path) -> None:
+    fake_uv = tmp_path / "uv"
+    uv_log = tmp_path / "uv.log"
+    torch_python = tmp_path / "torch-venv" / "bin" / "python"
+    torch_python.parent.mkdir(parents=True)
+    torch_python.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    torch_python.chmod(0o755)
+    fake_uv.write_text(
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$*" >>"${UV_LOG}"\n',
+        encoding="utf-8",
+    )
+    fake_uv.chmod(0o755)
+    command = f"""
+set -euo pipefail
+source {SETUP}
+UV_BIN={fake_uv}
+UV_LOG={uv_log}
+export UV_LOG
+SMOLVLA_TORCH_VENV_DIR={torch_python.parents[1]}
+sync_smolvla_torch_environment
+"""
+
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    calls = uv_log.read_text(encoding="utf-8").splitlines()
+    assert not any(call.startswith("venv ") for call in calls)
+    assert any(
+        "websockets>=13.0,<16.0" in call and "msgpack>=1.0.0,<2.0.0" in call
+        for call in calls
+    )
+
+
 def test_download_data_falls_back_to_the_smolvla_training_environment() -> None:
     source = DOWNLOAD_DATA.read_text(encoding="utf-8")
 

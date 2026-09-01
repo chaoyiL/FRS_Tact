@@ -454,14 +454,18 @@ sync_root_environment() {
 sync_smolvla_torch_environment() {
     local smolvla_python="${SMOLVLA_TORCH_VENV_DIR}/bin/python"
     log "官方 LeRobot SmolVLA 训练环境目录：${SMOLVLA_TORCH_VENV_DIR}"
-    "${UV_BIN}" venv --python "${PYTHON_VERSION}" "${SMOLVLA_TORCH_VENV_DIR}"
+    if [[ ! -x "${smolvla_python}" ]]; then
+        "${UV_BIN}" venv --python "${PYTHON_VERSION}" "${SMOLVLA_TORCH_VENV_DIR}"
+    fi
     # 先固定安装 CUDA 12.8 PyTorch，避免 PyPI 解析到 CPU wheel。
     "${UV_BIN}" pip install --python "${smolvla_python}" \
         "torch==${SMOLVLA_TORCH_VERSION_PYTORCH}" \
         "torchvision==${SMOLVLA_TORCH_VERSION_TORCHVISION}" \
         --index https://download.pytorch.org/whl/cu128
     "${UV_BIN}" pip install --python "${smolvla_python}" \
-        "lerobot[training,smolvla,peft]==${SMOLVLA_TORCH_VERSION}"
+        "lerobot[training,smolvla,peft]==${SMOLVLA_TORCH_VERSION}" \
+        "websockets>=13.0,<16.0" \
+        "msgpack>=1.0.0,<2.0.0"
     # torchcodec 0.5 is the newest release compatible with torch 2.7.
     "${UV_BIN}" pip install --python "${smolvla_python}" \
         "torchcodec==${SMOLVLA_TORCHCODEC_VERSION}"

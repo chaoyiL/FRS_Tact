@@ -1,6 +1,6 @@
 # Pure-vision SmolVLA deployment using the official PyTorch LeRobot policy.
 backend: pytorch_smolvla
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/smolvla_task1_0830_1.8w
 revision: null
 allow_download: false
 device: cuda
@@ -24,7 +24,8 @@ connection:
 observation:
   state_action_profile: dual-arm-20x20
   data_type: vision
-  language_prompt: Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
+  task: 0
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
   single_arm_mode: false
   controlled_arm: null
   no_state_obs_mode: false
@@ -33,7 +34,16 @@ control:
   control_frequency: 20.0
   controller_frequency: 80.0
   action_horizon: 20
-  steps_per_inference: 5
+  steps_per_inference: 10
+
+gripper:
+  hysteresis_enabled: True
+  left_close_threshold: 0.09
+  left_reopen_threshold: 0.10
+  left_closed_command: 0.01
+  right_close_threshold: 0.09
+  right_reopen_threshold: 0.10
+  right_closed_command: 0.01
 
 runtime:
   auto_start: false

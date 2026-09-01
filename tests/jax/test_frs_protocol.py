@@ -44,6 +44,18 @@ def unpack(payload: bytes) -> dict[str, Any]:
     return message
 
 
+def test_bridge_binds_start_to_warmup_observation_and_preserves_stop(
+    bridge: RobotBridgeClient, socket: RecordingSocket
+) -> None:
+    bridge.send_state("start", obs_seq=7)
+    bridge.send_state("stop")
+
+    assert [unpack(payload) for payload in socket.sent] == [
+        {"type": "state", "state": "start", "obs_seq": 7},
+        {"type": "state", "state": "stop"},
+    ]
+
+
 def _rtc_start() -> dict[str, Any]:
     return {
         "type": "frs_chunk_start",

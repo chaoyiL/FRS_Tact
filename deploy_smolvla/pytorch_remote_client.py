@@ -6,6 +6,8 @@ import os
 import sys
 import time
 from collections.abc import Mapping, Sequence
+import math
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +36,8 @@ try:
     from peft import PeftConfig, PeftModel
 except ImportError as error:
     raise ImportError(
-        "PyTorch SmolVLA requires the official LeRobot+PEFT environment used by VB3; "
-        "set FRS_PYTHON to that environment's Python executable"
+        "PyTorch SmolVLA requires the isolated official LeRobot+PEFT environment; "
+        "set SMOLVLA_TORCH_PYTHON or run `bash scripts/setup_env.sh --smolvla`"
     ) from error
 finally:
     for _index, _entry in sorted(_removed_sys_paths):
@@ -150,6 +152,79 @@ def _resolve_token(connection: Mapping[str, Any]) -> str | None:
     return token
 
 
+def _bounded_float(value: Any, name: str, *, minimum: float, maximum: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{name} must be a finite number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
+    return parsed
+
+
+def _gripper_payload(gripper_config: Mapping[str, Any]) -> dict[str, Any]:
+    if "hysteresis_enabled" not in gripper_config:
+        raise ValueError("gripper.hysteresis_enabled must be a boolean")
+    enabled = gripper_config["hysteresis_enabled"]
+    if type(enabled) is not bool:
+        raise ValueError("gripper.hysteresis_enabled must be a boolean")
+    payload: dict[str, Any] = {
+        "gripper_hysteresis_enabled": enabled,
+    }
+    for side in ("left", "right"):
+        close_name = f"{side}_close_threshold"
+        reopen_name = f"{side}_reopen_threshold"
+        closed_name = f"{side}_closed_command"
+        close = _bounded_float(
+            gripper_config.get(close_name),
+            f"gripper.{close_name}",
+            minimum=0.0,
+            maximum=1.05,
+        )
+        reopen = _bounded_float(
+            gripper_config.get(reopen_name),
+            f"gripper.{reopen_name}",
+            minimum=0.0,
+            maximum=1.05,
+        )
+        if close >= reopen:
+            raise ValueError(f"gripper.{close_name} must be less than gripper.{reopen_name}")
+        payload[f"{side}_gripper_close_threshold"] = close
+        payload[f"{side}_gripper_reopen_threshold"] = reopen
+        payload[f"{side}_gripper_closed_command"] = _bounded_float(
+            gripper_config.get(closed_name),
+            f"gripper.{closed_name}",
+            minimum=0.01,
+            maximum=0.04,
+        )
+    return payload
+
+
+def _server_config_payload(
+    observation_config: Mapping[str, Any],
+    control: Mapping[str, Any],
+    *,
+    action_horizon: int,
+    task: int | None = None,
+    gripper_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "data_type": "vision",
+        "observation_profile": SMOLVLA_OBSERVATION_PROFILE,
+        "language_prompt": observation_config["language_prompt"],
+        "control_frequency": float(control["control_frequency"]),
+        "controller_frequency": float(control["controller_frequency"]),
+        "single_arm_mode": bool(observation_config["single_arm_mode"]),
+        "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
+        "steps_per_inference": int(control["steps_per_inference"]),
+        "action_horizon": int(action_horizon),
+    }
+    if task is not None:
+        payload["task"] = int(task)
+    if gripper_config is not None:
+        payload.update(_gripper_payload(gripper_config))
+    return payload
+
+
 def _prepare_frame(
     observation: Mapping[str, Any],
     *,
@@ -171,7 +246,7 @@ def _prepare_frame(
         image = np.asarray(observation[robot_key])
         if image.ndim != 3 or image.shape[-1] != 3:
             raise ValueError(f"{robot_key} must be HWC RGB, got {image.shape}")
-        frame[model_key] = image.copy()
+        frame[robot_key] = image.copy()
     return prepare_observation_for_inference(
         frame,
         device=device,
@@ -250,21 +325,24 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         ping_timeout_s=float(connection.get("ping_timeout_s", 20.0)),
     )
     bridge.send_config(
-        {
-            "data_type": "vision",
-            "observation_profile": SMOLVLA_OBSERVATION_PROFILE,
-            "language_prompt": observation_config["language_prompt"],
-            "control_frequency": float(control["control_frequency"]),
-            "controller_frequency": float(control["controller_frequency"]),
-            "single_arm_mode": bool(observation_config["single_arm_mode"]),
-            "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
-            "steps_per_inference": int(control["steps_per_inference"]),
-            "action_horizon": horizon,
-        }
+        _server_config_payload(
+            observation_config,
+            control,
+            action_horizon=horizon,
+            task=(
+                int(observation_config["task"])
+                if profile != SINGLE_RIGHT_ARM_PROFILE
+                else None
+            ),
+            gripper_config=(
+                _section(config, "gripper")
+                if profile != SINGLE_RIGHT_ARM_PROFILE
+                else None
+            ),
+        )
     )
     task = str(observation_config["language_prompt"])
     timeout = float(connection.get("observation_timeout_s", 30.0))
-    ack_timeout = float(connection["action_ack_timeout_s"])
     max_iterations = (
         int(runtime.get("max_iterations", 0))
         if max_iterations_override is None
@@ -295,7 +373,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         print(f"[client] Warmup observation sequence: {warmup_seq}")
         if not bool(runtime.get("auto_start", False)):
             input("[client] Ready. Press Enter to send START to the robot server... ")
-        bridge.send_state("start")
+        bridge.send_state("start", obs_seq=warmup_seq)
 
         iteration = 0
         while max_iterations <= 0 or iteration < max_iterations:
@@ -305,7 +383,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             bridge.send_action(action, obs_seq)
-            bridge.receive_action_ack(obs_seq, timeout=ack_timeout)
+            # The legacy vision protocol signals completion by publishing the
+            # next observation; it does not send a generic action_ack.
             iteration += 1
             if iteration == 1 or iteration % 10 == 0:
                 print(

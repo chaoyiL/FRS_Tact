@@ -1,9 +1,9 @@
 # FRS 真机部署配置。
 backend: jax_smolvla_frs
 # 启动（默认不会自动给机器人发 START）：
-#   bash ./deploy_smolvla/scripts/start_smolvla.sh --mode frs
+#   bash ./deploy_smolvla/scripts/start_smolvla_frs.sh
 # 仅检查配置路径与认证信息：
-#   bash ./deploy_smolvla/scripts/start_smolvla.sh --mode frs --check
+#   bash ./deploy_smolvla/scripts/start_smolvla_frs.sh --check
 
 #纯视觉 SmolVLA JAX checkpoint。
 checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pick_tube_01_jax

@@ -1,5 +1,5 @@
 # Standalone DECO Stage 1 deployment using the CUDA-traced best checkpoint.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0829/bread/deco_stage1_latest.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0828/pick_two_tubes/deco_stage1_best_gpu.ts
 device: cuda:0
 seed: 0
 
