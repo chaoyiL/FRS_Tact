@@ -218,6 +218,18 @@ def test_validate_release_qualification_accepts_matching_slow16_evidence() -> No
             id="failed-gate",
         ),
         pytest.param(
+            "AT",
+            {"passed": 1, "score": 0.1, "deployment_slow_update_interval": 16},
+            "passed",
+            id="integer-passed",
+        ),
+        pytest.param(
+            "AT",
+            {"passed": "true", "score": 0.1, "deployment_slow_update_interval": 16},
+            "passed",
+            id="string-passed",
+        ),
+        pytest.param(
             "LDP",
             {"passed": True, "score": math.nan, "deployment_slow_update_interval": 16},
             "score",
@@ -234,6 +246,18 @@ def test_validate_release_qualification_accepts_matching_slow16_evidence() -> No
             {"passed": True, "score": 0.1, "deployment_slow_update_interval": 15},
             "interval",
             id="release-interval-mismatch",
+        ),
+        pytest.param(
+            "LDP",
+            {"passed": True, "score": 0.1, "deployment_slow_update_interval": True},
+            "interval",
+            id="boolean-release-interval",
+        ),
+        pytest.param(
+            "LDP",
+            {"passed": True, "score": 0.1, "deployment_slow_update_interval": "16"},
+            "interval",
+            id="string-release-interval",
         ),
     ],
 )
@@ -267,7 +291,10 @@ def test_validate_release_qualification_rejects_incomplete_or_invalid_evidence(
         )
 
 
-def test_validate_release_qualification_rejects_runtime_interval_other_than_sixteen() -> None:
+@pytest.mark.parametrize("slow_update_interval", [15, True, "16"])
+def test_validate_release_qualification_rejects_runtime_interval_other_than_sixteen(
+    slow_update_interval,
+) -> None:
     evidence = {
         "passed": True,
         "score": 0.1,
@@ -278,7 +305,7 @@ def test_validate_release_qualification_rejects_runtime_interval_other_than_sixt
         deploy.validate_release_qualification(
             release_cfg(**evidence),
             release_cfg(**evidence),
-            slow_update_interval=15,
+            slow_update_interval=slow_update_interval,
             ldp_checkpoint=Path("ldp.ckpt"),
             at_checkpoint=Path("at.ckpt"),
         )
