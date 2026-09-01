@@ -10,8 +10,10 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from reactive_diffusion_policy.common.pick_tube_validation import (
+    build_canonical_noop_actions,
     build_episode_split_manifest,
     compute_contiguous_300_step_drift,
+    compute_deployment_window_metrics,
     compute_idle_rollout_metrics,
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
@@ -70,6 +72,77 @@ def test_idle_metrics_integrate_translation_and_compose_so3_rotations():
     assert metrics["val_idle_rotation_step_p95_deg"] == pytest.approx(1.0)
     assert metrics["val_idle_right_translation_29_mm"] == pytest.approx(29.0)
     assert math.isnan(metrics["val_idle_left_translation_29_mm"])
+
+
+def test_deployment_window_metrics_only_measure_the_deployed_phase():
+    target = _neutral_actions(horizon=32)
+    idle_mask = np.ones((1, 32, 2), dtype=bool)
+    prediction = target.copy()
+    prediction[:, 3:19, 3:9] = _rotation_6d_z(1.0)
+
+    metrics = compute_deployment_window_metrics(
+        target,
+        prediction,
+        idle_mask,
+        phase_start=3,
+        phase_count=16,
+    )
+
+    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(1.0)
+
+    prediction = target.copy()
+    prediction[:, 19:32, 3:9] = _rotation_6d_z(10.0)
+    metrics = compute_deployment_window_metrics(
+        target,
+        prediction,
+        idle_mask,
+        phase_start=3,
+        phase_count=16,
+    )
+
+    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("phase_start", "phase_count"),
+    [(-1, 16), (0, 0), (17, 16)],
+)
+def test_deployment_window_metrics_reject_invalid_phase_bounds(
+    phase_start, phase_count
+):
+    target = _neutral_actions(horizon=32)
+    idle_mask = np.ones((1, 32, 2), dtype=bool)
+
+    with pytest.raises(ValueError):
+        compute_deployment_window_metrics(
+            target,
+            target.copy(),
+            idle_mask,
+            phase_start=phase_start,
+            phase_count=phase_count,
+        )
+
+
+@pytest.mark.parametrize("action_dim", [10, 20])
+def test_canonical_noop_actions_replace_pose_and_preserve_grippers(action_dim):
+    actions = torch.randn(2, 3, action_dim)
+    original = actions.clone()
+
+    noops = build_canonical_noop_actions(actions)
+
+    torch.testing.assert_close(noops[..., 0::10], torch.zeros_like(noops[..., 0::10]))
+    torch.testing.assert_close(noops[..., 1::10], torch.zeros_like(noops[..., 1::10]))
+    torch.testing.assert_close(noops[..., 2::10], torch.zeros_like(noops[..., 2::10]))
+    expected_rotation = torch.tensor(
+        [1, 0, 0, 0, 1, 0], dtype=actions.dtype
+    ).expand_as(noops[..., 3:9])
+    for arm_start in range(0, action_dim, 10):
+        torch.testing.assert_close(
+            noops[..., arm_start + 3 : arm_start + 9],
+            expected_rotation[..., :6],
+        )
+        torch.testing.assert_close(noops[..., arm_start + 9], original[..., arm_start + 9])
+    torch.testing.assert_close(actions, original)
 
 
 def test_metrics_report_active_errors_and_micro_motion_recall():
@@ -264,17 +337,29 @@ def test_pick_tube_v2_configs_select_feasible_idle_score():
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         at_cfg = compose(config_name="train_pick_tube_at_workspace")
         ldp_cfg = compose(config_name="train_pick_tube_ldp_workspace")
+        single_right_at_cfg = compose(
+            config_name="train_pick_tube_single_right_at_workspace"
+        )
+        single_right_ldp_cfg = compose(
+            config_name="train_pick_tube_single_right_ldp_workspace"
+        )
 
-    for cfg in (at_cfg, ldp_cfg):
+    for cfg, action_contract in (
+        (at_cfg, "bimanual_relative_pose20d_v2"),
+        (ldp_cfg, "bimanual_relative_pose20d_v2"),
+        (single_right_at_cfg, "single_right_relative_pose10d_v2"),
+        (single_right_ldp_cfg, "single_right_relative_pose10d_v2"),
+    ):
         assert cfg.task.dataset.val_ratio == 0.1
         assert cfg.task.action_representation_version == 2
-        assert cfg.task.action_contract == "bimanual_relative_pose20d_v2"
+        assert cfg.task.action_contract == action_contract
         assert cfg.checkpoint.topk.monitor_key == "val_idle_score"
         assert cfg.checkpoint.topk.mode == "min"
         assert cfg.validation.max_active_degradation == 0.05
         assert cfg.validation.min_micro_motion_recall == 0.95
         assert cfg.validation.baseline_json is None
         assert list(cfg.validation.seeds) == [0]
+        assert cfg.validation.deployment_slow_update_interval == 16
         assert cfg.checkpoint.periodic.keep == 10
 
 
