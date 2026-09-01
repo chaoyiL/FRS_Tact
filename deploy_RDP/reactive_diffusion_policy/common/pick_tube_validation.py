@@ -670,6 +670,65 @@ def load_active_metric_baselines(config) -> dict[str, float] | None:
     return baselines
 
 
+def _is_finite_positive_baseline(value) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
+def resolve_active_metric_baselines(
+    *,
+    external_baselines: dict[str, float] | None,
+    auto_translation_baseline_mm,
+    auto_rotation_baseline_deg,
+    active_translation_mm,
+    active_rotation_deg,
+    epoch,
+    auto_baseline_epoch=None,
+) -> dict[str, float | int | str | bool | None]:
+    """Prefer external baselines, otherwise freeze the first valid active metrics."""
+    if external_baselines is not None:
+        return {
+            "translation_mm": external_baselines["translation_mm"],
+            "rotation_deg": external_baselines["rotation_deg"],
+            "source": "external",
+            "epoch": None,
+            "calibrated": False,
+        }
+    if (
+        _is_finite_positive_baseline(auto_translation_baseline_mm)
+        and _is_finite_positive_baseline(auto_rotation_baseline_deg)
+    ):
+        return {
+            "translation_mm": float(auto_translation_baseline_mm),
+            "rotation_deg": float(auto_rotation_baseline_deg),
+            "source": "auto",
+            "epoch": auto_baseline_epoch,
+            "calibrated": False,
+        }
+    if (
+        _is_finite_positive_baseline(active_translation_mm)
+        and _is_finite_positive_baseline(active_rotation_deg)
+    ):
+        return {
+            "translation_mm": float(active_translation_mm),
+            "rotation_deg": float(active_rotation_deg),
+            "source": "auto",
+            "epoch": int(epoch),
+            "calibrated": True,
+        }
+    return {
+        "translation_mm": None,
+        "rotation_deg": None,
+        "source": None,
+        "epoch": None,
+        "calibrated": False,
+    }
+
+
 def _action_contract_identity(config) -> tuple[object, object]:
     version = _select(config, "task.action_representation_version")
     contract = _select(config, "task.action_contract")

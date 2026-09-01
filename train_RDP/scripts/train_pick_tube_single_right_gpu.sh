@@ -123,7 +123,7 @@ if (( ${#RUN_ID} > 64 )); then
   exit 2
 fi
 if [[ -z "${BASELINE_JSON}" ]]; then
-  echo "warning: BASELINE_JSON is unset; training will run, but checkpoints will remain non-deployable and will not enter top-k." >&2
+  echo "warning: BASELINE_JSON is unset; AT/LDP will auto-calibrate on the first valid deployment validation; calibration checkpoints remain recovery-only." >&2
 elif [[ ! -f "${BASELINE_JSON}" ]]; then
   echo "Validation baseline JSON not found: ${BASELINE_JSON}" >&2
   exit 1

@@ -4,6 +4,9 @@ import math
 import pytest
 from omegaconf import OmegaConf
 
+from reactive_diffusion_policy.common.pick_tube_validation import (
+    resolve_active_metric_baselines,
+)
 from reactive_diffusion_policy.common.checkpoint_util import PeriodicCheckpointManager
 from reactive_diffusion_policy.workspace.base_workspace import BaseWorkspace
 from reactive_diffusion_policy.workspace.train_at_workspace import (
@@ -117,6 +120,10 @@ def test_deployable_best_score_survives_checkpoint_round_trip(tmp_path, workspac
     workspace.optimizer_step = 2
     workspace.epoch = 1
     workspace.best_deploy_idle_score = 0.42
+    workspace.active_translation_baseline_mm = 1.25
+    workspace.active_rotation_baseline_deg = 2.5
+    workspace.active_baseline_source = "auto"
+    workspace.active_baseline_epoch = 1
 
     checkpoint = tmp_path / "deployable-state.ckpt"
     workspace.save_checkpoint(path=checkpoint, use_thread=False)
@@ -124,9 +131,64 @@ def test_deployable_best_score_survives_checkpoint_round_trip(tmp_path, workspac
     restored = workspace_class.__new__(workspace_class)
     BaseWorkspace.__init__(restored, cfg, output_dir=str(tmp_path))
     restored.best_deploy_idle_score = math.inf
+    restored.active_translation_baseline_mm = None
+    restored.active_rotation_baseline_deg = None
+    restored.active_baseline_source = None
+    restored.active_baseline_epoch = None
     restored.load_checkpoint(path=checkpoint)
 
     assert restored.best_deploy_idle_score == pytest.approx(0.42)
+    assert restored.active_translation_baseline_mm == pytest.approx(1.25)
+    assert restored.active_rotation_baseline_deg == pytest.approx(2.5)
+    assert restored.active_baseline_source == "auto"
+    assert restored.active_baseline_epoch == 1
+
+
+@pytest.mark.parametrize(
+    "workspace_class", [TrainATWorkspace, TrainDiffusionUnetImageWorkspace]
+)
+def test_old_checkpoint_without_auto_baseline_state_calibrates_after_resume(
+    tmp_path, workspace_class
+):
+    cfg = OmegaConf.create({"training": {"use_ema": False}})
+    legacy = workspace_class.__new__(workspace_class)
+    BaseWorkspace.__init__(legacy, cfg, output_dir=str(tmp_path))
+    legacy.global_step = 3
+    legacy.optimizer_step = 2
+    legacy.epoch = 1
+    legacy.best_deploy_idle_score = math.inf
+    checkpoint = tmp_path / "legacy-state.ckpt"
+    legacy.save_checkpoint(
+        path=checkpoint,
+        use_thread=False,
+        include_keys=[
+            "global_step",
+            "optimizer_step",
+            "epoch",
+            "best_deploy_idle_score",
+        ],
+    )
+
+    restored = workspace_class.__new__(workspace_class)
+    BaseWorkspace.__init__(restored, cfg, output_dir=str(tmp_path))
+    restored.active_translation_baseline_mm = None
+    restored.active_rotation_baseline_deg = None
+    restored.active_baseline_source = None
+    restored.active_baseline_epoch = None
+    restored.load_checkpoint(path=checkpoint)
+    baseline = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=restored.active_translation_baseline_mm,
+        auto_rotation_baseline_deg=restored.active_rotation_baseline_deg,
+        auto_baseline_epoch=restored.active_baseline_epoch,
+        active_translation_mm=1.25,
+        active_rotation_deg=2.5,
+        epoch=restored.epoch,
+    )
+
+    assert baseline["calibrated"] is True
+    assert baseline["source"] == "auto"
+    assert baseline["epoch"] == 1
 
 
 def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence():
@@ -147,6 +209,8 @@ def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence()
             "phase_start": 3,
             "score": None,
             "epoch": 7,
+            "active_baseline_source": None,
+            "active_baseline_epoch": None,
             "metrics": {"val_deploy_idle_score": None, "val_deployable": False},
         }
     }
@@ -160,6 +224,46 @@ def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence()
             epoch=7,
             metrics={},
         )
+
+
+def test_release_validation_records_auto_baseline_evidence():
+    release = build_release_validation(
+        passed=False,
+        deployment_slow_update_interval=16,
+        phase_start=3,
+        score=0.1,
+        epoch=7,
+        active_baseline_source="auto",
+        active_baseline_epoch=4,
+        metrics={},
+    )
+
+    assert OmegaConf.to_container(OmegaConf.create(release), resolve=True) == {
+        "passed": False,
+        "deployment_slow_update_interval": 16,
+        "phase_start": 3,
+        "score": 0.1,
+        "epoch": 7,
+        "active_baseline_source": "auto",
+        "active_baseline_epoch": 4,
+        "metrics": {},
+    }
+
+
+def test_release_validation_records_external_baseline_without_epoch():
+    release = build_release_validation(
+        passed=True,
+        deployment_slow_update_interval=16,
+        phase_start=3,
+        score=0.1,
+        epoch=7,
+        active_baseline_source="external",
+        active_baseline_epoch=4,
+        metrics={},
+    )
+
+    assert release["active_baseline_source"] == "external"
+    assert release["active_baseline_epoch"] is None
 
 
 def test_deployment_release_window_is_always_slow16():

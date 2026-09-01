@@ -18,6 +18,7 @@ from reactive_diffusion_policy.common.pick_tube_validation import (
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
     preserve_global_rng_state,
+    resolve_active_metric_baselines,
     validate_resume_action_contract,
 )
 
@@ -297,6 +298,112 @@ def test_missing_baseline_keeps_checkpoint_fail_closed():
     assert result["val_deployable"] is False
 
 
+def test_auto_baseline_calibrates_valid_metrics_once_and_freezes():
+    calibrated = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=1.25,
+        active_rotation_deg=2.5,
+        epoch=4,
+    )
+
+    assert calibrated == {
+        "translation_mm": 1.25,
+        "rotation_deg": 2.5,
+        "source": "auto",
+        "epoch": 4,
+        "calibrated": True,
+    }
+
+    frozen = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=calibrated["translation_mm"],
+        auto_rotation_baseline_deg=calibrated["rotation_deg"],
+        auto_baseline_epoch=calibrated["epoch"],
+        active_translation_mm=0.5,
+        active_rotation_deg=0.75,
+        epoch=9,
+    )
+
+    assert frozen == {
+        "translation_mm": 1.25,
+        "rotation_deg": 2.5,
+        "source": "auto",
+        "epoch": 4,
+        "calibrated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("translation", "rotation"),
+    [(math.nan, 2.5), (1.25, 0.0)],
+)
+def test_auto_baseline_skips_invalid_active_metrics(translation, rotation):
+    result = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=translation,
+        active_rotation_deg=rotation,
+        epoch=4,
+    )
+
+    assert result == {
+        "translation_mm": None,
+        "rotation_deg": None,
+        "source": None,
+        "epoch": None,
+        "calibrated": False,
+    }
+
+
+def test_external_baseline_has_priority_over_auto_baseline_state():
+    result = resolve_active_metric_baselines(
+        external_baselines={"translation_mm": 3.0, "rotation_deg": 4.0},
+        auto_translation_baseline_mm=1.25,
+        auto_rotation_baseline_deg=2.5,
+        active_translation_mm=0.5,
+        active_rotation_deg=0.75,
+        epoch=9,
+    )
+
+    assert result == {
+        "translation_mm": 3.0,
+        "rotation_deg": 4.0,
+        "source": "external",
+        "epoch": None,
+        "calibrated": False,
+    }
+
+
+def test_auto_baseline_calibration_forces_that_release_non_deployable():
+    baseline = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=1.0,
+        active_rotation_deg=2.0,
+        epoch=4,
+    )
+    release = evaluate_checkpoint_feasibility(
+        idle_translation_29_mm=0.1,
+        idle_rotation_29_deg=0.1,
+        idle_translation_p95_mm=0.01,
+        idle_rotation_p95_deg=0.01,
+        active_translation_mm=1.0,
+        active_translation_baseline_mm=baseline["translation_mm"],
+        active_rotation_deg=2.0,
+        active_rotation_baseline_deg=baseline["rotation_deg"],
+        micro_motion_recall=1.0,
+    )
+
+    release["val_deployable"] = bool(
+        release["val_deployable"] and not baseline["calibrated"]
+    )
+    assert release["val_deployable"] is False
+
+
 def test_seeded_validation_is_repeatable_and_preserves_global_rng():
     random.seed(101)
     np.random.seed(102)
@@ -425,6 +532,8 @@ def test_single_right_launcher_requires_deployable_at_and_ldp_checkpoints():
     assert "latest is recovery-only" in script
     assert "AT deployable checkpoint not found" in script
     assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
+    assert "AT/LDP will auto-calibrate on the first valid deployment validation" in script
+    assert "checkpoints will remain non-deployable" not in script
 
 
 

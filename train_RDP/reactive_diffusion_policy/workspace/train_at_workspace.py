@@ -42,6 +42,7 @@ from reactive_diffusion_policy.common.pick_tube_validation import (
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
     reconstruct_at_actions,
+    resolve_active_metric_baselines,
     validate_resume_action_contract,
 )
 
@@ -146,6 +147,8 @@ def build_release_validation(
     score,
     epoch,
     metrics,
+    active_baseline_source=None,
+    active_baseline_epoch=None,
 ) -> dict[str, object]:
     """Create scalar checkpoint evidence that deployment can validate safely."""
     if (
@@ -165,6 +168,18 @@ def build_release_validation(
         "phase_start": phase_start,
         "score": _release_scalar(score),
         "epoch": int(epoch),
+        "active_baseline_source": (
+            active_baseline_source
+            if active_baseline_source in {"auto", "external"}
+            else None
+        ),
+        "active_baseline_epoch": (
+            int(active_baseline_epoch)
+            if active_baseline_source == "auto"
+            and isinstance(active_baseline_epoch, (int, np.integer))
+            and not isinstance(active_baseline_epoch, bool)
+            else None
+        ),
         "metrics": {
             str(name): _release_scalar(value) for name, value in metrics.items()
         },
@@ -198,7 +213,11 @@ def namespace_deployment_release_metrics(release_metrics) -> dict:
 
 
 class TrainATWorkspace(BaseWorkspace):
-    include_keys = ['global_step', 'optimizer_step', 'epoch', 'best_deploy_idle_score']
+    include_keys = [
+        'global_step', 'optimizer_step', 'epoch', 'best_deploy_idle_score',
+        'active_translation_baseline_mm', 'active_rotation_baseline_deg',
+        'active_baseline_source', 'active_baseline_epoch',
+    ]
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
@@ -221,6 +240,10 @@ class TrainATWorkspace(BaseWorkspace):
         self.optimizer_step = 0
         self.epoch = 0
         self.best_deploy_idle_score = math.inf
+        self.active_translation_baseline_mm = None
+        self.active_rotation_baseline_deg = None
+        self.active_baseline_source = None
+        self.active_baseline_epoch = None
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -586,6 +609,32 @@ class TrainATWorkspace(BaseWorkspace):
                             step_log = merge_noop_idle_metrics(
                                 step_log, noop_metrics
                             )
+                            resolved_baselines = resolve_active_metric_baselines(
+                                external_baselines=active_baselines,
+                                auto_translation_baseline_mm=(
+                                    self.active_translation_baseline_mm
+                                ),
+                                auto_rotation_baseline_deg=(
+                                    self.active_rotation_baseline_deg
+                                ),
+                                auto_baseline_epoch=self.active_baseline_epoch,
+                                active_translation_mm=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_translation_mae_mm"
+                                ],
+                                active_rotation_deg=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_rotation_mae_deg"
+                                ],
+                                epoch=self.epoch,
+                            )
+                            if resolved_baselines["calibrated"]:
+                                self.active_translation_baseline_mm = (
+                                    resolved_baselines["translation_mm"]
+                                )
+                                self.active_rotation_baseline_deg = (
+                                    resolved_baselines["rotation_deg"]
+                                )
+                                self.active_baseline_source = "auto"
+                                self.active_baseline_epoch = resolved_baselines["epoch"]
                             release_metrics = evaluate_checkpoint_feasibility(
                                 idle_translation_29_mm=deployment_metrics[
                                     "val_deploy_idle_translation_window_mm"
@@ -602,25 +651,23 @@ class TrainATWorkspace(BaseWorkspace):
                                 active_translation_mm=deployment_metrics[
                                     f"val_deploy_active_{active_metric_arm}_translation_mae_mm"
                                 ],
-                                active_translation_baseline_mm=(
-                                    active_baselines["translation_mm"]
-                                    if active_baselines is not None
-                                    else None
-                                ),
+                                active_translation_baseline_mm=resolved_baselines[
+                                    "translation_mm"
+                                ],
                                 active_rotation_deg=deployment_metrics[
                                     f"val_deploy_active_{active_metric_arm}_rotation_mae_deg"
                                 ],
-                                active_rotation_baseline_deg=(
-                                    active_baselines["rotation_deg"]
-                                    if active_baselines is not None
-                                    else None
-                                ),
+                                active_rotation_baseline_deg=resolved_baselines[
+                                    "rotation_deg"
+                                ],
                                 micro_motion_recall=deployment_metrics[
                                     "val_deploy_micro_motion_recall"
                                 ],
                                 max_active_degradation=cfg.validation.max_active_degradation,
                                 min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
                             )
+                            if resolved_baselines["calibrated"]:
+                                release_metrics["val_deployable"] = False
                             step_log.update(
                                 namespace_deployment_release_metrics(release_metrics)
                             )
@@ -646,6 +693,16 @@ class TrainATWorkspace(BaseWorkspace):
                             score=release_score,
                             epoch=self.epoch,
                             metrics=step_log,
+                            active_baseline_source=(
+                                "external"
+                                if active_baselines is not None
+                                else self.active_baseline_source
+                            ),
+                            active_baseline_epoch=(
+                                None
+                                if active_baselines is not None
+                                else self.active_baseline_epoch
+                            ),
                         ),
                         merge=False,
                         force_add=True,
