@@ -4,7 +4,27 @@ set -Eeuo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
-TRAIN_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"
+TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_FRS_PYTHON:-}"
+ENV_FILE="${REPO_ROOT}/env_path"
+PREVIOUS_ENV_FILE="${REPO_ROOT}/environment_paths.sh"
+LEGACY_ENV_FILE="${REPO_ROOT}/.env.frs"
+if [[ ! -f "${ENV_FILE}" ]]; then
+    if [[ -f "${PREVIOUS_ENV_FILE}" ]]; then
+        ENV_FILE="${PREVIOUS_ENV_FILE}"
+    elif [[ -f "${LEGACY_ENV_FILE}" ]]; then
+        ENV_FILE="${LEGACY_ENV_FILE}"
+    fi
+fi
+if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    source "${ENV_FILE}"
+fi
+if [[ "${REPO_ROOT}" == /workspace/* ]]; then
+    DEFAULT_TRAIN_PYTHON="${WORKSPACE_ROOT:-${FRS_WORKSPACE_ROOT:-/workspace}}/venvs/pi05_frs_train/bin/python"
+else
+    DEFAULT_TRAIN_PYTHON="${TRAIN_ROOT}/.venv/bin/python"
+fi
+TRAIN_PYTHON="${TRAIN_PYTHON_OVERRIDE:-${TRAIN_PI05_FRS_PYTHON:-${DEFAULT_TRAIN_PYTHON}}}"
 export PYTHONPATH="${TRAIN_ROOT}/src:${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 # The standalone directory contains ``utils/`` as part of ``train_pi05_frs``.
 # Never let the working directory expose it as a top-level package that shadows

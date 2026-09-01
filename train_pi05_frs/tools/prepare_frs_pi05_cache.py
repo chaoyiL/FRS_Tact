@@ -26,6 +26,7 @@ class Pi0ConfigSpec:
     action_horizon: int
     paligemma_variant: str
     action_expert_variant: str
+    image_keys: tuple[str, ...]
 
 
 def load_pi0(checkpoint: str, *, config: Pi0ConfigSpec):
@@ -41,6 +42,7 @@ def load_pi0(checkpoint: str, *, config: Pi0ConfigSpec):
             action_horizon=config.action_horizon,
             paligemma_variant=config.paligemma_variant,
             action_expert_variant=config.action_expert_variant,
+            image_keys=config.image_keys,
         ),
     )
 
@@ -59,6 +61,7 @@ def _pi0_config(model_config: Mapping[str, Any]) -> Pi0ConfigSpec:
         action_horizon=int(model_config.get("action_horizon", 50)),
         paligemma_variant=str(model_config.get("paligemma_variant", "gemma_2b")),
         action_expert_variant=str(model_config.get("action_expert_variant", "gemma_300m")),
+        image_keys=tuple(model_config.get("camera_map", {})),
     )
 
 

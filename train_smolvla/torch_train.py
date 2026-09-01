@@ -228,7 +228,7 @@ def dataset_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
             raise ValueError(f"datasets[{index}] must be a mapping")
-        unknown = set(item) - {"repo_id", "root", "revision"}
+        unknown = set(item) - {"repo_id", "root", "revision", "rename_map"}
         if unknown:
             raise ValueError(f"unknown datasets[{index}] fields: {sorted(unknown)}")
         if not item.get("repo_id"):
@@ -239,14 +239,33 @@ def dataset_sources(config: dict[str, Any]) -> list[dict[str, Any]]:
         if repo_id in seen_repo_ids:
             raise ValueError(f"duplicate dataset repo_id: {repo_id}")
         seen_repo_ids.add(repo_id)
+        rename_map = item.get("rename_map") or {}
+        if not isinstance(rename_map, dict) or not all(
+            isinstance(source_key, str) and isinstance(target_key, str)
+            for source_key, target_key in rename_map.items()
+        ):
+            raise ValueError(f"datasets[{index}].rename_map must be a string mapping")
+        if len(set(rename_map.values())) != len(rename_map):
+            raise ValueError(
+                f"datasets[{index}].rename_map contains duplicate destination keys"
+            )
         sources.append(
             {
                 "repo_id": repo_id,
                 "root": str(item["root"]),
                 "revision": None if item.get("revision") is None else str(item["revision"]),
+                "rename_map": dict(rename_map),
             }
         )
     return sources
+
+
+def _source_image_keys(config: dict[str, Any], source: dict[str, Any]) -> list[str]:
+    """Resolve canonical model cameras back to one dataset's raw camera keys."""
+    canonical_keys = [str(key) for key in config["dataset"]["image_keys"]]
+    rename_map = source.get("rename_map") or {}
+    inverse = {target: raw for raw, target in rename_map.items()}
+    return [inverse.get(key, key) for key in canonical_keys]
 
 
 def validate_dataset_contract(config: dict[str, Any]) -> None:
@@ -284,7 +303,9 @@ def validate_dataset_contract(config: dict[str, Any]) -> None:
                 raise ValueError(
                     f"dataset {source['repo_id']} {key} must have shape [{dimension}], got {actual}"
                 )
-        expected_images = set(dataset["image_keys"])
+        source_rename = source.get("rename_map") or {}
+        source_images = _source_image_keys(config, source)
+        expected_images = set(source_images)
         actual_images = {key for key in features if key.startswith("observation.images.")}
         missing_images = expected_images - actual_images
         if missing_images:
@@ -293,12 +314,12 @@ def validate_dataset_contract(config: dict[str, Any]) -> None:
                 f"{sorted(missing_images)}; available cameras are {sorted(actual_images)}"
             )
         selected_features = {
-            key: {
+            source_rename.get(key, key): {
                 field: features[key].get(field)
                 for field in ("dtype", "shape", "names")
                 if features[key].get(field) is not None
             }
-            for key in ("observation.state", "action", *sorted(expected_images))
+            for key in ("observation.state", "action", *source_images)
         }
         if reference_features is None:
             reference_features = selected_features
@@ -403,18 +424,39 @@ class CombinedLeRobotDataset:
         return self._datasets[dataset_index][index - start]
 
 
-def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
-    """Hide unselected camera features before LeRobot returns training samples."""
+def _select_dataset_cameras(
+    dataset: Any,
+    selected_images: set[str],
+    rename_map: dict[str, str] | None = None,
+) -> Any:
+    """Select raw cameras and optionally canonicalize their sample keys."""
+    rename_map = dict(rename_map or {})
     meta = dataset.meta
     features = dict(meta.features)
     missing = selected_images - set(features)
     if missing:
         raise KeyError(f"dataset is missing selected cameras: {sorted(missing)}")
     selected_features = {
-        key: value
+        rename_map.get(key, key): value
         for key, value in features.items()
         if not key.startswith("observation.images.") or key in selected_images
     }
+    if len(selected_features) != sum(
+        1
+        for key in features
+        if not key.startswith("observation.images.") or key in selected_images
+    ):
+        raise ValueError(f"camera rename_map creates duplicate feature keys: {rename_map}")
+    renamed_video_keys = [
+        key
+        for key in selected_images
+        if rename_map.get(key, key) != key and features[key].get("dtype") == "video"
+    ]
+    if renamed_video_keys:
+        raise ValueError(
+            "per-dataset camera renaming currently requires Parquet image columns; "
+            f"video-backed keys cannot be renamed safely: {renamed_video_keys}"
+        )
     # LeRobotDatasetMetadata properties read from ``info`` dynamically.  The
     # DatasetReader holds this same metadata object, so pruning it here prevents
     # tactile/unused videos from being decoded by DataLoader workers.
@@ -423,20 +465,28 @@ def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
     else:
         meta.info.features = selected_features
     meta.stats = {
-        key: value for key, value in meta.stats.items() if key in selected_features
+        rename_map.get(key, key): value
+        for key, value in meta.stats.items()
+        if not key.startswith("observation.images.") or key in selected_images
     }
     if getattr(dataset, "delta_timestamps", None) is not None:
         dataset.delta_timestamps = {
-            key: value
+            rename_map.get(key, key): value
             for key, value in dataset.delta_timestamps.items()
-            if key in selected_features
+            if not key.startswith("observation.images.") or key in selected_images
         }
     reader = getattr(dataset, "reader", None)
+    if reader is not None and hasattr(reader, "_visual_keys"):
+        reader._visual_keys = tuple(
+            rename_map.get(key, key)
+            for key in reader._visual_keys
+            if key in selected_images
+        )
     if reader is not None and reader.delta_indices is not None:
         reader.delta_indices = {
-            key: value
+            rename_map.get(key, key): value
             for key, value in reader.delta_indices.items()
-            if key in selected_features
+            if not key.startswith("observation.images.") or key in selected_images
         }
     # Official LeRobot 0.6.1 loads ``dtype: image`` cameras as columns in the
     # Hugging Face Dataset before this selector runs. Pruning metadata is enough
@@ -451,15 +501,23 @@ def _select_dataset_cameras(dataset: Any, selected_images: set[str]) -> Any:
             if key.startswith("observation.images.") and key not in selected_images
         ]
         if unused_image_columns:
-            reader.hf_dataset = hf_dataset.remove_columns(unused_image_columns)
+            hf_dataset = hf_dataset.remove_columns(unused_image_columns)
+        column_renames = {
+            key: rename_map[key]
+            for key in selected_images
+            if key in getattr(hf_dataset, "column_names", ())
+            and key in rename_map
+            and rename_map[key] != key
+        }
+        if column_renames:
+            hf_dataset = hf_dataset.rename_columns(column_renames)
+        reader.hf_dataset = hf_dataset
     return dataset
 
 
 def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) -> Any:
     """Create a LeRobot-compatible factory that concatenates all configured sources."""
     sources = dataset_sources(config)
-    selected_images = set(config["dataset"]["image_keys"])
-
     def make_train_eval_datasets(cfg):
         from lerobot.datasets.compute_stats import aggregate_stats
 
@@ -483,9 +541,15 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
                 cfg.dataset.root = source["root"]
                 cfg.dataset.revision = source["revision"]
                 train_dataset, eval_dataset = upstream_factory(cfg)
-                train_datasets.append(_select_dataset_cameras(train_dataset, selected_images))
+                selected_images = set(_source_image_keys(config, source))
+                source_rename = source.get("rename_map") or {}
+                train_datasets.append(
+                    _select_dataset_cameras(train_dataset, selected_images, source_rename)
+                )
                 if eval_dataset is not None:
-                    eval_datasets.append(_select_dataset_cameras(eval_dataset, selected_images))
+                    eval_datasets.append(
+                        _select_dataset_cameras(eval_dataset, selected_images, source_rename)
+                    )
                 print(
                     f"[smolvla][rank {local_rank}] dataset ready: {source['repo_id']} "
                     f"train_frames={len(train_dataset)} "

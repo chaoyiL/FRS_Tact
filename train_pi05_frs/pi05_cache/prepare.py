@@ -373,6 +373,7 @@ def prepare_cache(
         "action_key": model.action_key,
         "rename_map": dict(rename_map) if rename_map is not None else None,
         "camera_map": dict(camera_map),
+        "image_keys": list(model.image_keys),
         "norm_stats_dir": str(norm_stats_dir),
         "norm_stats_asset_id": norm_stats_asset_id,
         "use_quantile_norm": use_quantile_norm,

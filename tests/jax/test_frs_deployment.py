@@ -2492,14 +2492,22 @@ def _contract_runtime() -> tuple[FRSRuntime, SimpleNamespace]:
 def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
     from deploy_pi05.frs_runtime import FRSRuntime as Pi05FRSRuntime
 
-    runtime = object.__new__(Pi05FRSRuntime)
-    runtime.config = SimpleNamespace(
-        tactile_keys=(
+    tactile_keys = (
+        (
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_right_1",
+        )
+        if action_dim == 10
+        else (
             "observation.images.tactile_left_0",
             "observation.images.tactile_right_0",
             "observation.images.tactile_left_1",
             "observation.images.tactile_right_1",
-        ),
+        )
+    )
+    runtime = object.__new__(Pi05FRSRuntime)
+    runtime.config = SimpleNamespace(
+        tactile_keys=tactile_keys,
         tactile_window_divisor=1,
         history_stride=3,
         decode_steps=10,
@@ -2513,7 +2521,7 @@ def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
         config=SimpleNamespace(
             action_dim=action_dim,
             action_horizon=10,
-            num_tactile_tokens=4,
+            num_tactile_tokens=len(tactile_keys),
             resnet_embedding_dim=512,
             tactile_window=10,
             decoder_input_version=2,
@@ -2540,7 +2548,7 @@ def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
         config=SimpleNamespace(
             action_dim=action_dim,
             action_horizon=10,
-            state_dim=20,
+            state_dim=7 if action_dim == 10 else 20,
             asset_id="physical_bimanual",
             use_quantile_norm=True,
         ),
@@ -2553,10 +2561,24 @@ def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
     ("action_dim", "objective_metadata"),
     [
         (32, {"loss_mode": "gated"}),
+        (
+            10,
+            {
+                "loss_mode": "composite_gated",
+                "loss_objective_version": 1,
+                "endpoint_policy": "scalar_three_region_composite",
+                "decode_policy": "scalar_three_region_composite",
+            },
+        ),
         (20, bimanual_objective_metadata(action_dim=20)),
         (32, bimanual_objective_metadata(action_dim=32)),
     ],
-    ids=("legacy-gated", "bimanual-gated-20d", "bimanual-gated-32d"),
+    ids=(
+        "legacy-gated",
+        "composite-gated-single-right",
+        "bimanual-gated-20d",
+        "bimanual-gated-32d",
+    ),
 )
 def test_frs_contract_accepts_matching_training_metadata(
     action_dim: int,

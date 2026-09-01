@@ -16,10 +16,12 @@ from train_pi05_frs.utils.model import FlowSolver
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
 from train_pi05_frs.utils.model import bimanual_composite_endpoint
 from train_pi05_frs.utils.model import bimanual_mse_per_sample
+from train_pi05_frs.utils.model import composite_endpoint
 from train_pi05_frs.utils.model import decode_actions
 from train_pi05_frs.utils.model import decode_bimanual_actions
 from train_pi05_frs.utils.model import flow_matching_loss_per_sample
 from train_pi05_frs.utils.model import masked_flow_matching_loss_per_sample
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 
 EvalTarget = Literal["gt", "predicted"]
 
@@ -425,6 +427,7 @@ def _evaluate_split_legacy(
     low_gate_safety_margin: float = 0.03,
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
+    track_composite: bool = False,
 ) -> EvaluationResult:
     from train_pi05_frs.utils.data import gate_weights_from_change
 
@@ -439,7 +442,10 @@ def _evaluate_split_legacy(
     mse_pred_parts: list[np.ndarray] = []
     mae_pred_parts: list[np.ndarray] = []
     pi05_gt_mse_parts: list[np.ndarray] = []
+    composite_parts: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
+    gt_actions: list[np.ndarray] = []
+    vla_actions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
     track_tactile = (
@@ -479,6 +485,10 @@ def _evaluate_split_legacy(
         pi05_gt_mse_parts.append(np.asarray(jax.device_get(pi05_gt_mse)))
         if keep_predictions:
             predictions.append(np.asarray(jax.device_get(prediction), dtype=np.float32))
+            gt_actions.append(np.asarray(jax.device_get(gt_action), dtype=np.float32))
+            vla_actions.append(
+                np.asarray(jax.device_get(predicted_action), dtype=np.float32)
+            )
         if track_tactile:
             current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
             change = conditioner.tactile_change_for_cache_indices(indices, current_tokens)
@@ -487,6 +497,25 @@ def _evaluate_split_legacy(
             )
             tactile_changes.append(change)
             gate_weights.append(gate_w)
+            if track_composite:
+                composite_target, _ = composite_endpoint(
+                    gt_action,
+                    predicted_action,
+                    jnp.asarray(gate_w),
+                    low_gate_threshold=low_gate_threshold,
+                    high_gate_threshold=high_gate_threshold,
+                )
+                composite_flow = flow_matching_loss_per_sample(
+                    model,
+                    x_base,
+                    composite_target,
+                    t,
+                    tactile_seq,
+                    state=state,
+                )
+                composite_parts.append(
+                    np.asarray(jax.device_get(composite_flow), dtype=np.float32)
+                )
 
     if not cache_indices:
         raise ValueError(f"No samples found for split {split!r}.")
@@ -499,6 +528,9 @@ def _evaluate_split_legacy(
     all_mse_pred = np.concatenate(mse_pred_parts)
     all_mae_pred = np.concatenate(mae_pred_parts)
     all_pi05_gt_mse = np.concatenate(pi05_gt_mse_parts)
+    all_gt_gain = all_pi05_gt_mse - all_mse_gt
+    all_relative_gt_error = all_mse_gt / np.maximum(all_pi05_gt_mse, 1e-8)
+    all_composite = np.concatenate(composite_parts) if composite_parts else None
     if target == "gt":
         primary_flow, primary_mse, primary_mae = all_flow_gt, all_mse_gt, all_mae_gt
     else:
@@ -544,6 +576,8 @@ def _evaluate_split_legacy(
         high_gate_gain = None
         high_gate_rank_satisfied_frac = None
         high_gate_repair_satisfied_frac = None
+        all_change = None
+        all_gate = None
 
     return EvaluationResult(
         target=target,
@@ -583,6 +617,22 @@ def _evaluate_split_legacy(
         high_gate_gain=high_gate_gain,
         high_gate_rank_satisfied_frac=high_gate_rank_satisfied_frac,
         high_gate_repair_satisfied_frac=high_gate_repair_satisfied_frac,
+        mse_vla_gt=float(np.mean(all_pi05_gt_mse)),
+        gt_gain=float(np.mean(all_gt_gain)),
+        relative_gt_error=_ratio_of_means(all_mse_gt, all_pi05_gt_mse),
+        sample_mse_vla_gt=all_pi05_gt_mse,
+        sample_gt_gain=all_gt_gain,
+        sample_relative_gt_error=all_relative_gt_error,
+        sample_tactile_change=all_change,
+        sample_gate_w=all_gate,
+        composite_fm=(
+            None if all_composite is None else float(np.mean(all_composite))
+        ),
+        sample_composite_fm=all_composite,
+        gate_low_threshold=float(low_gate_threshold),
+        gate_high_threshold=float(high_gate_threshold),
+        gt_actions=np.concatenate(gt_actions) if gt_actions else None,
+        vla_actions=np.concatenate(vla_actions) if vla_actions else None,
     )
 
 
@@ -607,11 +657,12 @@ def evaluate_split(
     rank_low_gate_threshold: float | None = None,
     rank_high_gate_threshold: float | None = None,
 ) -> EvaluationResult:
-    """Evaluate a split, adding independent wrist metrics for bimanual checkpoints.
+    """Evaluate legacy/scalar modes or add independent wrist metrics for bimanual.
 
-    The legacy implementation remains the exact path for every non-bimanual
-    loss mode. Bimanual endpoint metrics and composite FM are restricted to the
-    first 20 physical action dimensions; retained action arrays keep model width.
+    Scalar composite evaluation additionally retains its Gate, frozen-VLA
+    baseline, composite FM, and optional action arrays for live diagnostics.
+    Bimanual endpoint metrics and composite FM are restricted to the first 20
+    physical action dimensions; retained action arrays keep model width.
     """
     if loss_mode != BIMANUAL_LOSS_MODE:
         return _evaluate_split_legacy(
@@ -630,6 +681,7 @@ def evaluate_split(
             low_gate_safety_margin=low_gate_safety_margin,
             rank_margin=rank_margin,
             repair_margin=repair_margin,
+            track_composite=(loss_mode == COMPOSITE_GATED_LOSS_MODE),
         )
     from train_pi05_frs.utils.data import gate_weights_from_change
 

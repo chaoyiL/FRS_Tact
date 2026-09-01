@@ -117,8 +117,13 @@ Right-hand single-arm training:
 bash train_smolvla/scripts/start_smolvla_right_train.sh
 ```
 
-The right-hand dataset must expose a 7D `observation.state`, a 10D `action`,
-and the camera contract declared by `rename_map`.
+The default right-hand configuration mixes `KaiyueChen/insert_01` and
+`KaiyueChen/insert_02` with a 7D `observation.state` and 10D `action`.
+`insert_01`'s active `camera0` and `insert_02`'s active `camera1` are selected
+per source and canonicalized to the single model input
+`observation.images.camera1`; black placeholder and tactile cameras are pruned.
+The default batch size is 64 per GPU on two GPUs (global batch 128), with 6000
+steps and validation/checkpointing every 500 steps.
 
 To inspect the generated official LeRobot command without training:
 

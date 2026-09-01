@@ -4,7 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 TRAIN_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="$(cd -- "${TRAIN_ROOT}/.." && pwd)"
-TRAIN_VENV="${TRAIN_PI05_FRS_VENV:-${TRAIN_ROOT}/.venv}"
+if [[ "${REPO_ROOT}" == /workspace/* ]]; then
+    DEFAULT_TRAIN_VENV="${FRS_WORKSPACE_ROOT:-/workspace}/venvs/pi05_frs_train"
+else
+    DEFAULT_TRAIN_VENV="${TRAIN_ROOT}/.venv"
+fi
+TRAIN_VENV="${TRAIN_PI05_FRS_VENV:-${DEFAULT_TRAIN_VENV}}"
 UV_BIN="${UV_BIN:-uv}"
 TRAIN_PI05_FRS_PYTHON_OVERRIDE="${TRAIN_PI05_FRS_PYTHON:-}"
 TRAIN_PI05_FRS_PYTHON="${TRAIN_PI05_FRS_PYTHON_OVERRIDE:-${TRAIN_VENV}/bin/python}"
@@ -50,7 +55,7 @@ check_environment() {
 
 main() {
     case "${1:-}" in
-        "") sync_environment ;;
+        "") exec bash "${REPO_ROOT}/scripts/setup_env.sh" --pi05_frs_train ;;
         --check) check_environment ;;
         *) fail "usage: $0 [--check]" ;;
     esac

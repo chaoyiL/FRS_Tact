@@ -19,8 +19,15 @@ from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_action_dim
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
+from train_pi05_frs.utils.objective_schema import validate_composite_gated_objective_metadata
 
-LossMode = Literal["gt", "predicted", "gated", "bimanual_gated"]
+LossMode = Literal[
+    "gt", "predicted", "gated", "composite_gated", "bimanual_gated"
+]
+SCALAR_GATED_LOSS_MODES = ("gated", COMPOSITE_GATED_LOSS_MODE)
+ALL_GATED_LOSS_MODES = (*SCALAR_GATED_LOSS_MODES, BIMANUAL_LOSS_MODE)
 
 
 def _validate_bimanual_training_contract(
@@ -110,8 +117,14 @@ def _validate_resume_loss_objective(
     loss_mode: LossMode,
     action_dim: int,
 ) -> None:
-    """Require the exact fixed objective contract before resuming bimanual training."""
+    """Require exact objective metadata before resuming a versioned loss mode."""
 
+    if loss_mode == COMPOSITE_GATED_LOSS_MODE:
+        extra = checkpoint_metadata.get("extra_metadata")
+        if not isinstance(extra, Mapping):
+            raise ValueError("resume checkpoint is missing composite objective metadata")
+        validate_composite_gated_objective_metadata(extra)
+        return
     if loss_mode != BIMANUAL_LOSS_MODE:
         return
     extra = checkpoint_metadata.get("extra_metadata")
@@ -189,7 +202,7 @@ def checkpoint_selection_key(
             max(value[2] for value in wrist_values),
             aggregate_gt_mse,
         )
-    if loss_mode != "gated":
+    if loss_mode not in SCALAR_GATED_LOSS_MODES:
         return (0.0, aggregate_mse)
 
     low_unsafe = float(metrics.get("val_low_gate_unsafe_frac", float("nan")))
@@ -327,6 +340,7 @@ def train_decoder(
     tactile_keys: Sequence[str] | None = None,
     tactile_embedding_dim: int = 512,
     tactile_image_size: int = 224,
+    tactile_num_tokens: int = 4,
 ) -> None:
     _validate_training_path_boundaries(
         cache_dir=cache_dir,
@@ -364,6 +378,7 @@ def train_decoder(
     )
     from train_pi05_frs.utils.history_plot import plot_training_history
     from train_pi05_frs.utils.bimanual_visualize import plot_bimanual_diagnostics
+    from train_pi05_frs.utils.single_hand_visualize import plot_single_hand_diagnostics
     from train_pi05_frs.utils.bimanual_metrics import (
         flatten_bimanual_quadrant_metrics,
     )
@@ -461,16 +476,35 @@ def train_decoder(
         "worst_dataset_repair_penalty_high_w",
         "min_dataset_repair_satisfied_high_frac",
     )
-    if loss_mode == BIMANUAL_LOSS_MODE:
+    if loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE):
         history_fields.insert(4, "train_loss_composite_fm")
+        history_fields.extend(
+            ("val_composite_fm", "val_mse_vla_gt", "val_gt_gain", "val_relative_gt_error")
+        )
+    if loss_mode == COMPOSITE_GATED_LOSS_MODE:
+        history_fields.extend(
+            (
+                "val_gate_w_mean",
+                "val_gate_w_p10",
+                "val_gate_w_p50",
+                "val_gate_w_p90",
+                "val_tactile_change_mean",
+                "val_tactile_change_p10",
+                "val_tactile_change_p50",
+                "val_tactile_change_p90",
+                "val_gate_n_low",
+                "val_gate_n_mid",
+                "val_gate_n_high",
+                "val_low_safe_frac",
+                "checkpoint_selection_feasible",
+            )
+        )
+    if loss_mode == BIMANUAL_LOSS_MODE:
         gate_history_at = history_fields.index("train_flow_loss")
         history_fields[gate_history_at:gate_history_at] = [
             "train_gate_w_left",
             "train_gate_w_right",
         ]
-        history_fields.extend(
-            ("val_composite_fm", "val_mse_vla_gt", "val_gt_gain", "val_relative_gt_error")
-        )
         for wrist in ("left", "right"):
             history_fields.extend(
                 f"val_{metric_name}_{wrist}"
@@ -523,10 +557,11 @@ def train_decoder(
         raise ValueError("warmup_epochs must be non-negative.")
     if not 0.0 <= min_learning_rate_ratio <= 1.0:
         raise ValueError("min_learning_rate_ratio must be in [0, 1].")
-    if loss_mode not in ("gt", "predicted", "gated", BIMANUAL_LOSS_MODE):
+    if loss_mode not in ("gt", "predicted", *ALL_GATED_LOSS_MODES):
         raise ValueError(
-            "loss_mode must be 'gt', 'predicted', 'gated', or "
-            f"'{BIMANUAL_LOSS_MODE}', got {loss_mode!r}."
+            "loss_mode must be 'gt', 'predicted', 'gated', "
+            f"'{COMPOSITE_GATED_LOSS_MODE}', or '{BIMANUAL_LOSS_MODE}', "
+            f"got {loss_mode!r}."
         )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
     if not 0.0 <= gate_tau <= 1.0:
@@ -535,6 +570,10 @@ def train_decoder(
         raise ValueError(f"gate_temperature must be positive, got {gate_temperature}.")
     if gate_lambda < 0:
         raise ValueError(f"gate_lambda must be non-negative, got {gate_lambda}.")
+    if tactile_num_tokens <= 0:
+        raise ValueError(
+            f"tactile_num_tokens must be positive, got {tactile_num_tokens}."
+        )
     if eval_every <= 0:
         raise ValueError(f"eval_every must be positive, got {eval_every}.")
     if aux_decode_solver not in ("euler", "fireflow"):
@@ -576,11 +615,21 @@ def train_decoder(
             raise ValueError("tactile_embedding_cache_root is required for multi-source FRS")
         if not tactile_keys:
             raise ValueError("tactile_keys is required for multi-source FRS")
+        if len(tactile_keys) != tactile_num_tokens:
+            raise ValueError(
+                "tactile_num_tokens must equal the number of tactile_keys: "
+                f"{tactile_num_tokens} != {len(tactile_keys)}."
+            )
         source_names = [str(source["repo_id"]) for source in dataset_sources]
         pairs = MultiCachedPairs(cache_dirs, source_names=source_names)
     else:
         if cache_dir is None:
             raise ValueError("cache_dir is required when cache_dirs is not provided")
+        if tactile_num_tokens != len(TACTILE_KEYS):
+            raise ValueError(
+                "legacy image-loading training uses the fixed tactile key set and "
+                f"requires tactile_num_tokens={len(TACTILE_KEYS)}."
+            )
         pairs = CachedPairs(cache_dir)
     _validate_bimanual_training_contract(
         loss_mode=loss_mode,
@@ -615,7 +664,7 @@ def train_decoder(
             history_stride=history_stride,
             embedding_dim=tactile_embedding_dim,
             image_size=tactile_image_size,
-            build_episode_baselines=(loss_mode in ("gated", BIMANUAL_LOSS_MODE)),
+            build_episode_baselines=(loss_mode in ALL_GATED_LOSS_MODES),
         )
     else:
         conditioner = TactileConditionedBatches(
@@ -625,7 +674,7 @@ def train_decoder(
             dataset_repo_id=dataset_repo_id,
             dataset_root=dataset_root,
             history_stride=history_stride,
-            build_episode_baselines=(loss_mode in ("gated", BIMANUAL_LOSS_MODE)),
+            build_episode_baselines=(loss_mode in ALL_GATED_LOSS_MODES),
             num_workers=num_workers,
             prefetch_batches=prefetch_batches,
             load_threads=load_threads,
@@ -645,6 +694,7 @@ def train_decoder(
         mlp_ratio=mlp_ratio,
         state_conditioning=state_conditioning,
         state_dim=int(pairs.manifest["state_dim"]) if state_conditioning else 0,
+        num_tactile_tokens=tactile_num_tokens,
     )
     if resume_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
@@ -763,6 +813,16 @@ def train_decoder(
             f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
             f"(primary eval=gt; also log vs predicted)"
         )
+    elif loss_mode == COMPOSITE_GATED_LOSS_MODE:
+        print(
+            "loss_mode=composite_gated scalar three-region composite FM "
+            f"tau={gate_tau:g} T={gate_temperature:g} "
+            f"aux={aux_decode_weight:g} decode_steps={aux_decode_steps} "
+            f"decode_solver={aux_decode_solver} low_safety={low_gate_safety_weight:g} "
+            f"rank={rank_weight:g} repair={repair_weight:g} "
+            f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
+            "(one mixed GT/VLA endpoint; primary eval=gt)"
+        )
     else:
         print(
             "loss_mode=bimanual_gated objective-v2 masked composite FM "
@@ -841,7 +901,7 @@ def train_decoder(
                         "rank",
                         "repair",
                     )
-                    if loss_mode == BIMANUAL_LOSS_MODE
+                    if loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
                     else (
                         "gt_fm",
                         "vla_fm",
@@ -890,7 +950,7 @@ def train_decoder(
                         batch_gate_w = 0.5 * (
                             batch_gate_w_left + batch_gate_w_right
                         )
-                    elif loss_mode == "gated":
+                    elif loss_mode in SCALAR_GATED_LOSS_MODES:
                         current_tokens = np.asarray(tactile_seq[:, -1, :, :], dtype=np.float32)
                         gate_w = conditioner.gate_weights_for_cache_indices(
                             indices,
@@ -945,7 +1005,7 @@ def train_decoder(
                     gate_w_left_values.append(batch_gate_w_left)
                     gate_w_right_values.append(batch_gate_w_right)
                     if batch_number == 0 or (batch_number + 1) % 20 == 0:
-                        if loss_mode == "gated":
+                        if loss_mode in SCALAR_GATED_LOSS_MODES:
                             extra = f" gate_w={batch_gate_w:.4f}"
                         elif loss_mode == BIMANUAL_LOSS_MODE:
                             extra = (
@@ -1008,8 +1068,11 @@ def train_decoder(
                     ),
                     "eval_every": eval_every,
                 }
-                if loss_mode == BIMANUAL_LOSS_MODE:
+                if loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE):
                     checkpoint_extra.pop("gate_lambda")
+                if loss_mode == COMPOSITE_GATED_LOSS_MODE:
+                    checkpoint_extra.update(composite_gated_objective_metadata())
+                if loss_mode == BIMANUAL_LOSS_MODE:
                     checkpoint_extra.update(
                         bimanual_objective_metadata(
                             action_dim=int(model.config.action_dim)
@@ -1023,19 +1086,21 @@ def train_decoder(
                         batch_size=batch_size,
                         num_steps=validation_steps,
                         keep_predictions=(
-                            loss_mode == BIMANUAL_LOSS_MODE and write_plots
+                            loss_mode
+                            in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+                            and write_plots
                         ),
                         solver=aux_decode_solver,
                         target=eval_target,
                         loss_mode=loss_mode,
                         gate_tau=(
                             gate_tau
-                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            if loss_mode in ALL_GATED_LOSS_MODES
                             else None
                         ),
                         gate_temperature=(
                             gate_temperature
-                            if loss_mode in ("gated", BIMANUAL_LOSS_MODE)
+                            if loss_mode in ALL_GATED_LOSS_MODES
                             else None
                         ),
                         low_gate_threshold=low_gate_threshold,
@@ -1086,6 +1151,54 @@ def train_decoder(
                                     validation.high_gate_repair_satisfied_frac
                                 ),
                             }
+                        )
+                    if loss_mode == COMPOSITE_GATED_LOSS_MODE:
+                        if (
+                            validation.sample_gate_w is None
+                            or validation.sample_tactile_change is None
+                            or validation.composite_fm is None
+                        ):
+                            raise ValueError(
+                                "single-hand composite validation is missing Gate diagnostics"
+                            )
+                        gate_values = np.asarray(validation.sample_gate_w)
+                        change_values = np.asarray(validation.sample_tactile_change)
+                        low_gate = gate_values <= low_gate_threshold
+                        high_gate = gate_values >= high_gate_threshold
+                        mid_gate = ~(low_gate | high_gate)
+                        metrics.update(
+                            {
+                                "val_composite_fm": float(validation.composite_fm),
+                                "val_mse_vla_gt": float(validation.mse_vla_gt),
+                                "val_gt_gain": float(validation.gt_gain),
+                                "val_relative_gt_error": float(
+                                    validation.relative_gt_error
+                                ),
+                                "val_gate_w_mean": float(np.mean(gate_values)),
+                                "val_gate_w_p10": float(np.quantile(gate_values, 0.1)),
+                                "val_gate_w_p50": float(np.quantile(gate_values, 0.5)),
+                                "val_gate_w_p90": float(np.quantile(gate_values, 0.9)),
+                                "val_tactile_change_mean": float(
+                                    np.mean(change_values)
+                                ),
+                                "val_tactile_change_p10": float(
+                                    np.quantile(change_values, 0.1)
+                                ),
+                                "val_tactile_change_p50": float(
+                                    np.quantile(change_values, 0.5)
+                                ),
+                                "val_tactile_change_p90": float(
+                                    np.quantile(change_values, 0.9)
+                                ),
+                                "val_gate_n_low": int(np.count_nonzero(low_gate)),
+                                "val_gate_n_mid": int(np.count_nonzero(mid_gate)),
+                                "val_gate_n_high": int(np.count_nonzero(high_gate)),
+                                "val_low_safe_frac": 1.0
+                                - float(validation.low_gate_unsafe_frac),
+                            }
+                        )
+                        metrics["checkpoint_selection_feasible"] = int(
+                            _best_key(metrics)[0] == 0.0
                         )
                     if validation.n_high_w_left is not None:
                         metrics.update(
@@ -1175,6 +1288,7 @@ def train_decoder(
                                 history_path,
                                 validation,
                                 output_dir=output_dir,
+                                pairs=pairs,
                                 min_rank_satisfied=(
                                     best_min_high_gate_rank_satisfied_frac
                                 ),
@@ -1190,6 +1304,27 @@ def train_decoder(
                         else:
                             for path in bimanual_plots:
                                 print(f"bimanual_plot={path}", flush=True)
+                    if loss_mode == COMPOSITE_GATED_LOSS_MODE and write_plots:
+                        try:
+                            single_hand_plots = plot_single_hand_diagnostics(
+                                history_path,
+                                validation,
+                                output_dir=output_dir,
+                                pairs=pairs,
+                                min_rank_satisfied=(
+                                    best_min_high_gate_rank_satisfied_frac
+                                ),
+                                min_low_safe=1.0 - best_max_low_gate_unsafe_frac,
+                            )
+                        except Exception as exc:
+                            print(
+                                "warning: could not refresh single-hand "
+                                f"diagnostics: {exc}",
+                                flush=True,
+                            )
+                        else:
+                            for path in single_hand_plots:
+                                print(f"single_hand_plot={path}", flush=True)
                     save_checkpoint(
                         output_dir / "last",
                         model,
@@ -1280,7 +1415,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Train tactile GRU + cross-attn flow decoder "
             "(frozen ResNet features; loss-mode gt / predicted / gated / "
-            "bimanual_gated)."
+            "composite_gated / bimanual_gated)."
         )
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
@@ -1312,12 +1447,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--loss-mode",
-        choices=("gt", "predicted", "gated", BIMANUAL_LOSS_MODE),
+        choices=(
+            "gt",
+            "predicted",
+            "gated",
+            COMPOSITE_GATED_LOSS_MODE,
+            BIMANUAL_LOSS_MODE,
+        ),
         default="gt",
         help=(
             "gt: FM(gt)+aux*MSE(decode,gt) (primary eval vs GT). "
             "predicted: FM vs VLA predicted_actions only (no aux; sanity check). "
             "gated: FRS_Tact three-region six-term Gate objective. "
+            "composite_gated: scalar Gate mixes one GT/VLA endpoint before FM. "
             "bimanual_gated: fixed per-wrist 20D objective (gate-lambda ignored). "
             "All modes always log both val_mse_gt and val_mse_pred."
         ),
@@ -1462,7 +1604,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         gate_tau=args.gate_tau,
         gate_temperature=args.gate_temperature,
         gate_lambda=(
-            0.0 if args.loss_mode == BIMANUAL_LOSS_MODE else args.gate_lambda
+            0.0
+            if args.loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+            else args.gate_lambda
         ),
         aux_decode_weight=args.aux_decode_weight,
         aux_decode_steps=(

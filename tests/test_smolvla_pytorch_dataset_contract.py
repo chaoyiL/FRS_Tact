@@ -70,6 +70,9 @@ def test_visual_contract_allows_and_prunes_tactile_cameras(tmp_path: Path) -> No
             removed = set(names)
             return FakeHfDataset([name for name in self.column_names if name not in removed])
 
+        def rename_columns(self, mapping: dict[str, str]):
+            return FakeHfDataset([mapping.get(name, name) for name in self.column_names])
+
     dataset = SimpleNamespace(
         meta=metadata,
         delta_timestamps={key: [0.0] for key in features},
@@ -89,6 +92,75 @@ def test_visual_contract_allows_and_prunes_tactile_cameras(tmp_path: Path) -> No
     assert "observation.images.tactile_left_0" not in dataset.reader.hf_dataset.column_names
     assert "observation.images.camera0" in dataset.reader.hf_dataset.column_names
     assert "observation.images.camera1" in dataset.reader.hf_dataset.column_names
+
+
+def test_per_source_camera_mapping_canonicalizes_insert_camera(tmp_path: Path) -> None:
+    features = {
+        "observation.state": {"dtype": "float32", "shape": [7]},
+        "action": {"dtype": "float32", "shape": [10]},
+        "observation.images.camera0": {"dtype": "image", "shape": [224, 224, 3]},
+        "observation.images.camera1": {"dtype": "image", "shape": [224, 224, 3]},
+    }
+    info_path = tmp_path / "meta/info.json"
+    info_path.parent.mkdir(parents=True)
+    info_path.write_text(
+        json.dumps({"codebase_version": "v3.0", "fps": 30, "features": features}),
+        encoding="utf-8",
+    )
+    config = {
+        "dataset": {
+            "expected_fps": 30,
+            "state_dim": 7,
+            "action_dim": 10,
+            "image_keys": ["observation.images.camera1"],
+        },
+        "datasets": [
+            {
+                "repo_id": "test/insert_01",
+                "root": str(tmp_path),
+                "rename_map": {
+                    "observation.images.camera0": "observation.images.camera1"
+                },
+            }
+        ],
+    }
+
+    validate_dataset_contract(config)
+
+    class FakeHfDataset:
+        def __init__(self, column_names: list[str]):
+            self.column_names = column_names
+
+        def remove_columns(self, names: list[str]):
+            removed = set(names)
+            return FakeHfDataset([name for name in self.column_names if name not in removed])
+
+        def rename_columns(self, mapping: dict[str, str]):
+            return FakeHfDataset([mapping.get(name, name) for name in self.column_names])
+
+    metadata = SimpleNamespace(
+        features=features,
+        info={"features": dict(features)},
+        stats={key: {"mean": [0.0]} for key in features},
+    )
+    dataset = SimpleNamespace(
+        meta=metadata,
+        delta_timestamps={key: [0.0] for key in features},
+        reader=SimpleNamespace(
+            delta_indices={key: [0] for key in features},
+            hf_dataset=FakeHfDataset(list(features)),
+        ),
+    )
+    _select_dataset_cameras(
+        dataset,
+        {"observation.images.camera0"},
+        {"observation.images.camera0": "observation.images.camera1"},
+    )
+
+    assert "observation.images.camera0" not in metadata.info["features"]
+    assert "observation.images.camera1" in metadata.info["features"]
+    assert dataset.reader.hf_dataset.column_names.count("observation.images.camera1") == 1
+    assert "observation.images.camera0" not in dataset.reader.hf_dataset.column_names
 
 
 def test_wandb_auto_is_offline_without_credentials(monkeypatch) -> None:
@@ -279,6 +351,20 @@ def test_training_configs_use_smolvla_names() -> None:
     assert (config_dir / "train_smolvla_right.yaml").is_file()
     assert not (config_dir / "train_pytorch.yaml").exists()
     assert not (config_dir / "train_pytorch_right.yaml").exists()
+
+    right = yaml.safe_load((config_dir / "train_smolvla_right.yaml").read_text(encoding="utf-8"))
+    assert [source["repo_id"] for source in right["datasets"]] == [
+        "KaiyueChen/insert_01",
+        "KaiyueChen/insert_02",
+    ]
+    assert right["datasets"][0]["rename_map"] == {
+        "observation.images.camera0": "observation.images.camera1"
+    }
+    assert right["dataset"]["image_keys"] == ["observation.images.camera1"]
+    assert right["dataset"]["state_dim"] == 7
+    assert right["dataset"]["action_dim"] == 10
+    assert right["augmentation"] == {"preset": "balanced-light-v2", "enabled": True}
+    assert right["distributed"]["num_gpus"] == 2
 
 
 def test_single_gpu_precision_uses_yaml_value(monkeypatch) -> None:
