@@ -97,9 +97,13 @@ GPU_ID=1 bash scripts/server_ljl_bread_dual.sh doctor
 # 生成/续算 embedding、PCA30、RDP Zarr，然后训练 AT -> LDP
 GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 \
   bash scripts/server_ljl_bread_dual.sh all
+
+# AT 已完成而 LDP 中断时，只恢复 LDP
+GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 \
+  bash scripts/server_ljl_bread_dual.sh ldp
 ```
 
 中间数据位于 `/DATA/ljl/substage/rdp_bread_dual`，权重分别保存在其
 `outputs/bread_01_02_03/at_*` 和 `outputs/bread_01_02_03/ldp_*` 下的
 `checkpoints/latest.ckpt`。默认预计算 batch/workers 为512/32，AT batch为512，
-LDP物理 batch为64，训练 workers为32；可以用同名环境变量覆盖。
+LDP物理 batch为32、梯度累积2（有效 batch 64），训练 workers为32；可以用同名环境变量覆盖。

@@ -35,7 +35,8 @@ PRECOMPUTE_WORKERS=${BREAD_PRECOMPUTE_WORKERS:-32}
 CONVERT_WORKERS=${BREAD_CONVERT_WORKERS:-32}
 AT_BATCH=${BREAD_AT_BATCH:-512}
 # LDP is substantially heavier than AT; 64 is the stable physical batch.
-LDP_BATCH=${BREAD_LDP_BATCH:-64}
+LDP_BATCH=${BREAD_LDP_BATCH:-32}
+LDP_GRAD_ACCUM=${BREAD_LDP_GRAD_ACCUM:-2}
 NUM_WORKERS=${BREAD_NUM_WORKERS:-32}
 AT_EPOCHS=${BREAD_AT_EPOCHS:-20}
 LDP_EPOCHS=${BREAD_LDP_EPOCHS:-10}
@@ -59,6 +60,8 @@ usage() {
   bash scripts/server_ljl_bread_dual.sh precompute
   bash scripts/server_ljl_bread_dual.sh prepare
   bash scripts/server_ljl_bread_dual.sh train
+  bash scripts/server_ljl_bread_dual.sh at
+  bash scripts/server_ljl_bread_dual.sh ldp
   bash scripts/server_ljl_bread_dual.sh all
 
 数据：bread_01 + bread_02 + bread_03（合并训练一个双臂模型）
@@ -68,6 +71,8 @@ usage() {
   precompute 只生成四路触觉 embedding
   prepare    生成/续算 embedding、PCA30 和双臂 RDP Zarr
   train      使用已有 Zarr 训练双臂 AT -> LDP
+  at         只训练或恢复 AT
+  ldp        从已有 AT latest.ckpt 只训练或恢复 LDP
   all        prepare + train；不会安装或下载环境
 
 默认路径：
@@ -80,7 +85,8 @@ usage() {
 
 默认参数：
   GPU_ID=0 BREAD_PRECOMPUTE_BATCH=512 BREAD_PRECOMPUTE_WORKERS=32
-  BREAD_AT_BATCH=512 BREAD_LDP_BATCH=64 BREAD_NUM_WORKERS=32
+  BREAD_AT_BATCH=512 BREAD_LDP_BATCH=32 BREAD_LDP_GRAD_ACCUM=2
+  BREAD_NUM_WORKERS=32
   BREAD_AT_EPOCHS=20 BREAD_LDP_EPOCHS=10 BREAD_MIXED_PRECISION=bf16
 
 路径和训练参数只接受 BREAD_* 覆盖，避免被其他任务导出的 DATASET_PATH、
@@ -88,7 +94,7 @@ PCA_PATH、WORK_ROOT 等变量污染。
 
 示例：
   GPU_ID=1 bash scripts/server_ljl_bread_dual.sh all
-  GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 bash scripts/server_ljl_bread_dual.sh train
+  GPU_ID=1 BREAD_EXPERIMENT_ID=bread_v1 bash scripts/server_ljl_bread_dual.sh ldp
 USAGE
 }
 
@@ -128,7 +134,11 @@ import torch
 
 if not torch.cuda.is_available():
     raise SystemExit("RDP PyTorch 环境没有检测到 CUDA")
-print(f"RDP torch={torch.__version__}, gpu={torch.cuda.get_device_name(0)}")
+free_bytes, total_bytes = torch.cuda.mem_get_info()
+print(
+    f"RDP torch={torch.__version__}, gpu={torch.cuda.get_device_name(0)}, "
+    f"free_vram={free_bytes / 2**30:.1f}/{total_bytes / 2**30:.1f} GiB"
+)
 PY
   env -u LD_LIBRARY_PATH "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
     XLA_PYTHON_CLIENT_PREALLOCATE=false "${JAX_PYTHON}" - <<'PY'
@@ -307,6 +317,7 @@ prepare_dataset() {
 }
 
 train_model() {
+  local train_stage=${1:-all}
   if [[ ! -d "${DATASET_PATH}/replay_buffer.zarr" && "${DRY_RUN}" != "1" ]]; then
     echo "RDP dataset not found: ${DATASET_PATH}/replay_buffer.zarr" >&2
     echo "请先运行：bash scripts/server_ljl_bread_dual.sh prepare" >&2
@@ -326,6 +337,7 @@ train_model() {
     "LDP_EPOCHS=${LDP_EPOCHS}" \
     "AT_BATCH=${AT_BATCH}" \
     "LDP_BATCH=${LDP_BATCH}" \
+    "LDP_GRAD_ACCUM=${LDP_GRAD_ACCUM}" \
     "NUM_WORKERS=${NUM_WORKERS}" \
     "AT_CHECKPOINT_EVERY=${AT_CHECKPOINT_EVERY}" \
     "LDP_CHECKPOINT_EVERY=${LDP_CHECKPOINT_EVERY}" \
@@ -334,11 +346,11 @@ train_model() {
     "RESUME=${RESUME}" \
     "VALIDATE_DATASET=0" \
     "DRY_RUN=${DRY_RUN}" \
-    bash scripts/train_pick_tube_single_gpu.sh all
+    bash scripts/train_pick_tube_single_gpu.sh "${train_stage}"
 }
 
 case "${STAGE}" in
-  doctor|precompute|prepare|train|all)
+  doctor|precompute|prepare|train|at|ldp|all)
     ;;
   help|-h|--help)
     usage
@@ -376,14 +388,18 @@ case "${STAGE}" in
     ;;
   train)
     verify_runtime
-    train_model
+    train_model all
+    ;;
+  at|ldp)
+    verify_runtime
+    train_model "${STAGE}"
     ;;
   all)
     check_dataset_contract
     check_encoder
     verify_runtime
     prepare_dataset
-    train_model
+    train_model all
     ;;
 esac
 
