@@ -37,6 +37,7 @@ from reactive_diffusion_policy.common.artifact_manifest import (
     save_normalizer_cache,
 )
 from reactive_diffusion_policy.common.pick_tube_validation import (
+    compute_deployment_window_metrics,
     compute_idle_rollout_metrics,
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
@@ -46,16 +47,19 @@ from reactive_diffusion_policy.common.pick_tube_validation import (
 from accelerate import Accelerator
 from accelerate.utils import DistributedDataParallelKwargs
 from reactive_diffusion_policy.workspace.train_at_workspace import (
+    build_release_validation,
+    get_deployment_phase_window,
     get_effective_num_batches,
     get_legacy_optimizer_step,
     get_num_training_steps,
     should_optimizer_step,
+    should_update_deployable_checkpoint,
 )
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
-    include_keys = ['global_step', 'optimizer_step', 'epoch']
+    include_keys = ['global_step', 'optimizer_step', 'epoch', 'best_deploy_idle_score']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
@@ -135,6 +139,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         self.global_step = 0
         self.optimizer_step = 0
         self.epoch = 0
+        self.best_deploy_idle_score = float("inf")
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -472,42 +477,60 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                 ),
                             )
                             step_log.update(physical_metrics)
+                            phase_start, phase_count = get_deployment_phase_window(cfg)
+                            deployment_metrics = compute_deployment_window_metrics(
+                                torch.cat(val_targets),
+                                torch.cat(val_predictions),
+                                torch.cat(val_idle_masks),
+                                phase_start=phase_start,
+                                phase_count=phase_count,
+                                valid_mask=torch.cat(val_valid_masks),
+                                state_action_profile=cfg.task.get(
+                                    "state_action_profile", None
+                                ),
+                            )
+                            step_log.update(deployment_metrics)
+                            release_metrics = evaluate_checkpoint_feasibility(
+                                idle_translation_29_mm=deployment_metrics[
+                                    "val_deploy_idle_translation_window_mm"
+                                ],
+                                idle_rotation_29_deg=deployment_metrics[
+                                    "val_deploy_idle_rotation_window_deg"
+                                ],
+                                idle_translation_p95_mm=deployment_metrics[
+                                    "val_deploy_idle_translation_step_p95_mm"
+                                ],
+                                idle_rotation_p95_deg=deployment_metrics[
+                                    "val_deploy_idle_rotation_step_p95_deg"
+                                ],
+                                active_translation_mm=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_translation_mae_mm"
+                                ],
+                                active_translation_baseline_mm=(
+                                    active_baselines["translation_mm"]
+                                    if active_baselines is not None
+                                    else None
+                                ),
+                                active_rotation_deg=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_rotation_mae_deg"
+                                ],
+                                active_rotation_baseline_deg=(
+                                    active_baselines["rotation_deg"]
+                                    if active_baselines is not None
+                                    else None
+                                ),
+                                micro_motion_recall=deployment_metrics[
+                                    "val_deploy_micro_motion_recall"
+                                ],
+                                max_active_degradation=cfg.validation.max_active_degradation,
+                                min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
+                            )
                             step_log.update(
-                                evaluate_checkpoint_feasibility(
-                                    idle_translation_29_mm=physical_metrics[
-                                        "val_idle_translation_29_mm"
-                                    ],
-                                    idle_rotation_29_deg=physical_metrics[
-                                        "val_idle_rotation_29_deg"
-                                    ],
-                                    idle_translation_p95_mm=physical_metrics[
-                                        "val_idle_translation_p95_mm"
-                                    ],
-                                    idle_rotation_p95_deg=physical_metrics[
-                                        "val_idle_rotation_p95_deg"
-                                    ],
-                                    active_translation_mm=physical_metrics[
-                                        f"val_active_{active_metric_arm}_translation_mae_mm"
-                                    ],
-                                    active_translation_baseline_mm=(
-                                        active_baselines["translation_mm"]
-                                        if active_baselines is not None
-                                        else None
-                                    ),
-                                    active_rotation_deg=physical_metrics[
-                                        f"val_active_{active_metric_arm}_rotation_mae_deg"
-                                    ],
-                                    active_rotation_baseline_deg=(
-                                        active_baselines["rotation_deg"]
-                                        if active_baselines is not None
-                                        else None
-                                    ),
-                                    micro_motion_recall=physical_metrics[
-                                        "val_micro_motion_recall"
-                                    ],
-                                    max_active_degradation=cfg.validation.max_active_degradation,
-                                    min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
-                                )
+                                {
+                                    key.replace("val_idle_score", "val_deploy_idle_score", 1)
+                                    .replace("val_checkpoint_feasible", "val_deploy_checkpoint_feasible", 1): value
+                                    for key, value in release_metrics.items()
+                                }
                             )
 
                 # run diffusion sampling on a training batch
@@ -550,9 +573,38 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     model_ddp = self.model
                     self.model = accelerator.unwrap_model(self.model)
 
-                    # checkpointing
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
+                    release_passed = bool(step_log.get("val_deployable", False))
+                    release_score = step_log.get("val_deploy_idle_score")
+                    OmegaConf.update(
+                        self.cfg,
+                        "release_validation",
+                        build_release_validation(
+                            passed=release_passed,
+                            deployment_slow_update_interval=get_deployment_phase_window(
+                                cfg
+                            )[1],
+                            score=release_score,
+                            epoch=self.epoch,
+                            metrics=step_log,
+                        ),
+                        merge=False,
+                        force_add=True,
+                    )
+                    update_deployable = should_update_deployable_checkpoint(
+                        release_passed,
+                        release_score,
+                        self.best_deploy_idle_score,
+                    )
+                    if update_deployable:
+                        self.best_deploy_idle_score = float(release_score)
+
+                    # latest.ckpt is unconditional recovery state, never a release.
+                    self.save_checkpoint()
+                    if update_deployable:
+                        self.save_checkpoint(
+                            path=self.get_checkpoint_path(tag="deployable"),
+                            use_thread=False,
+                        )
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
                     periodic_ckpt_path = periodic_manager.get_ckpt_path(self.epoch)
@@ -572,7 +624,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = None
-                    if metric_dict.get("val_checkpoint_feasible", False):
+                    if metric_dict.get("val_deployable", False):
                         topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:

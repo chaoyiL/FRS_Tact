@@ -36,6 +36,8 @@ from reactive_diffusion_policy.common.artifact_manifest import (
     save_normalizer_cache,
 )
 from reactive_diffusion_policy.common.pick_tube_validation import (
+    build_canonical_noop_actions,
+    compute_deployment_window_metrics,
     compute_idle_rollout_metrics,
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
@@ -93,8 +95,65 @@ def get_legacy_optimizer_step(
     )
 
 
+def get_deployment_phase_window(cfg) -> tuple[int, int]:
+    """Return the fixed slow16 decoder window used by robot deployment."""
+    phase_count = int(cfg.validation.deployment_slow_update_interval)
+    if phase_count != 16:
+        raise ValueError(
+            "validation.deployment_slow_update_interval must remain exactly 16"
+        )
+    phase_start = (
+        int(cfg.n_obs_steps) * int(cfg.dataset_obs_temporal_downsample_ratio) - 1
+    )
+    return phase_start, phase_count
+
+
+def should_update_deployable_checkpoint(passed, score, best_score) -> bool:
+    """Return whether a qualified checkpoint improves the release score."""
+    try:
+        candidate = float(score)
+        best = float(best_score)
+    except (TypeError, ValueError):
+        return False
+    return bool(passed) and math.isfinite(candidate) and candidate < best
+
+
+def _release_scalar(value):
+    if isinstance(value, np.generic):
+        value = value.item()
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        value = float(value)
+        return value if math.isfinite(value) else None
+    return None
+
+
+def build_release_validation(
+    *,
+    passed,
+    deployment_slow_update_interval,
+    score,
+    epoch,
+    metrics,
+) -> dict[str, object]:
+    """Create scalar checkpoint evidence that deployment can validate safely."""
+    deployment_slow_update_interval = int(deployment_slow_update_interval)
+    if deployment_slow_update_interval != 16:
+        raise ValueError("deployment_slow_update_interval must remain exactly 16")
+    return {
+        "passed": bool(passed),
+        "deployment_slow_update_interval": deployment_slow_update_interval,
+        "score": _release_scalar(score),
+        "epoch": int(epoch),
+        "metrics": {
+            str(name): _release_scalar(value) for name, value in metrics.items()
+        },
+    }
+
+
 class TrainATWorkspace(BaseWorkspace):
-    include_keys = ['global_step', 'optimizer_step', 'epoch']
+    include_keys = ['global_step', 'optimizer_step', 'epoch', 'best_deploy_idle_score']
 
     def __init__(self, cfg: OmegaConf, output_dir=None):
         super().__init__(cfg, output_dir=output_dir)
@@ -116,6 +175,7 @@ class TrainATWorkspace(BaseWorkspace):
         self.global_step = 0
         self.optimizer_step = 0
         self.epoch = 0
+        self.best_deploy_idle_score = math.inf
 
     def run(self):
         cfg = copy.deepcopy(self.cfg)
@@ -356,6 +416,9 @@ class TrainATWorkspace(BaseWorkspace):
                         val_predictions = list()
                         val_idle_masks = list()
                         val_valid_masks = list()
+                        val_noop_targets = list()
+                        val_noop_predictions = list()
+                        val_noop_idle_masks = list()
                         with tqdm.tqdm(val_dataloader, desc=f"Validation epoch {self.epoch}",
                                        leave=False, mininterval=cfg.training.tqdm_interval_sec) as tepoch:
                             for batch_idx, batch in enumerate(tepoch):
@@ -368,6 +431,13 @@ class TrainATWorkspace(BaseWorkspace):
                                     physical_prediction = reconstruct_at_actions(
                                         policy, batch
                                     )
+                                    noop_batch = dict(batch)
+                                    noop_batch["action"] = build_canonical_noop_actions(
+                                        batch["action"]
+                                    )
+                                    noop_prediction = reconstruct_at_actions(
+                                        policy, noop_batch
+                                    )
                                 loss = loss_metric_dict["loss"]
                                 val_losses.append(loss)
                                 val_targets.append(batch["action"].detach().cpu())
@@ -379,6 +449,17 @@ class TrainATWorkspace(BaseWorkspace):
                                 )
                                 val_valid_masks.append(
                                     batch["valid_mask"].detach().cpu()
+                                )
+                                val_noop_targets.append(
+                                    noop_batch["action"].detach().cpu()
+                                )
+                                val_noop_predictions.append(
+                                    noop_prediction.detach().cpu()
+                                )
+                                val_noop_idle_masks.append(
+                                    torch.ones_like(
+                                        batch["idle_arm_mask"], dtype=torch.bool
+                                    ).detach().cpu()
                                 )
                                 # metric
                                 val_encoder_loss.append(loss_metric_dict["encoder_loss"])
@@ -433,42 +514,79 @@ class TrainATWorkspace(BaseWorkspace):
                                 ),
                             )
                             step_log.update(physical_metrics)
+                            phase_start, phase_count = get_deployment_phase_window(cfg)
+                            deployment_metrics = compute_deployment_window_metrics(
+                                torch.cat(val_targets),
+                                torch.cat(val_predictions),
+                                torch.cat(val_idle_masks),
+                                phase_start=phase_start,
+                                phase_count=phase_count,
+                                valid_mask=torch.cat(val_valid_masks),
+                                state_action_profile=cfg.task.get(
+                                    "state_action_profile", None
+                                ),
+                            )
+                            noop_metrics = compute_deployment_window_metrics(
+                                torch.cat(val_noop_targets),
+                                torch.cat(val_noop_predictions),
+                                torch.cat(val_noop_idle_masks),
+                                phase_start=phase_start,
+                                phase_count=phase_count,
+                                valid_mask=torch.cat(val_valid_masks),
+                                state_action_profile=cfg.task.get(
+                                    "state_action_profile", None
+                                ),
+                            )
+                            step_log.update(deployment_metrics)
                             step_log.update(
-                                evaluate_checkpoint_feasibility(
-                                    idle_translation_29_mm=physical_metrics[
-                                        "val_idle_translation_29_mm"
-                                    ],
-                                    idle_rotation_29_deg=physical_metrics[
-                                        "val_idle_rotation_29_deg"
-                                    ],
-                                    idle_translation_p95_mm=physical_metrics[
-                                        "val_idle_translation_p95_mm"
-                                    ],
-                                    idle_rotation_p95_deg=physical_metrics[
-                                        "val_idle_rotation_p95_deg"
-                                    ],
-                                    active_translation_mm=physical_metrics[
-                                        f"val_active_{active_metric_arm}_translation_mae_mm"
-                                    ],
-                                    active_translation_baseline_mm=(
-                                        active_baselines["translation_mm"]
-                                        if active_baselines is not None
-                                        else None
-                                    ),
-                                    active_rotation_deg=physical_metrics[
-                                        f"val_active_{active_metric_arm}_rotation_mae_deg"
-                                    ],
-                                    active_rotation_baseline_deg=(
-                                        active_baselines["rotation_deg"]
-                                        if active_baselines is not None
-                                        else None
-                                    ),
-                                    micro_motion_recall=physical_metrics[
-                                        "val_micro_motion_recall"
-                                    ],
-                                    max_active_degradation=cfg.validation.max_active_degradation,
-                                    min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
-                                )
+                                {
+                                    key.replace(
+                                        "val_deploy_idle_", "val_deploy_noop_idle_", 1
+                                    ): value
+                                    for key, value in noop_metrics.items()
+                                }
+                            )
+                            release_metrics = evaluate_checkpoint_feasibility(
+                                idle_translation_29_mm=deployment_metrics[
+                                    "val_deploy_idle_translation_window_mm"
+                                ],
+                                idle_rotation_29_deg=deployment_metrics[
+                                    "val_deploy_idle_rotation_window_deg"
+                                ],
+                                idle_translation_p95_mm=noop_metrics[
+                                    "val_deploy_idle_translation_step_p95_mm"
+                                ],
+                                idle_rotation_p95_deg=noop_metrics[
+                                    "val_deploy_idle_rotation_step_p95_deg"
+                                ],
+                                active_translation_mm=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_translation_mae_mm"
+                                ],
+                                active_translation_baseline_mm=(
+                                    active_baselines["translation_mm"]
+                                    if active_baselines is not None
+                                    else None
+                                ),
+                                active_rotation_deg=deployment_metrics[
+                                    f"val_deploy_active_{active_metric_arm}_rotation_mae_deg"
+                                ],
+                                active_rotation_baseline_deg=(
+                                    active_baselines["rotation_deg"]
+                                    if active_baselines is not None
+                                    else None
+                                ),
+                                micro_motion_recall=deployment_metrics[
+                                    "val_deploy_micro_motion_recall"
+                                ],
+                                max_active_degradation=cfg.validation.max_active_degradation,
+                                min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
+                            )
+                            step_log.update(
+                                {
+                                    key.replace("val_idle_score", "val_deploy_idle_score", 1)
+                                    .replace("val_checkpoint_feasible", "val_deploy_checkpoint_feasible", 1): value
+                                    for key, value in release_metrics.items()
+                                }
                             )
 
                 # checkpoint
@@ -477,9 +595,37 @@ class TrainATWorkspace(BaseWorkspace):
                     local_epoch_idx,
                     num_epochs_to_run,
                 ):
-                    # checkpointing
-                    if cfg.checkpoint.save_last_ckpt:
-                        self.save_checkpoint()
+                    release_passed = bool(step_log.get("val_deployable", False))
+                    release_score = step_log.get("val_deploy_idle_score")
+                    OmegaConf.update(
+                        self.cfg,
+                        "release_validation",
+                        build_release_validation(
+                            passed=release_passed,
+                            deployment_slow_update_interval=get_deployment_phase_window(
+                                cfg
+                            )[1],
+                            score=release_score,
+                            epoch=self.epoch,
+                            metrics=step_log,
+                        ),
+                        merge=False,
+                        force_add=True,
+                    )
+                    update_deployable = should_update_deployable_checkpoint(
+                        release_passed,
+                        release_score,
+                        self.best_deploy_idle_score,
+                    )
+                    if update_deployable:
+                        self.best_deploy_idle_score = float(release_score)
+                    # latest.ckpt is unconditional recovery state, never a release.
+                    self.save_checkpoint()
+                    if update_deployable:
+                        self.save_checkpoint(
+                            path=self.get_checkpoint_path(tag="deployable"),
+                            use_thread=False,
+                        )
                     if cfg.checkpoint.save_last_snapshot:
                         self.save_snapshot()
                     periodic_ckpt_path = periodic_manager.get_ckpt_path(self.epoch)
@@ -499,7 +645,7 @@ class TrainATWorkspace(BaseWorkspace):
                     # since save_checkpoint uses threads.
                     # therefore at this point the file might have been empty!
                     topk_ckpt_path = None
-                    if metric_dict.get("val_checkpoint_feasible", False):
+                    if metric_dict.get("val_deployable", False):
                         topk_ckpt_path = topk_manager.get_ckpt_path(metric_dict)
 
                     if topk_ckpt_path is not None:

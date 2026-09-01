@@ -373,7 +373,7 @@ def test_pick_tube_v2_configs_select_feasible_idle_score():
         assert cfg.task.dataset.val_ratio == 0.1
         assert cfg.task.action_representation_version == 2
         assert cfg.task.action_contract == action_contract
-        assert cfg.checkpoint.topk.monitor_key == "val_idle_score"
+        assert cfg.checkpoint.topk.monitor_key == "val_deploy_idle_score"
         assert cfg.checkpoint.topk.mode == "min"
         assert cfg.validation.max_active_degradation == 0.05
         assert cfg.validation.min_micro_motion_recall == 0.95
@@ -411,6 +411,20 @@ def test_pick_tube_launchers_allow_missing_baseline():
         script = launcher.read_text(encoding="utf-8")
         assert "BASELINE_JSON is required" not in script
         assert "checkpoints will remain non-deployable" in script
+
+
+def test_single_right_launcher_requires_deployable_at_and_ldp_checkpoints():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "train_pick_tube_single_right_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}" in script
+    assert "${AT_DIR}/checkpoints/latest.ckpt" not in script
+    assert "latest is recovery-only" in script
+    assert "AT deployable checkpoint not found" in script
+    assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
 
 
 

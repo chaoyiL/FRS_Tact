@@ -251,10 +251,10 @@ checkpoint:
     keep: 0
     format_str: 'epoch={epoch:04d}.ckpt'
   topk:
-    monitor_key: val_idle_score
+    monitor_key: val_deploy_idle_score
     mode: min
     k: 20
-    format_str: 'epoch={epoch:04d}-val_idle_score={val_idle_score:.6f}.ckpt'
+    format_str: 'epoch={epoch:04d}-val_deploy_idle_score={val_deploy_idle_score:.6f}.ckpt'
   save_last_ckpt: True
   save_last_snapshot: False
 

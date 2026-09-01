@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Single-right-arm pick-tube PCA30 training entry point for an RTX PRO 6000.
-# AT is trained first; LDP then loads the AT latest checkpoint.
+# AT is trained first; LDP only consumes an explicitly qualified AT release.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RDP_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
@@ -51,7 +51,7 @@ Examples:
     bash scripts/train_pick_tube_single_right_gpu.sh all
 
   # Train only LDP from an existing AT checkpoint
-  AT_CKPT=/absolute/path/to/at/checkpoints/latest.ckpt \
+  AT_CKPT=/absolute/path/to/at/checkpoints/deployable.ckpt \
     RUN_ID=single_right_pca30_v2 \
     bash scripts/train_pick_tube_single_right_gpu.sh ldp
 
@@ -196,24 +196,28 @@ train_at() {
   )
   run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${args[@]}"
 
-  AT_CKPT=${AT_DIR}/checkpoints/latest.ckpt
+  AT_CKPT=${AT_DIR}/checkpoints/deployable.ckpt
   if [[ "${DRY_RUN}" != "1" ]]; then
     if [[ ! -f "${AT_CKPT}" ]]; then
-      echo "AT checkpoint was not produced: ${AT_CKPT}" >&2
+      echo "AT deployable checkpoint was not produced: ${AT_CKPT}; latest is recovery-only and cannot start LDP training." >&2
       exit 1
     fi
   fi
-  echo "AT checkpoint: ${AT_CKPT}"
+  echo "AT deployable checkpoint: ${AT_CKPT}"
 }
 
 resolve_at_checkpoint() {
-  AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/latest.ckpt}
+  AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}
+  if [[ "${AT_CKPT}" != */checkpoints/deployable.ckpt ]]; then
+    echo "AT checkpoint must be checkpoints/deployable.ckpt; latest is recovery-only: ${AT_CKPT}" >&2
+    exit 1
+  fi
 }
 
 train_ldp() {
   resolve_at_checkpoint
   if [[ "${DRY_RUN}" != "1" && ! -f "${AT_CKPT}" ]]; then
-    echo "AT checkpoint not found: ${AT_CKPT}" >&2
+    echo "AT deployable checkpoint not found: ${AT_CKPT}; latest is recovery-only and cannot start LDP training." >&2
     exit 1
   fi
 
@@ -245,7 +249,12 @@ train_ldp() {
     "validation.baseline_json=${BASELINE_JSON}"
   )
   run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${args[@]}"
-  echo "LDP output: ${LDP_DIR}"
+  local ldp_ckpt=${LDP_DIR}/checkpoints/deployable.ckpt
+  if [[ "${DRY_RUN}" != "1" && ! -f "${ldp_ckpt}" ]]; then
+    echo "LDP deployable checkpoint was not produced: ${ldp_ckpt}; latest is recovery-only." >&2
+    exit 1
+  fi
+  echo "LDP deployable checkpoint: ${ldp_ckpt}"
 }
 
 case "${STAGE}" in
