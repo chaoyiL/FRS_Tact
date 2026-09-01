@@ -43,6 +43,81 @@ IMAGE_KEYS = (
 
 # This may need change if we release a small model.
 IMAGE_RESOLUTION = (224, 224)
+IMAGE_AUGMENTATION_PRESETS = ("openpi-default", "balanced-light-v2")
+
+
+def _rgb_to_grayscale(image: jax.Array) -> jax.Array:
+    """Match torchvision's RGB luminance conversion for [..., H, W, C]."""
+
+    weights = jnp.asarray((0.2989, 0.5870, 0.1140), dtype=image.dtype)
+    return jnp.sum(image * weights, axis=-1, keepdims=True)
+
+
+def _gaussian_blur(image: jax.Array, sigma: jax.Array, kernel_size: int) -> jax.Array:
+    """Apply torchvision-style reflect-padded Gaussian blur to [N, H, W, C]."""
+
+    radius = kernel_size // 2
+    coordinates = jnp.arange(-radius, radius + 1, dtype=image.dtype)
+    kernel_1d = jnp.exp(-(coordinates**2) / (2.0 * sigma**2))
+    kernel_1d /= jnp.sum(kernel_1d)
+    kernel_2d = kernel_1d[:, None] * kernel_1d[None, :]
+    channels = image.shape[-1]
+    kernel = jnp.repeat(kernel_2d[:, :, None, None], channels, axis=3)
+    padded = jnp.pad(image, ((0, 0), (radius, radius), (radius, radius), (0, 0)), mode="reflect")
+    return jax.lax.conv_general_dilated(
+        padded,
+        kernel,
+        window_strides=(1, 1),
+        padding="VALID",
+        dimension_numbers=("NHWC", "HWIO", "NHWC"),
+        feature_group_count=channels,
+    )
+
+
+def _balanced_light_v2_sample(rng: at.KeyArrayLike, views: jax.Array) -> jax.Array:
+    """Apply one balanced-light-v2 draw shared by all camera views in a sample."""
+
+    branch_rng, brightness_rng, contrast_rng, saturation_rng, blur_rng, kernel_rng, sigma_rng = jax.random.split(
+        rng, 7
+    )
+    identity = jax.random.uniform(branch_rng) < 0.25
+
+    def augment(_: None) -> jax.Array:
+        brightness = jax.random.uniform(brightness_rng, minval=0.90, maxval=1.20)
+        contrast = jax.random.uniform(contrast_rng, minval=0.85, maxval=1.10)
+        saturation = jax.random.uniform(saturation_rng, minval=0.90, maxval=1.10)
+
+        result = jnp.clip(views * brightness, 0.0, 1.0)
+        contrast_mean = jnp.mean(_rgb_to_grayscale(result), axis=(1, 2, 3), keepdims=True)
+        result = jnp.clip((result - contrast_mean) * contrast + contrast_mean, 0.0, 1.0)
+        grayscale = _rgb_to_grayscale(result)
+        result = jnp.clip((result - grayscale) * saturation + grayscale, 0.0, 1.0)
+
+        should_blur = jax.random.uniform(blur_rng) < 0.20
+        use_kernel_five = jax.random.bernoulli(kernel_rng)
+        sigma = jax.random.uniform(sigma_rng, minval=0.1, maxval=1.0)
+
+        def blur(_: None) -> jax.Array:
+            return jax.lax.cond(
+                use_kernel_five,
+                lambda unused: _gaussian_blur(result, sigma, 5),
+                lambda unused: _gaussian_blur(result, sigma, 3),
+                operand=None,
+            )
+
+        return jax.lax.cond(should_blur, blur, lambda unused: result, operand=None)
+
+    return jax.lax.cond(identity, lambda unused: views, augment, operand=None)
+
+
+def _balanced_light_v2(rng: at.KeyArrayLike, images: dict[str, jax.Array]) -> dict[str, jax.Array]:
+    """Apply balanced-light-v2 to [B,H,W,C] images, sharing draws across cameras."""
+
+    keys = tuple(images)
+    stacked = jnp.stack([images[key] for key in keys], axis=1)
+    sample_rngs = jax.random.split(rng, stacked.shape[0])
+    augmented = jax.vmap(_balanced_light_v2_sample)(sample_rngs, stacked)
+    return {key: augmented[:, index] for index, key in enumerate(keys)}
 
 
 # Data format
@@ -146,6 +221,7 @@ def preprocess_observation(
     train: bool = False,
     image_keys: Sequence[str] = IMAGE_KEYS,
     image_resolution: tuple[int, int] = IMAGE_RESOLUTION,
+    image_augmentation: str | None = "openpi-default",
 ) -> Observation:
     """Preprocess the observations by performing image augmentations (if train=True), resizing (if necessary), and
     filling in a default image mask (if necessary).
@@ -156,6 +232,12 @@ def preprocess_observation(
 
     batch_shape = observation.state.shape[:-1]
 
+    if image_augmentation is not None and image_augmentation not in IMAGE_AUGMENTATION_PRESETS:
+        raise ValueError(
+            f"unknown image augmentation preset {image_augmentation!r}; expected one of "
+            f"{IMAGE_AUGMENTATION_PRESETS} or None"
+        )
+
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
@@ -163,7 +245,7 @@ def preprocess_observation(
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad(image, *image_resolution)
 
-        if train:
+        if train and image_augmentation == "openpi-default":
             # Convert from [-1, 1] to [0, 1] for augmax.
             image = image / 2.0 + 0.5
 
@@ -185,6 +267,14 @@ def preprocess_observation(
             image = image * 2.0 - 1.0
 
         out_images[key] = image
+
+    if train and image_augmentation == "balanced-light-v2":
+        if rng is None:
+            raise ValueError("balanced-light-v2 requires an RNG key during training")
+        unit_images = {key: image / 2.0 + 0.5 for key, image in out_images.items()}
+        out_images = {
+            key: image * 2.0 - 1.0 for key, image in _balanced_light_v2(rng, unit_images).items()
+        }
 
     # obtain mask
     out_masks = {}

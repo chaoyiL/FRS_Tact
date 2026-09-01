@@ -263,6 +263,7 @@ def create_data_loader(
     shuffle: bool = False,
     num_batches: int | None = None,
     one_epoch: bool = False,
+    sample_limit: int | None = None,
     skip_norm_stats: bool = False,
     framework: Literal["jax", "pytorch"] = "jax",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
@@ -280,6 +281,8 @@ def create_data_loader(
     logging.info(f"data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        if sample_limit is not None:
+            raise NotImplementedError("Fixed validation subsets are not supported for RLDS datasets")
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
@@ -300,6 +303,7 @@ def create_data_loader(
         shuffle=shuffle,
         num_batches=num_batches,
         one_epoch=one_epoch,
+        sample_limit=sample_limit,
         num_workers=config.num_workers,
         seed=config.seed,
         skip_norm_stats=skip_norm_stats,
@@ -318,6 +322,7 @@ def create_torch_data_loader(
     shuffle: bool = False,
     num_batches: int | None = None,
     one_epoch: bool = False,
+    sample_limit: int | None = None,
     num_workers: int = 0,
     seed: int = 0,
     framework: str = "jax",
@@ -341,6 +346,14 @@ def create_torch_data_loader(
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+
+    if sample_limit is not None:
+        if sample_limit <= 0:
+            raise ValueError("sample_limit must be positive")
+        if sample_limit < len(dataset):
+            generator = np.random.default_rng(seed)
+            indices = np.sort(generator.choice(len(dataset), size=sample_limit, replace=False)).tolist()
+            dataset = torch.utils.data.Subset(dataset, indices)
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

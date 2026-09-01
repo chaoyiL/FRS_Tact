@@ -17,10 +17,13 @@ OUTPUT_ROOT=${OUTPUT_ROOT:-${RDP_DIR}/data/outputs/pick_tube_01_06}
 RUN_ID=${RUN_ID:-pca30_latent32_full6_$(date +%Y%m%d_%H%M%S)}
 LOGGING_MODE=${LOGGING_MODE:-offline}
 MIXED_PRECISION=${MIXED_PRECISION:-bf16}
+PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+CUDA_MODULE_LOADING=${CUDA_MODULE_LOADING:-LAZY}
 AT_EPOCHS=${AT_EPOCHS:-20}
 LDP_EPOCHS=${LDP_EPOCHS:-10}
 AT_BATCH=${AT_BATCH:-64}
 LDP_BATCH=${LDP_BATCH:-64}
+LDP_GRAD_ACCUM=${LDP_GRAD_ACCUM:-1}
 NUM_WORKERS=${NUM_WORKERS:-8}
 TACTILE_DIM=${TACTILE_DIM:-30}
 AT_CHECKPOINT_EVERY=${AT_CHECKPOINT_EVERY:-1}
@@ -61,7 +64,7 @@ Common environment overrides:
   OUTPUT_ROOT=/absolute/path/to/outputs
   RUN_ID=pca30_latent32_full6_v1
   AT_EPOCHS=20 LDP_EPOCHS=10
-  AT_BATCH=64 LDP_BATCH=64 NUM_WORKERS=8
+  AT_BATCH=64 LDP_BATCH=64 LDP_GRAD_ACCUM=1 NUM_WORKERS=8
   TACTILE_DIM=30              # total PCA output dimension across both arms
   MIXED_PRECISION=bf16        # use "no" to disable Accelerate mixed precision
   AT_CHECKPOINT_EVERY=1 LDP_CHECKPOINT_EVERY=1
@@ -101,6 +104,10 @@ if [[ ! "${GPU_ID}" =~ ^[0-9]+$ ]]; then
 fi
 if [[ ! "${TACTILE_DIM}" =~ ^[1-9][0-9]*$ ]]; then
   echo "TACTILE_DIM must be a positive integer, got: ${TACTILE_DIM}" >&2
+  exit 2
+fi
+if [[ ! "${LDP_GRAD_ACCUM}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "LDP_GRAD_ACCUM must be a positive integer, got: ${LDP_GRAD_ACCUM}" >&2
   exit 2
 fi
 if [[ "${RESUME}" != "true" && "${RESUME}" != "false" ]]; then
@@ -194,7 +201,9 @@ train_at() {
     "val_dataloader.num_workers=${NUM_WORKERS}"
     "validation.baseline_json=${BASELINE_JSON}"
   )
-  run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${args[@]}"
+  run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
+    "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}" \
+    "CUDA_MODULE_LOADING=${CUDA_MODULE_LOADING}" "${args[@]}"
 
   AT_CKPT=${AT_DIR}/checkpoints/latest.ckpt
   if [[ "${DRY_RUN}" != "1" ]]; then
@@ -235,6 +244,7 @@ train_ldp() {
     "logging.mode=${LOGGING_MODE}"
     "training.resume=${RESUME}"
     "training.num_epochs=${LDP_EPOCHS}"
+    "training.gradient_accumulate_every=${LDP_GRAD_ACCUM}"
     "training.checkpoint_every=${LDP_CHECKPOINT_EVERY}"
     "checkpoint.topk.k=${LDP_CHECKPOINT_KEEP}"
     "checkpoint.periodic.keep=${LDP_PERIODIC_KEEP}"
@@ -244,7 +254,9 @@ train_ldp() {
     "val_dataloader.num_workers=${NUM_WORKERS}"
     "validation.baseline_json=${BASELINE_JSON}"
   )
-  run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${args[@]}"
+  run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" \
+    "PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF}" \
+    "CUDA_MODULE_LOADING=${CUDA_MODULE_LOADING}" "${args[@]}"
   echo "LDP output: ${LDP_DIR}"
 }
 

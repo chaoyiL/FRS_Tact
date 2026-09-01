@@ -274,6 +274,8 @@ class TrainConfig:
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
     # Optional held-out data used only for validation.
     validation_data: DataConfigFactory | None = None
+    # Optional fixed subset of training data evaluated without augmentation.
+    validation_seen_data: DataConfigFactory | None = None
 
     # Base directory for config assets (e.g., norm stats).
     assets_base_dir: str = "./assets"
@@ -296,6 +298,8 @@ class TrainConfig:
     log_interval: int = 200
     # How often to evaluate the complete held-out validation split.
     validation_interval: int = 2000
+    # Optional maximum number of full batches evaluated for each validation split.
+    validation_max_batches: int | None = None
     # How often (in steps) to save checkpoints.
     save_interval: int = 5000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.

@@ -68,6 +68,7 @@ class Pi0(_model.BaseModel):
         self.pi05 = config.pi05
         # Optional fixed image key order for consistent training/inference.
         self.image_keys = config.image_keys
+        self.image_augmentation = config.image_augmentation
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -194,7 +195,13 @@ class Pi0(_model.BaseModel):
     ) -> at.Float[at.Array, "*b ah"]:
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         image_keys = self.image_keys if self.image_keys is not None else list(observation.images.keys())
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train, image_keys=image_keys)
+        observation = _model.preprocess_observation(
+            preprocess_rng,
+            observation,
+            train=train,
+            image_keys=image_keys,
+            image_augmentation=self.image_augmentation,
+        )
 
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)

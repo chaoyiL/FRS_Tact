@@ -72,6 +72,23 @@ Pi0.5 使用 JAX 访问 GPU。环境中的 PyTorch 只用于读取 LeRobot 数�
 CPU wheel，避免重复下载 PyTorch CUDA/NVIDIA 运行库。项目已经内置所需的 LeRobot v3
 只读运行时代码，不需要在安装时访问 GitHub 克隆另一份 LeRobot。
 
+### 双手 seen / unseen 验证
+
+双手配置对每个数据集分别按 episode 固定拆分 90% 训练和 10% `val_unseen`，
+避免相邻frame落入训练和未见验证两侧。`val_seen`从90%训练episode对应的frame中
+使用独立固定seed抽样；它不参与梯度，只在关闭 `balanced-light-v2` 后评估。
+`val_unseen`同样关闭增强。每2000 step最多评估20个完整batch/分支，并记录：
+
+- `loss`：正常增强训练流上的训练损失；
+- `val_seen`：模型见过的训练分布固定子集；
+- `val_unseen`：完全留出的episode固定子集；
+- `gap = val_unseen - val_seen`：训练分布与未见episode的泛化差距。
+
+双手全局batch为128，因此每个验证分支最多覆盖2560 frames。两个固定验证子集和
+固定flow-matching随机数在每次验证中保持不变，跨step趋势可直接比较。归一化统计只从
+90%训练episode计算。验证、保存间隔和checkpoint保留周期均为2000，方便按
+`val_unseen`最低点选择而不是默认使用最终checkpoint。
+
 ### 右手单臂训练
 
 右手训练使用 `configs/train_pi05_right.yaml` 和 `pi05_single` 档位，固定合同为
@@ -100,7 +117,7 @@ bash train_pi05/scripts/start_pi05_right_train.sh
 每次训练都会写入独立的时间戳日志文件，并更新 `latest.log` 链接：
 
 ```bash
-tail -F /workspace/outputs/pi05_right_train90_val10_logs/latest.log
+tail -F /workspace/outputs/pi05_right_press_0102_balanced_light_v2_train90_val10_seen_unseen_logs/latest.log
 ```
 
 确实需要进入 tmux 时，可显式运行
@@ -109,10 +126,18 @@ tail -F /workspace/outputs/pi05_right_train90_val10_logs/latest.log
 `source env_path` 后也可以使用不歧义的快捷命令：`hf`、`wandb`、
 `data-python`、`pi05-python`、`pi05-deploy-python` 和 `smolvla-python`。
 
-当前右手配置分别从 `insert_01` 和 `insert_02` 中按 episode 固定留出 10% 作为
-验证集，其余 90% 合并后统一 shuffle。验证 episode 不参与训练或归一化统计；
-训练每 2000 step 在完整验证集上记录一次 `val_loss`。W&B 只记录数值指标，
-不会上传相机画面。
+当前右手配置分别从 `press_01` 和 `press_02` 中按 episode 固定留出 10% 作为
+`val_unseen`，其余 90% 合并后统一 shuffle；`val_seen` 从训练 episode 对应 frame 中
+固定抽样。两边每 2000 step 最多各评估 20 个完整 batch，并记录 `val_seen`、
+`val_unseen` 和 `gap`。验证 episode 不参与训练或归一化统计，验证过程关闭图像增强。
+W&B 只记录数值指标，不会上传相机画面。
+
+单手和双手正式配置均启用 `balanced-light-v2`。该预设与 SmolVLA 中面向 DECO
+部署场景的版本保持同一合同：每个样本 25% 保持原图，75% 进行亮度
+`[0.90, 1.20]`、对比度 `[0.85, 1.10]` 和饱和度 `[0.90, 1.10]` 扰动；
+非原图分支另有 20% 概率使用核大小 3 或 5、sigma `[0.1, 1.0]` 的高斯模糊。
+双手的左右相机共享一次随机抽样，验证和部署不会执行增强。该预设替代 OpenPI
+默认的随机裁剪、旋转和强 ColorJitter，不会与它们叠加。
 
 辅助工具需要时单独调用，例如：
 

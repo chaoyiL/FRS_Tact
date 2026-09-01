@@ -281,14 +281,37 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    validation_loader = None
-    if config.validation_data is not None:
-        validation_config = dataclasses.replace(config, data=config.validation_data)
-        validation_loader = _data_loader.create_data_loader(
-            validation_config,
+    validation_loaders = {}
+    validation_sample_limit = (
+        config.validation_max_batches * config.batch_size
+        if config.validation_max_batches is not None
+        else None
+    )
+    if config.validation_seen_data is not None:
+        validation_seen_config = dataclasses.replace(
+            config,
+            data=config.validation_seen_data,
+            seed=config.seed + 1001,
+        )
+        validation_loaders["seen"] = _data_loader.create_data_loader(
+            validation_seen_config,
             sharding=data_sharding,
             shuffle=False,
             one_epoch=True,
+            sample_limit=validation_sample_limit,
+        )
+    if config.validation_data is not None:
+        validation_unseen_config = dataclasses.replace(
+            config,
+            data=config.validation_data,
+            seed=config.seed + 2001,
+        )
+        validation_loaders["unseen"] = _data_loader.create_data_loader(
+            validation_unseen_config,
+            sharding=data_sharding,
+            shuffle=False,
+            one_epoch=True,
+            sample_limit=validation_sample_limit,
         )
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
@@ -332,24 +355,43 @@ def main(config: _config.TrainConfig):
             wandb.log(reduced_info, step=step)
             infos = []
 
-        should_validate = validation_loader is not None and (
+        should_validate = bool(validation_loaders) and (
             (step > start_step and step % config.validation_interval == 0)
             or step == config.num_train_steps - 1
         )
         if should_validate:
-            validation_loss_sum = 0.0
-            validation_batch_count = 0
-            for validation_index, validation_batch in enumerate(validation_loader):
-                batch_rng = jax.random.fold_in(validation_rng, validation_index)
-                with sharding.set_mesh(mesh):
-                    validation_loss = pvalidation_step(batch_rng, train_state, validation_batch)
-                validation_loss_sum += float(jax.device_get(validation_loss))
-                validation_batch_count += 1
-            if validation_batch_count == 0:
-                raise RuntimeError("Validation loader produced no batches")
-            mean_validation_loss = validation_loss_sum / validation_batch_count
-            pbar.write(f"Step {step}: val_loss={mean_validation_loss:.4f}")
-            wandb.log({"val_loss": mean_validation_loss}, step=step)
+            validation_metrics = {}
+            for split_index, (split_name, validation_loader) in enumerate(validation_loaders.items()):
+                validation_loss_sum = 0.0
+                validation_batch_count = 0
+                split_rng = jax.random.fold_in(validation_rng, split_index)
+                for validation_index, validation_batch in enumerate(validation_loader):
+                    batch_rng = jax.random.fold_in(split_rng, validation_index)
+                    with sharding.set_mesh(mesh):
+                        validation_loss = pvalidation_step(batch_rng, train_state, validation_batch)
+                    validation_loss_sum += float(jax.device_get(validation_loss))
+                    validation_batch_count += 1
+                if validation_batch_count == 0:
+                    raise RuntimeError(f"Validation split {split_name!r} produced no batches")
+                validation_metrics[split_name] = validation_loss_sum / validation_batch_count
+
+            if "seen" in validation_metrics:
+                seen_loss = validation_metrics["seen"]
+                unseen_loss = validation_metrics["unseen"]
+                dual_metrics = {
+                    "val_seen": seen_loss,
+                    "val_unseen": unseen_loss,
+                    "gap": unseen_loss - seen_loss,
+                }
+                pbar.write(
+                    f"Step {step}: val_seen={seen_loss:.4f}, val_unseen={unseen_loss:.4f}, "
+                    f"gap={dual_metrics['gap']:+.4f}"
+                )
+                wandb.log(dual_metrics, step=step)
+            else:
+                mean_validation_loss = validation_metrics["unseen"]
+                pbar.write(f"Step {step}: val_loss={mean_validation_loss:.4f}")
+                wandb.log({"val_loss": mean_validation_loss}, step=step)
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

@@ -3,7 +3,7 @@
 #   - observation.state：7D 右臂状态；
 #   - action：10D 右臂动作；
 #   - observation.images.camera1：有效的右手视觉画面。
-# insert_01 和 insert_02 的 camera0 都是黑色占位图，训练不会读取它们。
+# 单手配置只读取 camera1；无论 camera0 是否存在或是否为占位图，都不会送入模型。
 # 本配置不会从双臂 20D 数据中自动猜测或截取右手维度。
 profile: pi05_single
 checkpoint: gs://openpi-assets/checkpoints/pi05_base/params
@@ -11,13 +11,21 @@ allow_download: true
 
 # 多个右手单臂数据集可继续按顺序追加；训练时会合并并统一 shuffle。
 datasets:
-  - repo_id: KaiyueChen/insert_01
-    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+  - repo_id: KaiyueChen/press_01
+    root: /workspace/lerobot_v30/KaiyueChen/press_01
     action_key: action
 
-  - repo_id: KaiyueChen/insert_02
-    root: /workspace/lerobot_v30/KaiyueChen/insert_02
+  - repo_id: KaiyueChen/press_02
+    root: /workspace/lerobot_v30/KaiyueChen/press_02
     action_key: action
+
+  # - repo_id: KaiyueChen/insert_01
+  #   root: /workspace/lerobot_v30/KaiyueChen/insert_01
+  #   action_key: action
+
+  # - repo_id: KaiyueChen/insert_02
+  #   root: /workspace/lerobot_v30/KaiyueChen/insert_02
+  #   action_key: action
   # - repo_id: KaiyueChen/insert_03
   #   root: /workspace/lerobot_v30/KaiyueChen/insert_03
   #   action_key: action
@@ -30,27 +38,38 @@ dataset_contract:
   image_keys:
     - observation.images.camera1
 
+# 与 SmolVLA 双手训练一致的 DECO 场景光照增强。训练时启用，验证和部署时自动关闭。
+# 25% 保持原图；75% 使用共享的轻度亮度/对比度/饱和度扰动；非原图分支有 20% 概率高斯模糊。
+augmentation:
+  preset: balanced-light-v2
+  enabled: true
+
 # 必须是用相同 7D state / 10D action 定义计算出的归一化统计。
 norm_stats:
   dir: ./assets
   # 只使用 90% 训练 episode 计算，不能复用之前基于全部数据的统计。
-  asset_id: insert_0102_train90
+  asset_id: press_0102
 
 validation:
-  # 每个数据集分别按 episode 固定划分 90% 训练、10% 验证，避免相邻帧泄漏。
+  # 每个数据集分别按 episode 固定划分 90% train、10% val_unseen，避免相邻帧泄漏。
   ratio: 0.10
   seed: 42
-  # 每 2000 个训练 step 在完整验证集上计算一次 val_loss，最后一步也会验证。
-  interval: 2000
+  interval: 1000
+  # val_seen 从训练 episode 的 frame 中固定抽样，但评估时关闭图像增强。
+  track_seen: true
+  # 每个 split 最多 20 个完整 batch；batch_size=128 时即约 2560 frames。
+  max_batches_per_split: 20
 
 training:
-  output: /workspace/outputs/pi05_right_train90_val10
+  # 使用新目录，避免把 balanced-light-v2 混入旧的默认增强实验后继续训练。
+  output: /workspace/outputs/pi05_right_press_0102
   batch_size: 128
   num_workers: 8
   steps: 20000
   log_interval: 20
   save_interval: 2000
-  keep_period: 10000
+  # 保留每个验证节点，方便按照最低 val_unseen 选择 checkpoint。
+  keep_period: 2000
   seed: 42
   # 两张 A100 组成一个 2 卡 FSDP 分片组；batch_size=128 是全局 batch，等效每卡 64。
   fsdp_devices: 2
@@ -61,4 +80,4 @@ training:
 wandb:
   enable: true
   project: pi05-vision-right
-  exp_name: pi05_right_insert_01_02_train90_val10
+  exp_name: pi05_right_press_01_02
