@@ -26,6 +26,8 @@ def expand_right_action(action: Any, observation: Mapping[str, Any]) -> np.ndarr
     right = np.asarray(action, dtype=np.float32)
     if right.ndim != 2 or right.shape[1] != 10:
         raise ValueError("right action must have shape [H, 10]")
+    if not np.isfinite(right).all():
+        raise ValueError("right action must contain only finite values")
 
     left = np.empty((right.shape[0], 10), dtype=np.float32)
     left[:, :3] = 0

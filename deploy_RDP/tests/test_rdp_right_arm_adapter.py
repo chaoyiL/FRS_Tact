@@ -43,3 +43,12 @@ def test_expand_right_action_requires_horizon_by_ten_action():
     state = np.arange(20, dtype=np.float32)
     with pytest.raises(ValueError):
         expand_right_action(np.zeros((10,), dtype=np.float32), {"observation.state": state})
+
+
+def test_expand_right_action_rejects_nonfinite_action():
+    state = np.arange(20, dtype=np.float32)
+    right = np.zeros((1, 10), dtype=np.float32)
+    right[0, 0] = np.nan
+
+    with pytest.raises(ValueError, match="finite"):
+        expand_right_action(right, {"observation.state": state})
