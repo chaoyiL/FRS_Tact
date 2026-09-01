@@ -13,19 +13,19 @@ augmentation:
 datasets:
   - repo_id: KaiyueChen/bread_01
     root: /workspace/lerobot_v30/KaiyueChen/bread_01
-    action_key: actions
+    action_key: action
 
   - repo_id: KaiyueChen/bread_02
     root: /workspace/lerobot_v30/KaiyueChen/bread_02
-    action_key: actions
+    action_key: action
 
   - repo_id: KaiyueChen/bread_03
     root: /workspace/lerobot_v30/KaiyueChen/bread_03
-    action_key: actions
+    action_key: action
 
   - repo_id: KaiyueChen/bread_04
     root: /workspace/lerobot_v30/KaiyueChen/bread_04
-    action_key: actions
+    action_key: action
 
 dataset_contract:
   state_key: observation.state
