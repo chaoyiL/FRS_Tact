@@ -278,27 +278,131 @@ def predict_independent_snapshots(
     return _prediction_arrays(results)
 
 
-def _write_action_overview(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
-    """Render an OpenCV overview of independent right-arm action responses."""
+def _response_metrics(arrays: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """Derive scalar action/report metrics from one action per snapshot."""
 
-    height, width = 620, 1200
-    image = np.full((height, width, 3), 250, dtype=np.uint8)
-    cv2.putText(
-        image,
-        "Independent RDP snapshot actions (right arm)",
-        (28, 42),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (25, 25, 25),
-        2,
-        cv2.LINE_AA,
+    actions = arrays["policy_actions"].astype(np.float64, copy=False)
+    first_basis = actions[:, 3:6]
+    second_basis = actions[:, 6:9]
+    first_norm = np.linalg.norm(first_basis, axis=1, keepdims=True)
+    if np.any(first_norm <= 1e-6):
+        raise ValueError("policy action rotation first basis must be nonzero")
+    first = first_basis / first_norm
+    second = second_basis - np.sum(first * second_basis, axis=1, keepdims=True) * first
+    second_norm = np.linalg.norm(second, axis=1, keepdims=True)
+    if np.any(second_norm <= 1e-6):
+        raise ValueError("policy action rotation bases must not be collinear")
+    second = second / second_norm
+    rotation_matrix = np.stack((first, second, np.cross(first, second)), axis=-1)
+    rotation_angle = np.linalg.norm(
+        Rotation.from_matrix(rotation_matrix).as_rotvec(), axis=1
     )
-    panel_height = 160
+    gripper_command = actions[:, 9]
+    recorded_right_gripper = arrays["states"][:, 13].astype(np.float64, copy=False)
+    return {
+        "translation_norm": np.linalg.norm(actions[:, :3], axis=1),
+        "rotation_angle": rotation_angle,
+        "gripper_command": gripper_command,
+        "recorded_right_gripper": recorded_right_gripper,
+        "gripper_delta": gripper_command - recorded_right_gripper,
+        "latency_ms": arrays["latency_ms"].astype(np.float64, copy=False),
+    }
+
+
+def _metric_range(
+    values: np.ndarray, *, include_p95: bool = False
+) -> dict[str, float]:
+    metrics = {
+        "min": float(np.min(values)),
+        "max": float(np.max(values)),
+        "mean": float(np.mean(values)),
+    }
+    if include_p95:
+        metrics["p95"] = float(np.percentile(values, 95))
+    return metrics
+
+
+
+def right_snapshot_response_points(
+    right_poses: Any, local_translations: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return right-hand start points and local translations expressed in base frame."""
+
+    poses = np.asarray(right_poses, dtype=np.float64)
+    translations = np.asarray(local_translations, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[1] != 6 or translations.shape != (len(poses), 3):
+        raise ValueError("right poses must be (N,6) and local translations must be (N,3)")
+    if not np.isfinite(poses).all() or not np.isfinite(translations).all():
+        raise ValueError("right poses and local translations must be finite")
+    starts = poses[:, :3].copy()
+    endpoints = starts + Rotation.from_rotvec(poses[:, 3:]).apply(translations)
+    return starts, endpoints
+
+def _write_right_snapshot_responses(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+    """Render recorded right-hand poses and base-frame one-step responses."""
+
+    starts, endpoints = right_snapshot_response_points(
+        arrays["right_poses"], arrays["policy_actions"][:, :3]
+    )
+    world_points = np.concatenate((starts, endpoints), axis=0)
+    projected = np.column_stack(
+        (
+            world_points[:, 0] - world_points[:, 1],
+            0.5 * (world_points[:, 0] + world_points[:, 1]) - world_points[:, 2],
+        )
+    )
+    center = np.mean(projected, axis=0)
+    span = np.ptp(projected, axis=0)
+    width, height, margin = 960, 720, 80
+    if float(np.max(span)) <= 1e-9:
+        scale = 1.0
+    else:
+        scale = min((width - 2 * margin) / max(float(span[0]), 1e-9), (height - 2 * margin) / max(float(span[1]), 1e-9))
+
+    def pixels(values: np.ndarray) -> np.ndarray:
+        coordinates = np.empty((len(values), 2), dtype=np.int32)
+        coordinates[:, 0] = np.rint((values[:, 0] - center[0]) * scale + width / 2).astype(np.int32)
+        coordinates[:, 1] = np.rint(-(values[:, 1] - center[1]) * scale + height / 2).astype(np.int32)
+        return coordinates
+
+    start_pixels = pixels(projected[: len(starts)])
+    end_pixels = pixels(projected[len(starts) :])
+    image = np.full((height, width, 3), 250, dtype=np.uint8)
+    cv2.putText(image, "Right snapshot XYZ trajectory and local-frame responses", (26, 38), cv2.FONT_HERSHEY_SIMPLEX, 0.72, (25, 25, 25), 2, cv2.LINE_AA)
+    cv2.putText(image, "yellow: recorded XYZ trajectory   green: predicted one-step base-frame response", (26, 66), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (65, 65, 65), 1, cv2.LINE_AA)
+    cv2.rectangle(image, (margin, margin + 12), (width - margin, height - margin), (210, 210, 210), 1)
+    if len(start_pixels) > 1:
+        cv2.polylines(image, [start_pixels.reshape(-1, 1, 2)], False, (20, 185, 240), 2, cv2.LINE_AA)
+    for index, (start, end) in enumerate(zip(start_pixels, end_pixels, strict=True)):
+        start_point = tuple(start)
+        end_point = tuple(end)
+        if start_point == end_point:
+            cv2.circle(image, start_point, 4, (20, 185, 240), -1, cv2.LINE_AA)
+        else:
+            cv2.arrowedLine(image, start_point, end_point, (40, 160, 40), 2, cv2.LINE_AA, tipLength=0.12)
+        cv2.circle(image, start_point, 3, (20, 185, 240), -1, cv2.LINE_AA)
+        cv2.putText(image, str(int(arrays["step_ids"][index])), (start_point[0] + 6, start_point[1] - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (45, 45, 45), 1, cv2.LINE_AA)
+    cv2.putText(image, "isometric projection: horizontal=x-y, vertical=0.5(x+y)-z", (26, height - 24), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (75, 75, 75), 1, cv2.LINE_AA)
+    if not cv2.imwrite(str(path), image):
+        raise OSError(f"could not write right snapshot response plot: {path}")
+
+
+def _write_action_overview(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+    """Render OpenCV action metrics for independent right-arm snapshots."""
+
     actions = arrays["policy_actions"]
-    names = ("translation xyz", "rotation 6D", "gripper")
-    groups = (actions[:, :3], actions[:, 3:9], actions[:, 9:])
-    colors = ((40, 80, 220), (60, 170, 60), (220, 120, 30), (160, 70, 180), (30, 150, 180), (80, 80, 80))
-    for panel, (name, values) in enumerate(zip(names, groups, strict=True)):
+    metrics = _response_metrics(arrays)
+    panels = (
+        ("translation xyz + norm", np.column_stack((actions[:, :3], metrics["translation_norm"]))),
+        ("rotation angle (rad)", metrics["rotation_angle"][:, None]),
+        ("gripper command / recorded / delta", np.column_stack((metrics["gripper_command"], metrics["recorded_right_gripper"], metrics["gripper_delta"]))),
+        ("latency (ms)", metrics["latency_ms"][:, None]),
+    )
+    width, height, panel_height = 1200, 760, 160
+    image = np.full((height, width, 3), 250, dtype=np.uint8)
+    cv2.putText(image, "Independent RDP snapshot action metrics", (28, 42), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (25, 25, 25), 2, cv2.LINE_AA)
+    colors = ((40, 80, 220), (60, 170, 60), (220, 120, 30), (160, 70, 180))
+    for panel, (name, values) in enumerate(panels):
         top = 72 + panel * panel_height
         bottom = top + panel_height - 34
         cv2.rectangle(image, (28, top), (width - 28, bottom), (215, 215, 215), 1)
@@ -319,13 +423,13 @@ def _write_action_overview(path: Path, arrays: Mapping[str, np.ndarray]) -> None
     if not cv2.imwrite(str(path), image):
         raise OSError(f"could not write action overview: {path}")
 
-
 def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[str, Path]:
     """Write numeric predictions, per-snapshot records, CSV, JSON, and an OpenCV plot."""
 
     import csv
 
     arrays = _prediction_arrays(results)
+    metrics = _response_metrics(arrays)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -333,13 +437,14 @@ def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[st
         "trajectory_csv": output / "trajectory.csv",
         "summary": output / "summary.json",
         "action_overview": output / "action_overview.png",
-        "snapshot_responses": output / "snapshot_responses.jsonl",
+        "snapshot_responses": output / "right_snapshot_responses.png",
     }
     np.savez_compressed(paths["predictions"], **arrays)
     with paths["trajectory_csv"].open("w", newline="", encoding="utf-8") as file:
         columns = (
             "step_id", "timestamp", "latency_ms", "right_x", "right_y", "right_z",
             "right_rx", "right_ry", "right_rz",
+            "translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper", "gripper_delta",
             *[f"policy_action_{index}" for index in range(10)],
             *[f"wire_action_{index}" for index in range(20)],
         )
@@ -352,39 +457,29 @@ def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[st
                 "latency_ms": float(arrays["latency_ms"][index]),
             }
             row.update({f"right_{name}": float(value) for name, value in zip(("x", "y", "z", "rx", "ry", "rz"), arrays["right_poses"][index], strict=True)})
+            row.update({name: float(values[index]) for name, values in metrics.items()})
             row.update({f"policy_action_{column}": float(value) for column, value in enumerate(arrays["policy_actions"][index])})
             row.update({f"wire_action_{column}": float(value) for column, value in enumerate(arrays["wire_actions"][index])})
             writer.writerow(row)
-    with paths["snapshot_responses"].open("w", encoding="utf-8") as file:
-        for index in range(len(arrays["states"])):
-            response = {
-                "step_id": int(arrays["step_ids"][index]),
-                "timestamp": float(arrays["timestamps"][index]),
-                "latency_ms": float(arrays["latency_ms"][index]),
-                "state": arrays["states"][index].tolist(),
-                "policy_action": arrays["policy_actions"][index].tolist(),
-                "wire_action": arrays["wire_actions"][index].tolist(),
-            }
-            file.write(json.dumps(response, allow_nan=False, sort_keys=True) + "\\n")
-    latency = arrays["latency_ms"]
     summary = {
         "snapshots": int(len(arrays["states"])),
         "step_range": [int(arrays["step_ids"][0]), int(arrays["step_ids"][-1])],
-        "latency_ms": {
-            "mean": float(np.mean(latency)),
-            "p95": float(np.percentile(latency, 95)),
-            "max": float(np.max(latency)),
-        },
         "right_translation_norm": {
             "mean": float(np.mean(np.linalg.norm(arrays["policy_actions"][:, :3], axis=1))),
             "max": float(np.max(np.linalg.norm(arrays["policy_actions"][:, :3], axis=1))),
         },
         "profile": SINGLE_RIGHT_ARM_7X10.name,
         "evaluation_mode": "independent_snapshot_reset",
+        "state": {"finite": bool(np.isfinite(arrays["states"]).all()), "shape": list(arrays["states"].shape)},
+        "translation_norm": _metric_range(metrics["translation_norm"]),
+        "rotation_angle": _metric_range(metrics["rotation_angle"]),
+        "gripper_delta": _metric_range(metrics["gripper_delta"]),
+        "latency_ms": _metric_range(metrics["latency_ms"], include_p95=True),
     }
     with paths["summary"].open("w", encoding="utf-8") as file:
         json.dump(summary, file, allow_nan=False, indent=2, sort_keys=True)
     _write_action_overview(paths["action_overview"], arrays)
+    _write_right_snapshot_responses(paths["snapshot_responses"], arrays)
     return paths
 
 
@@ -416,6 +511,7 @@ def run_evaluation(
     at_checkpoint = Path(str(model_config["at_checkpoint"])).expanduser().resolve()
     encoder_dir = Path(str(model_config["tactile_encoder_dir"])).expanduser().resolve()
     tactile_pca_path = Path(str(model_config["tactile_pca_path"])).expanduser().resolve()
+    slow_update_interval = control["slow_update_interval"]
     missing = [path for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path) if not path.is_file()]
     if not encoder_dir.is_dir():
         missing.append(encoder_dir)
@@ -429,6 +525,7 @@ def run_evaluation(
         device,
         int(model_config.get("num_inference_steps", 8)),
         tactile_pca.output_dim,
+        slow_update_interval=slow_update_interval,
         profile=profile,
         artifact_verification=str(model_config.get("artifact_verification", "strict")),
         tactile_pca_path=tactile_pca_path,
@@ -438,7 +535,7 @@ def run_evaluation(
         load_tactile_resnet18(encoder_dir, device=device),
         device,
         tactile_pca,
-        slow_update_interval=int(control.get("slow_update_interval", 5)),
+        slow_update_interval=slow_update_interval,
         dataset_obs_temporal_downsample_ratio=int(checkpoint_cfg.dataset_obs_temporal_downsample_ratio),
         n_obs_steps=int(checkpoint_cfg.n_obs_steps),
         profile=profile,

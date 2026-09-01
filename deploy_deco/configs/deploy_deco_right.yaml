@@ -1,4 +1,4 @@
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0829/insert/deco_stage1_latest.ts
+checkpoint: //home/typhon/FRS_Tact/checkpoints/model/deco_0831/deco_0831/press/deco_stage1_best.ts
 device: cuda:0
 seed: 0
 model:
@@ -17,7 +17,7 @@ connection:
 observation:
   data_type: vision
   observation_profile: deco_vision_224
-  language_prompt: Use the right hand to insert the object.
+  language_prompt: Use the right hand to press the button.
   single_arm_mode: true
   controlled_arm: right
   # camera0 was a constant black placeholder throughout this model's training data.

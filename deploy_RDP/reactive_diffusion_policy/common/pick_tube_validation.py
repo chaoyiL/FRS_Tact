@@ -470,6 +470,62 @@ def compute_idle_rollout_metrics(
     return metrics
 
 
+def compute_deployment_window_metrics(
+    target,
+    prediction,
+    idle_mask,
+    *,
+    phase_start,
+    phase_count,
+    valid_mask=None,
+    state_action_profile: str | None = None,
+) -> dict[str, float]:
+    """Measure idle metrics over the action phase executed by deployment."""
+    if phase_start < 0:
+        raise ValueError("phase_start must be non-negative")
+    if phase_count < 1:
+        raise ValueError("phase_count must be positive")
+
+    target_array = _as_numpy(target)
+    if target_array.ndim not in (2, 3):
+        raise ValueError("target must have shape [T, A] or [B, T, A]")
+    horizon = target_array.shape[-2]
+    phase_end = phase_start + phase_count
+    if phase_end > horizon:
+        raise ValueError("deployment phase must fit within the action sequence")
+
+    window = slice(phase_start, phase_end)
+    metrics = compute_idle_rollout_metrics(
+        target[..., window, :],
+        prediction[..., window, :],
+        idle_mask[..., window, :],
+        horizon=phase_count,
+        valid_mask=(None if valid_mask is None else valid_mask[..., window]),
+        state_action_profile=state_action_profile,
+    )
+    return {
+        name.replace("val_", "val_deploy_", 1).replace("_29_", "_window_"): value
+        for name, value in metrics.items()
+    }
+
+
+def build_canonical_noop_actions(actions: torch.Tensor) -> torch.Tensor:
+    """Return relative-action no-ops while retaining each gripper target."""
+    if not isinstance(actions, torch.Tensor):
+        raise TypeError("actions must be a torch.Tensor")
+    if actions.ndim < 1 or actions.shape[-1] not in (10, 20):
+        raise ValueError("actions must use a contiguous 10D or 20D layout")
+    if not actions.is_contiguous():
+        raise ValueError("actions must use a contiguous 10D or 20D layout")
+
+    noops = actions.clone()
+    rotation = actions.new_tensor([1, 0, 0, 0, 1, 0])
+    for arm_start in range(0, actions.shape[-1], 10):
+        noops[..., arm_start : arm_start + 3] = 0
+        noops[..., arm_start + 3 : arm_start + 9] = rotation
+    return noops
+
+
 def compute_contiguous_300_step_drift(
     target,
     prediction,
@@ -612,6 +668,65 @@ def load_active_metric_baselines(config) -> dict[str, float] | None:
             )
         baselines[output_key] = baseline
     return baselines
+
+
+def _is_finite_positive_baseline(value) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and float(value) > 0
+    )
+
+
+def resolve_active_metric_baselines(
+    *,
+    external_baselines: dict[str, float] | None,
+    auto_translation_baseline_mm,
+    auto_rotation_baseline_deg,
+    active_translation_mm,
+    active_rotation_deg,
+    epoch,
+    auto_baseline_epoch=None,
+) -> dict[str, float | int | str | bool | None]:
+    """Prefer external baselines, otherwise freeze the first valid active metrics."""
+    if external_baselines is not None:
+        return {
+            "translation_mm": external_baselines["translation_mm"],
+            "rotation_deg": external_baselines["rotation_deg"],
+            "source": "external",
+            "epoch": None,
+            "calibrated": False,
+        }
+    if (
+        _is_finite_positive_baseline(auto_translation_baseline_mm)
+        and _is_finite_positive_baseline(auto_rotation_baseline_deg)
+    ):
+        return {
+            "translation_mm": float(auto_translation_baseline_mm),
+            "rotation_deg": float(auto_rotation_baseline_deg),
+            "source": "auto",
+            "epoch": auto_baseline_epoch,
+            "calibrated": False,
+        }
+    if (
+        _is_finite_positive_baseline(active_translation_mm)
+        and _is_finite_positive_baseline(active_rotation_deg)
+    ):
+        return {
+            "translation_mm": float(active_translation_mm),
+            "rotation_deg": float(active_rotation_deg),
+            "source": "auto",
+            "epoch": int(epoch),
+            "calibrated": True,
+        }
+    return {
+        "translation_mm": None,
+        "rotation_deg": None,
+        "source": None,
+        "epoch": None,
+        "calibrated": False,
+    }
 
 
 def _action_contract_identity(config) -> tuple[object, object]:

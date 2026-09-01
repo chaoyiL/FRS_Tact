@@ -162,6 +162,48 @@ def test_workspaces_persist_optimizer_step_separately_from_batch_logging_step():
     )
 
 
+def test_ldp_prepare_keeps_the_complete_validation_loader_unsharded():
+    train_loader = object()
+    validation_loader = object()
+    model = object()
+    optimizer = object()
+    scheduler = object()
+    prepared_train_loader = object()
+    prepared_model = object()
+    prepared_optimizer = object()
+    prepared_scheduler = object()
+
+    class FakeAccelerator:
+        def prepare(self, *components):
+            self.components = components
+            return (
+                prepared_train_loader,
+                prepared_model,
+                prepared_optimizer,
+                prepared_scheduler,
+            )
+
+    accelerator = FakeAccelerator()
+    prepared = train_diffusion_unet_image_workspace.prepare_training_components(
+        accelerator,
+        train_loader,
+        validation_loader,
+        model,
+        optimizer,
+        scheduler,
+    )
+
+    assert accelerator.components == (train_loader, model, optimizer, scheduler)
+    assert prepared == (
+        prepared_train_loader,
+        validation_loader,
+        prepared_model,
+        prepared_optimizer,
+        prepared_scheduler,
+    )
+    assert prepared[1] is validation_loader
+
+
 @pytest.mark.parametrize("accumulate_every", [0, -1])
 def test_accumulation_boundary_rejects_nonpositive_interval(accumulate_every):
     with pytest.raises(ValueError, match="positive"):

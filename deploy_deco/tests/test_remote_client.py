@@ -10,8 +10,45 @@ from deploy_deco import bridge_client, policy, remote_client
 from deploy_deco.artifact import TACTILE_FIELD_ORDER
 
 
+def test_right_gripper_bias_shifts_only_column_19_and_clips() -> None:
+    action = np.zeros((2, 20), dtype=np.float32)
+    action[:, 9] = [0.08, 0.09]
+    action[:, 19] = [0.10, 0.119]
+    original = action.copy()
+
+    adjusted = remote_client.apply_right_gripper_bias(action, 0.005)
+
+    np.testing.assert_allclose(adjusted[:, 19], [0.105, 0.1208])
+    np.testing.assert_array_equal(adjusted[:, 9], original[:, 9])
+    np.testing.assert_array_equal(action, original)
+
+
+def test_zero_right_gripper_bias_returns_an_equal_copy() -> None:
+    action = np.arange(40, dtype=np.float32).reshape(2, 20)
+
+    adjusted = remote_client.apply_right_gripper_bias(action, 0.0)
+
+    np.testing.assert_array_equal(adjusted, action)
+    assert adjusted is not action
+
+
+def test_gripper_biases_shift_left_and_right_independently() -> None:
+    action = np.zeros((2, 20), dtype=np.float32)
+    action[:, 9] = [0.08, 0.07]
+    action[:, 19] = [0.10, 0.12]
+    original = action.copy()
+
+    adjusted = remote_client.apply_gripper_biases(action, -0.005, -0.005)
+
+    np.testing.assert_allclose(adjusted[:, 9], [0.075, 0.0677])
+    np.testing.assert_allclose(adjusted[:, 19], [0.095, 0.115])
+    np.testing.assert_array_equal(adjusted[:, :9], original[:, :9])
+    np.testing.assert_array_equal(action, original)
+
+
 def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch) -> None:
     events: list[tuple[str, int | str] | str] = []
+    sent_actions: list[np.ndarray] = []
     observations = iter(
         [
             (0, {"frame": "warmup"}),
@@ -29,7 +66,10 @@ def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch)
             "require_token": False,
         },
         "observation": {},
-        "control": {},
+        "control": {
+            "left_gripper_bias_m": -0.005,
+            "right_gripper_bias_m": 0.005,
+        },
         "runtime": {"auto_start": True, "warmup_runs": 0},
     }
 
@@ -51,6 +91,7 @@ def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch)
 
         def send_action(self, action: np.ndarray, obs_seq: int) -> None:
             events.append(("action", obs_seq))
+            sent_actions.append(action.copy())
 
         def close(self) -> None:
             events.append("close")
@@ -65,7 +106,10 @@ def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch)
             pass
 
         def predict(self, observation: dict, *, seed: int) -> np.ndarray:
-            return np.zeros((32, 20), dtype=np.float32)
+            action = np.zeros((32, 20), dtype=np.float32)
+            action[:, 9] = 0.08
+            action[:, 19] = 0.10
+            return action
 
     monkeypatch.setattr(remote_client, "check", lambda _path: config)
     monkeypatch.setattr(remote_client, "resolve_checkpoint", lambda _config: Path("/tmp/deco.ts"))
@@ -84,6 +128,8 @@ def test_bounded_loop_waits_for_post_action_observation_before_stop(monkeypatch)
         ("state", "stop"),
         "close",
     ]
+    np.testing.assert_allclose(sent_actions[0][:, 19], 0.105)
+    np.testing.assert_allclose(sent_actions[0][:, 9], 0.075)
 
 
 def test_legacy_loop_reads_next_observation_without_waiting_for_action_ack(

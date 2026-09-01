@@ -10,12 +10,15 @@ from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
 from reactive_diffusion_policy.common.pick_tube_validation import (
+    build_canonical_noop_actions,
     build_episode_split_manifest,
     compute_contiguous_300_step_drift,
+    compute_deployment_window_metrics,
     compute_idle_rollout_metrics,
     evaluate_checkpoint_feasibility,
     load_active_metric_baselines,
     preserve_global_rng_state,
+    resolve_active_metric_baselines,
     validate_resume_action_contract,
 )
 
@@ -70,6 +73,97 @@ def test_idle_metrics_integrate_translation_and_compose_so3_rotations():
     assert metrics["val_idle_rotation_step_p95_deg"] == pytest.approx(1.0)
     assert metrics["val_idle_right_translation_29_mm"] == pytest.approx(29.0)
     assert math.isnan(metrics["val_idle_left_translation_29_mm"])
+
+
+def test_deployment_window_metrics_only_measure_the_deployed_phase():
+    target = _neutral_actions(horizon=32)
+    idle_mask = np.zeros((1, 32, 2), dtype=bool)
+    idle_mask[..., 0] = True
+    prediction = target.copy()
+    prediction[:, 3, 3:9] = _rotation_6d_z(2.0)
+    prediction[:, 18, 3:9] = _rotation_6d_z(4.0)
+
+    metrics = compute_deployment_window_metrics(
+        target,
+        prediction,
+        idle_mask,
+        phase_start=3,
+        phase_count=16,
+    )
+
+    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(2.5)
+    assert metrics["val_deploy_idle_rotation_window_deg"] == pytest.approx(6.0)
+    assert metrics["val_deploy_idle_left_rotation_window_deg"] == pytest.approx(6.0)
+    assert "val_deploy_idle_rotation_29_deg" not in metrics
+    assert "val_deploy_idle_left_rotation_29_deg" not in metrics
+
+    prediction = target.copy()
+    prediction[:, 19:32, 3:9] = _rotation_6d_z(10.0)
+    metrics = compute_deployment_window_metrics(
+        target,
+        prediction,
+        idle_mask,
+        phase_start=3,
+        phase_count=16,
+    )
+
+    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(0.0)
+
+
+@pytest.mark.parametrize(
+    ("phase_start", "phase_count"),
+    [(-1, 16), (0, 0), (17, 16)],
+)
+def test_deployment_window_metrics_reject_invalid_phase_bounds(
+    phase_start, phase_count
+):
+    target = _neutral_actions(horizon=32)
+    idle_mask = np.ones((1, 32, 2), dtype=bool)
+
+    with pytest.raises(ValueError):
+        compute_deployment_window_metrics(
+            target,
+            target.copy(),
+            idle_mask,
+            phase_start=phase_start,
+            phase_count=phase_count,
+        )
+
+
+@pytest.mark.parametrize("action_dim", [10, 20])
+def test_canonical_noop_actions_replace_pose_and_preserve_grippers(action_dim):
+    actions = torch.randn(2, 3, action_dim)
+    original = actions.clone()
+
+    noops = build_canonical_noop_actions(actions)
+
+    torch.testing.assert_close(noops[..., 0::10], torch.zeros_like(noops[..., 0::10]))
+    torch.testing.assert_close(noops[..., 1::10], torch.zeros_like(noops[..., 1::10]))
+    torch.testing.assert_close(noops[..., 2::10], torch.zeros_like(noops[..., 2::10]))
+    expected_rotation = torch.tensor(
+        [1, 0, 0, 0, 1, 0], dtype=actions.dtype
+    ).expand_as(noops[..., 3:9])
+    for arm_start in range(0, action_dim, 10):
+        torch.testing.assert_close(
+            noops[..., arm_start + 3 : arm_start + 9],
+            expected_rotation[..., :6],
+        )
+        torch.testing.assert_close(noops[..., arm_start + 9], original[..., arm_start + 9])
+    torch.testing.assert_close(actions, original)
+
+
+@pytest.mark.parametrize(
+    ("actions", "error"),
+    [
+        (torch.zeros(2, 3, 9), ValueError),
+        (torch.zeros(2, 3, 30), ValueError),
+        (torch.zeros(2, 10, 3).transpose(1, 2), ValueError),
+        (np.zeros((2, 3, 10)), TypeError),
+    ],
+)
+def test_canonical_noop_actions_reject_unsupported_layouts(actions, error):
+    with pytest.raises(error):
+        build_canonical_noop_actions(actions)
 
 
 def test_metrics_report_active_errors_and_micro_motion_recall():
@@ -204,6 +298,112 @@ def test_missing_baseline_keeps_checkpoint_fail_closed():
     assert result["val_deployable"] is False
 
 
+def test_auto_baseline_calibrates_valid_metrics_once_and_freezes():
+    calibrated = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=1.25,
+        active_rotation_deg=2.5,
+        epoch=4,
+    )
+
+    assert calibrated == {
+        "translation_mm": 1.25,
+        "rotation_deg": 2.5,
+        "source": "auto",
+        "epoch": 4,
+        "calibrated": True,
+    }
+
+    frozen = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=calibrated["translation_mm"],
+        auto_rotation_baseline_deg=calibrated["rotation_deg"],
+        auto_baseline_epoch=calibrated["epoch"],
+        active_translation_mm=0.5,
+        active_rotation_deg=0.75,
+        epoch=9,
+    )
+
+    assert frozen == {
+        "translation_mm": 1.25,
+        "rotation_deg": 2.5,
+        "source": "auto",
+        "epoch": 4,
+        "calibrated": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("translation", "rotation"),
+    [(math.nan, 2.5), (1.25, 0.0)],
+)
+def test_auto_baseline_skips_invalid_active_metrics(translation, rotation):
+    result = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=translation,
+        active_rotation_deg=rotation,
+        epoch=4,
+    )
+
+    assert result == {
+        "translation_mm": None,
+        "rotation_deg": None,
+        "source": None,
+        "epoch": None,
+        "calibrated": False,
+    }
+
+
+def test_external_baseline_has_priority_over_auto_baseline_state():
+    result = resolve_active_metric_baselines(
+        external_baselines={"translation_mm": 3.0, "rotation_deg": 4.0},
+        auto_translation_baseline_mm=1.25,
+        auto_rotation_baseline_deg=2.5,
+        active_translation_mm=0.5,
+        active_rotation_deg=0.75,
+        epoch=9,
+    )
+
+    assert result == {
+        "translation_mm": 3.0,
+        "rotation_deg": 4.0,
+        "source": "external",
+        "epoch": None,
+        "calibrated": False,
+    }
+
+
+def test_auto_baseline_calibration_forces_that_release_non_deployable():
+    baseline = resolve_active_metric_baselines(
+        external_baselines=None,
+        auto_translation_baseline_mm=None,
+        auto_rotation_baseline_deg=None,
+        active_translation_mm=1.0,
+        active_rotation_deg=2.0,
+        epoch=4,
+    )
+    release = evaluate_checkpoint_feasibility(
+        idle_translation_29_mm=0.1,
+        idle_rotation_29_deg=0.1,
+        idle_translation_p95_mm=0.01,
+        idle_rotation_p95_deg=0.01,
+        active_translation_mm=1.0,
+        active_translation_baseline_mm=baseline["translation_mm"],
+        active_rotation_deg=2.0,
+        active_rotation_baseline_deg=baseline["rotation_deg"],
+        micro_motion_recall=1.0,
+    )
+
+    release["val_deployable"] = bool(
+        release["val_deployable"] and not baseline["calibrated"]
+    )
+    assert release["val_deployable"] is False
+
+
 def test_seeded_validation_is_repeatable_and_preserves_global_rng():
     random.seed(101)
     np.random.seed(102)
@@ -264,17 +464,29 @@ def test_pick_tube_v2_configs_select_feasible_idle_score():
     with initialize_config_dir(version_base=None, config_dir=config_dir):
         at_cfg = compose(config_name="train_pick_tube_at_workspace")
         ldp_cfg = compose(config_name="train_pick_tube_ldp_workspace")
+        single_right_at_cfg = compose(
+            config_name="train_pick_tube_single_right_at_workspace"
+        )
+        single_right_ldp_cfg = compose(
+            config_name="train_pick_tube_single_right_ldp_workspace"
+        )
 
-    for cfg in (at_cfg, ldp_cfg):
+    for cfg, action_contract in (
+        (at_cfg, "bimanual_relative_pose20d_v2"),
+        (ldp_cfg, "bimanual_relative_pose20d_v2"),
+        (single_right_at_cfg, "single_right_relative_pose10d_v2"),
+        (single_right_ldp_cfg, "single_right_relative_pose10d_v2"),
+    ):
         assert cfg.task.dataset.val_ratio == 0.1
         assert cfg.task.action_representation_version == 2
-        assert cfg.task.action_contract == "bimanual_relative_pose20d_v2"
-        assert cfg.checkpoint.topk.monitor_key == "val_idle_score"
+        assert cfg.task.action_contract == action_contract
+        assert cfg.checkpoint.topk.monitor_key == "val_deploy_idle_score"
         assert cfg.checkpoint.topk.mode == "min"
         assert cfg.validation.max_active_degradation == 0.05
         assert cfg.validation.min_micro_motion_recall == 0.95
         assert cfg.validation.baseline_json is None
         assert list(cfg.validation.seeds) == [0]
+        assert cfg.validation.deployment_slow_update_interval == 16
         assert cfg.checkpoint.periodic.keep == 10
 
 
@@ -295,17 +507,51 @@ def test_v2_experiment_launcher_uses_fresh_20_epoch_runs():
 
 def test_pick_tube_launchers_allow_missing_baseline():
     root = Path(__file__).resolve().parents[1]
-    launchers = (
+    generic_launcher = root / "scripts" / "train_pick_tube_single_gpu.sh"
+    generic_script = generic_launcher.read_text(encoding="utf-8")
+    assert "BASELINE_JSON is required" not in generic_script
+    assert "AT/LDP will auto-calibrate on the first valid deployment validation" in generic_script
+
+    recovery_only_launchers = (
         root / "scripts" / "run_pick_tube_rdp_experiments.sh",
-        root / "scripts" / "train_pick_tube_single_gpu.sh",
         root / "scripts" / "train_pick_tube_server.sh",
         root / "train_pick_tube_rdp.sh",
     )
 
-    for launcher in launchers:
+    for launcher in recovery_only_launchers:
         script = launcher.read_text(encoding="utf-8")
         assert "BASELINE_JSON is required" not in script
         assert "checkpoints will remain non-deployable" in script
+
+
+def test_single_right_launcher_requires_deployable_at_and_ldp_checkpoints():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "train_pick_tube_single_right_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}" in script
+    assert "${AT_DIR}/checkpoints/latest.ckpt" not in script
+    assert "latest is recovery-only" in script
+    assert "AT deployable checkpoint not found" in script
+    assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
+    assert "AT/LDP will auto-calibrate on the first valid deployment validation" in script
+    assert "checkpoints will remain non-deployable" not in script
+
+
+def test_generic_launcher_requires_deployable_at_and_ldp_checkpoints():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "train_pick_tube_single_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}" in script
+    assert "${AT_DIR}/checkpoints/latest.ckpt" not in script
+    assert "latest is recovery-only" in script
+    assert "AT deployable checkpoint not found" in script
+    assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
 
 
 

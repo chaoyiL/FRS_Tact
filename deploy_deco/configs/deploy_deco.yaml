@@ -1,5 +1,5 @@
 # Standalone DECO Stage 1 deployment using the CUDA-traced best checkpoint.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0828/pick_two_tubes/deco_stage1_best_gpu.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0828/bread/deco_stage1_best_gpu.ts
 device: cuda:0
 seed: 0
 
@@ -31,6 +31,8 @@ control:
   action_horizon: 32
   # Execute 32 actions (about 1.07s) before obtaining a new observation and replanning.
   steps_per_inference: 32
+  left_gripper_bias_m: 0
+  right_gripper_bias_m: 0
 
 runtime:
   auto_start: false

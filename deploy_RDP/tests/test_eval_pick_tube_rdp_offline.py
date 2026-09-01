@@ -148,3 +148,156 @@ def test_predict_independent_snapshots_synchronizes_cuda_before_latency(
 
     assert clock_reads == 2
     np.testing.assert_allclose(results["latency_ms"], [125.0])
+
+
+def test_write_reports_renders_decodable_right_snapshot_response_plot(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    snapshots = evaluator.load_snapshots(snapshot_dir)
+    results = evaluator.predict_independent_snapshots(
+        _FakeRuntime(), evaluator.SINGLE_RIGHT_ARM_7X10, snapshots, seed=7
+    )
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+
+    response_plot = paths["snapshot_responses"]
+    assert response_plot.name == "right_snapshot_responses.png"
+    decoded = cv2.imread(str(response_plot), cv2.IMREAD_COLOR)
+    assert decoded is not None and decoded.size > 0
+
+
+def test_write_reports_includes_snapshot_action_metrics(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    snapshots = evaluator.load_snapshots(snapshot_dir)
+    results = evaluator.predict_independent_snapshots(
+        _FakeRuntime(), evaluator.SINGLE_RIGHT_ARM_7X10, snapshots, seed=7
+    )
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+
+    header = paths["trajectory_csv"].read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert {"translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper", "latency_ms"} <= set(header)
+    summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
+    assert summary["state"] == {"finite": True, "shape": [len(snapshots), 20]}
+    for name in ("translation_norm", "rotation_angle", "gripper_delta"):
+        assert set(summary[name]) == {"min", "max", "mean"}
+        assert all(np.isfinite(value) for value in summary[name].values())
+    assert set(summary["latency_ms"]) == {"min", "max", "mean", "p95"}
+
+
+def test_write_reports_preserves_deterministic_response_metrics(tmp_path: Path) -> None:
+    import csv
+
+    states = np.zeros((2, 20), dtype=np.float32)
+    states[:, 13] = [0.1, 0.2]
+    right_poses = np.asarray(
+        [[1, 2, 3, 0, 0, np.pi / 2], [2, 2, 3, 0, 0, np.pi / 2]], dtype=np.float32
+    )
+    policy_actions = np.asarray(
+        [[1, 0, 0, 0, 1, 0, -1, 0, 0, 0.3], [1, 0, 0, 0, 1, 0, -1, 0, 0, 0.4]],
+        dtype=np.float32,
+    )
+    results = {
+        "states": states,
+        "policy_actions": policy_actions,
+        "wire_actions": np.zeros((2, 20), dtype=np.float32),
+        "right_poses": right_poses,
+        "step_ids": np.asarray([2, 10], dtype=np.int64),
+        "timestamps": np.asarray([1.0, 2.0], dtype=np.float64),
+        "latency_ms": np.asarray([1.0, 5.0], dtype=np.float64),
+    }
+
+    starts, endpoints = evaluator.right_snapshot_response_points(
+        right_poses, policy_actions[:, :3]
+    )
+    np.testing.assert_allclose(starts[0], [1, 2, 3])
+    np.testing.assert_allclose(endpoints[0], [1, 3, 3], atol=1e-6)
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+    with paths["trajectory_csv"].open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert "gripper_delta" in rows[0]
+    assert float(rows[0]["gripper_delta"]) == pytest.approx(0.2)
+    summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
+    assert summary["rotation_angle"]["mean"] == pytest.approx(np.pi / 2)
+    assert summary["latency_ms"] == {
+        "min": 1.0, "mean": 3.0, "p95": 4.8, "max": 5.0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("slow_update_interval", "expected_loader_interval"),
+    [
+        pytest.param(16, 16, id="slow16"),
+        pytest.param(16.9, None, id="fractional-interval"),
+    ],
+)
+def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_update_interval: float,
+    expected_loader_interval: int | None,
+) -> None:
+    from types import SimpleNamespace
+
+    ldp_checkpoint = tmp_path / "ldp.ckpt"
+    at_checkpoint = tmp_path / "at.ckpt"
+    tactile_pca_path = tmp_path / "pca.npz"
+    for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path):
+        path.touch()
+    tactile_encoder_dir = tmp_path / "encoder"
+    tactile_encoder_dir.mkdir()
+    config = {
+        "model": {
+            "ldp_checkpoint": str(ldp_checkpoint),
+            "at_checkpoint": str(at_checkpoint),
+            "tactile_encoder_dir": str(tactile_encoder_dir),
+            "tactile_pca_path": str(tactile_pca_path),
+            "state_action_profile": "single-right-arm-7x10",
+        },
+        "control": {"slow_update_interval": slow_update_interval},
+    }
+    captured = {}
+
+    class FakePCA:
+        output_dim = 30
+
+    def load_policy(*args, **kwargs):
+        captured.update(kwargs)
+        interval = kwargs["slow_update_interval"]
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval != 16:
+            raise ValueError("slow_update_interval must be exactly 16")
+        return object(), SimpleNamespace(
+            dataset_obs_temporal_downsample_ratio=2,
+            n_obs_steps=2,
+        )
+
+    monkeypatch.setattr(evaluator, "load_config", lambda path: config)
+    monkeypatch.setattr(evaluator, "load_policy", load_policy)
+    monkeypatch.setattr(evaluator, "PickTubeRDPRuntime", lambda *args, **kwargs: object())
+    monkeypatch.setattr(evaluator, "load_snapshots", lambda path: [])
+    monkeypatch.setattr(evaluator, "predict_independent_snapshots", lambda *args, **kwargs: {})
+    monkeypatch.setattr(evaluator, "write_reports", lambda *args, **kwargs: {})
+    from reactive_diffusion_policy.deploy import tactile_encoder_torch
+    from reactive_diffusion_policy.model.tactile_pca import BimanualTactilePCA
+
+    monkeypatch.setattr(
+        BimanualTactilePCA,
+        "from_npz",
+        classmethod(lambda cls, path, device: FakePCA()),
+    )
+    monkeypatch.setattr(tactile_encoder_torch, "load_tactile_resnet18", lambda *args, **kwargs: object())
+
+    arguments = (
+        tmp_path / "config.yaml",
+        tmp_path / "observations",
+        tmp_path / "reports",
+    )
+    if expected_loader_interval is None:
+        with pytest.raises(ValueError, match="slow_update_interval"):
+            evaluator.run_evaluation(*arguments, device_name="cpu", seed=0)
+        assert captured["slow_update_interval"] == slow_update_interval
+    else:
+        evaluator.run_evaluation(*arguments, device_name="cpu", seed=0)
+        assert captured["slow_update_interval"] == expected_loader_interval

@@ -221,6 +221,7 @@ def main() -> None:
     config = load_config(config_path)
     model = config["model"]
     control = config["control"]
+    slow_update_interval = control["slow_update_interval"]
     device = torch.device(args.device)
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")
@@ -235,6 +236,7 @@ def main() -> None:
         device,
         int(model.get("num_inference_steps", 8)),
         tactile_pca.output_dim,
+        slow_update_interval=slow_update_interval,
         artifact_verification=str(model.get("artifact_verification", "strict")),
         tactile_pca_path=pca_path,
     )
@@ -244,7 +246,7 @@ def main() -> None:
         tactile_encoder,
         device,
         tactile_pca,
-        slow_update_interval=int(control.get("slow_update_interval", 5)),
+        slow_update_interval=slow_update_interval,
         dataset_obs_temporal_downsample_ratio=int(
             checkpoint_cfg.dataset_obs_temporal_downsample_ratio
         ),

@@ -31,6 +31,13 @@ _DEFAULT_WEIGHTS = {
 }
 
 
+def _rotation_compute_dtype(*values: torch.Tensor) -> torch.dtype:
+    dtype = values[0].dtype
+    for value in values[1:]:
+        dtype = torch.promote_types(dtype, value.dtype)
+    return torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
+
+
 def project_rotation_6d(
         rotation_6d: torch.Tensor,
         eps: float = 1e-6) -> tuple[torch.Tensor, torch.Tensor]:
@@ -125,8 +132,12 @@ def compute_physical_action_loss(
     resolved = _resolve_weights(weights)
     valid_mask = valid_mask.to(device=target.device, dtype=torch.bool)
     idle_arm_mask = idle_arm_mask.to(device=target.device, dtype=torch.bool)
-    identity_6d = target.new_tensor([1, 0, 0, 0, 1, 0])
-    identity_matrix, _ = project_rotation_6d(identity_6d)
+    rotation_compute_dtype = _rotation_compute_dtype(target, prediction)
+    with torch.autocast(device_type=prediction.device.type, enabled=False):
+        identity_6d = target.new_tensor(
+            [1, 0, 0, 0, 1, 0], dtype=rotation_compute_dtype
+        )
+        identity_matrix, _ = project_rotation_6d(identity_6d)
 
     position_terms = []
     rotation_terms = []
@@ -144,34 +155,39 @@ def compute_physical_action_loss(
             _scaled_huber(position_error, resolved["position_scale"]), valid_mask
         ))
 
-        target_rotation_6d = target[..., rotation_slice]
-        predicted_rotation_6d = prediction[..., rotation_slice]
-        target_rotation, _ = project_rotation_6d(target_rotation_6d)
-        predicted_rotation, degeneracy = project_rotation_6d(predicted_rotation_6d)
-        rotation_error = _geodesic_angle(target_rotation, predicted_rotation)
-        rotation_terms.append(_masked_mean(
-            _scaled_huber(rotation_error, resolved["rotation_scale"]), valid_mask
-        ))
-        degenerate_terms.append(_masked_mean(degeneracy, valid_mask))
+        with torch.autocast(device_type=prediction.device.type, enabled=False):
+            target_rotation_6d = target[..., rotation_slice].to(rotation_compute_dtype)
+            predicted_rotation_6d = prediction[..., rotation_slice].to(rotation_compute_dtype)
+            target_rotation, _ = project_rotation_6d(target_rotation_6d)
+            predicted_rotation, degeneracy = project_rotation_6d(predicted_rotation_6d)
+            rotation_error = _geodesic_angle(target_rotation, predicted_rotation)
+            rotation_terms.append(_masked_mean(
+                _scaled_huber(rotation_error, resolved["rotation_scale"]), valid_mask
+            ))
+            degenerate_terms.append(_masked_mean(degeneracy, valid_mask))
+
+            raw_rotation_error = F.smooth_l1_loss(
+                predicted_rotation_6d,
+                target_rotation_6d,
+                reduction="none",
+            ).mean(dim=-1)
+            rot6_aux_terms.append(_masked_mean(raw_rotation_error, valid_mask))
+
+            idle_rotation_error = _geodesic_angle(identity_matrix, predicted_rotation)
+            idle_rotation_value = _scaled_huber(
+                idle_rotation_error, resolved["idle_rotation_scale"]
+            )
 
         gripper_error = (prediction[..., gripper_index] - target[..., gripper_index]).abs()
         gripper_terms.append(_masked_mean(
             _scaled_huber(gripper_error, resolved["gripper_scale"]), valid_mask
         ))
 
-        raw_rotation_error = F.smooth_l1_loss(
-            predicted_rotation_6d,
-            target_rotation_6d,
-            reduction="none",
-        ).mean(dim=-1)
-        rot6_aux_terms.append(_masked_mean(raw_rotation_error, valid_mask))
-
         idle_mask = valid_mask & idle_arm_mask[..., arm_index]
         idle_position_error = torch.linalg.vector_norm(predicted_position, dim=-1)
-        idle_rotation_error = _geodesic_angle(identity_matrix, predicted_rotation)
         idle_value = (
             _scaled_huber(idle_position_error, resolved["idle_position_scale"])
-            + _scaled_huber(idle_rotation_error, resolved["idle_rotation_scale"])
+            + idle_rotation_value
         )
         idle_terms.append(_masked_mean(idle_value, idle_mask))
 

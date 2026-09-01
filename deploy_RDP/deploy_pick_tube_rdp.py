@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import copy
+import math
 import os
 import time
 import warnings
 from collections.abc import Mapping, Sequence
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -288,12 +290,107 @@ def validate_artifact_pairing(
             raise ValueError("Configured PCA artifact does not match checkpoint metadata")
 
 
+def validate_release_qualification(
+    ldp_cfg: Any,
+    at_cfg: Any,
+    *,
+    slow_update_interval: int,
+    ldp_checkpoint: Path,
+    at_checkpoint: Path,
+) -> None:
+    """Require release evidence compatible with the fixed robot slow16 schedule."""
+    if (
+        isinstance(slow_update_interval, bool)
+        or not isinstance(slow_update_interval, int)
+        or slow_update_interval != 16
+    ):
+        raise ValueError(
+            "Deployment control.slow_update_interval must be exactly 16, "
+            f"got {slow_update_interval!r}"
+        )
+
+    for role, cfg, checkpoint in (
+        ("LDP", ldp_cfg, ldp_checkpoint),
+        ("AT", at_cfg, at_checkpoint),
+    ):
+        evidence = OmegaConf.select(cfg, "release_validation")
+        if not OmegaConf.is_dict(evidence):
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} is missing release_validation evidence"
+            )
+
+        n_obs_steps = OmegaConf.select(cfg, "n_obs_steps")
+        ratio = OmegaConf.select(cfg, "dataset_obs_temporal_downsample_ratio")
+        for field, value in (
+            ("n_obs_steps", n_obs_steps),
+            ("dataset_obs_temporal_downsample_ratio", ratio),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"{role} checkpoint {checkpoint} {field} must be a non-boolean integer"
+                )
+        phase_start = n_obs_steps * ratio - 1
+        if phase_start != 3:
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} derived phase_start must be exactly 3"
+            )
+
+        passed = OmegaConf.select(evidence, "passed")
+        if passed is not True:
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation.passed "
+                "must be exactly True"
+            )
+
+        score = OmegaConf.select(evidence, "score")
+        if (
+            isinstance(score, bool)
+            or not isinstance(score, Real)
+            or not math.isfinite(float(score))
+        ):
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation.score "
+                "must be finite"
+            )
+
+        evidence_phase_start = OmegaConf.select(evidence, "phase_start")
+        if (
+            isinstance(evidence_phase_start, bool)
+            or not isinstance(evidence_phase_start, int)
+            or evidence_phase_start != 3
+        ):
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation phase_start "
+                "must be exactly 3"
+            )
+
+        release_interval = OmegaConf.select(
+            evidence, "deployment_slow_update_interval"
+        )
+        if (
+            isinstance(release_interval, bool)
+            or not isinstance(release_interval, int)
+            or release_interval != 16
+        ):
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation "
+                "deployment_slow_update_interval must be exactly 16"
+            )
+
+        if checkpoint.name != "deployable.ckpt":
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} must be named deployable.ckpt; "
+                "latest.ckpt is recovery-only"
+            )
+
+
 def load_policy(
     ldp_checkpoint: Path,
     at_checkpoint: Path,
     device: torch.device,
     num_inference_steps: int,
     tactile_embedding_dim: int,
+    slow_update_interval: int,
     profile: StateActionProfile = DUAL_ARM_20X20,
     artifact_verification: str = "strict",
     tactile_pca_path: Path | None = None,
@@ -319,6 +416,13 @@ def load_policy(
         at_checkpoint,
         artifact_verification=artifact_verification,
         tactile_pca_path=tactile_pca_path,
+    )
+    validate_release_qualification(
+        cfg,
+        at_cfg,
+        slow_update_interval=slow_update_interval,
+        ldp_checkpoint=ldp_checkpoint,
+        at_checkpoint=at_checkpoint,
     )
     cfg.at_load_dir = str(at_checkpoint)
     cfg.policy.at.load_dir = str(at_checkpoint)
@@ -530,6 +634,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
     at_checkpoint = resolve_path(str(model_config["at_checkpoint"]))
     encoder_dir = resolve_path(str(model_config["tactile_encoder_dir"]))
     tactile_pca_path = resolve_path(str(model_config["tactile_pca_path"]))
+    slow_update_interval = control["slow_update_interval"]
     missing = [path for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path) if not path.is_file()]
     if not encoder_dir.is_dir():
         missing.append(encoder_dir)
@@ -545,6 +650,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         device,
         int(model_config.get("num_inference_steps", 8)),
         tactile_pca.output_dim,
+        slow_update_interval=slow_update_interval,
         profile=profile,
         artifact_verification=str(model_config.get("artifact_verification", "strict")),
         tactile_pca_path=tactile_pca_path,
@@ -555,7 +661,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         tactile_encoder,
         device,
         tactile_pca,
-        slow_update_interval=int(control.get("slow_update_interval", 5)),
+        slow_update_interval=slow_update_interval,
         dataset_obs_temporal_downsample_ratio=int(
             checkpoint_cfg.dataset_obs_temporal_downsample_ratio
         ),
