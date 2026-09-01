@@ -60,6 +60,22 @@ from reactive_diffusion_policy.workspace.train_at_workspace import (
 
 OmegaConf.register_new_resolver("eval", eval, replace=True)
 
+
+def prepare_training_components(
+    accelerator,
+    train_dataloader,
+    val_dataloader,
+    model,
+    optimizer,
+    lr_scheduler,
+):
+    """Prepare distributed training state without sharding rank-zero validation."""
+    train_dataloader, model, optimizer, lr_scheduler = accelerator.prepare(
+        train_dataloader, model, optimizer, lr_scheduler
+    )
+    return train_dataloader, val_dataloader, model, optimizer, lr_scheduler
+
+
 class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
     include_keys = [
         'global_step', 'optimizer_step', 'epoch', 'best_deploy_idle_score',
@@ -299,8 +315,13 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
         )
 
         # accelerator
-        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = accelerator.prepare(
-            train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler
+        train_dataloader, val_dataloader, self.model, self.optimizer, lr_scheduler = prepare_training_components(
+            accelerator,
+            train_dataloader,
+            val_dataloader,
+            self.model,
+            self.optimizer,
+            lr_scheduler,
         )
 
         # device transfer
