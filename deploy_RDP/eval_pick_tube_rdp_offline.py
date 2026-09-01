@@ -246,6 +246,8 @@ def predict_independent_snapshots(
             torch.cuda.manual_seed_all(seed)
         started = time.perf_counter()
         prediction = runtime.predict(observation)
+        if getattr(getattr(runtime, "device", None), "type", None) == "cuda":
+            torch.cuda.synchronize(runtime.device)
         latency_ms = (time.perf_counter() - started) * 1000.0
         policy_action = np.asarray(prediction[0], dtype=np.float32)
         if policy_action.shape != (1, profile.action_dim) or not np.isfinite(policy_action).all():

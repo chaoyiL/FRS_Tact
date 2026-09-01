@@ -122,6 +122,7 @@ def test_predict_independent_snapshots_synchronizes_cuda_before_latency(
     snapshot_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import time
+    import torch
     from types import SimpleNamespace
 
     snapshots = evaluator.load_snapshots(snapshot_dir)[:1]
