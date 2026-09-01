@@ -24,11 +24,13 @@ from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
 from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
+from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
 from train_pi05_frs.utils.model import DecoderConfig
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
 from train_pi05_frs.utils.model import bimanual_composite_endpoint
 from train_pi05_frs.utils.model import bimanual_loss_components_per_sample
 from train_pi05_frs.utils.model import bimanual_mse_per_sample
+from train_pi05_frs.utils.model import composite_endpoint
 from train_pi05_frs.utils.model import decode_actions
 from train_pi05_frs.utils.model import decode_euler
 from train_pi05_frs.utils.metrics import bimanual_source_decode_metrics
@@ -346,6 +348,66 @@ def test_bimanual_evaluation_uses_first_20_dims_and_keeps_wrists_separate(
     assert result.predictions.shape[-1] == 32
     np.testing.assert_allclose(result.gt_actions, gt_action)
     np.testing.assert_allclose(result.vla_actions, predicted_action)
+
+
+def test_single_hand_composite_evaluation_retains_plot_inputs(monkeypatch) -> None:
+    gt_action = np.zeros((2, 2, 10), dtype=np.float32)
+    vla_action = np.ones_like(gt_action)
+    prediction = np.stack((gt_action[0], vla_action[1]), axis=0)
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((2, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1], dtype=np.int64),
+                np.zeros_like(gt_action),
+                vla_action,
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 2, 4), dtype=np.float32),
+            )
+
+        def tactile_change_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    def fake_flow(model, x_base, target, t, tactile_input, state):
+        del model, x_base, t, tactile_input, state
+        return np.mean(np.square(np.asarray(target)), axis=(1, 2))
+
+    monkeypatch.setattr(metrics_module, "flow_matching_loss_per_sample", fake_flow)
+    monkeypatch.setattr(
+        metrics_module,
+        "decode_actions",
+        lambda *args, **kwargs: prediction,
+    )
+
+    result = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="composite_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+    )
+
+    np.testing.assert_allclose(result.sample_composite_fm, [0.0, 1.0])
+    assert result.composite_fm == pytest.approx(0.5)
+    np.testing.assert_allclose(result.sample_mse_vla_gt, [1.0, 1.0])
+    np.testing.assert_allclose(result.sample_gt_gain, [1.0, 0.0])
+    assert result.sample_gate_w.shape == (2,)
+    assert result.sample_tactile_change.shape == (2,)
+    np.testing.assert_allclose(result.predictions, prediction)
+    np.testing.assert_allclose(result.gt_actions, gt_action)
+    np.testing.assert_allclose(result.vla_actions, vla_action)
 
 
 def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
@@ -959,6 +1021,25 @@ def test_bimanual_resume_requires_exact_objective_metadata():
         )
 
 
+def test_composite_resume_requires_exact_objective_metadata():
+    valid = {
+        "extra_metadata": {
+            "loss_mode": "composite_gated",
+            **composite_gated_objective_metadata(),
+        }
+    }
+    _validate_resume_loss_objective(
+        valid, loss_mode="composite_gated", action_dim=10
+    )
+    invalid = copy.deepcopy(valid)
+    invalid["extra_metadata"]["endpoint_policy"] = "dual_flow"
+
+    with pytest.raises(ValueError, match="endpoint_policy"):
+        _validate_resume_loss_objective(
+            invalid, loss_mode="composite_gated", action_dim=10
+        )
+
+
 def test_bimanual_checkpoint_selection_uses_worst_source_wrist_metrics():
     metrics = {
         "val_mse_gt": 0.25,
@@ -990,6 +1071,56 @@ def test_32d_composite_steers_first_20_and_preserves_vla_tail():
     np.testing.assert_allclose(target[0, :, 10:20], 2.0)
     np.testing.assert_allclose(target[..., 20:], 2.0)
     assert effective.shape == (2, 2)
+
+
+def test_scalar_composite_endpoint_uses_three_gate_regions():
+    gt = jnp.ones((3, 2, 4), dtype=jnp.float32)
+    vla = jnp.zeros_like(gt)
+    target, effective = composite_endpoint(
+        gt,
+        vla,
+        jnp.asarray([0.2, 0.5, 0.8], dtype=jnp.float32),
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+    )
+
+    np.testing.assert_allclose(effective, [0.0, 0.5, 1.0])
+    np.testing.assert_allclose(target[:, 0, 0], [0.0, 0.5, 1.0])
+
+
+def test_scalar_composite_decode_matches_bimanual_endpoint_weighting(monkeypatch):
+    gt = jnp.zeros((3, 2, 4), dtype=jnp.float32)
+    vla = jnp.ones_like(gt)
+    decoded = jnp.full_like(gt, 0.25)
+    gates = jnp.asarray([0.2, 0.5, 0.8], dtype=jnp.float32)
+
+    monkeypatch.setattr(
+        model_module,
+        "flow_matching_loss_per_sample",
+        lambda *args, **kwargs: jnp.zeros((3,), dtype=jnp.float32),
+    )
+    monkeypatch.setattr(
+        model_module,
+        "decode_actions",
+        lambda *args, **kwargs: decoded,
+    )
+    components = model_module.gated_loss_components_per_sample(
+        object(),  # type: ignore[arg-type]
+        jnp.zeros_like(gt),
+        gt,
+        vla,
+        jnp.full((3,), 0.5),
+        jnp.zeros((3, 1, 2, 4)),
+        gates,
+        gate_lambda=0.0,
+        aux_decode_weight=2.0,
+        low_gate_safety_weight=0.0,
+        rank_weight=0.0,
+        repair_weight=0.0,
+        use_composite_endpoint=True,
+    )
+
+    np.testing.assert_allclose(components["decode"], [1.125, 0.625, 0.125])
 
 
 def test_bimanual_mse_ignores_32d_padding_tail():
@@ -1570,6 +1701,73 @@ class ConditionedDecoderModelTest(unittest.TestCase):
             set(components),
             {"gt_fm", "vla_fm", "low_safety", "decode", "rank", "repair"},
         )
+
+    def test_scalar_composite_gated_uses_one_mixed_flow_endpoint(self):
+        model = self.make_model()
+        optimizer = make_optimizer(model, learning_rate=1e-3, weight_decay=0.0)
+        x_base = jax.random.normal(jax.random.key(53), (3, 6, 3))
+        gt = x_base + 1.0
+        predicted = x_base - 0.25
+        tactile = self._tactile_seq(jax.random.key(54), 3)
+        gate = jnp.asarray([0.2, 0.5, 0.8], dtype=jnp.float32)
+        key = jax.random.key(55)
+        time_key, _ = jax.random.split(key)
+        t = jax.random.uniform(time_key, (3,), minval=0.0, maxval=1.0)
+        target, _ = composite_endpoint(gt, predicted, gate)
+        expected = jnp.mean(
+            flow_matching_loss_per_sample(model, x_base, target, t, tactile)
+        )
+
+        loss, components = train_step(
+            model,
+            optimizer,
+            x_base,
+            gt,
+            predicted,
+            tactile,
+            gate,
+            key,
+            loss_mode="composite_gated",
+            gate_lambda=0.0,
+            aux_decode_weight=0.0,
+        )
+
+        np.testing.assert_allclose(loss, expected, rtol=1e-3, atol=1e-5)
+        self.assertEqual(
+            set(components),
+            {
+                "gt_fm",
+                "vla_fm",
+                "composite_fm",
+                "low_safety",
+                "decode",
+                "rank",
+                "repair",
+            },
+        )
+        self.assertEqual(float(components["gt_fm"]), 0.0)
+        self.assertEqual(float(components["vla_fm"]), 0.0)
+
+    def test_decoder_accepts_two_tactile_tokens(self):
+        model = TactileConditionedFlowDecoder(
+            DecoderConfig(
+                action_dim=3,
+                action_horizon=6,
+                tactile_window=3,
+                gru_hidden_dim=8,
+                resnet_embedding_dim=4,
+                model_dim=16,
+                depth=1,
+                num_heads=4,
+                num_tactile_tokens=2,
+            ),
+            rngs=nnx.Rngs(56),
+        )
+        tactile = jax.random.normal(jax.random.key(57), (2, 3, 2, 4))
+
+        tokens = model.encode_tactile_tokens(tactile)
+
+        self.assertEqual(tokens.shape, (2, 2, 16))
 
     def test_shape_finite_gradient_and_decode(self):
         model = self.make_model()

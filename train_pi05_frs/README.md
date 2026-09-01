@@ -2,8 +2,9 @@
 
 This directory is the standalone training project for the three-stage Pi0.5 flow-steering
 pipeline: tactile embedding precomputation, Pi0.5 action-cache preparation, and FRS decoder
-training. It owns a third environment, `train_pi05_frs/.venv`, separate from the repository
-training environment and `deploy_pi05/.venv`.
+training. On `/workspace`, it uses `/workspace/venvs/pi05_frs_train` for training and
+`/workspace/venvs/lerobot_data_tools` for LeRobot dataset download/conversion. Both are
+separate from the pure-vision Pi0.5 training and deployment environments.
 
 ## Set up and run
 
@@ -11,9 +12,11 @@ Run commands from the repository root. The launcher selects only the package-loc
 puts `train_pi05_frs/src` before the repository on `PYTHONPATH`, and then changes into this project.
 
 ```bash
-cd /home/typhon/FRS_Tact
-bash train_pi05_frs/scripts/setup_env.sh
-bash train_pi05_frs/scripts/setup_env.sh --check
+cd /workspace/FRS_Tact
+bash scripts/setup_env.sh --pi05_frs_train
+
+# This shortcut downloads KaiyueChen/insert_01 and performs the supported v2.1 -> v3.0 conversion.
+bash scripts/download_data.sh --insert_01
 
 # Edit the /workspace examples first, then run a dependency-light preflight.
 bash train_pi05_frs/scripts/start_frs_pi05_train.sh --check \
@@ -39,10 +42,15 @@ session name; attach with `tmux attach -t <name>`.
 
 `configs/train_pi05_frs_right.yaml` is the independent right-hand configuration. Its fixed
 contract is 7D `observation.state`, 10D `action`, one right-wrist visual stream, and tactile keys
-`tactile_right_0`, `tactile_right_1` in that order. Replace its example checkpoint, dataset,
-encoder, norm-statistics, cache, and output paths before starting it.
+`tactile_right_0`, `tactile_right_1` in that order. It is configured for the smaller
+`KaiyueChen/insert_01` repair set and the LoRA checkpoint
+`KaiyueChen/pi05_task3_0830_1w`; set the tactile-encoder path before starting it.
 
 ```bash
+# Download the pure-vision checkpoint to the path used by the YAML.
+FRS_CHECKPOINT_ROOT=/workspace/checkpoints \
+  bash scripts/download_ckpt.sh KaiyueChen/pi05_task3_0830_1w
+
 # Dependency-light input/configuration check.
 bash train_pi05_frs/scripts/start_frs_pi05_right_train.sh --check
 
@@ -52,7 +60,16 @@ bash train_pi05_frs/scripts/start_frs_pi05_right_train.sh
 
 The right-hand Pi0.5 checkpoint itself must use `action_dim: 10`, and its norm statistics must
 come from the same 7D-state/10D-action fine-tune. A dual-arm Pi0.5 checkpoint or dual-arm FRS
-checkpoint cannot be reused by only changing the profile.
+checkpoint cannot be reused by only changing the profile. The right-hand decoder is explicitly
+configured with two tactile tokens. Its `composite_gated` objective follows the bimanual endpoint
+design with a scalar Gate: low/mid/high Gate maps to VLA/mixed/GT endpoint, then one FM loss is
+computed. Decode supervision uses the same VLA/mixed/GT weighting; high-Gate rank/repair and
+low-Gate safety constraints remain enabled.
+With `write_plots: true`, every validation event refreshes `training_curves.png`,
+`training_overview.png`, `single_hand_behavior.png`, `gate_diagnostics.png`, and
+`single_hand_action_examples.png` in the run output directory. The right-hand configuration uses
+`eval_every: 5`, so these files first appear after epoch 5 and are then overwritten at epochs
+10, 15, and so on with the latest validation result.
 
 ### Physical bimanual training
 

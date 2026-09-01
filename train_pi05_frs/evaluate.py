@@ -12,6 +12,7 @@ from train_pi05_frs.utils.checkpoint import load_checkpoint
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 from train_pi05_frs.utils.data import CachedTactileEmbeddingBatches
 from train_pi05_frs.utils.data import TactileConditionedBatches
 from train_pi05_frs.utils.data import resolve_tactile_window
@@ -96,7 +97,10 @@ def _evaluate_decoder_legacy(
         dataset_repo_id=dataset_repo_id,
         dataset_root=dataset_root,
         history_stride=history_stride,
-        build_episode_baselines=str(extra.get("loss_mode", "gt")) == "gated",
+        build_episode_baselines=(
+            str(extra.get("loss_mode", "gt"))
+            in ("gated", COMPOSITE_GATED_LOSS_MODE)
+        ),
         num_workers=num_workers,
         prefetch_batches=prefetch_batches,
         load_threads=load_threads,

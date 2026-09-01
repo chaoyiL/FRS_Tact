@@ -31,6 +31,7 @@ def test_setup_env_help_is_safe_to_execute_directly() -> None:
     assert "--smolvla" in completed.stdout
     assert "--pi05_deploy" in completed.stdout
     assert "--pi05_train" in completed.stdout
+    assert "--pi05_frs_train" in completed.stdout
 
 
 def test_setup_env_declares_three_distinct_environment_targets() -> None:
@@ -50,6 +51,14 @@ def test_setup_env_declares_three_distinct_environment_targets() -> None:
     assert 'PI05_TRAIN_VENV_DIR="${PI05_TRAIN_VENV_DIR:-${DEFAULT_PI05_TRAIN_VENV_DIR}}"' in source
     assert 'UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"' in source
     assert '--project "${PI05_TRAIN_PROJECT_ROOT}"' in source
+    assert 'PI05_FRS_TRAIN_PROJECT_ROOT="${PROJECT_ROOT}/train_pi05_frs"' in source
+    assert (
+        'DEFAULT_PI05_FRS_TRAIN_VENV_DIR="${WORKSPACE_ROOT_VALUE}/venvs/pi05_frs_train"'
+        in source
+    )
+    assert 'export TRAIN_PI05_FRS_PYTHON=%q' in source
+    assert 'UV_PROJECT_ENVIRONMENT="${PI05_FRS_TRAIN_VENV_DIR}"' in source
+    assert '--project "${PI05_FRS_TRAIN_PROJECT_ROOT}"' in source
     assert 'UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-120}"' in source
     assert 'UV_HTTP_RETRIES="${UV_HTTP_RETRIES:-8}"' in source
     assert 'UV_DEFAULT_INDEX="${FRS_PYPI_MIRROR}"' in source
@@ -103,6 +112,8 @@ def test_download_data_falls_back_to_the_smolvla_training_environment() -> None:
     assert 'DEFAULT_SMOLVLA_DATA_PYTHON="${FRS_WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python"' in source
     assert '"${SMOLVLA_TORCH_PYTHON:-}"' in source
     assert "DATA_TOOL_PYTHON 不可执行，尝试其他 Python 3.12 环境" in source
+    assert "--insert_01" in source
+    assert "--pi05_frs_train" in source
 
 
 def test_pi05_train_launcher_loads_canonical_environment_file() -> None:
@@ -247,6 +258,7 @@ sync_root_environment() {{ record sync-root; }}
 sync_smolvla_torch_environment() {{ record sync-smolvla-torch; }}
 sync_pi05_environment() {{ record sync-pi05; }}
 sync_pi05_train_environment() {{ record sync-pi05-train; }}
+sync_pi05_frs_train_environment() {{ record sync-pi05-frs-train; }}
 sync_data_tools_environment() {{ record sync-data-tools; }}
 write_environment_file() {{ record env-file; }}
 verify_python_environment() {{ record verify-root; }}
@@ -254,9 +266,11 @@ verify_smolvla_torch_environment() {{ record verify-smolvla-torch; }}
 verify_pi05_environment() {{ record verify-pi05; }}
 verify_data_tools_environment() {{ record verify-data-tools; }}
 verify_pi05_train_environment() {{ record verify-pi05-train; }}
+verify_pi05_frs_train_environment() {{ record verify-pi05-frs-train; }}
 check_root_gpu() {{ record gpu-root; }}
 check_pi05_gpu() {{ record gpu-pi05; }}
 check_pi05_train_gpu() {{ record gpu-pi05-train; }}
+check_pi05_frs_train_gpu() {{ record gpu-pi05-frs-train; }}
 print_summary() {{ record summary; }}
 main {quoted_args}
 """
@@ -324,6 +338,22 @@ def test_pi05_train_selector_only_sets_up_training_environment(tmp_path: Path) -
     assert "sync-pi05" not in events
 
 
+def test_pi05_frs_train_selector_only_sets_up_frs_training_environment(
+    tmp_path: Path,
+) -> None:
+    completed = run_stubbed_main(tmp_path, "--pi05_frs_train")
+    assert completed.returncode == 0, completed.stderr
+    events = read_events(tmp_path)
+    assert "sync-pi05-frs-train" in events
+    assert "verify-pi05-frs-train" in events
+    assert "gpu-pi05-frs-train" in events
+    assert "sync-root" not in events
+    assert "sync-pi05" not in events
+    assert "sync-pi05-train" not in events
+    assert "sync-data-tools" in events
+    assert "verify-data-tools" in events
+
+
 def test_help_has_no_side_effects(tmp_path: Path) -> None:
     completed = run_stubbed_main(tmp_path, "--help")
     assert completed.returncode == 0
@@ -335,12 +365,22 @@ def test_help_has_no_side_effects(tmp_path: Path) -> None:
     ("args", "case_name"),
     [
         ((selector, help_flag), f"{selector.removeprefix('--')}_{help_flag.removeprefix('-')}")
-        for selector in ("--smolvla", "--pi05_deploy", "--pi05_train")
+        for selector in (
+            "--smolvla",
+            "--pi05_deploy",
+            "--pi05_train",
+            "--pi05_frs_train",
+        )
         for help_flag in ("-h", "--help")
     ]
     + [
         ((help_flag, selector), f"{help_flag.removeprefix('-')}_{selector.removeprefix('--')}")
-        for selector in ("--smolvla", "--pi05_deploy", "--pi05_train")
+        for selector in (
+            "--smolvla",
+            "--pi05_deploy",
+            "--pi05_train",
+            "--pi05_frs_train",
+        )
         for help_flag in ("-h", "--help")
     ],
 )

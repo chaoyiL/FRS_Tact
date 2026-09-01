@@ -1,47 +1,36 @@
-# 纯视觉 SmolVLA 右手单臂训练配置，字段与官方 LeRobot 训练流程对齐。
-# 数据合同必须是：7D observation.state、10D action、右腕相机。
-# 启动：bash train_smolvla/scripts/start_smolvla_right_train.sh
+# Pure-vision SmolVLA training for the right hand.
+# Canonical model contract: 7D state, 10D action, one right-wrist camera.
 
 dataset:
-  # TODO：换成实际的右手单臂数据集 ID 和 scripts/download_data.sh 生成的 v3.0 路径。
-  repo_id: local/pick_tube_right
-  root: /workspace/lerobot_v30/KaiyueChen/pick_tube_right
   expected_fps: 30
   state_dim: 7
   action_dim: 10
+  # Every source below is canonicalized to this model-facing key.
   image_keys:
-    - observation.images.camera0
+    - observation.images.camera1
   eval_split: 0.10
+  # The local balanced-light-v2 augmenter is used instead.
   image_transforms:
-    enable: true
-    max_num_transforms: 2
+    enable: false
+    max_num_transforms: 0
     random_order: false
-    tfs:
-      brightness:
-        weight: 1.0
-        type: ColorJitter
-        kwargs:
-          brightness: [0.8, 1.2]
-      contrast:
-        weight: 1.0
-        type: ColorJitter
-        kwargs:
-          contrast: [0.8, 1.2]
-      saturation:
-        weight: 1.0
-        type: ColorJitter
-        kwargs:
-          saturation: [0.85, 1.15]
-      hue:
-        weight: 0.5
-        type: ColorJitter
-        kwargs:
-          hue: [-0.01, 0.01]
-      sharpness:
-        weight: 0.5
-        type: SharpnessJitter
-        kwargs:
-          sharpness: [0.8, 1.2]
+    tfs: {}
+
+# insert_01 stores its active single-hand RGB stream in camera0, while
+# insert_02 stores it in camera1 and keeps camera0 as a black placeholder.
+# Per-source renaming makes both datasets expose the same canonical camera1.
+datasets:
+  - repo_id: KaiyueChen/insert_01
+    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+    rename_map:
+      observation.images.camera0: observation.images.camera1
+
+  - repo_id: KaiyueChen/insert_02
+    root: /workspace/lerobot_v30/KaiyueChen/insert_02
+
+augmentation:
+  preset: balanced-light-v2
+  enabled: true
 
 policy:
   path: lerobot/smolvla_base
@@ -54,14 +43,14 @@ policy:
   train_expert_only: false
   train_state_proj: true
   optimizer_lr: 5.0e-5
-  scheduler_warmup_steps: 1500
-  scheduler_decay_steps: 30000
+  scheduler_warmup_steps: 500
+  scheduler_decay_steps: 6000
   device: cuda
   push_to_hub: false
 
-# 原始右腕相机 camera0 映射为模型输入 camera1。
-rename_map:
-  observation.images.camera0: observation.images.camera1
+# Source-specific camera renaming above has already produced the final model
+# key, so no additional global rename is required.
+rename_map: {}
 
 peft:
   enable: true
@@ -78,21 +67,24 @@ peft:
   lora_alpha: 16
 
 training:
-  output_dir: /workspace/outputs/smolvla_right
+  output_dir: /workspace/outputs/smolvla_right_insert_0102
   existing_output: increment
-  job_name: smolvla_right
+  job_name: smolvla_right_insert_0102
+  # Per-GPU value: two GPUs produce a global batch of 128.
   batch_size: 64
   num_workers: 8
-  steps: 30000
-  eval_steps: 500
-  max_eval_samples: 0
-  save_freq: 2000
+  # Start with roughly a few epochs and select the best validation checkpoint;
+  # the previous 30k default is unnecessarily prone to overfitting here.
+  steps: 20000
+  eval_steps: 1000
+  max_eval_samples: 2560
+  save_freq: 500
   log_freq: 20
-  seed: 1000
+  seed: 42
   resume_from: null
 
 distributed:
-  num_gpus: 1
+  num_gpus: 2
   num_machines: 1
   mixed_precision: bf16
   timeout_seconds: 7200
@@ -101,9 +93,8 @@ wandb:
   enable: true
   project: smolvla-right
   entity: null
-  # auto: online when WANDB_API_KEY/~/.netrc exists, otherwise offline.
   mode: auto
-  notes: PyTorch SmolVLA pure-vision right-hand 7D-state 10D-action training
+  notes: SmolVLA right-hand insert_01+insert_02, 7D state, 10D action, one RGB camera
   run_id: null
   disable_artifact: true
   add_tags: true

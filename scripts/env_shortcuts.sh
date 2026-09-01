@@ -24,6 +24,11 @@ pi05-deploy-python() {
     _frs_run_python "${PI05_PYTHON:-}" "bash scripts/setup_env.sh --pi05_deploy" "$@"
 }
 
+pi05-frs-python() {
+    _frs_run_python "${TRAIN_PI05_FRS_PYTHON:-}" \
+        "bash scripts/setup_env.sh --pi05_frs_train" "$@"
+}
+
 smolvla-python() {
     _frs_run_python "${SMOLVLA_TORCH_PYTHON:-}" "bash scripts/setup_env.sh --smolvla" "$@"
 }
@@ -35,7 +40,8 @@ hf() {
         "${DATA_TOOL_PYTHON:-}" \
         "${FRS_PYTHON:-}" \
         "${PI05_PYTHON:-}" \
-        "${TRAIN_PI05_PYTHON:-}"
+        "${TRAIN_PI05_PYTHON:-}" \
+        "${TRAIN_PI05_FRS_PYTHON:-}"
     do
         [[ -n "${python_path}" ]] || continue
         cli="$(dirname -- "${python_path}")/hf"

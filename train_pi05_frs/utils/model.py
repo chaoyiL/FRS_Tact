@@ -20,6 +20,7 @@ from train_pi05_frs.utils.bimanual_schema import (
     validate_bimanual_action_dim,
 )
 from train_pi05_frs.utils.integration import fireflow_integrate_velocity
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]
@@ -446,6 +447,30 @@ def three_region_effective_gate_weights(
     )
 
 
+def composite_endpoint(
+    gt_action: Array,
+    predicted_action: Array,
+    gate_weights: Array,
+    *,
+    low_gate_threshold: float = 0.3,
+    high_gate_threshold: float = 0.7,
+) -> tuple[Array, Array]:
+    """Return one scalar-Gate endpoint between the frozen VLA action and GT."""
+
+    if gt_action.ndim != 3 or gt_action.shape != predicted_action.shape:
+        raise ValueError("composite endpoint requires matching [B, T, A] actions")
+    if gate_weights.shape != (gt_action.shape[0],):
+        raise ValueError("scalar gate_weights must have shape [B]")
+    effective = three_region_effective_gate_weights(
+        gate_weights,
+        low_gate_threshold=low_gate_threshold,
+        high_gate_threshold=high_gate_threshold,
+    )
+    weights = effective[:, None, None]
+    target = weights * gt_action + (1.0 - weights) * predicted_action
+    return target, effective
+
+
 def bimanual_composite_endpoint(
     gt_action: Array,
     predicted_action: Array,
@@ -676,6 +701,7 @@ def gated_loss_components_per_sample(
     repair_margin: float = 0.0,
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
+    use_composite_endpoint: bool = False,
 ) -> dict[str, Array]:
     if low_gate_safety_weight < 0:
         raise ValueError(
@@ -690,38 +716,66 @@ def gated_loss_components_per_sample(
     if repair_weight < 0:
         raise ValueError(f"repair weight must be non-negative, got {repair_weight}.")
 
-    flow_gt = flow_matching_loss_per_sample(
-        model,
-        x_base,
-        gt_action,
-        t,
-        tactile_seq,
-        state=state,
-        state_keep_mask=state_keep_mask,
-    )
-    flow_pi05 = flow_matching_loss_per_sample(
-        model,
-        x_base,
-        predicted_action,
-        t,
-        tactile_seq,
-        state=state,
-        state_keep_mask=state_keep_mask,
-    )
     effective_weights = three_region_effective_gate_weights(
         gate_weights,
         low_gate_threshold=low_gate_threshold,
         high_gate_threshold=high_gate_threshold,
     )
-    zeros = jnp.zeros_like(flow_gt)
-    components = {
-        "gt_fm": effective_weights * flow_gt,
-        "vla_fm": float(gate_lambda) * (1.0 - effective_weights) * flow_pi05,
-        "low_safety": zeros,
-        "decode": zeros,
-        "rank": zeros,
-        "repair": zeros,
-    }
+    if use_composite_endpoint:
+        target, _ = composite_endpoint(
+            gt_action,
+            predicted_action,
+            gate_weights,
+            low_gate_threshold=low_gate_threshold,
+            high_gate_threshold=high_gate_threshold,
+        )
+        composite_flow = flow_matching_loss_per_sample(
+            model,
+            x_base,
+            target,
+            t,
+            tactile_seq,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+        zeros = jnp.zeros_like(composite_flow)
+        components = {
+            "gt_fm": zeros,
+            "vla_fm": zeros,
+            "composite_fm": composite_flow,
+            "low_safety": zeros,
+            "decode": zeros,
+            "rank": zeros,
+            "repair": zeros,
+        }
+    else:
+        flow_gt = flow_matching_loss_per_sample(
+            model,
+            x_base,
+            gt_action,
+            t,
+            tactile_seq,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+        flow_pi05 = flow_matching_loss_per_sample(
+            model,
+            x_base,
+            predicted_action,
+            t,
+            tactile_seq,
+            state=state,
+            state_keep_mask=state_keep_mask,
+        )
+        zeros = jnp.zeros_like(flow_gt)
+        components = {
+            "gt_fm": effective_weights * flow_gt,
+            "vla_fm": float(gate_lambda) * (1.0 - effective_weights) * flow_pi05,
+            "low_safety": zeros,
+            "decode": zeros,
+            "rank": zeros,
+            "repair": zeros,
+        }
 
     decoded = None
     if any(
@@ -747,9 +801,18 @@ def gated_loss_components_per_sample(
     if aux_decode_weight != 0.0:
         assert decoded is not None
         mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
-        components["decode"] = float(aux_decode_weight) * _active_group_normalized_per_sample(
-            mse_gt, high_strength
-        )
+        if use_composite_endpoint:
+            mse_pred = jnp.mean(
+                jnp.square(decoded - predicted_action), axis=(1, 2)
+            )
+            components["decode"] = float(aux_decode_weight) * (
+                effective_weights * mse_gt
+                + (1.0 - effective_weights) * mse_pred
+            )
+        else:
+            components["decode"] = float(
+                aux_decode_weight
+            ) * _active_group_normalized_per_sample(mse_gt, high_strength)
     if low_gate_safety_weight != 0.0:
         assert decoded is not None
         components["low_safety"] = float(low_gate_safety_weight) * low_gate_safety_loss_per_sample(
@@ -1098,6 +1161,35 @@ def _train_step_jit(
                 high_gate_threshold=high_gate_threshold,
             )
             components = {name: jnp.mean(per_sample[name]) for name in LOSS_COMPONENT_NAMES}
+        elif loss_mode == COMPOSITE_GATED_LOSS_MODE:
+            per_sample = gated_loss_components_per_sample(
+                candidate,
+                x_base,
+                gt_action,
+                predicted_action,
+                t,
+                tactile_seq,
+                gate_weights,
+                state=state,
+                state_keep_mask=state_keep_mask,
+                gate_lambda=0.0,
+                aux_decode_weight=aux_decode_weight,
+                aux_decode_steps=aux_decode_steps,
+                aux_decode_solver=aux_decode_solver,
+                low_gate_safety_weight=low_gate_safety_weight,
+                low_gate_safety_margin=low_gate_safety_margin,
+                rank_weight=rank_weight,
+                rank_margin=rank_margin,
+                repair_weight=repair_weight,
+                repair_margin=repair_margin,
+                low_gate_threshold=low_gate_threshold,
+                high_gate_threshold=high_gate_threshold,
+                use_composite_endpoint=True,
+            )
+            components = {
+                name: jnp.mean(per_sample[name])
+                for name in TRAIN_LOSS_COMPONENT_NAMES
+            }
         elif loss_mode == "bimanual_gated":
             per_sample = bimanual_loss_components_per_sample(
                 candidate,
@@ -1128,7 +1220,8 @@ def _train_step_jit(
             }
         else:
             raise ValueError(
-                "loss_mode must be 'gt', 'predicted', 'gated', or 'bimanual_gated', "
+                "loss_mode must be 'gt', 'predicted', 'gated', "
+                f"'{COMPOSITE_GATED_LOSS_MODE}', or 'bimanual_gated', "
                 f"got {loss_mode!r}."
             )
         loss = sum(components.values())
@@ -1166,9 +1259,15 @@ def train_step(
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
 ) -> tuple[Array, dict[str, Array]]:
-    """Validate the small bimanual label before the compiled optimizer update."""
+    """Validate host-side Gate contracts before the compiled optimizer update."""
 
-    if loss_mode == "bimanual_gated":
+    if loss_mode in ("gated", COMPOSITE_GATED_LOSS_MODE):
+        host_gates = np.asarray(jax.device_get(gate_weights))
+        if host_gates.shape != (x_base.shape[0],):
+            raise ValueError("scalar gate_weights must have shape [B]")
+        if np.any(~np.isfinite(host_gates)):
+            raise ValueError("scalar gate_weights must be finite before optimizer update")
+    elif loss_mode == "bimanual_gated":
         host_gates = np.asarray(jax.device_get(gate_weights))
         if np.any(~np.isfinite(host_gates)):
             raise ValueError(

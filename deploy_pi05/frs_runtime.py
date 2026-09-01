@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 
 
 _BIMANUAL_STEERED_ACTION_DIM = 20
+_COMPOSITE_GATED_LOSS_MODE = "composite_gated"
 _GRIPPER_ACTION_INDICES = (9, 19)
 _POSITION_ACTION_SLICES = (slice(0, 3), slice(10, 13))
 _ROTATION_ACTION_SLICES = (slice(3, 9), slice(13, 19))
@@ -367,6 +368,19 @@ def _validate_loss_contract(
 ) -> None:
     loss_mode = extra.get("loss_mode")
     if loss_mode == "gated":
+        return
+    if loss_mode == _COMPOSITE_GATED_LOSS_MODE:
+        _require_equal(extra.get("loss_objective_version"), 1, "loss_objective_version")
+        _require_equal(
+            extra.get("endpoint_policy"),
+            "scalar_three_region_composite",
+            "endpoint_policy",
+        )
+        _require_equal(
+            extra.get("decode_policy"),
+            "scalar_three_region_composite",
+            "decode_policy",
+        )
         return
     if loss_mode != "bimanual_gated":
         raise ValueError(f"unsupported FRS loss_mode: {loss_mode!r}")

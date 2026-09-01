@@ -27,6 +27,7 @@ from train_pi05_frs.utils.path_safety import validate_output_roots
 from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_action_dim
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 
 
 TRAIN_ROOT = Path(__file__).resolve().parents[1]
@@ -893,11 +894,20 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         _reject_unknown_keys(section, allowed, prefix=prefix)
 
     loss_mode = training.get("loss_mode", "gated")
-    if loss_mode not in ("gt", "predicted", "gated", BIMANUAL_LOSS_MODE):
+    if loss_mode not in (
+        "gt",
+        "predicted",
+        "gated",
+        COMPOSITE_GATED_LOSS_MODE,
+        BIMANUAL_LOSS_MODE,
+    ):
         raise ValueError("config.frs_training.loss_mode is invalid")
-    if loss_mode == BIMANUAL_LOSS_MODE and "gate_lambda" in training:
+    if (
+        loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+        and "gate_lambda" in training
+    ):
         raise ValueError(
-            "config.frs_training.gate_lambda is not supported for bimanual_gated"
+            f"config.frs_training.gate_lambda is not supported for {loss_mode}"
         )
 
     sanitized_cache_dirs = [
@@ -1341,7 +1351,8 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_temperature=float(training.get("gate_temperature", 0.1)),
         gate_lambda=(
             0.0
-            if training.get("loss_mode", "gated") == BIMANUAL_LOSS_MODE
+            if training.get("loss_mode", "gated")
+            in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
             else float(training.get("gate_lambda", 1.0))
         ),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
@@ -1391,6 +1402,7 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         tactile_keys=tuple(str(key) for key in model["tactile_keys"]),
         tactile_embedding_dim=int(model.get("tactile_embedding_dim", 512)),
         tactile_image_size=int(model.get("tactile_image_size", 224)),
+        tactile_num_tokens=int(model.get("tactile_num_tokens", 4)),
     )
 
 

@@ -4,8 +4,8 @@
 #   robot action: 10D right arm
 #   tactile inputs: right_0, right_1 (in this exact order)
 
-# TODO: replace with the right-hand Pi0.5 checkpoint.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_right/checkpoint
+# Right-hand Pi0.5 checkpoint used to build the FRS action cache.
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
 seed: 0
 num_steps: 10
 
@@ -31,9 +31,9 @@ model:
   empty_cameras: []
 
 norm_stats:
-  # TODO: use the assets produced by the same right-hand Pi0.5 fine-tune.
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_right/checkpoint/assets
-  asset_id: insert_01
+  # Assets produced by the same right-hand Pi0.5 fine-tune.
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  asset_id: insert_0102_train90
   use_quantile_norm: true
 
 frs:

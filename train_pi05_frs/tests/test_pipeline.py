@@ -19,6 +19,7 @@ from train_pi05_frs.utils.bimanual_schema import (
     bimanual_objective_metadata,
     validate_bimanual_objective_metadata,
 )
+from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 from train_pi05_frs.tools.train_frs import load_config, validate_config
 
 
@@ -323,6 +324,8 @@ def test_bimanual_config_is_independent_and_validated():
 
 
 def test_right_hand_config_has_fixed_single_arm_contract():
+    from train_pi05_frs.tools.prepare_frs_pi05_cache import _pi0_config
+
     path = TRAIN_ROOT / "configs" / "train_pi05_frs_right.yaml"
     config = load_config(path)
     model = config["model"]
@@ -339,6 +342,20 @@ def test_right_hand_config_has_fixed_single_arm_contract():
     assert model["camera_map"] == {
         "right_wrist_0_rgb": "observation.images.camera1"
     }
+    assert config["checkpoint"] == "/workspace/checkpoints/model/pi05_task3_0830_1w"
+    assert config["datasets"] == [
+        {
+            "repo_id": "KaiyueChen/insert_01",
+            "root": "/workspace/lerobot_v30/KaiyueChen/insert_01",
+            "action_key": "action",
+        }
+    ]
+    assert model["paligemma_variant"] == "gemma_2b_lora"
+    assert model["action_expert_variant"] == "gemma_300m_lora"
+    assert config["norm_stats"]["asset_id"] == "insert_0102_train90"
+    assert config["frs_training"]["loss_mode"] == COMPOSITE_GATED_LOSS_MODE
+    assert "gate_lambda" not in config["frs_training"]
+    assert _pi0_config(model).image_keys == ("right_wrist_0_rgb",)
     validate_config(config, check_paths=False)
 
 
@@ -444,6 +461,42 @@ def test_pipeline_forwards_bimanual_mode_without_gate_lambda(
     train_tool.train_from_config(config)
 
     assert captured["loss_mode"] == BIMANUAL_LOSS_MODE
+
+
+def test_composite_gated_rejects_legacy_gate_lambda(tmp_path: Path) -> None:
+    config = _valid_config(tmp_path)
+    config["frs_training"]["loss_mode"] = COMPOSITE_GATED_LOSS_MODE
+
+    with pytest.raises(ValueError, match="gate_lambda.*composite_gated"):
+        validate_config(config, check_paths=False)
+
+
+def test_pipeline_forwards_two_tactile_tokens_for_single_hand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs.tools import train_frs as train_tool
+
+    config = _valid_config(tmp_path)
+    config["model"]["tactile_keys"] = [
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_right_1",
+    ]
+    config["model"]["tactile_num_tokens"] = 2
+    config["frs_training"]["loss_mode"] = COMPOSITE_GATED_LOSS_MODE
+    config["frs_training"].pop("gate_lambda")
+    cache_dir = Path(config["action_cache"]["root"]) / "org" / "demo"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        train_tool, "train_decoder", lambda **kwargs: captured.update(kwargs)
+    )
+
+    train_tool.train_from_config(config)
+
+    assert captured["loss_mode"] == COMPOSITE_GATED_LOSS_MODE
+    assert captured["gate_lambda"] == 0.0
+    assert captured["tactile_num_tokens"] == 2
 
 
 def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:
@@ -1461,6 +1514,10 @@ def test_prepare_reuses_one_model_preserves_url_and_sanitizes_each_cache_dir(
     outputs = tool.prepare_from_config(config)
 
     assert [call[0] for call in load_calls] == ["gs://example/pi05"]
+    assert load_calls[0][1].image_keys == (
+        "left_wrist_0_rgb",
+        "right_wrist_0_rgb",
+    )
     assert len(prepare_calls) == 2
     assert all(call["checkpoint_dir"] == "gs://example/pi05" for call in prepare_calls)
     assert all(call["loaded_model"] is shared_model for call in prepare_calls)
@@ -1579,6 +1636,7 @@ def test_train_forwards_multi_dataset_caches_and_strict_booleans(
         Path(config["action_cache"]["root"]) / "other" / "demo",
     ]
     assert calls[0]["state_conditioning"] is True
+    assert calls[0]["tactile_num_tokens"] == 4
     assert calls[0]["write_plots"] is True
     assert calls[0]["resume"] is False
     assert [source["root"] for source in calls[0]["dataset_sources"]] == [
@@ -1890,7 +1948,14 @@ def test_check_exits_before_tmux_even_when_tmux_is_available(tmp_path: Path) -> 
 def test_launcher_uses_private_src_and_training_interpreter_without_uv() -> None:
     script = LAUNCHER.read_text(encoding="utf-8")
 
-    assert 'TRAIN_PYTHON="${TRAIN_PI05_FRS_PYTHON:-${TRAIN_ROOT}/.venv/bin/python}"' in script
+    assert 'ENV_FILE="${REPO_ROOT}/env_path"' in script
+    assert 'source "${ENV_FILE}"' in script
+    assert 'TRAIN_PYTHON_OVERRIDE="${TRAIN_PI05_FRS_PYTHON:-}"' in script
+    assert "/venvs/pi05_frs_train/bin/python" in script
+    assert (
+        'TRAIN_PYTHON="${TRAIN_PYTHON_OVERRIDE:-${TRAIN_PI05_FRS_PYTHON:-${DEFAULT_TRAIN_PYTHON}}}"'
+        in script
+    )
     assert 'export PYTHONPATH="${TRAIN_ROOT}/src:${REPO_ROOT}' in script
     assert "export PYTHONSAFEPATH=1" in script
     assert 'cd "${TRAIN_ROOT}"' in script

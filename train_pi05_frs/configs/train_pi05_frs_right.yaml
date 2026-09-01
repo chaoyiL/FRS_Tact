@@ -1,18 +1,18 @@
 # Pi0.5 FRS 右手单臂完整训练流水线。
 # 固定合同：7D observation.state、10D action、右腕视觉、两路右手触觉。
-# 使用前必须替换 checkpoint、数据集、触觉编码器和 norm_stats 的示例路径。
-checkpoint: /workspace/checkpoints/model/pi05_right/checkpoint
+# 纯视觉 checkpoint 由以下命令下载到 /workspace/checkpoints/model/pi05_task3_0830_1w：
+# FRS_CHECKPOINT_ROOT=/workspace/checkpoints \
+#   bash scripts/download_ckpt.sh KaiyueChen/pi05_task3_0830_1w
+checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
 allow_download: false
 
 datasets:
-  - repo_id: local/pick_tube_right
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_right
+  - repo_id: KaiyueChen/insert_01
+    root: /workspace/lerobot_v30/KaiyueChen/insert_01
     action_key: action
-    rename_map:
-      observation.images.camera0: observation.images.camera1
 
 action_cache:
-  root: /workspace/frs_pick_tube_pi05_right/action_cache_slerpflow_k50_state_v3
+  root: /workspace/frs_insert_01_pi05_right/action_cache_slerpflow_k50_state_v3
   model_sample_steps: 10
   reverse_steps: 50
   reverse_solver: slerpflow
@@ -29,7 +29,7 @@ action_cache:
 
 tactile_embedding_cache:
   enabled: true
-  root: /workspace/tactile_embeddings_pi05_right
+  root: /workspace/tactile_embeddings_pi05_right_insert_01
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -42,7 +42,7 @@ model:
   state_dim: 7
   robot_action_dim: 10
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder/pi05_right
+  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_right_0
@@ -57,23 +57,23 @@ model:
   # 必须与右手 Pi0.5 checkpoint 的模型 action_dim 一致。
   action_dim: 10
   action_horizon: 50
-  paligemma_variant: gemma_2b
-  action_expert_variant: gemma_300m
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
 
 norm_stats:
   # 必须使用训练右手 Pi0.5 checkpoint 时的同一套 7D state / 10D action 统计量。
-  dir: /workspace/checkpoints/model/pi05_right/checkpoint/assets
-  asset_id: pick_tube_right
+  dir: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  asset_id: insert_0102_train90
   use_quantile_norm: true
 
 frs_training:
-  output: /workspace/frs_pick_tube_pi05_right/run_gated_right_01
+  output: /workspace/frs_insert_01_pi05_right/run_composite_gated_right_01
   tactile_window_divisor: 5
   history_stride: 3
-  loss_mode: gated
+  # 单手 composite objective：Gate 先混合 GT/VLA endpoint，再计算一条 FM 路径。
+  loss_mode: composite_gated
   gate_tau: 0.4
   gate_temperature: 0.1
-  gate_lambda: 0.25
   aux_decode_weight: 4.0
   aux_decode_steps: 10
   aux_decode_solver: fireflow
@@ -81,7 +81,7 @@ frs_training:
   low_gate_safety_margin: 0.03
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
-  rank_weight: 2.0
+  rank_weight: 4.0
   rank_margin: 0.0
   repair_weight: 2.0
   repair_margin: 0.0
