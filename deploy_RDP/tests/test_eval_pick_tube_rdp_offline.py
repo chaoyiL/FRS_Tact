@@ -224,3 +224,80 @@ def test_write_reports_preserves_deterministic_response_metrics(tmp_path: Path) 
     assert summary["latency_ms"] == {
         "min": 1.0, "mean": 3.0, "p95": 4.8, "max": 5.0,
     }
+
+
+@pytest.mark.parametrize(
+    ("slow_update_interval", "expected_loader_interval"),
+    [
+        pytest.param(16, 16, id="slow16"),
+        pytest.param(16.9, None, id="fractional-interval"),
+    ],
+)
+def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_update_interval: float,
+    expected_loader_interval: int | None,
+) -> None:
+    from types import SimpleNamespace
+
+    ldp_checkpoint = tmp_path / "ldp.ckpt"
+    at_checkpoint = tmp_path / "at.ckpt"
+    tactile_pca_path = tmp_path / "pca.npz"
+    for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path):
+        path.touch()
+    tactile_encoder_dir = tmp_path / "encoder"
+    tactile_encoder_dir.mkdir()
+    config = {
+        "model": {
+            "ldp_checkpoint": str(ldp_checkpoint),
+            "at_checkpoint": str(at_checkpoint),
+            "tactile_encoder_dir": str(tactile_encoder_dir),
+            "tactile_pca_path": str(tactile_pca_path),
+            "state_action_profile": "single-right-arm-7x10",
+        },
+        "control": {"slow_update_interval": slow_update_interval},
+    }
+    captured = {}
+
+    class FakePCA:
+        output_dim = 30
+
+    def load_policy(*args, **kwargs):
+        captured.update(kwargs)
+        interval = kwargs["slow_update_interval"]
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval != 16:
+            raise ValueError("slow_update_interval must be exactly 16")
+        return object(), SimpleNamespace(
+            dataset_obs_temporal_downsample_ratio=2,
+            n_obs_steps=2,
+        )
+
+    monkeypatch.setattr(evaluator, "load_config", lambda path: config)
+    monkeypatch.setattr(evaluator, "load_policy", load_policy)
+    monkeypatch.setattr(evaluator, "PickTubeRDPRuntime", lambda *args, **kwargs: object())
+    monkeypatch.setattr(evaluator, "load_snapshots", lambda path: [])
+    monkeypatch.setattr(evaluator, "predict_independent_snapshots", lambda *args, **kwargs: {})
+    monkeypatch.setattr(evaluator, "write_reports", lambda *args, **kwargs: {})
+    from reactive_diffusion_policy.deploy import tactile_encoder_torch
+    from reactive_diffusion_policy.model.tactile_pca import BimanualTactilePCA
+
+    monkeypatch.setattr(
+        BimanualTactilePCA,
+        "from_npz",
+        classmethod(lambda cls, path, device: FakePCA()),
+    )
+    monkeypatch.setattr(tactile_encoder_torch, "load_tactile_resnet18", lambda *args, **kwargs: object())
+
+    arguments = (
+        tmp_path / "config.yaml",
+        tmp_path / "observations",
+        tmp_path / "reports",
+    )
+    if expected_loader_interval is None:
+        with pytest.raises(ValueError, match="slow_update_interval"):
+            evaluator.run_evaluation(*arguments, device_name="cpu", seed=0)
+        assert captured["slow_update_interval"] == slow_update_interval
+    else:
+        evaluator.run_evaluation(*arguments, device_name="cpu", seed=0)
+        assert captured["slow_update_interval"] == expected_loader_interval

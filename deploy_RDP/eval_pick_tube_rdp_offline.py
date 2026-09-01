@@ -511,6 +511,7 @@ def run_evaluation(
     at_checkpoint = Path(str(model_config["at_checkpoint"])).expanduser().resolve()
     encoder_dir = Path(str(model_config["tactile_encoder_dir"])).expanduser().resolve()
     tactile_pca_path = Path(str(model_config["tactile_pca_path"])).expanduser().resolve()
+    slow_update_interval = control["slow_update_interval"]
     missing = [path for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path) if not path.is_file()]
     if not encoder_dir.is_dir():
         missing.append(encoder_dir)
@@ -524,6 +525,7 @@ def run_evaluation(
         device,
         int(model_config.get("num_inference_steps", 8)),
         tactile_pca.output_dim,
+        slow_update_interval=slow_update_interval,
         profile=profile,
         artifact_verification=str(model_config.get("artifact_verification", "strict")),
         tactile_pca_path=tactile_pca_path,
@@ -533,7 +535,7 @@ def run_evaluation(
         load_tactile_resnet18(encoder_dir, device=device),
         device,
         tactile_pca,
-        slow_update_interval=int(control.get("slow_update_interval", 5)),
+        slow_update_interval=slow_update_interval,
         dataset_obs_temporal_downsample_ratio=int(checkpoint_cfg.dataset_obs_temporal_downsample_ratio),
         n_obs_steps=int(checkpoint_cfg.n_obs_steps),
         profile=profile,

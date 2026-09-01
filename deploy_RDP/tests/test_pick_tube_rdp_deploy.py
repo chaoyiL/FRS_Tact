@@ -1,4 +1,5 @@
 import importlib.util
+import math
 from pathlib import Path
 
 import numpy as np
@@ -95,6 +96,11 @@ def observation(step: int = 0) -> dict:
 def tactile_cfg(obs_dim: int, extended_dim: int | None = None):
     return OmegaConf.create(
         {
+            "release_validation": {
+                "passed": True,
+                "score": 0.1,
+                "deployment_slow_update_interval": 16,
+            },
             "shape_meta": {
                 "obs": {
                     "tactile_embedding": {"shape": [obs_dim]},
@@ -179,6 +185,129 @@ def policy_cfg(tactile_dim: int, artifacts=None):
 
 def payload(cfg):
     return {"cfg": cfg}
+
+
+def release_cfg(**release_validation):
+    return OmegaConf.create({"release_validation": release_validation})
+
+
+def test_validate_release_qualification_accepts_matching_slow16_evidence() -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.0125,
+        "deployment_slow_update_interval": 16,
+    }
+
+    deploy.validate_release_qualification(
+        release_cfg(**evidence),
+        release_cfg(**evidence),
+        slow_update_interval=16,
+        ldp_checkpoint=Path("ldp/deployable.ckpt"),
+        at_checkpoint=Path("at/deployable.ckpt"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "release_validation", "message"),
+    [
+        pytest.param("LDP", None, "release_validation", id="missing-evidence"),
+        pytest.param(
+            "AT",
+            {"passed": False, "score": 0.1, "deployment_slow_update_interval": 16},
+            "passed",
+            id="failed-gate",
+        ),
+        pytest.param(
+            "LDP",
+            {"passed": True, "score": math.nan, "deployment_slow_update_interval": 16},
+            "score",
+            id="nan-score",
+        ),
+        pytest.param(
+            "AT",
+            {"passed": True, "score": math.inf, "deployment_slow_update_interval": 16},
+            "score",
+            id="infinite-score",
+        ),
+        pytest.param(
+            "LDP",
+            {"passed": True, "score": 0.1, "deployment_slow_update_interval": 15},
+            "interval",
+            id="release-interval-mismatch",
+        ),
+    ],
+)
+def test_validate_release_qualification_rejects_incomplete_or_invalid_evidence(
+    role, release_validation, message
+) -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.1,
+        "deployment_slow_update_interval": 16,
+    }
+    ldp_cfg = release_cfg(**evidence)
+    at_cfg = release_cfg(**evidence)
+    if release_validation is None:
+        if role == "LDP":
+            ldp_cfg = OmegaConf.create({})
+        else:
+            at_cfg = OmegaConf.create({})
+    elif role == "LDP":
+        ldp_cfg = release_cfg(**release_validation)
+    else:
+        at_cfg = release_cfg(**release_validation)
+
+    with pytest.raises(ValueError, match=message):
+        deploy.validate_release_qualification(
+            ldp_cfg,
+            at_cfg,
+            slow_update_interval=16,
+            ldp_checkpoint=Path("ldp/deployable.ckpt"),
+            at_checkpoint=Path("at/deployable.ckpt"),
+        )
+
+
+def test_validate_release_qualification_rejects_runtime_interval_other_than_sixteen() -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.1,
+        "deployment_slow_update_interval": 16,
+    }
+
+    with pytest.raises(ValueError, match="slow_update_interval"):
+        deploy.validate_release_qualification(
+            release_cfg(**evidence),
+            release_cfg(**evidence),
+            slow_update_interval=15,
+            ldp_checkpoint=Path("ldp.ckpt"),
+            at_checkpoint=Path("at.ckpt"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("ldp_checkpoint", "at_checkpoint"),
+    [
+        pytest.param(Path("latest.ckpt"), Path("deployable.ckpt"), id="ldp-latest"),
+        pytest.param(Path("deployable.ckpt"), Path("latest.ckpt"), id="at-latest"),
+    ],
+)
+def test_validate_release_qualification_rejects_recovery_checkpoints(
+    ldp_checkpoint: Path, at_checkpoint: Path
+) -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.1,
+        "deployment_slow_update_interval": 16,
+    }
+
+    with pytest.raises(ValueError, match="deployable.ckpt"):
+        deploy.validate_release_qualification(
+            release_cfg(**evidence),
+            release_cfg(**evidence),
+            slow_update_interval=16,
+            ldp_checkpoint=ldp_checkpoint,
+            at_checkpoint=at_checkpoint,
+        )
 
 
 def test_prepare_inference_config_drops_training_only_color_jitter() -> None:
@@ -275,6 +404,7 @@ def test_load_policy_reports_checkpoint_payload_cfg_errors(role, invalid_payload
             torch.device("cpu"),
             num_inference_steps=8,
             tactile_embedding_dim=16,
+            slow_update_interval=16,
         )
 
     message = str(error.value)
@@ -302,6 +432,7 @@ def test_load_policy_reports_unresolved_checkpoint_metadata(monkeypatch) -> None
             torch.device("cpu"),
             num_inference_steps=8,
             tactile_embedding_dim=16,
+            slow_update_interval=16,
         )
 
     message = str(error.value)
@@ -312,14 +443,15 @@ def test_load_policy_reports_unresolved_checkpoint_metadata(monkeypatch) -> None
 
 
 def test_load_policy_validates_matching_payloads_before_workspace_construction(monkeypatch) -> None:
-    ldp_checkpoint = Path("ldp.ckpt")
-    at_checkpoint = Path("at.ckpt")
+    ldp_checkpoint = Path("ldp/deployable.ckpt")
+    at_checkpoint = Path("at/deployable.ckpt")
     ldp_cfg_mapping = OmegaConf.to_container(policy_cfg(30), resolve=False)
     at_cfg_mapping = OmegaConf.to_container(tactile_cfg(30), resolve=False)
     ldp_payload = payload(ldp_cfg_mapping)
     at_payload = payload(at_cfg_mapping)
     payload_calls = []
     validated = False
+    qualification_validated = False
     workspace_instances = []
     original_validate = deploy.validate_tactile_dimensions
 
@@ -336,9 +468,16 @@ def test_load_policy_validates_matching_payloads_before_workspace_construction(m
         original_validate(*args)
         validated = True
 
+    def validate_qualification(*args, **kwargs):
+        nonlocal qualification_validated
+        assert validated
+        assert kwargs["slow_update_interval"] == 16
+        qualification_validated = True
+
     class FakeWorkspace:
         def __init__(self, cfg):
             assert validated
+            assert qualification_validated
             self.cfg = cfg
             self.ema_model = LoadedFakePolicy()
             self.model = LoadedFakePolicy()
@@ -351,6 +490,7 @@ def test_load_policy_validates_matching_payloads_before_workspace_construction(m
 
     monkeypatch.setattr(deploy, "_load_checkpoint_payload", load_payload)
     monkeypatch.setattr(deploy, "validate_tactile_dimensions", validate)
+    monkeypatch.setattr(deploy, "validate_release_qualification", validate_qualification)
     monkeypatch.setattr(deploy.hydra.utils, "get_class", lambda target: FakeWorkspace)
 
     with pytest.warns(UserWarning, match="legacy"):
@@ -360,6 +500,7 @@ def test_load_policy_validates_matching_payloads_before_workspace_construction(m
             torch.device("cpu"),
             num_inference_steps=7,
             tactile_embedding_dim=30,
+            slow_update_interval=16,
             artifact_verification="legacy-compatible",
         )
 
@@ -417,6 +558,7 @@ def test_load_policy_rejects_each_mismatched_tactile_dimension_before_workspace(
             torch.device("cpu"),
             num_inference_steps=8,
             tactile_embedding_dim=pca_dim,
+            slow_update_interval=16,
             artifact_verification="legacy-compatible",
         )
 
@@ -439,7 +581,7 @@ def _install_fake_policy_load(monkeypatch, ldp_cfg, at_cfg):
 
 
 def test_load_policy_strict_accepts_exact_v2_bundle(tmp_path, monkeypatch) -> None:
-    at_path = tmp_path / "at.ckpt"
+    at_path = tmp_path / "deployable.ckpt"
     at_path.write_bytes(b"AT checkpoint")
     pca_path = tmp_path / "pca.npz"
     pca_path.write_bytes(b"PCA artifact")
@@ -457,11 +599,12 @@ def test_load_policy_strict_accepts_exact_v2_bundle(tmp_path, monkeypatch) -> No
     )
 
     policy, _ = deploy.load_policy(
-        tmp_path / "ldp.ckpt",
+        tmp_path / "ldp" / "deployable.ckpt",
         at_path,
         torch.device("cpu"),
         num_inference_steps=8,
         tactile_embedding_dim=30,
+        slow_update_interval=16,
         artifact_verification="strict",
         tactile_pca_path=pca_path,
     )
@@ -508,6 +651,7 @@ def test_load_policy_strict_rejects_same_dimension_different_artifact(
             torch.device("cpu"),
             8,
             30,
+            slow_update_interval=16,
             artifact_verification="strict",
             tactile_pca_path=pca_path,
         )
@@ -535,6 +679,7 @@ def test_load_policy_strict_rejects_v1_v2_mixing(tmp_path, monkeypatch) -> None:
             torch.device("cpu"),
             8,
             30,
+            slow_update_interval=16,
             artifact_verification="strict",
         )
 
@@ -549,6 +694,7 @@ def test_load_policy_strict_rejects_missing_v2_metadata(monkeypatch) -> None:
             torch.device("cpu"),
             8,
             30,
+            slow_update_interval=16,
             artifact_verification="strict",
         )
 
@@ -558,11 +704,12 @@ def test_legacy_metadata_requires_explicit_compatibility_mode(monkeypatch) -> No
 
     with pytest.warns(UserWarning, match="legacy"):
         policy, _ = deploy.load_policy(
-            Path("ldp.ckpt"),
-            Path("at.ckpt"),
+            Path("ldp/deployable.ckpt"),
+            Path("at/deployable.ckpt"),
             torch.device("cpu"),
             8,
             30,
+            slow_update_interval=16,
             artifact_verification="legacy-compatible",
         )
     assert policy.eval_called
@@ -574,6 +721,7 @@ def test_legacy_metadata_requires_explicit_compatibility_mode(monkeypatch) -> No
             torch.device("cpu"),
             8,
             30,
+            slow_update_interval=16,
             artifact_verification="off",
         )
 
@@ -707,3 +855,29 @@ def test_runtime_updates_slow_plan_every_five_steps_and_decodes_every_step(
     assert policy.fast_history_lengths == [4, 5, 6, 7, 8, 4, 5]
     assert all(action.shape == (1, 20) and action.dtype == np.float32 for action in actions)
     np.testing.assert_allclose(encoder.last_means, np.arange(1, 5) / 255.0)
+
+
+def test_runtime_slow16_retains_the_deployed_phase_history_sequence() -> None:
+    policy = FakePolicy(15)
+    encoder = FakeTactileEncoder()
+    means = np.zeros((2, 1024), dtype=np.float32)
+    components = np.zeros((2, 15, 1024), dtype=np.float32)
+    components[:, np.arange(15), np.arange(15)] = 1.0
+    tactile_pca = deploy.BimanualTactilePCA(means, components)
+    runtime = deploy.PickTubeRDPRuntime(
+        policy,
+        encoder,
+        torch.device("cpu"),
+        tactile_pca,
+        slow_update_interval=16,
+        dataset_obs_temporal_downsample_ratio=2,
+        n_obs_steps=2,
+    )
+
+    slow_updates = []
+    for step in range(17):
+        _, slow_update = runtime.predict(observation(step))
+        slow_updates.append(slow_update)
+
+    assert slow_updates == [True] + [False] * 15 + [True]
+    assert policy.fast_history_lengths == list(range(4, 20)) + [4]
