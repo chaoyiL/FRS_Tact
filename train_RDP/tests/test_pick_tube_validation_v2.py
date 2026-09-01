@@ -76,9 +76,11 @@ def test_idle_metrics_integrate_translation_and_compose_so3_rotations():
 
 def test_deployment_window_metrics_only_measure_the_deployed_phase():
     target = _neutral_actions(horizon=32)
-    idle_mask = np.ones((1, 32, 2), dtype=bool)
+    idle_mask = np.zeros((1, 32, 2), dtype=bool)
+    idle_mask[..., 0] = True
     prediction = target.copy()
-    prediction[:, 3:19, 3:9] = _rotation_6d_z(1.0)
+    prediction[:, 3, 3:9] = _rotation_6d_z(2.0)
+    prediction[:, 18, 3:9] = _rotation_6d_z(4.0)
 
     metrics = compute_deployment_window_metrics(
         target,
@@ -88,7 +90,11 @@ def test_deployment_window_metrics_only_measure_the_deployed_phase():
         phase_count=16,
     )
 
-    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(1.0)
+    assert metrics["val_deploy_idle_rotation_step_p95_deg"] == pytest.approx(2.5)
+    assert metrics["val_deploy_idle_rotation_window_deg"] == pytest.approx(6.0)
+    assert metrics["val_deploy_idle_left_rotation_window_deg"] == pytest.approx(6.0)
+    assert "val_deploy_idle_rotation_29_deg" not in metrics
+    assert "val_deploy_idle_left_rotation_29_deg" not in metrics
 
     prediction = target.copy()
     prediction[:, 19:32, 3:9] = _rotation_6d_z(10.0)
@@ -143,6 +149,20 @@ def test_canonical_noop_actions_replace_pose_and_preserve_grippers(action_dim):
         )
         torch.testing.assert_close(noops[..., arm_start + 9], original[..., arm_start + 9])
     torch.testing.assert_close(actions, original)
+
+
+@pytest.mark.parametrize(
+    ("actions", "error"),
+    [
+        (torch.zeros(2, 3, 9), ValueError),
+        (torch.zeros(2, 3, 30), ValueError),
+        (torch.zeros(2, 10, 3).transpose(1, 2), ValueError),
+        (np.zeros((2, 3, 10)), TypeError),
+    ],
+)
+def test_canonical_noop_actions_reject_unsupported_layouts(actions, error):
+    with pytest.raises(error):
+        build_canonical_noop_actions(actions)
 
 
 def test_metrics_report_active_errors_and_micro_motion_recall():
