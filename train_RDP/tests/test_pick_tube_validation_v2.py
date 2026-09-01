@@ -507,14 +507,18 @@ def test_v2_experiment_launcher_uses_fresh_20_epoch_runs():
 
 def test_pick_tube_launchers_allow_missing_baseline():
     root = Path(__file__).resolve().parents[1]
-    launchers = (
+    generic_launcher = root / "scripts" / "train_pick_tube_single_gpu.sh"
+    generic_script = generic_launcher.read_text(encoding="utf-8")
+    assert "BASELINE_JSON is required" not in generic_script
+    assert "AT/LDP will auto-calibrate on the first valid deployment validation" in generic_script
+
+    recovery_only_launchers = (
         root / "scripts" / "run_pick_tube_rdp_experiments.sh",
-        root / "scripts" / "train_pick_tube_single_gpu.sh",
         root / "scripts" / "train_pick_tube_server.sh",
         root / "train_pick_tube_rdp.sh",
     )
 
-    for launcher in launchers:
+    for launcher in recovery_only_launchers:
         script = launcher.read_text(encoding="utf-8")
         assert "BASELINE_JSON is required" not in script
         assert "checkpoints will remain non-deployable" in script
@@ -534,6 +538,20 @@ def test_single_right_launcher_requires_deployable_at_and_ldp_checkpoints():
     assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
     assert "AT/LDP will auto-calibrate on the first valid deployment validation" in script
     assert "checkpoints will remain non-deployable" not in script
+
+
+def test_generic_launcher_requires_deployable_at_and_ldp_checkpoints():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "train_pick_tube_single_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}" in script
+    assert "${AT_DIR}/checkpoints/latest.ckpt" not in script
+    assert "latest is recovery-only" in script
+    assert "AT deployable checkpoint not found" in script
+    assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
 
 
 
