@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from pathlib import Path
@@ -10,17 +11,37 @@ ROOT = Path(__file__).resolve().parents[1]
 TRAIN = ROOT / "train_RDP"
 DEPLOY = ROOT / "deploy_RDP"
 REVISION = "RDP_vitamin 7a5bc24 branch agent/rdp-pick-tube-deployment"
+LOCAL_ENVIRONMENT_DIRECTORIES = frozenset((".venv", ".venv-jax"))
 
 
 def project_files(root: Path) -> set[Path]:
-    return {
-        path.relative_to(root)
-        for path in root.rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc"
-    }
+    files: set[Path] = set()
+    for path in root.rglob("*"):
+        relative_path = path.relative_to(root)
+        if (
+            path.is_file()
+            and not LOCAL_ENVIRONMENT_DIRECTORIES.intersection(relative_path.parts)
+            and "__pycache__" not in relative_path.parts
+            and path.suffix != ".pyc"
+        ):
+            files.add(relative_path)
+    return files
 
 
 class RDPProjectBoundaryTest(unittest.TestCase):
+    def test_project_file_scan_ignores_local_environments(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "src" / "module.py"
+            source.parent.mkdir()
+            source.write_text("", encoding="utf-8")
+            for environment_name in (".venv", ".venv-jax"):
+                native_extension = root / environment_name / "package" / "native.so"
+                native_extension.parent.mkdir(parents=True)
+                native_extension.write_bytes(b"")
+
+            self.assertEqual(project_files(root), {Path("src/module.py")})
+
     def test_projects_record_new_source_revision(self) -> None:
         for project in (TRAIN, DEPLOY):
             self.assertEqual(
@@ -94,8 +115,11 @@ class RDPProjectBoundaryTest(unittest.TestCase):
         self.assertIn("websockets==16.0", lines)
 
     def test_no_prebuilt_native_extensions_are_vendored(self) -> None:
-        self.assertEqual(list(TRAIN.rglob("*.so")), [])
-        self.assertEqual(list(DEPLOY.rglob("*.so")), [])
+        for project in (TRAIN, DEPLOY):
+            native_extensions = sorted(
+                path for path in project_files(project) if path.suffix == ".so"
+            )
+            self.assertEqual(native_extensions, [])
 
     def test_shell_entrypoints_parse(self) -> None:
         scripts = [*TRAIN.joinpath("scripts").glob("*.sh"), *DEPLOY.joinpath("scripts").glob("*.sh")]
