@@ -309,22 +309,41 @@ def _response_metrics(arrays: Mapping[str, np.ndarray]) -> dict[str, np.ndarray]
     }
 
 
-def _metric_range(values: np.ndarray) -> dict[str, float]:
-    return {
+def _metric_range(
+    values: np.ndarray, *, include_p95: bool = False
+) -> dict[str, float]:
+    metrics = {
         "min": float(np.min(values)),
         "max": float(np.max(values)),
         "mean": float(np.mean(values)),
     }
+    if include_p95:
+        metrics["p95"] = float(np.percentile(values, 95))
+    return metrics
 
+
+
+def right_snapshot_response_points(
+    right_poses: Any, local_translations: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return right-hand start points and local translations expressed in base frame."""
+
+    poses = np.asarray(right_poses, dtype=np.float64)
+    translations = np.asarray(local_translations, dtype=np.float64)
+    if poses.ndim != 2 or poses.shape[1] != 6 or translations.shape != (len(poses), 3):
+        raise ValueError("right poses must be (N,6) and local translations must be (N,3)")
+    if not np.isfinite(poses).all() or not np.isfinite(translations).all():
+        raise ValueError("right poses and local translations must be finite")
+    starts = poses[:, :3].copy()
+    endpoints = starts + Rotation.from_rotvec(poses[:, 3:]).apply(translations)
+    return starts, endpoints
 
 def _write_right_snapshot_responses(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
     """Render recorded right-hand poses and base-frame one-step responses."""
 
-    right_poses = arrays["right_poses"].astype(np.float64, copy=False)
-    starts = right_poses[:, :3]
-    local_translation = arrays["policy_actions"][:, :3].astype(np.float64, copy=False)
-    response_delta = Rotation.from_rotvec(right_poses[:, 3:]).apply(local_translation)
-    endpoints = starts + response_delta
+    starts, endpoints = right_snapshot_response_points(
+        arrays["right_poses"], arrays["policy_actions"][:, :3]
+    )
     world_points = np.concatenate((starts, endpoints), axis=0)
     projected = np.column_stack(
         (
@@ -376,7 +395,7 @@ def _write_action_overview(path: Path, arrays: Mapping[str, np.ndarray]) -> None
     panels = (
         ("translation xyz + norm", np.column_stack((actions[:, :3], metrics["translation_norm"]))),
         ("rotation angle (rad)", metrics["rotation_angle"][:, None]),
-        ("gripper command / recorded", np.column_stack((metrics["gripper_command"], metrics["recorded_right_gripper"]))),
+        ("gripper command / recorded / delta", np.column_stack((metrics["gripper_command"], metrics["recorded_right_gripper"], metrics["gripper_delta"]))),
         ("latency (ms)", metrics["latency_ms"][:, None]),
     )
     width, height, panel_height = 1200, 760, 160
@@ -425,7 +444,7 @@ def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[st
         columns = (
             "step_id", "timestamp", "latency_ms", "right_x", "right_y", "right_z",
             "right_rx", "right_ry", "right_rz",
-            "translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper",
+            "translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper", "gripper_delta",
             *[f"policy_action_{index}" for index in range(10)],
             *[f"wire_action_{index}" for index in range(20)],
         )
@@ -438,19 +457,13 @@ def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[st
                 "latency_ms": float(arrays["latency_ms"][index]),
             }
             row.update({f"right_{name}": float(value) for name, value in zip(("x", "y", "z", "rx", "ry", "rz"), arrays["right_poses"][index], strict=True)})
-            row.update({name: float(values[index]) for name, values in metrics.items() if name != "gripper_delta"})
+            row.update({name: float(values[index]) for name, values in metrics.items()})
             row.update({f"policy_action_{column}": float(value) for column, value in enumerate(arrays["policy_actions"][index])})
             row.update({f"wire_action_{column}": float(value) for column, value in enumerate(arrays["wire_actions"][index])})
             writer.writerow(row)
-    latency = arrays["latency_ms"]
     summary = {
         "snapshots": int(len(arrays["states"])),
         "step_range": [int(arrays["step_ids"][0]), int(arrays["step_ids"][-1])],
-        "latency_ms": {
-            "mean": float(np.mean(latency)),
-            "p95": float(np.percentile(latency, 95)),
-            "max": float(np.max(latency)),
-        },
         "right_translation_norm": {
             "mean": float(np.mean(np.linalg.norm(arrays["policy_actions"][:, :3], axis=1))),
             "max": float(np.max(np.linalg.norm(arrays["policy_actions"][:, :3], axis=1))),
@@ -461,7 +474,7 @@ def write_reports(output_dir: Path | str, results: Mapping[str, Any]) -> dict[st
         "translation_norm": _metric_range(metrics["translation_norm"]),
         "rotation_angle": _metric_range(metrics["rotation_angle"]),
         "gripper_delta": _metric_range(metrics["gripper_delta"]),
-        "latency_ms": _metric_range(metrics["latency_ms"]),
+        "latency_ms": _metric_range(metrics["latency_ms"], include_p95=True),
     }
     with paths["summary"].open("w", encoding="utf-8") as file:
         json.dump(summary, file, allow_nan=False, indent=2, sort_keys=True)

@@ -180,6 +180,47 @@ def test_write_reports_includes_snapshot_action_metrics(
     assert {"translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper", "latency_ms"} <= set(header)
     summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
     assert summary["state"] == {"finite": True, "shape": [len(snapshots), 20]}
-    for name in ("translation_norm", "rotation_angle", "gripper_delta", "latency_ms"):
+    for name in ("translation_norm", "rotation_angle", "gripper_delta"):
         assert set(summary[name]) == {"min", "max", "mean"}
         assert all(np.isfinite(value) for value in summary[name].values())
+    assert set(summary["latency_ms"]) == {"min", "max", "mean", "p95"}
+
+
+def test_write_reports_preserves_deterministic_response_metrics(tmp_path: Path) -> None:
+    import csv
+
+    states = np.zeros((2, 20), dtype=np.float32)
+    states[:, 13] = [0.1, 0.2]
+    right_poses = np.asarray(
+        [[1, 2, 3, 0, 0, np.pi / 2], [2, 2, 3, 0, 0, np.pi / 2]], dtype=np.float32
+    )
+    policy_actions = np.asarray(
+        [[1, 0, 0, 0, 1, 0, -1, 0, 0, 0.3], [1, 0, 0, 0, 1, 0, -1, 0, 0, 0.4]],
+        dtype=np.float32,
+    )
+    results = {
+        "states": states,
+        "policy_actions": policy_actions,
+        "wire_actions": np.zeros((2, 20), dtype=np.float32),
+        "right_poses": right_poses,
+        "step_ids": np.asarray([2, 10], dtype=np.int64),
+        "timestamps": np.asarray([1.0, 2.0], dtype=np.float64),
+        "latency_ms": np.asarray([1.0, 5.0], dtype=np.float64),
+    }
+
+    starts, endpoints = evaluator.right_snapshot_response_points(
+        right_poses, policy_actions[:, :3]
+    )
+    np.testing.assert_allclose(starts[0], [1, 2, 3])
+    np.testing.assert_allclose(endpoints[0], [1, 3, 3], atol=1e-6)
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+    with paths["trajectory_csv"].open(newline="", encoding="utf-8") as file:
+        rows = list(csv.DictReader(file))
+    assert "gripper_delta" in rows[0]
+    assert float(rows[0]["gripper_delta"]) == pytest.approx(0.2)
+    summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
+    assert summary["rotation_angle"]["mean"] == pytest.approx(np.pi / 2)
+    assert summary["latency_ms"] == {
+        "min": 1.0, "mean": 3.0, "p95": 4.8, "max": 5.0,
+    }
