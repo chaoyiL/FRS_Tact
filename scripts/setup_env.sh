@@ -33,8 +33,10 @@
 #
 #      bash scripts/setup_env.sh --pi05_train
 #
-#   5. --pi05_frs_train：只安装 Pi0.5 FRS 训练环境，使用 Python 3.12，
-#      对应 train_pi05_frs。该环境独立于纯视觉 Pi0.5 训练和 Pi0.5 部署。
+#   5. --pi05_frs_train：安装两套职责分离的 Python 3.12 环境：
+#      - Pi0.5 FRS 训练环境，对应 train_pi05_frs；
+#      - LeRobot 数据下载/转换环境，对应 data_tools。
+#      两套环境都独立于纯视觉 Pi0.5 训练和 Pi0.5 部署。
 #
 #      bash scripts/setup_env.sh --pi05_frs_train
 #
@@ -133,7 +135,7 @@ usage() {
 --smolvla      安装 FRS_Tact 环境及独立的官方 LeRobot SmolVLA 训练环境（Python 3.12）
 --pi05_deploy  只安装 Pi0.5 与 Pi0.5-FRS 部署环境（Python 3.12）
 --pi05_train   安装纯视觉 Pi0.5 JAX 训练环境（Python 3.11）和数据转换环境（Python 3.12）
---pi05_frs_train 只安装 Pi0.5 FRS 训练环境（Python 3.12）
+--pi05_frs_train 安装 Pi0.5 FRS 训练环境和独立数据工具环境（均为 Python 3.12）
 -h, --help     只显示本帮助，不执行安装
 
 四个显式参数不能组合使用。
@@ -211,6 +213,10 @@ should_setup_pi05_train() {
 
 should_setup_pi05_frs_train() {
     [[ "${SETUP_MODE}" == "pi05_frs_train" ]]
+}
+
+should_setup_data_tools() {
+    [[ "${SETUP_MODE}" == "pi05_train" || "${SETUP_MODE}" == "pi05_frs_train" ]]
 }
 
 log() {
@@ -364,13 +370,15 @@ configure_uv_storage() {
     fi
     if should_setup_pi05_train; then
         mkdir -p "$(dirname -- "${PI05_TRAIN_VENV_DIR}")"
-        mkdir -p "$(dirname -- "${DATA_TOOLS_VENV_DIR}")"
         export UV_PROJECT_ENVIRONMENT="${PI05_TRAIN_VENV_DIR}"
     elif should_setup_pi05_frs_train; then
         mkdir -p "$(dirname -- "${PI05_FRS_TRAIN_VENV_DIR}")"
         export UV_PROJECT_ENVIRONMENT="${PI05_FRS_TRAIN_VENV_DIR}"
     else
         export UV_PROJECT_ENVIRONMENT="${VENV_DIR}"
+    fi
+    if should_setup_data_tools; then
+        mkdir -p "$(dirname -- "${DATA_TOOLS_VENV_DIR}")"
     fi
     export UV_CACHE_DIR="${UV_CACHE_DIR_VALUE}"
 
@@ -389,12 +397,14 @@ configure_uv_storage() {
     if should_setup_pi05_train; then
         pi05_train_env_device="$(stat -c '%d' "$(dirname -- "${PI05_TRAIN_VENV_DIR}")")"
         [[ "${pi05_train_env_device}" == "${cache_device}" ]] || needs_copy=1
-        data_tools_env_device="$(stat -c '%d' "$(dirname -- "${DATA_TOOLS_VENV_DIR}")")"
-        [[ "${data_tools_env_device}" == "${cache_device}" ]] || needs_copy=1
     fi
     if should_setup_pi05_frs_train; then
         pi05_frs_train_env_device="$(stat -c '%d' "$(dirname -- "${PI05_FRS_TRAIN_VENV_DIR}")")"
         [[ "${pi05_frs_train_env_device}" == "${cache_device}" ]] || needs_copy=1
+    fi
+    if should_setup_data_tools; then
+        data_tools_env_device="$(stat -c '%d' "$(dirname -- "${DATA_TOOLS_VENV_DIR}")")"
+        [[ "${data_tools_env_device}" == "${cache_device}" ]] || needs_copy=1
     fi
     if ((needs_copy)); then
         export UV_LINK_MODE="copy"
@@ -464,6 +474,8 @@ validate_selected_projects() {
     if should_setup_pi05_train; then
         [[ -f "${PI05_TRAIN_PROJECT_ROOT}/pyproject.toml" ]] || \
             fail "缺少 Pi0.5 训练项目：${PI05_TRAIN_PROJECT_ROOT}/pyproject.toml"
+    fi
+    if should_setup_data_tools; then
         [[ -f "${DATA_TOOLS_PROJECT_ROOT}/pyproject.toml" ]] || \
             fail "缺少 LeRobot 数据工具项目：${DATA_TOOLS_PROJECT_ROOT}/pyproject.toml"
     fi
@@ -905,9 +917,12 @@ PY
 print_summary() {
     if should_setup_pi05_train; then
         echo "Pi0.5 训练环境（已安装）：${PI05_TRAIN_VENV_DIR}"
-        echo "LeRobot 数据工具环境（已安装）：${DATA_TOOLS_VENV_DIR}"
     else
         echo "Pi0.5 训练环境（本次未安装）：${PI05_TRAIN_VENV_DIR}"
+    fi
+    if should_setup_data_tools; then
+        echo "LeRobot 数据工具环境（已安装）：${DATA_TOOLS_VENV_DIR}"
+    else
         echo "LeRobot 数据工具环境（本次未安装）：${DATA_TOOLS_VENV_DIR}"
     fi
     if should_setup_pi05_frs_train; then
@@ -942,7 +957,8 @@ print_summary() {
         echo "  ${DATA_TOOLS_VENV_DIR}/bin/hf auth login"
         echo "  ${PI05_TRAIN_VENV_DIR}/bin/wandb login"
     elif should_setup_pi05_frs_train; then
-        echo "  ${PI05_FRS_TRAIN_VENV_DIR}/bin/hf auth login"
+        echo "  ${DATA_TOOLS_VENV_DIR}/bin/hf auth login"
+        echo "  ${PI05_FRS_TRAIN_VENV_DIR}/bin/wandb login"
     elif should_setup_smolvla; then
         echo "  ${VENV_DIR}/bin/hf auth login"
         echo "  ${VENV_DIR}/bin/wandb login"
@@ -982,14 +998,14 @@ main() {
     should_setup_smolvla && sync_root_environment
     should_setup_smolvla && sync_smolvla_torch_environment
     should_setup_pi05 && sync_pi05_environment
-    should_setup_pi05_train && sync_data_tools_environment
+    should_setup_data_tools && sync_data_tools_environment
     should_setup_pi05_train && sync_pi05_train_environment
     should_setup_pi05_frs_train && sync_pi05_frs_train_environment
     write_environment_file
     should_setup_smolvla && verify_python_environment
     should_setup_smolvla && verify_smolvla_torch_environment
     should_setup_pi05 && verify_pi05_environment
-    should_setup_pi05_train && verify_data_tools_environment
+    should_setup_data_tools && verify_data_tools_environment
     should_setup_pi05_train && verify_pi05_train_environment
     should_setup_pi05_frs_train && verify_pi05_frs_train_environment
     should_setup_smolvla && check_root_gpu

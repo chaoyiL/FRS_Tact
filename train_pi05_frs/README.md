@@ -2,7 +2,8 @@
 
 This directory is the standalone training project for the three-stage Pi0.5 flow-steering
 pipeline: tactile embedding precomputation, Pi0.5 action-cache preparation, and FRS decoder
-training. On `/workspace`, its isolated environment is `/workspace/venvs/pi05_frs_train`,
+training. On `/workspace`, it uses `/workspace/venvs/pi05_frs_train` for training and
+`/workspace/venvs/lerobot_data_tools` for LeRobot dataset download/conversion. Both are
 separate from the pure-vision Pi0.5 training and deployment environments.
 
 ## Set up and run
@@ -11,8 +12,11 @@ Run commands from the repository root. The launcher selects only the package-loc
 puts `train_pi05_frs/src` before the repository on `PYTHONPATH`, and then changes into this project.
 
 ```bash
-cd /home/typhon/FRS_Tact
+cd /workspace/FRS_Tact
 bash scripts/setup_env.sh --pi05_frs_train
+
+# This shortcut downloads KaiyueChen/insert_01 and performs the supported v2.1 -> v3.0 conversion.
+bash scripts/download_data.sh --insert_01
 
 # Edit the /workspace examples first, then run a dependency-light preflight.
 bash train_pi05_frs/scripts/start_frs_pi05_train.sh --check \

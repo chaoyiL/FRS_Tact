@@ -112,6 +112,8 @@ def test_download_data_falls_back_to_the_smolvla_training_environment() -> None:
     assert 'DEFAULT_SMOLVLA_DATA_PYTHON="${FRS_WORKSPACE_ROOT:-/workspace}/venvs/smolvla_torch/bin/python"' in source
     assert '"${SMOLVLA_TORCH_PYTHON:-}"' in source
     assert "DATA_TOOL_PYTHON 不可执行，尝试其他 Python 3.12 环境" in source
+    assert "--insert_01" in source
+    assert "--pi05_frs_train" in source
 
 
 def test_pi05_train_launcher_loads_canonical_environment_file() -> None:
@@ -348,7 +350,8 @@ def test_pi05_frs_train_selector_only_sets_up_frs_training_environment(
     assert "sync-root" not in events
     assert "sync-pi05" not in events
     assert "sync-pi05-train" not in events
-    assert "sync-data-tools" not in events
+    assert "sync-data-tools" in events
+    assert "verify-data-tools" in events
 
 
 def test_help_has_no_side_effects(tmp_path: Path) -> None:

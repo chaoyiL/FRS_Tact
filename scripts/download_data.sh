@@ -50,7 +50,7 @@ resolve_data_python() {
             return 0
         fi
     done
-    echo "找不到可用的 Python 3.12 LeRobot 环境；请安装 SmolVLA 或独立数据工具环境" >&2
+    echo "找不到可用的 Python 3.12 LeRobot 数据工具环境。Pi0.5 FRS 请先执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_frs_train" >&2
     return 1
 }
 
@@ -85,6 +85,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
                 REQUESTED_DATASETS+=("${2##*/}")
                 shift 2
                 ;;
+            --insert_01)
+                REQUESTED_DATASETS+=("insert_01")
+                shift
+                ;;
             --cache-dir)
                 [[ $# -ge 2 ]] || { echo "--cache-dir requires a path" >&2; exit 2; }
                 HF_DATASET_CACHE_DIR="$2"
@@ -92,9 +96,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
                 ;;
             -h|--help)
                 cat <<'EOF'
-Usage: bash scripts/download_data.sh [--dataset NAME]... [--cache-dir PATH]
+Usage: bash scripts/download_data.sh [--dataset NAME | --insert_01]... [--cache-dir PATH]
 
 Without --dataset, downloads the datasets enabled in the DATASETS list.
+--insert_01 is a shortcut for --dataset insert_01.
 This is the only supported training-dataset download and v2.1 -> v3.0 path.
 EOF
                 exit 0
@@ -166,7 +171,7 @@ check_deps() {
     if [[ ! -x "${DATA_PYTHON}" ]]; then
         echo "=========================================="
         echo " 数据工具 Python 不可执行：${DATA_PYTHON}"
-        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_frs_train"
         echo "=========================================="
         exit 1
     fi
@@ -179,7 +184,7 @@ check_deps() {
     if [[ ! -x "${DATA_HF}" ]] || ! "${DATA_HF}" version &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境中未检测到 hf 命令：${DATA_HF}"
-        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --smolvla"
+        echo " 请执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_frs_train"
         echo ""
         echo " 安装后如需登录，请执行:"
         echo "   ${DATA_HF} auth login"
@@ -190,7 +195,7 @@ check_deps() {
     if ! "${DATA_PYTHON}" -c "import jsonlines; import torch; import lerobot.datasets.v30.convert_dataset_v21_to_v30" &>/dev/null; then
         echo "=========================================="
         echo " 数据工具环境缺少 LeRobot 数据转换依赖（包括 CPU PyTorch）。"
-        echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_train"
+        echo " 请重新执行: bash ${PROJECT_ROOT}/scripts/setup_env.sh --pi05_frs_train"
         echo "=========================================="
         exit 1
     fi
