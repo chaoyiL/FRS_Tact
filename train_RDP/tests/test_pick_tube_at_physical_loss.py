@@ -1,5 +1,6 @@
 import math
 
+import pytest
 import torch
 
 from reactive_diffusion_policy.common.normalize_util import get_action_normalizer
@@ -30,6 +31,36 @@ def _identity_actions(batch=1, horizon=3, dtype=torch.float64):
     return actions
 
 
+def _z_rotation_10d_action(
+    angle_degrees: float,
+    *,
+    device: str | torch.device = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> torch.Tensor:
+    """Return a single-arm action whose 6D rotation is a Z-axis rotation."""
+    angle = math.radians(angle_degrees)
+    action = torch.zeros((1, 1, 10), device=device, dtype=dtype)
+    action[..., 3:9] = torch.tensor(
+        [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
+        device=device,
+        dtype=dtype,
+    )
+    return action
+
+
+def _single_arm_rotation_loss(
+    target: torch.Tensor,
+    prediction: torch.Tensor,
+) -> dict[str, torch.Tensor]:
+    return compute_bimanual_physical_loss(
+        target,
+        prediction,
+        torch.ones(target.shape[:2], device=target.device, dtype=torch.bool),
+        torch.zeros((*target.shape[:2], 1), device=target.device, dtype=torch.bool),
+        DEFAULT_WEIGHTS,
+    )
+
+
 def _loss(target, prediction, valid_mask=None, idle_arm_mask=None, weights=None):
     if valid_mask is None:
         valid_mask = torch.ones(target.shape[:2], dtype=torch.bool)
@@ -42,6 +73,53 @@ def _loss(target, prediction, valid_mask=None, idle_arm_mask=None, weights=None)
         idle_arm_mask,
         DEFAULT_WEIGHTS if weights is None else weights,
     )
+
+
+@pytest.mark.parametrize("angle_degrees", [0.05, 0.5, 1.2])
+def test_bf16_cpu_autocast_preserves_small_10d_rotation_loss(angle_degrees):
+    target = _z_rotation_10d_action(0.0)
+    prediction = _z_rotation_10d_action(angle_degrees)
+
+    with torch.autocast("cpu", enabled=False):
+        reference = _single_arm_rotation_loss(target, prediction)["rotation_loss"]
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = _single_arm_rotation_loss(target, prediction)["rotation_loss"]
+
+    assert actual.dtype == torch.float32
+    assert actual > 0
+    torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+
+
+def test_bf16_cpu_autocast_preserves_10d_rotation_gradients():
+    target = _z_rotation_10d_action(0.0)
+    prediction = _z_rotation_10d_action(1.2).requires_grad_()
+
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        rotation_loss = _single_arm_rotation_loss(target, prediction)["rotation_loss"]
+    rotation_loss.backward()
+
+    rotation_gradient = prediction.grad[..., 3:9]
+    assert torch.isfinite(rotation_gradient).all()
+    assert torch.count_nonzero(rotation_gradient) > 0
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+    reason="CUDA BF16 support is required",
+)
+@pytest.mark.parametrize("angle_degrees", [0.05, 0.5, 1.2])
+def test_bf16_cuda_autocast_preserves_small_10d_rotation_loss(angle_degrees):
+    target = _z_rotation_10d_action(0.0, device="cuda")
+    prediction = _z_rotation_10d_action(angle_degrees, device="cuda")
+
+    with torch.autocast("cuda", enabled=False):
+        reference = _single_arm_rotation_loss(target, prediction)["rotation_loss"]
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        actual = _single_arm_rotation_loss(target, prediction)["rotation_loss"]
+
+    assert actual.dtype == torch.float32
+    assert actual > 0
+    torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
 
 
 def test_project_rotation_6d_maps_identity_to_a_valid_rotation():
