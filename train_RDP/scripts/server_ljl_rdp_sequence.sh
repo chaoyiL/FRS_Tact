@@ -54,6 +54,10 @@ run_single insert
 run_single press
 run_bread
 
-printf '\nRDP sequence completed.\n'
+if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  printf '\nRDP sequence dry run completed.\n'
+else
+  printf '\nRDP sequence completed.\n'
+fi
 printf 'stage: %s\n' "${STAGE}"
 printf 'sequence id: %s\n' "${RDP_SEQUENCE_ID}"

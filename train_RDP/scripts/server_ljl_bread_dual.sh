@@ -72,7 +72,7 @@ usage() {
   prepare    生成/续算 embedding、PCA30 和双臂 RDP Zarr
   train      使用已有 Zarr 训练双臂 AT -> LDP
   at         只训练或恢复 AT
-  ldp        从已有 AT latest.ckpt 只训练或恢复 LDP
+  ldp        仅从 AT deployable.ckpt 训练或恢复 LDP；latest.ckpt（仅恢复用）
   all        prepare + train；不会安装或下载环境
 
 默认路径：
