@@ -97,14 +97,23 @@ def get_legacy_optimizer_step(
 
 def get_deployment_phase_window(cfg) -> tuple[int, int]:
     """Return the fixed slow16 decoder window used by robot deployment."""
-    phase_count = int(cfg.validation.deployment_slow_update_interval)
+    phase_count = OmegaConf.select(cfg, "validation.deployment_slow_update_interval")
+    n_obs_steps = OmegaConf.select(cfg, "n_obs_steps")
+    ratio = OmegaConf.select(cfg, "dataset_obs_temporal_downsample_ratio")
+    for name, value in (
+        ("validation.deployment_slow_update_interval", phase_count),
+        ("n_obs_steps", n_obs_steps),
+        ("dataset_obs_temporal_downsample_ratio", ratio),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{name} must be a non-boolean integer")
     if phase_count != 16:
         raise ValueError(
             "validation.deployment_slow_update_interval must remain exactly 16"
         )
-    phase_start = (
-        int(cfg.n_obs_steps) * int(cfg.dataset_obs_temporal_downsample_ratio) - 1
-    )
+    phase_start = n_obs_steps * ratio - 1
+    if phase_start != 3:
+        raise ValueError("deployment phase_start must remain exactly 3")
     return phase_start, phase_count
 
 
@@ -133,23 +142,59 @@ def build_release_validation(
     *,
     passed,
     deployment_slow_update_interval,
+    phase_start,
     score,
     epoch,
     metrics,
 ) -> dict[str, object]:
     """Create scalar checkpoint evidence that deployment can validate safely."""
-    deployment_slow_update_interval = int(deployment_slow_update_interval)
+    if (
+        isinstance(deployment_slow_update_interval, bool)
+        or not isinstance(deployment_slow_update_interval, int)
+    ):
+        raise ValueError("deployment_slow_update_interval must be a non-boolean integer")
     if deployment_slow_update_interval != 16:
         raise ValueError("deployment_slow_update_interval must remain exactly 16")
+    if isinstance(phase_start, bool) or not isinstance(phase_start, int):
+        raise ValueError("phase_start must be a non-boolean integer")
+    if phase_start != 3:
+        raise ValueError("phase_start must remain exactly 3")
     return {
         "passed": bool(passed),
         "deployment_slow_update_interval": deployment_slow_update_interval,
+        "phase_start": phase_start,
         "score": _release_scalar(score),
         "epoch": int(epoch),
         "metrics": {
             str(name): _release_scalar(value) for name, value in metrics.items()
         },
     }
+
+
+def merge_noop_idle_metrics(metrics, noop_metrics) -> dict:
+    """Attach only canonical no-op idle metrics without corrupting real metrics."""
+    merged = dict(metrics)
+    merged.update(
+        {
+            key.replace("val_deploy_idle_", "val_deploy_noop_idle_", 1): value
+            for key, value in noop_metrics.items()
+            if key.startswith("val_deploy_idle_")
+        }
+    )
+    return merged
+
+
+def namespace_deployment_release_metrics(release_metrics) -> dict:
+    """Keep deployment qualification output separate from historical metrics."""
+    names = {
+        "val_active_translation_degradation": "val_deploy_active_translation_degradation",
+        "val_active_rotation_degradation": "val_deploy_active_rotation_degradation",
+        "val_micro_motion_recall": "val_deploy_micro_motion_recall",
+        "val_idle_score": "val_deploy_idle_score",
+        "val_checkpoint_feasible": "val_deploy_checkpoint_feasible",
+        "val_deployable": "val_deployable",
+    }
+    return {names[key]: value for key, value in release_metrics.items()}
 
 
 class TrainATWorkspace(BaseWorkspace):
@@ -538,13 +583,8 @@ class TrainATWorkspace(BaseWorkspace):
                                 ),
                             )
                             step_log.update(deployment_metrics)
-                            step_log.update(
-                                {
-                                    key.replace(
-                                        "val_deploy_idle_", "val_deploy_noop_idle_", 1
-                                    ): value
-                                    for key, value in noop_metrics.items()
-                                }
+                            step_log = merge_noop_idle_metrics(
+                                step_log, noop_metrics
                             )
                             release_metrics = evaluate_checkpoint_feasibility(
                                 idle_translation_29_mm=deployment_metrics[
@@ -582,11 +622,7 @@ class TrainATWorkspace(BaseWorkspace):
                                 min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
                             )
                             step_log.update(
-                                {
-                                    key.replace("val_idle_score", "val_deploy_idle_score", 1)
-                                    .replace("val_checkpoint_feasible", "val_deploy_checkpoint_feasible", 1): value
-                                    for key, value in release_metrics.items()
-                                }
+                                namespace_deployment_release_metrics(release_metrics)
                             )
 
                 # checkpoint
@@ -597,14 +633,16 @@ class TrainATWorkspace(BaseWorkspace):
                 ):
                     release_passed = bool(step_log.get("val_deployable", False))
                     release_score = step_log.get("val_deploy_idle_score")
+                    release_phase_start, release_phase_count = get_deployment_phase_window(
+                        cfg
+                    )
                     OmegaConf.update(
                         self.cfg,
                         "release_validation",
                         build_release_validation(
                             passed=release_passed,
-                            deployment_slow_update_interval=get_deployment_phase_window(
-                                cfg
-                            )[1],
+                            deployment_slow_update_interval=release_phase_count,
+                            phase_start=release_phase_start,
                             score=release_score,
                             epoch=self.epoch,
                             metrics=step_log,

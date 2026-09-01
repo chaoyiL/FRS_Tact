@@ -100,7 +100,10 @@ def tactile_cfg(obs_dim: int, extended_dim: int | None = None):
                 "passed": True,
                 "score": 0.1,
                 "deployment_slow_update_interval": 16,
+                "phase_start": 3,
             },
+            "n_obs_steps": 2,
+            "dataset_obs_temporal_downsample_ratio": 2,
             "shape_meta": {
                 "obs": {
                     "tactile_embedding": {"shape": [obs_dim]},
@@ -188,7 +191,15 @@ def payload(cfg):
 
 
 def release_cfg(**release_validation):
-    return OmegaConf.create({"release_validation": release_validation})
+    evidence = {"phase_start": 3}
+    evidence.update(release_validation)
+    return OmegaConf.create(
+        {
+            "n_obs_steps": 2,
+            "dataset_obs_temporal_downsample_ratio": 2,
+            "release_validation": evidence,
+        }
+    )
 
 
 def test_validate_release_qualification_accepts_matching_slow16_evidence() -> None:
@@ -196,6 +207,7 @@ def test_validate_release_qualification_accepts_matching_slow16_evidence() -> No
         "passed": True,
         "score": 0.0125,
         "deployment_slow_update_interval": 16,
+        "phase_start": 3,
     }
 
     deploy.validate_release_qualification(
@@ -205,6 +217,64 @@ def test_validate_release_qualification_accepts_matching_slow16_evidence() -> No
         ldp_checkpoint=Path("ldp/deployable.ckpt"),
         at_checkpoint=Path("at/deployable.ckpt"),
     )
+
+
+@pytest.mark.parametrize("invalid", [16.9, 16.0, "16", True])
+@pytest.mark.parametrize(
+    "field", ["n_obs_steps", "dataset_obs_temporal_downsample_ratio"]
+)
+def test_validate_release_qualification_rejects_non_integer_phase_contract_values(
+    field, invalid
+) -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.1,
+        "deployment_slow_update_interval": 16,
+        "phase_start": 3,
+    }
+    ldp_cfg = release_cfg(**evidence)
+    ldp_cfg[field] = invalid
+
+    with pytest.raises(ValueError, match=field):
+        deploy.validate_release_qualification(
+            ldp_cfg,
+            release_cfg(**evidence),
+            slow_update_interval=16,
+            ldp_checkpoint=Path("ldp/deployable.ckpt"),
+            at_checkpoint=Path("at/deployable.ckpt"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("ldp_start", "at_start", "evidence_start"),
+    [(3, 5, 3), (5, 5, 5), (3, 3, None), (3, 3, 5)],
+)
+def test_validate_release_qualification_rejects_phase_start_mismatch(
+    ldp_start, at_start, evidence_start
+) -> None:
+    evidence = {
+        "passed": True,
+        "score": 0.1,
+        "deployment_slow_update_interval": 16,
+        "phase_start": evidence_start,
+    }
+    ldp_cfg = release_cfg(**evidence)
+    at_cfg = release_cfg(**evidence)
+    ldp_cfg.n_obs_steps = ldp_start + 1
+    ldp_cfg.dataset_obs_temporal_downsample_ratio = 1
+    at_cfg.n_obs_steps = at_start + 1
+    at_cfg.dataset_obs_temporal_downsample_ratio = 1
+    if evidence_start is None:
+        del ldp_cfg.release_validation.phase_start
+
+    with pytest.raises(ValueError, match="phase_start"):
+        deploy.validate_release_qualification(
+            ldp_cfg,
+            at_cfg,
+            slow_update_interval=16,
+            ldp_checkpoint=Path("ldp/deployable.ckpt"),
+            at_checkpoint=Path("at/deployable.ckpt"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -268,6 +338,7 @@ def test_validate_release_qualification_rejects_incomplete_or_invalid_evidence(
         "passed": True,
         "score": 0.1,
         "deployment_slow_update_interval": 16,
+        "phase_start": 3,
     }
     ldp_cfg = release_cfg(**evidence)
     at_cfg = release_cfg(**evidence)
@@ -299,6 +370,7 @@ def test_validate_release_qualification_rejects_runtime_interval_other_than_sixt
         "passed": True,
         "score": 0.1,
         "deployment_slow_update_interval": 16,
+        "phase_start": 3,
     }
 
     with pytest.raises(ValueError, match="slow_update_interval"):

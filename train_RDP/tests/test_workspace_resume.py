@@ -10,6 +10,8 @@ from reactive_diffusion_policy.workspace.train_at_workspace import (
     TrainATWorkspace,
     build_release_validation,
     get_deployment_phase_window,
+    merge_noop_idle_metrics,
+    namespace_deployment_release_metrics,
     should_update_deployable_checkpoint,
 )
 from reactive_diffusion_policy.workspace.train_diffusion_unet_image_workspace import (
@@ -131,6 +133,7 @@ def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence()
     release = build_release_validation(
         passed=False,
         deployment_slow_update_interval=16,
+        phase_start=3,
         score=math.inf,
         epoch=7,
         metrics={"val_deploy_idle_score": math.inf, "val_deployable": False},
@@ -141,6 +144,7 @@ def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence()
         "release_validation": {
             "passed": False,
             "deployment_slow_update_interval": 16,
+            "phase_start": 3,
             "score": None,
             "epoch": 7,
             "metrics": {"val_deploy_idle_score": None, "val_deployable": False},
@@ -151,6 +155,7 @@ def test_release_validation_is_omegaconf_safe_and_fail_closed_without_evidence()
         build_release_validation(
             passed=False,
             deployment_slow_update_interval=15,
+            phase_start=3,
             score=None,
             epoch=7,
             metrics={},
@@ -171,3 +176,147 @@ def test_deployment_release_window_is_always_slow16():
     cfg.validation.deployment_slow_update_interval = 15
     with pytest.raises(ValueError, match="exactly 16"):
         get_deployment_phase_window(cfg)
+
+
+@pytest.mark.parametrize("invalid", [16.9, 16.0, "16", True])
+def test_deployment_phase_contract_rejects_non_integer_interval(invalid):
+    cfg = OmegaConf.create(
+        {
+            "n_obs_steps": 2,
+            "dataset_obs_temporal_downsample_ratio": 2,
+            "validation": {"deployment_slow_update_interval": invalid},
+        }
+    )
+
+    with pytest.raises(ValueError, match="integer"):
+        get_deployment_phase_window(cfg)
+
+    with pytest.raises(ValueError, match="integer"):
+        build_release_validation(
+            passed=False,
+            deployment_slow_update_interval=invalid,
+            phase_start=3,
+            score=None,
+            epoch=1,
+            metrics={},
+        )
+
+
+@pytest.mark.parametrize("phase_start", [3.0, "3", True, 5])
+def test_release_validation_requires_the_exact_integer_phase_start(phase_start):
+    with pytest.raises(ValueError, match="phase_start"):
+        build_release_validation(
+            passed=False,
+            deployment_slow_update_interval=16,
+            phase_start=phase_start,
+            score=None,
+            epoch=1,
+            metrics={},
+        )
+
+
+@pytest.mark.parametrize("key", ["n_obs_steps", "dataset_obs_temporal_downsample_ratio"])
+@pytest.mark.parametrize("invalid", [2.0, "2", True])
+def test_deployment_phase_contract_rejects_non_integer_observation_inputs(key, invalid):
+    cfg = OmegaConf.create(
+        {
+            "n_obs_steps": 2,
+            "dataset_obs_temporal_downsample_ratio": 2,
+            "validation": {"deployment_slow_update_interval": 16},
+        }
+    )
+    cfg[key] = invalid
+
+    with pytest.raises(ValueError, match="integer"):
+        get_deployment_phase_window(cfg)
+
+
+@pytest.mark.parametrize(
+    ("n_obs_steps", "ratio"),
+    [(1, 2), (2, 3)],
+)
+def test_deployment_phase_contract_rejects_noncanonical_start(n_obs_steps, ratio):
+    cfg = OmegaConf.create(
+        {
+            "n_obs_steps": n_obs_steps,
+            "dataset_obs_temporal_downsample_ratio": ratio,
+            "validation": {"deployment_slow_update_interval": 16},
+        }
+    )
+
+    with pytest.raises(ValueError, match="phase_start"):
+        get_deployment_phase_window(cfg)
+
+
+def test_noop_metric_merge_preserves_real_active_and_micro_evidence():
+    real_metrics = {
+        "val_deploy_idle_translation_step_p95_mm": 0.01,
+        "val_deploy_active_right_translation_mae_mm": 1.0,
+        "val_deploy_micro_motion_recall": 0.99,
+    }
+    noop_metrics = {
+        "val_deploy_idle_translation_step_p95_mm": 0.02,
+        "val_deploy_active_right_translation_mae_mm": math.nan,
+        "val_deploy_micro_motion_recall": math.nan,
+    }
+
+    merged = merge_noop_idle_metrics(real_metrics, noop_metrics)
+    release_metrics = namespace_deployment_release_metrics(
+        {
+            "val_active_translation_degradation": 0.01,
+            "val_active_rotation_degradation": 0.02,
+            "val_micro_motion_recall": 0.99,
+            "val_idle_score": 0.03,
+            "val_checkpoint_feasible": True,
+            "val_deployable": True,
+        }
+    )
+    evidence = build_release_validation(
+        passed=True,
+        deployment_slow_update_interval=16,
+        phase_start=3,
+        score=release_metrics["val_deploy_idle_score"],
+        epoch=1,
+        metrics={**merged, **release_metrics},
+    )
+
+    assert merged["val_deploy_active_right_translation_mae_mm"] == 1.0
+    assert merged["val_deploy_micro_motion_recall"] == 0.99
+    assert merged["val_deploy_noop_idle_translation_step_p95_mm"] == 0.02
+    assert "val_deploy_noop_active_right_translation_mae_mm" not in merged
+    assert "val_deploy_noop_micro_motion_recall" not in merged
+    assert evidence["metrics"]["val_deploy_active_right_translation_mae_mm"] == 1.0
+    assert evidence["metrics"]["val_deploy_micro_motion_recall"] == 0.99
+
+
+def test_release_metric_namespace_preserves_historical_and_deployment_values():
+    full = {
+        "val_active_translation_degradation": 0.5,
+        "val_active_rotation_degradation": 0.6,
+        "val_micro_motion_recall": 0.7,
+    }
+    deployment = namespace_deployment_release_metrics(
+        {
+            "val_active_translation_degradation": 0.01,
+            "val_active_rotation_degradation": 0.02,
+            "val_micro_motion_recall": 0.99,
+            "val_idle_score": 0.03,
+            "val_checkpoint_feasible": True,
+            "val_deployable": True,
+        }
+    )
+    evidence = build_release_validation(
+        passed=True,
+        deployment_slow_update_interval=16,
+        phase_start=3,
+        score=deployment["val_deploy_idle_score"],
+        epoch=1,
+        metrics={**full, **deployment},
+    )
+
+    assert evidence["metrics"]["val_micro_motion_recall"] == 0.7
+    assert evidence["metrics"]["val_active_translation_degradation"] == 0.5
+    assert evidence["metrics"]["val_deploy_micro_motion_recall"] == 0.99
+    assert evidence["metrics"]["val_deploy_active_translation_degradation"] == 0.01
+    assert evidence["metrics"]["val_deploy_active_rotation_degradation"] == 0.02
+    assert evidence["metrics"]["val_deploy_checkpoint_feasible"] is True

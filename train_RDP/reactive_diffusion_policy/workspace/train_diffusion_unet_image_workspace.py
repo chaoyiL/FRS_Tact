@@ -52,6 +52,7 @@ from reactive_diffusion_policy.workspace.train_at_workspace import (
     get_effective_num_batches,
     get_legacy_optimizer_step,
     get_num_training_steps,
+    namespace_deployment_release_metrics,
     should_optimizer_step,
     should_update_deployable_checkpoint,
 )
@@ -526,11 +527,7 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
                                 min_micro_motion_recall=cfg.validation.min_micro_motion_recall,
                             )
                             step_log.update(
-                                {
-                                    key.replace("val_idle_score", "val_deploy_idle_score", 1)
-                                    .replace("val_checkpoint_feasible", "val_deploy_checkpoint_feasible", 1): value
-                                    for key, value in release_metrics.items()
-                                }
+                                namespace_deployment_release_metrics(release_metrics)
                             )
 
                 # run diffusion sampling on a training batch
@@ -575,14 +572,16 @@ class TrainDiffusionUnetImageWorkspace(BaseWorkspace):
 
                     release_passed = bool(step_log.get("val_deployable", False))
                     release_score = step_log.get("val_deploy_idle_score")
+                    release_phase_start, release_phase_count = get_deployment_phase_window(
+                        cfg
+                    )
                     OmegaConf.update(
                         self.cfg,
                         "release_validation",
                         build_release_validation(
                             passed=release_passed,
-                            deployment_slow_update_interval=get_deployment_phase_window(
-                                cfg
-                            )[1],
+                            deployment_slow_update_interval=release_phase_count,
+                            phase_start=release_phase_start,
                             score=release_score,
                             epoch=self.epoch,
                             metrics=step_log,

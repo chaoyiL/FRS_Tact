@@ -319,6 +319,22 @@ def validate_release_qualification(
                 f"{role} checkpoint {checkpoint} is missing release_validation evidence"
             )
 
+        n_obs_steps = OmegaConf.select(cfg, "n_obs_steps")
+        ratio = OmegaConf.select(cfg, "dataset_obs_temporal_downsample_ratio")
+        for field, value in (
+            ("n_obs_steps", n_obs_steps),
+            ("dataset_obs_temporal_downsample_ratio", ratio),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"{role} checkpoint {checkpoint} {field} must be a non-boolean integer"
+                )
+        phase_start = n_obs_steps * ratio - 1
+        if phase_start != 3:
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} derived phase_start must be exactly 3"
+            )
+
         passed = OmegaConf.select(evidence, "passed")
         if passed is not True:
             raise ValueError(
@@ -335,6 +351,17 @@ def validate_release_qualification(
             raise ValueError(
                 f"{role} checkpoint {checkpoint} release_validation.score "
                 "must be finite"
+            )
+
+        evidence_phase_start = OmegaConf.select(evidence, "phase_start")
+        if (
+            isinstance(evidence_phase_start, bool)
+            or not isinstance(evidence_phase_start, int)
+            or evidence_phase_start != 3
+        ):
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation phase_start "
+                "must be exactly 3"
             )
 
         release_interval = OmegaConf.select(
