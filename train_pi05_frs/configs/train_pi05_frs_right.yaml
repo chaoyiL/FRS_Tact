@@ -3,7 +3,7 @@
 # 纯视觉 checkpoint 由以下命令下载到 /workspace/checkpoints/model/pi05_task3_0830_1w：
 # FRS_CHECKPOINT_ROOT=/workspace/checkpoints \
 #   bash scripts/download_ckpt.sh KaiyueChen/pi05_task3_0830_1w
-checkpoint: /workspace/checkpoints/model/pi05_task3_0830_1w
+checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
 allow_download: false
 
 datasets:
@@ -42,7 +42,7 @@ model:
   state_dim: 7
   robot_action_dim: 10
   use_tactile_encoder: true
-  tactile_encoder_path: /workspace/checkpoints/encoder/pi05_right
+  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
   freeze_tactile_encoder: true
   tactile_keys:
     - observation.images.tactile_right_0
@@ -62,7 +62,7 @@ model:
 
 norm_stats:
   # 必须使用训练右手 Pi0.5 checkpoint 时的同一套 7D state / 10D action 统计量。
-  dir: /workspace/checkpoints/model/pi05_task3_0830_1w/assets
+  dir: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
   asset_id: insert_0102_train90
   use_quantile_norm: true
 

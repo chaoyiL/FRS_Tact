@@ -11,13 +11,13 @@ augmentation:
   enabled: true
 
 datasets:
-  - repo_id: KaiyueChen/pick_tube_05
-    root: /workspace/lerobot_v30/KaiyueChen/pick_tube_05
+  - repo_id: KaiyueChen/pick_01
+    root: /workspace/lerobot_v30/KaiyueChen/pick_01
     action_key: action
-  # Add more converted LeRobot v3 datasets here:
-  # - repo_id: KaiyueChen/pick_tube_06
-  #   root: /workspace/lerobot_v30/KaiyueChen/pick_tube_06
-  #   action_key: action
+
+  - repo_id: KaiyueChen/pick_02
+    root: /workspace/lerobot_v30/KaiyueChen/pick_02
+    action_key: action
 
 dataset_contract:
   state_key: observation.state
@@ -30,13 +30,13 @@ dataset_contract:
 norm_stats:
   dir: ./assets
   # 只使用 90% 训练 episode 计算，val_unseen 不参与统计。
-  asset_id: task1
+  asset_id: pick_0102
 
 validation:
   # 每个数据集分别按 episode 固定拆分 90% train / 10% val_unseen。
   ratio: 0.10
   seed: 42
-  interval: 2000
+  interval: 1000
   # val_seen 从训练 episode 的 frame 中固定抽样，但评估时关闭图像增强。
   track_seen: true
   # 每个 split 最多 20 个完整 batch；batch_size=128 时即约 2560 frames。
@@ -44,10 +44,10 @@ validation:
 
 training:
   # 使用新目录，避免与无双验证或旧增强实验混合续训。
-  output: /workspace/outputs/pi05_vision_balanced_light_v2_train90_val10_seen_unseen
+  output: /workspace/outputs/pi05_bimanual_pick_0102_balanced_light_v2
   batch_size: 128
   num_workers: 8
-  steps: 100000
+  steps: 40000
   log_interval: 200
   # 与验证间隔一致，确保 2000/4000/6000/8000... 均有可部署 checkpoint。
   save_interval: 2000
@@ -61,4 +61,4 @@ training:
 wandb:
   enable: true
   project: pi05-vision
-  exp_name: pi05_vision_balanced_light_v2_train90_val10_seen_unseen
+  exp_name: pi05_bimanual_pick_0102_balanced_light_v2
