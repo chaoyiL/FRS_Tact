@@ -148,3 +148,38 @@ def test_predict_independent_snapshots_synchronizes_cuda_before_latency(
 
     assert clock_reads == 2
     np.testing.assert_allclose(results["latency_ms"], [125.0])
+
+
+def test_write_reports_renders_decodable_right_snapshot_response_plot(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    snapshots = evaluator.load_snapshots(snapshot_dir)
+    results = evaluator.predict_independent_snapshots(
+        _FakeRuntime(), evaluator.SINGLE_RIGHT_ARM_7X10, snapshots, seed=7
+    )
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+
+    response_plot = paths["snapshot_responses"]
+    assert response_plot.name == "right_snapshot_responses.png"
+    decoded = cv2.imread(str(response_plot), cv2.IMREAD_COLOR)
+    assert decoded is not None and decoded.size > 0
+
+
+def test_write_reports_includes_snapshot_action_metrics(
+    snapshot_dir: Path, tmp_path: Path
+) -> None:
+    snapshots = evaluator.load_snapshots(snapshot_dir)
+    results = evaluator.predict_independent_snapshots(
+        _FakeRuntime(), evaluator.SINGLE_RIGHT_ARM_7X10, snapshots, seed=7
+    )
+
+    paths = evaluator.write_reports(tmp_path / "reports", results)
+
+    header = paths["trajectory_csv"].read_text(encoding="utf-8").splitlines()[0].split(",")
+    assert {"translation_norm", "rotation_angle", "gripper_command", "recorded_right_gripper", "latency_ms"} <= set(header)
+    summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
+    assert summary["state"] == {"finite": True, "shape": [len(snapshots), 20]}
+    for name in ("translation_norm", "rotation_angle", "gripper_delta", "latency_ms"):
+        assert set(summary[name]) == {"min", "max", "mean"}
+        assert all(np.isfinite(value) for value in summary[name].values())
