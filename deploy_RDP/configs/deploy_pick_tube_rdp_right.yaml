@@ -1,0 +1,31 @@
+task: insert the object with the right hand
+
+model:
+  ldp_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/ldp/latest.ckpt
+  at_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/at/latest.ckpt
+  tactile_encoder_dir: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
+  tactile_pca_path: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/pca/tactile_pca_insert_01_02_encoder0824_2x15.npz
+  state_action_profile: single-right-arm-7x10
+  artifact_verification: legacy-compatible
+  device: cuda:0
+  num_inference_steps: 8
+
+connection:
+  address: 127.0.0.1
+  port: 26421
+  add_port: true
+  retry_interval_s: 1.0
+  action_ack_timeout_s: 3.0
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+
+control:
+  control_frequency: 30.0
+  controller_frequency: 80.0
+  slow_update_interval: 16
+
+runtime:
+  auto_start: false
+  warmup_runs: 2
+  status_interval_s: 2.0
+  max_iterations: 0

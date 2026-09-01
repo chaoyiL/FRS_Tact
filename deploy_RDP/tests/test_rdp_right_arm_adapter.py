@@ -1,10 +1,7 @@
 import numpy as np
 import pytest
 
-from reactive_diffusion_policy.deploy.right_arm_adapter import (
-    expand_right_action,
-    project_right_state,
-)
+from right_arm_adapter import expand_right_action, project_right_state
 
 
 def test_project_right_state_uses_right_slice():

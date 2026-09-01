@@ -34,8 +34,12 @@ class FakeTactileEncoder(nn.Module):
 
 
 class FakePolicy:
-    def __init__(self, components_per_arm: int) -> None:
+    def __init__(
+        self, components_per_arm: int, state_dim: int = 20, action_dim: int = 20
+    ) -> None:
         self.components_per_arm = components_per_arm
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self.slow_calls = 0
         self.fast_history_lengths = []
         self.slow_observation_states = []
@@ -43,7 +47,7 @@ class FakePolicy:
     def predict_action(self, obs_dict, **kwargs):
         assert tuple(obs_dict["camera1"].shape) == (1, 2, 3, 224, 224)
         assert tuple(obs_dict["camera2"].shape) == (1, 2, 3, 224, 224)
-        assert tuple(obs_dict["observation_state"].shape) == (1, 2, 20)
+        assert tuple(obs_dict["observation_state"].shape) == (1, 2, self.state_dim)
         tactile_dim = self.components_per_arm * 2
         assert tuple(obs_dict["tactile_embedding"].shape) == (1, 2, tactile_dim)
         torch.testing.assert_close(
@@ -74,7 +78,7 @@ class FakePolicy:
         assert extended_obs["tactile_embedding"].shape[2] == self.components_per_arm * 2
         assert extended_obs_last_step == history_length
         self.fast_history_lengths.append(history_length)
-        return {"action": torch.full((1, history_length, 20), float(history_length))}
+        return {"action": torch.full((1, history_length, self.action_dim), float(history_length))}
 
 
 def observation(step: int = 0) -> dict:
@@ -92,12 +96,27 @@ def tactile_cfg(obs_dim: int, extended_dim: int | None = None):
     return OmegaConf.create(
         {
             "shape_meta": {
-                "obs": {"tactile_embedding": {"shape": [obs_dim]}},
+                "obs": {
+                    "tactile_embedding": {"shape": [obs_dim]},
+                    "observation_state": {"shape": [20]},
+                },
                 "extended_obs": {
                     "tactile_embedding": {
                         "shape": [obs_dim if extended_dim is None else extended_dim]
                     }
                 },
+                "action": {"shape": [20]},
+            }
+        }
+    )
+
+
+def state_action_cfg(state_dim: int, action_dim: int):
+    return OmegaConf.create(
+        {
+            "shape_meta": {
+                "obs": {"observation_state": {"shape": [state_dim]}},
+                "action": {"shape": [action_dim]},
             }
         }
     )
@@ -578,6 +597,81 @@ def test_tactile_dim_rejects_malformed_shapes(shape) -> None:
 
     with pytest.raises(ValueError):
         deploy._tactile_dim(cfg, "LDP", "obs")
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [deploy.DUAL_ARM_20X20, deploy.SINGLE_RIGHT_ARM_7X10],
+    ids=["dual_arm", "single_right"],
+)
+def test_state_action_dimensions_accept_matching_ldp_and_at(profile) -> None:
+    deploy.validate_state_action_dimensions(
+        profile,
+        state_action_cfg(profile.state_dim, profile.action_dim),
+        state_action_cfg(profile.state_dim, profile.action_dim),
+        Path("ldp.ckpt"),
+        Path("at.ckpt"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("ldp_state", "ldp_action", "at_state", "at_action", "source"),
+    [
+        pytest.param(20, 10, 7, 10, "LDP state", id="ldp-state"),
+        pytest.param(7, 20, 7, 10, "LDP action", id="ldp-action"),
+        pytest.param(7, 10, 20, 10, "AT state", id="at-state"),
+        pytest.param(7, 10, 7, 20, "AT action", id="at-action"),
+    ],
+)
+def test_state_action_dimensions_reject_mismatching_ldp_or_at(
+    ldp_state, ldp_action, at_state, at_action, source
+) -> None:
+    with pytest.raises(ValueError, match=source):
+        deploy.validate_state_action_dimensions(
+            deploy.SINGLE_RIGHT_ARM_7X10,
+            state_action_cfg(ldp_state, ldp_action),
+            state_action_cfg(at_state, at_action),
+            Path("ldp.ckpt"),
+            Path("at.ckpt"),
+        )
+
+
+def test_single_right_runtime_projects_state_and_expands_wire_action() -> None:
+    policy = FakePolicy(15, state_dim=7, action_dim=10)
+    encoder = FakeTactileEncoder()
+    means = np.zeros((2, 1024), dtype=np.float32)
+    components = np.zeros((2, 15, 1024), dtype=np.float32)
+    components[:, np.arange(15), np.arange(15)] = 1.0
+    tactile_pca = deploy.BimanualTactilePCA(means, components)
+    runtime = deploy.PickTubeRDPRuntime(
+        policy,
+        encoder,
+        torch.device("cpu"),
+        tactile_pca,
+        slow_update_interval=5,
+        dataset_obs_temporal_downsample_ratio=2,
+        n_obs_steps=2,
+        profile=deploy.SINGLE_RIGHT_ARM_7X10,
+    )
+
+    bridge_observation = observation()
+    bridge_observation["observation.state"] = np.arange(20, dtype=np.float32)
+    policy_action, slow_update = runtime.predict(bridge_observation)
+    wire_action = deploy.wire_action_for_profile(
+        policy_action, bridge_observation, deploy.SINGLE_RIGHT_ARM_7X10
+    )
+
+    assert slow_update is True
+    assert policy_action.shape == (1, 10)
+    assert policy_action.dtype == np.float32
+    assert policy.slow_observation_states == [[7.0, 7.0]]
+    assert wire_action.shape == (1, 20)
+    np.testing.assert_array_equal(wire_action[:, :3], 0)
+    np.testing.assert_array_equal(wire_action[:, 3:9], [[1, 0, 0, 0, 1, 0]])
+    np.testing.assert_array_equal(
+        wire_action[:, 9], bridge_observation["observation.state"][6]
+    )
+    np.testing.assert_array_equal(wire_action[:, 10:], policy_action)
 
 
 @pytest.mark.parametrize("components_per_arm", [8, 15, 30])

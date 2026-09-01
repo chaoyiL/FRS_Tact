@@ -27,6 +27,14 @@ from reactive_diffusion_policy.common.artifact_manifest import (
     ArtifactManifest,
     sha256_file,
 )
+from reactive_diffusion_policy.common.pick_tube_action_contract import (
+    DUAL_ARM_20X20,
+    DUAL_ARM_PROFILE,
+    SINGLE_RIGHT_ARM_7X10,
+    StateActionProfile,
+    resolve_state_action_profile,
+)
+from right_arm_adapter import expand_right_action, project_right_state
 
 
 CAMERA_KEYS = ("observation.images.camera0", "observation.images.camera1")
@@ -39,7 +47,6 @@ TACTILE_KEYS = (
 STATE_KEY = "observation.state"
 IMAGE_SIZE = 224
 STATE_DIM = 20
-ACTION_DIM = 20
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -169,6 +176,60 @@ def validate_tactile_dimensions(
         )
 
 
+def _state_action_dim(
+    cfg: Any,
+    role: str,
+    field: str,
+    checkpoint: Path,
+) -> int:
+    key = (
+        "shape_meta.obs.observation_state.shape"
+        if field == "state"
+        else "shape_meta.action.shape"
+    )
+    try:
+        shape = OmegaConf.select(cfg, key)
+    except Exception as exc:
+        raise ValueError(
+            f"{role} {field} checkpoint {checkpoint} could not resolve {key}: {exc}"
+        ) from exc
+    if (
+        not isinstance(shape, Sequence)
+        or isinstance(shape, (str, bytes))
+        or len(shape) != 1
+    ):
+        raise ValueError(
+            f"{role} {field} checkpoint {checkpoint} is missing a valid {key}"
+        )
+    dimension = shape[0]
+    if isinstance(dimension, bool) or not isinstance(dimension, int) or dimension < 1:
+        raise ValueError(
+            f"{role} {field} checkpoint {checkpoint} has invalid {key}: {list(shape)}"
+        )
+    return dimension
+
+
+def validate_state_action_dimensions(
+    profile: StateActionProfile,
+    ldp_cfg: Any,
+    at_cfg: Any,
+    ldp_checkpoint: Path,
+    at_checkpoint: Path,
+) -> None:
+    expected = {"state": profile.state_dim, "action": profile.action_dim}
+    for role, cfg, checkpoint in (
+        ("LDP", ldp_cfg, ldp_checkpoint),
+        ("AT", at_cfg, at_checkpoint),
+    ):
+        for field, expected_dim in expected.items():
+            actual_dim = _state_action_dim(cfg, role, field, checkpoint)
+            if actual_dim != expected_dim:
+                raise ValueError(
+                    f"{role} {field} dimension mismatch for profile {profile.name}: "
+                    f"expected {expected_dim}D, got {actual_dim}D in {checkpoint}"
+                )
+
+
 def validate_artifact_pairing(
     ldp_cfg: Any,
     at_cfg: Any,
@@ -233,6 +294,7 @@ def load_policy(
     device: torch.device,
     num_inference_steps: int,
     tactile_embedding_dim: int,
+    profile: StateActionProfile = DUAL_ARM_20X20,
     artifact_verification: str = "strict",
     tactile_pca_path: Path | None = None,
 ):
@@ -247,6 +309,9 @@ def load_policy(
         at_cfg,
         ldp_checkpoint,
         at_checkpoint,
+    )
+    validate_state_action_dimensions(
+        profile, cfg, at_cfg, ldp_checkpoint, at_checkpoint
     )
     validate_artifact_pairing(
         cfg,
@@ -293,6 +358,7 @@ class PickTubeRDPRuntime:
         slow_update_interval: int,
         dataset_obs_temporal_downsample_ratio: int,
         n_obs_steps: int,
+        profile: StateActionProfile = DUAL_ARM_20X20,
     ) -> None:
         if slow_update_interval < 1:
             raise ValueError("slow_update_interval must be positive")
@@ -305,6 +371,7 @@ class PickTubeRDPRuntime:
         self.slow_update_interval = slow_update_interval
         self.temporal_downsample_ratio = dataset_obs_temporal_downsample_ratio
         self.n_obs_steps = n_obs_steps
+        self.profile = profile
         self.reset()
 
     def reset(self) -> None:
@@ -322,9 +389,16 @@ class PickTubeRDPRuntime:
         if missing:
             raise ValueError(f"Robot observation is missing keys: {missing}")
 
-        state = np.asarray(observation[STATE_KEY], dtype=np.float32)
-        if state.shape != (STATE_DIM,) or not np.isfinite(state).all():
-            raise ValueError(f"Expected finite {STATE_DIM}D state, got {state.shape}")
+        bridge_state = np.asarray(observation[STATE_KEY], dtype=np.float32)
+        if bridge_state.shape != (STATE_DIM,) or not np.isfinite(bridge_state).all():
+            raise ValueError(
+                f"Expected finite {STATE_DIM}D state, got {bridge_state.shape}"
+            )
+        state = (
+            project_right_state(observation)
+            if self.profile == SINGLE_RIGHT_ARM_7X10
+            else bridge_state
+        )
 
         camera_images = [_rgb_image(observation[key], key) for key in CAMERA_KEYS]
         tactile_images = [_rgb_image(observation[key], key) for key in TACTILE_KEYS]
@@ -411,10 +485,24 @@ class PickTubeRDPRuntime:
             dataset_obs_temporal_downsample_ratio=self.temporal_downsample_ratio,
         )
         action = result["action"][0, -1].detach().float().cpu().numpy()
-        if action.shape != (ACTION_DIM,) or not np.isfinite(action).all():
-            raise RuntimeError(f"Expected finite {ACTION_DIM}D action, got {action.shape}")
+        if action.shape != (self.profile.action_dim,) or not np.isfinite(action).all():
+            raise RuntimeError(
+                f"Expected finite {self.profile.action_dim}D action, got {action.shape}"
+            )
         self.step += 1
         return action[None].astype(np.float32, copy=False), slow_update
+
+
+def wire_action_for_profile(
+    action: np.ndarray,
+    observation: Mapping[str, Any],
+    profile: StateActionProfile,
+) -> np.ndarray:
+    if profile == SINGLE_RIGHT_ARM_7X10:
+        return expand_right_action(action, observation)
+    if profile == DUAL_ARM_20X20:
+        return action
+    raise ValueError(f"Unsupported state/action profile: {profile.name}")
 
 
 def _token(connection: dict[str, Any]) -> str | None:
@@ -431,6 +519,9 @@ def run(config_path: Path, device_override: str | None = None) -> None:
     connection = config["connection"]
     control = config["control"]
     runtime_config = config["runtime"]
+    profile = resolve_state_action_profile(
+        str(model_config.get("state_action_profile", DUAL_ARM_PROFILE))
+    )
     device = torch.device(device_override or str(model_config.get("device", "cuda:0")))
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA is unavailable")
@@ -454,6 +545,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         device,
         int(model_config.get("num_inference_steps", 8)),
         tactile_pca.output_dim,
+        profile=profile,
         artifact_verification=str(model_config.get("artifact_verification", "strict")),
         tactile_pca_path=tactile_pca_path,
     )
@@ -468,6 +560,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
             checkpoint_cfg.dataset_obs_temporal_downsample_ratio
         ),
         n_obs_steps=int(checkpoint_cfg.n_obs_steps),
+        profile=profile,
     )
 
     bridge = RobotBridgeClient(
@@ -514,7 +607,8 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         while max_iterations <= 0 or iteration < max_iterations:
             obs_seq, observation = bridge.receive_observation()
             started = time.perf_counter()
-            action, slow_update = rdp.predict(observation)
+            policy_action, slow_update = rdp.predict(observation)
+            action = wire_action_for_profile(policy_action, observation, profile)
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             inference_ms = (time.perf_counter() - started) * 1000.0
