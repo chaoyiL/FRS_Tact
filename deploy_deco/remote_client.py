@@ -27,6 +27,43 @@ from .right_arm_adapter import expand_right_action, project_right_observation
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_deco.yaml"
 DEFAULT_OBSERVE_ONLY_OUTPUT_ROOT = Path(__file__).resolve().parent / "outputs"
+LEFT_GRIPPER_ACTION_INDEX = 9
+RIGHT_GRIPPER_ACTION_INDEX = 19
+GRIPPER_MIN_WIDTH_M = 0.0677
+GRIPPER_MAX_WIDTH_M = 0.1208
+
+
+def apply_right_gripper_bias(action: Any, bias_m: float) -> np.ndarray:
+    """Return a copy with a constant bias applied to the right gripper width."""
+    bias = float(bias_m)
+    if not np.isfinite(bias):
+        raise ValueError("right_gripper_bias_m must be finite")
+    adjusted = np.array(action, copy=True)
+    if bias == 0.0:
+        return adjusted
+    adjusted[:, RIGHT_GRIPPER_ACTION_INDEX] = np.clip(
+        adjusted[:, RIGHT_GRIPPER_ACTION_INDEX] + bias,
+        GRIPPER_MIN_WIDTH_M,
+        GRIPPER_MAX_WIDTH_M,
+    )
+    return adjusted
+
+
+def apply_gripper_biases(
+    action: Any, left_bias_m: float, right_bias_m: float
+) -> np.ndarray:
+    """Return a copy with independent left and right gripper biases."""
+    adjusted = apply_right_gripper_bias(action, right_bias_m)
+    left_bias = float(left_bias_m)
+    if not np.isfinite(left_bias):
+        raise ValueError("left_gripper_bias_m must be finite")
+    if left_bias != 0.0:
+        adjusted[:, LEFT_GRIPPER_ACTION_INDEX] = np.clip(
+            adjusted[:, LEFT_GRIPPER_ACTION_INDEX] + left_bias,
+            GRIPPER_MIN_WIDTH_M,
+            GRIPPER_MAX_WIDTH_M,
+        )
+    return adjusted
 
 
 def check(config_path: Path) -> dict[str, Any]:
@@ -131,6 +168,9 @@ def run(
     checkpoint = resolve_checkpoint(config)
     connection = section(config, "connection")
     observation_config = section(config, "observation")
+    control_config = section(config, "control")
+    left_gripper_bias_m = float(control_config.get("left_gripper_bias_m", 0.0))
+    right_gripper_bias_m = float(control_config.get("right_gripper_bias_m", 0.0))
     seed = int(config.get("seed", 0))
     warmup_runs = int(runtime.get("warmup_runs", 1))
     observation_timeout = float(connection.get("observation_timeout_s", 30.0))
@@ -146,10 +186,12 @@ def run(
         )
 
     def wire_action(action: Any, observation: dict[str, Any]) -> Any:
-        return (
-            expand_right_action(action, observation)
-            if profile == SINGLE_RIGHT_ARM_PROFILE
-            else action
+        if profile == SINGLE_RIGHT_ARM_PROFILE:
+            return expand_right_action(action, observation)
+        return apply_gripper_biases(
+            action,
+            left_gripper_bias_m,
+            right_gripper_bias_m,
         )
 
     print(f"[startup] Loading DECO TorchScript on {config['device']}...")
@@ -170,6 +212,10 @@ def run(
     tactile_keys = getattr(policy, "tactile_keys", ())
     artifact_mode = "stage2_tactile" if tactile_keys else "stage1_vision"
     print(f"[startup] artifact_mode={artifact_mode}")
+    if left_gripper_bias_m != 0.0:
+        print(f"[startup] left_gripper_bias_m={left_gripper_bias_m:g}")
+    if right_gripper_bias_m != 0.0:
+        print(f"[startup] right_gripper_bias_m={right_gripper_bias_m:g}")
     if tactile_keys:
         print(f"[startup] Stage 2 tactile key order: {tactile_keys}")
     if observe_only and tuple(tactile_keys) != TACTILE_FIELD_ORDER:

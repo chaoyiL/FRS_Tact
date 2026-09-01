@@ -1,6 +1,6 @@
 # Dedicated deployment config for the single phase-conditioned Bread DECO weight.
 # Export the new artifact to this path before launching the Bread phase client.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0829/bread/bread_phase_v3.ts
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/deco_0830/bread_v3/deco_stage1_best.ts
 device: cuda:0
 seed: 0
 model:
@@ -29,7 +29,7 @@ control:
   control_frequency: 30.0
   controller_frequency: 80.0
   action_horizon: 32
-  steps_per_inference: 16
+  steps_per_inference: 32
 
 runtime:
   auto_start: false

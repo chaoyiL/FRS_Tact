@@ -2,7 +2,7 @@
 # This profile requires a checkpoint trained with 7D right-arm state and 10D robot actions.
 
 # Right-hand Pi0.5 checkpoint trained on insert_01.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task4_0830_6k
 seed: 0
 num_steps: 10
 
@@ -29,8 +29,8 @@ model:
 
 norm_stats:
   # Assets produced by the same right-hand fine-tune.
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
-  asset_id: insert_0102_train90
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task4_0830_6k/assets
+  asset_id: press_0102
   use_quantile_norm: true
 
 connection:
@@ -48,7 +48,7 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Firstly, use the hand to pick up the tube and then insert it back.
+  language_prompt: Use the hand to press the button of the bread machine.
   single_arm_mode: true
   controlled_arm: right
   no_state_obs_mode: false
