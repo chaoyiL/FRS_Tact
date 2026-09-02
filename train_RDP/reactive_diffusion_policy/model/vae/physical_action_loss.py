@@ -161,6 +161,9 @@ def compute_physical_action_loss(
             predicted_position - target_position, dim=-1
         )
         position_value = _scaled_huber(position_error, resolved["position_scale"])
+        micro_motion_position_value = _scaled_huber(
+            position_error, LOW_TRANSLATION_DELTA_M
+        )
         position_terms.append(_masked_mean(position_value, valid_mask))
 
         with torch.autocast(device_type=prediction.device.type, enabled=False):
@@ -171,6 +174,9 @@ def compute_physical_action_loss(
             rotation_error = _geodesic_angle(target_rotation, predicted_rotation)
             rotation_value = _scaled_huber(
                 rotation_error, resolved["rotation_scale"]
+            )
+            micro_motion_rotation_value = _scaled_huber(
+                rotation_error, math.radians(LOW_ROTATION_DELTA_DEG)
             )
             rotation_terms.append(_masked_mean(rotation_value, valid_mask))
             degenerate_terms.append(_masked_mean(degeneracy, valid_mask))
@@ -207,7 +213,8 @@ def compute_physical_action_loss(
             valid_mask & ~idle_arm_mask[..., arm_index] & target_is_micro_motion
         )
         micro_motion_terms.append(_masked_mean(
-            position_value + rotation_value, micro_motion_mask
+            micro_motion_position_value + micro_motion_rotation_value,
+            micro_motion_mask,
         ))
         idle_position_error = torch.linalg.vector_norm(predicted_position, dim=-1)
         idle_value = (

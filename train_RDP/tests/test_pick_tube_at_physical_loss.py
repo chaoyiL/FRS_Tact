@@ -283,6 +283,44 @@ def test_micro_motion_loss_excludes_idle_large_and_invalid_targets():
     torch.testing.assert_close(micro_motion_loss, torch.zeros_like(micro_motion_loss))
 
 
+@pytest.mark.parametrize("micro_motion", ["translation", "rotation"])
+def test_micro_motion_loss_uses_low_contract_thresholds_as_scales(micro_motion):
+    target = _identity_actions(horizon=1)
+    prediction = _identity_actions(horizon=1)
+    if micro_motion == "translation":
+        magnitude = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+        target[..., 0] = magnitude
+        normalized_error = magnitude / LOW_TRANSLATION_DELTA_M
+    else:
+        angle = math.radians((LOW_ROTATION_DELTA_DEG + HIGH_ROTATION_DELTA_DEG) / 2)
+        target[..., 3:9] = torch.tensor(
+            [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
+            dtype=torch.float64,
+        )
+        normalized_error = angle / math.radians(LOW_ROTATION_DELTA_DEG)
+
+    micro_motion_loss = _loss(
+        target,
+        prediction,
+        weights=dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0),
+    )["micro_motion_loss"]
+    reconstruction_value = normalized_error - 0.5
+    if micro_motion == "translation":
+        identity_rotation_error = math.acos(1.0 - 1e-7)
+        normalized_identity_error = (
+            identity_rotation_error / math.radians(LOW_ROTATION_DELTA_DEG)
+        )
+        reconstruction_value += 0.5 * normalized_identity_error ** 2
+    expected = reconstruction_value / 2
+
+    torch.testing.assert_close(
+        micro_motion_loss,
+        torch.tensor(expected, dtype=torch.float64),
+        atol=1e-6,
+        rtol=0,
+    )
+
+
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():
     target = _identity_actions(horizon=1)
     prediction = target.clone()
