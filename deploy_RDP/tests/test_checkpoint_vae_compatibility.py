@@ -37,4 +37,4 @@ def test_checkpoint_policy_at_hydra_instantiates_with_micro_motion_weight():
         assert component_state.keys() == weighted_state[component].keys()
         for name, value in component_state.items():
             assert value.shape == weighted_state[component][name].shape
-    legacy_vae.load_state_dict(weighted_state)
+    vae.load_state_dict(legacy_state)
