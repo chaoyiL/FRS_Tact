@@ -360,6 +360,7 @@ def test_bf16_cpu_autocast_preserves_micro_motion_classification(micro_motion):
             [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
             dtype=torch.float32,
         )
+    prediction.requires_grad_(True)
     valid_mask = torch.ones(target.shape[:2], dtype=torch.bool)
     idle_mask = torch.zeros((*target.shape[:2], 1), dtype=torch.bool)
     weights = dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0)
@@ -376,6 +377,52 @@ def test_bf16_cpu_autocast_preserves_micro_motion_classification(micro_motion):
     assert reference > 0
     assert actual > 0
     torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+    actual.backward()
+    assert torch.isfinite(prediction.grad).all()
+    assert torch.count_nonzero(prediction.grad) > 0
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or not torch.cuda.is_bf16_supported(),
+    reason="CUDA BF16 support is required",
+)
+@pytest.mark.parametrize("micro_motion", ["translation", "rotation"])
+def test_bf16_cuda_autocast_preserves_micro_motion_classification(micro_motion):
+    target = _identity_actions(batch=1, horizon=1, dtype=torch.float32)[
+        ..., :10
+    ].cuda()
+    prediction = target.clone()
+    if micro_motion == "translation":
+        target[..., 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    else:
+        angle = math.radians(
+            (LOW_ROTATION_DELTA_DEG + HIGH_ROTATION_DELTA_DEG) / 2
+        )
+        target[..., 3:9] = torch.tensor(
+            [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
+            dtype=torch.float32,
+            device="cuda",
+        )
+    prediction.requires_grad_(True)
+    valid_mask = torch.ones(target.shape[:2], dtype=torch.bool, device="cuda")
+    idle_mask = torch.zeros((*target.shape[:2], 1), dtype=torch.bool, device="cuda")
+    weights = dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0)
+
+    with torch.autocast("cuda", enabled=False):
+        reference = compute_bimanual_physical_loss(
+            target, prediction, valid_mask, idle_mask, weights
+        )["micro_motion_loss"]
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        actual = compute_bimanual_physical_loss(
+            target, prediction, valid_mask, idle_mask, weights
+        )["micro_motion_loss"]
+
+    assert reference > 0
+    assert actual > 0
+    torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+    actual.backward()
+    assert torch.isfinite(prediction.grad).all()
+    assert torch.count_nonzero(prediction.grad) > 0
 
 
 def test_micro_motion_loss_has_single_and_dual_arm_parity_for_one_target_arm():
@@ -412,6 +459,46 @@ def test_micro_motion_loss_has_single_and_dual_arm_parity_for_one_target_arm():
     torch.testing.assert_close(
         dual_prediction.grad[..., :10], single_prediction.grad
     )
+
+
+def test_micro_motion_loss_is_invariant_to_arm_side_and_nonmicro_rarity():
+    magnitude = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    valid_one = torch.ones((1, 1), dtype=torch.bool)
+    valid_many = torch.ones((1, 8), dtype=torch.bool)
+    weights = dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0)
+
+    left_target = _identity_actions(batch=1, horizon=1)
+    left_target[..., 0] = magnitude
+    left_loss = compute_bimanual_physical_loss(
+        left_target,
+        _identity_actions(batch=1, horizon=1),
+        valid_one,
+        torch.zeros((1, 1, 2), dtype=torch.bool),
+        weights,
+    )["micro_motion_loss"]
+
+    right_target = _identity_actions(batch=1, horizon=1)
+    right_target[..., 10] = magnitude
+    right_loss = compute_bimanual_physical_loss(
+        right_target,
+        _identity_actions(batch=1, horizon=1),
+        valid_one,
+        torch.zeros((1, 1, 2), dtype=torch.bool),
+        weights,
+    )["micro_motion_loss"]
+
+    rare_target = _identity_actions(batch=1, horizon=8)
+    rare_target[:, 0, 0] = magnitude
+    rare_loss = compute_bimanual_physical_loss(
+        rare_target,
+        _identity_actions(batch=1, horizon=8),
+        valid_many,
+        torch.zeros((1, 8, 2), dtype=torch.bool),
+        weights,
+    )["micro_motion_loss"]
+
+    torch.testing.assert_close(left_loss, right_loss)
+    torch.testing.assert_close(left_loss, rare_loss)
 
 
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():

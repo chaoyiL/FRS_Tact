@@ -25,3 +25,16 @@ def test_checkpoint_policy_at_hydra_instantiates_with_micro_motion_weight():
     vae = hydra.utils.instantiate(checkpoint_cfg.policy.at)
 
     assert vae.physical_loss_weights["micro_motion_weight"] == 1.0
+
+    legacy_cfg = OmegaConf.create(OmegaConf.to_container(checkpoint_cfg, resolve=True))
+    del legacy_cfg.policy.at.micro_motion_weight
+    legacy_vae = hydra.utils.instantiate(legacy_cfg.policy.at)
+    assert legacy_vae.physical_loss_weights["micro_motion_weight"] == 0.0
+    legacy_state = legacy_vae.state_dict()
+    weighted_state = vae.state_dict()
+    assert legacy_state.keys() == weighted_state.keys()
+    for component, component_state in legacy_state.items():
+        assert component_state.keys() == weighted_state[component].keys()
+        for name, value in component_state.items():
+            assert value.shape == weighted_state[component][name].shape
+    legacy_vae.load_state_dict(weighted_state)
