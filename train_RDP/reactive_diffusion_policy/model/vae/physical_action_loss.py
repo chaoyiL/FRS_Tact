@@ -4,6 +4,13 @@ from collections.abc import Mapping
 import torch
 import torch.nn.functional as F
 
+from reactive_diffusion_policy.common.pick_tube_action_contract import (
+    HIGH_ROTATION_DELTA_DEG,
+    HIGH_TRANSLATION_DELTA_M,
+    LOW_ROTATION_DELTA_DEG,
+    LOW_TRANSLATION_DELTA_M,
+)
+
 
 def action_arm_slices(action_dim: int):
     if action_dim not in (10, 20):
@@ -28,6 +35,7 @@ _DEFAULT_WEIGHTS = {
     "idle_weight": 1.0,
     "degenerate_weight": 1.0,
     "rot6_aux_weight": 0.0,
+    "micro_motion_weight": 0.0,
 }
 
 
@@ -143,6 +151,7 @@ def compute_physical_action_loss(
     rotation_terms = []
     gripper_terms = []
     idle_terms = []
+    micro_motion_terms = []
     degenerate_terms = []
     rot6_aux_terms = []
     for arm_index, (position_slice, rotation_slice, gripper_index) in enumerate(arm_slices):
@@ -151,9 +160,8 @@ def compute_physical_action_loss(
         position_error = torch.linalg.vector_norm(
             predicted_position - target_position, dim=-1
         )
-        position_terms.append(_masked_mean(
-            _scaled_huber(position_error, resolved["position_scale"]), valid_mask
-        ))
+        position_value = _scaled_huber(position_error, resolved["position_scale"])
+        position_terms.append(_masked_mean(position_value, valid_mask))
 
         with torch.autocast(device_type=prediction.device.type, enabled=False):
             target_rotation_6d = target[..., rotation_slice].to(rotation_compute_dtype)
@@ -161,9 +169,10 @@ def compute_physical_action_loss(
             target_rotation, _ = project_rotation_6d(target_rotation_6d)
             predicted_rotation, degeneracy = project_rotation_6d(predicted_rotation_6d)
             rotation_error = _geodesic_angle(target_rotation, predicted_rotation)
-            rotation_terms.append(_masked_mean(
-                _scaled_huber(rotation_error, resolved["rotation_scale"]), valid_mask
-            ))
+            rotation_value = _scaled_huber(
+                rotation_error, resolved["rotation_scale"]
+            )
+            rotation_terms.append(_masked_mean(rotation_value, valid_mask))
             degenerate_terms.append(_masked_mean(degeneracy, valid_mask))
 
             raw_rotation_error = F.smooth_l1_loss(
@@ -184,6 +193,22 @@ def compute_physical_action_loss(
         ))
 
         idle_mask = valid_mask & idle_arm_mask[..., arm_index]
+        target_translation = torch.linalg.vector_norm(target_position, dim=-1)
+        target_rotation_error = _geodesic_angle(identity_matrix, target_rotation)
+        target_is_micro_motion = (
+            (
+                (target_translation >= LOW_TRANSLATION_DELTA_M)
+                | (target_rotation_error >= math.radians(LOW_ROTATION_DELTA_DEG))
+            )
+            & (target_translation <= HIGH_TRANSLATION_DELTA_M)
+            & (target_rotation_error <= math.radians(HIGH_ROTATION_DELTA_DEG))
+        )
+        micro_motion_mask = (
+            valid_mask & ~idle_arm_mask[..., arm_index] & target_is_micro_motion
+        )
+        micro_motion_terms.append(_masked_mean(
+            position_value + rotation_value, micro_motion_mask
+        ))
         idle_position_error = torch.linalg.vector_norm(predicted_position, dim=-1)
         idle_value = (
             _scaled_huber(idle_position_error, resolved["idle_position_scale"])
@@ -195,6 +220,7 @@ def compute_physical_action_loss(
     rotation_loss = _arm_mean(rotation_terms)
     gripper_loss = _arm_mean(gripper_terms)
     idle_loss = _arm_mean(idle_terms)
+    micro_motion_loss = _arm_mean(micro_motion_terms)
     degenerate_loss = _arm_mean(degenerate_terms)
     rot6_aux_loss = _arm_mean(rot6_aux_terms)
     total = (
@@ -204,6 +230,7 @@ def compute_physical_action_loss(
         + float(resolved["idle_weight"]) * idle_loss
         + float(resolved["degenerate_weight"]) * degenerate_loss
         + float(resolved["rot6_aux_weight"]) * rot6_aux_loss
+        + float(resolved["micro_motion_weight"]) * micro_motion_loss
     )
     return {
         "loss": total,
@@ -211,6 +238,7 @@ def compute_physical_action_loss(
         "rotation_loss": rotation_loss,
         "gripper_loss": gripper_loss,
         "idle_loss": idle_loss,
+        "micro_motion_loss": micro_motion_loss,
         "degenerate_loss": degenerate_loss,
         "rot6_aux_loss": rot6_aux_loss,
     }

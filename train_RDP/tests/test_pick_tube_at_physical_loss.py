@@ -4,6 +4,12 @@ import pytest
 import torch
 
 from reactive_diffusion_policy.common.normalize_util import get_action_normalizer
+from reactive_diffusion_policy.common.pick_tube_action_contract import (
+    HIGH_ROTATION_DELTA_DEG,
+    HIGH_TRANSLATION_DELTA_M,
+    LOW_ROTATION_DELTA_DEG,
+    LOW_TRANSLATION_DELTA_M,
+)
 from reactive_diffusion_policy.model.vae.model import VAE
 from reactive_diffusion_policy.model.vae.physical_action_loss import (
     compute_bimanual_physical_loss,
@@ -159,6 +165,7 @@ def test_physical_loss_masks_invalid_and_padded_timesteps():
         "rotation_loss",
         "gripper_loss",
         "idle_loss",
+        "micro_motion_loss",
         "degenerate_loss",
         "rot6_aux_loss",
         "loss",
@@ -225,6 +232,55 @@ def test_idle_loss_responds_only_for_masked_arm_and_timestep():
 
     assert masked > 0
     torch.testing.assert_close(unmasked, torch.zeros_like(unmasked))
+
+
+@pytest.mark.parametrize("micro_motion", ["translation", "rotation"])
+def test_micro_motion_loss_penalizes_missed_valid_active_target_with_gradients(
+    micro_motion,
+):
+    target = _identity_actions(horizon=1)
+    prediction = target.clone()
+    if micro_motion == "translation":
+        target[..., 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+        prediction[..., 0] = 0
+    else:
+        angle = math.radians((LOW_ROTATION_DELTA_DEG + HIGH_ROTATION_DELTA_DEG) / 2)
+        target[..., 3:9] = torch.tensor(
+            [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
+            dtype=torch.float64,
+        )
+    prediction.requires_grad_(True)
+
+    losses = _loss(
+        target,
+        prediction,
+        weights=dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0),
+    )
+    losses["micro_motion_loss"].backward()
+
+    assert losses["micro_motion_loss"] > 0
+    assert torch.isfinite(prediction.grad).all()
+    assert torch.count_nonzero(prediction.grad) > 0
+
+
+def test_micro_motion_loss_excludes_idle_large_and_invalid_targets():
+    target = _identity_actions(horizon=3)
+    target[:, 0, 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    target[:, 1, 0] = HIGH_TRANSLATION_DELTA_M * 2
+    target[:, 2, 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    prediction = _identity_actions(horizon=3)
+    valid_mask = torch.tensor([[True, True, False]])
+    idle_mask = torch.tensor([[[True, False], [False, False], [False, False]]])
+
+    micro_motion_loss = _loss(
+        target,
+        prediction,
+        valid_mask=valid_mask,
+        idle_arm_mask=idle_mask,
+        weights=dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0),
+    )["micro_motion_loss"]
+
+    torch.testing.assert_close(micro_motion_loss, torch.zeros_like(micro_motion_loss))
 
 
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():
