@@ -321,6 +321,31 @@ def test_micro_motion_loss_uses_low_contract_thresholds_as_scales(micro_motion):
     )
 
 
+def test_micro_motion_weight_changes_only_total_loss_by_micro_term():
+    target = _identity_actions(horizon=1)
+    target[..., 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    prediction = _identity_actions(horizon=1)
+
+    default_losses = _loss(target, prediction)
+    explicit_zero_losses = _loss(
+        target,
+        prediction,
+        weights=dict(DEFAULT_WEIGHTS, micro_motion_weight=0.0),
+    )
+    enabled_losses = _loss(
+        target,
+        prediction,
+        weights=dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0),
+    )
+
+    torch.testing.assert_close(
+        enabled_losses["loss"] - default_losses["loss"],
+        enabled_losses["micro_motion_loss"],
+    )
+    for name in default_losses:
+        torch.testing.assert_close(default_losses[name], explicit_zero_losses[name])
+
+
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():
     target = _identity_actions(horizon=1)
     prediction = target.clone()
