@@ -149,7 +149,7 @@ def test_pick_tube_training_configs_select_v2_normalization_and_physical_loss():
         single_ldp_cfg.policy.at,
         single_ldp_cfg.task.dataset.at,
     ):
-        assert vae_cfg.idle_weight == 1.0
+        assert vae_cfg.idle_weight == 2.0
         assert vae_cfg.micro_motion_weight == 1.0
         assert vae_cfg.position_scale == 1e-3
         assert vae_cfg.rotation_scale == np.deg2rad(1.0)

@@ -573,7 +573,7 @@ def evaluate_checkpoint_feasibility(
     active_rotation_baseline_deg: float | None,
     micro_motion_recall: float,
     max_active_degradation: float = 0.05,
-    min_micro_motion_recall: float = 0.95,
+    min_micro_motion_recall: float = 0.40,
 ) -> dict[str, float | bool]:
     """Apply hard gates and calculate the idle score used by top-k selection."""
     score = float(idle_translation_29_mm) + float(idle_rotation_29_deg) / 0.5

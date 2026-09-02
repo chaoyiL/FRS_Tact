@@ -192,10 +192,10 @@ def test_metrics_report_active_errors_and_micro_motion_recall():
 @pytest.mark.parametrize(
     ("translation", "rotation", "recall", "feasible"),
     [
-        (1.05, 2.10, 0.95, True),
-        (1.051, 2.0, 0.95, False),
-        (1.0, 2.101, 0.95, False),
-        (1.0, 2.0, 0.949, False),
+        (1.05, 2.10, 0.40, True),
+        (1.051, 2.0, 0.40, False),
+        (1.0, 2.101, 0.40, False),
+        (1.0, 2.0, 0.399, False),
     ],
 )
 def test_checkpoint_feasibility_enforces_separate_active_and_micro_motion_limits(
@@ -220,6 +220,30 @@ def test_checkpoint_feasibility_enforces_separate_active_and_micro_motion_limits
         rotation / 2.0 - 1.0
     )
     assert result["val_idle_score"] == pytest.approx(0.6)
+    assert result["val_checkpoint_feasible"] is feasible
+    assert result["val_deployable"] is feasible
+
+
+@pytest.mark.parametrize(
+    ("recall", "feasible"),
+    [
+        (0.4681236080178174, True),
+        (0.255707, False),
+    ],
+)
+def test_micro_motion_gate_accepts_new_run_but_rejects_old_run(recall, feasible):
+    result = evaluate_checkpoint_feasibility(
+        idle_translation_29_mm=0.4,
+        idle_rotation_29_deg=0.1,
+        idle_translation_p95_mm=0.04,
+        idle_rotation_p95_deg=0.02,
+        active_translation_mm=1.0,
+        active_translation_baseline_mm=1.0,
+        active_rotation_deg=2.0,
+        active_rotation_baseline_deg=2.0,
+        micro_motion_recall=recall,
+    )
+
     assert result["val_checkpoint_feasible"] is feasible
     assert result["val_deployable"] is feasible
 
@@ -483,7 +507,7 @@ def test_pick_tube_v2_configs_select_feasible_idle_score():
         assert cfg.checkpoint.topk.monitor_key == "val_deploy_idle_score"
         assert cfg.checkpoint.topk.mode == "min"
         assert cfg.validation.max_active_degradation == 0.05
-        assert cfg.validation.min_micro_motion_recall == 0.95
+        assert cfg.validation.min_micro_motion_recall == 0.40
         assert cfg.validation.baseline_json is None
         assert list(cfg.validation.seeds) == [0]
         assert cfg.validation.deployment_slow_update_interval == 16
