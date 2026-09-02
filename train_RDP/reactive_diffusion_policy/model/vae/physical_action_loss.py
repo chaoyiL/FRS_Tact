@@ -192,6 +192,12 @@ def compute_physical_action_loss(
             idle_rotation_value = _scaled_huber(
                 idle_rotation_error, resolved["idle_rotation_scale"]
             )
+            # The contract's 0.25-degree lower bound is below BF16's useful
+            # resolution around an identity rotation matrix. Keep target
+            # classification in the same FP32/FP64 island as geodesic loss.
+            target_rotation_error = _geodesic_angle(
+                identity_matrix, target_rotation
+            )
 
         gripper_error = (prediction[..., gripper_index] - target[..., gripper_index]).abs()
         gripper_terms.append(_masked_mean(
@@ -200,7 +206,6 @@ def compute_physical_action_loss(
 
         idle_mask = valid_mask & idle_arm_mask[..., arm_index]
         target_translation = torch.linalg.vector_norm(target_position, dim=-1)
-        target_rotation_error = _geodesic_angle(identity_matrix, target_rotation)
         target_is_micro_motion = (
             (
                 (target_translation >= LOW_TRANSLATION_DELTA_M)

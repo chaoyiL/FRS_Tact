@@ -346,6 +346,38 @@ def test_micro_motion_weight_changes_only_total_loss_by_micro_term():
         torch.testing.assert_close(default_losses[name], explicit_zero_losses[name])
 
 
+@pytest.mark.parametrize("micro_motion", ["translation", "rotation"])
+def test_bf16_cpu_autocast_preserves_micro_motion_classification(micro_motion):
+    target = _identity_actions(batch=1, horizon=1, dtype=torch.float32)[..., :10]
+    prediction = target.clone()
+    if micro_motion == "translation":
+        target[..., 0] = (LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M) / 2
+    else:
+        angle = math.radians(
+            (LOW_ROTATION_DELTA_DEG + HIGH_ROTATION_DELTA_DEG) / 2
+        )
+        target[..., 3:9] = torch.tensor(
+            [math.cos(angle), -math.sin(angle), 0, math.sin(angle), math.cos(angle), 0],
+            dtype=torch.float32,
+        )
+    valid_mask = torch.ones(target.shape[:2], dtype=torch.bool)
+    idle_mask = torch.zeros((*target.shape[:2], 1), dtype=torch.bool)
+    weights = dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0)
+
+    with torch.autocast("cpu", enabled=False):
+        reference = compute_bimanual_physical_loss(
+            target, prediction, valid_mask, idle_mask, weights
+        )["micro_motion_loss"]
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        actual = compute_bimanual_physical_loss(
+            target, prediction, valid_mask, idle_mask, weights
+        )["micro_motion_loss"]
+
+    assert reference > 0
+    assert actual > 0
+    torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+
+
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():
     target = _identity_actions(horizon=1)
     prediction = target.clone()
