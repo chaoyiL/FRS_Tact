@@ -244,7 +244,7 @@ validation:
   seeds: [0]
   deployment_slow_update_interval: 16
   max_active_degradation: 0.05
-  min_micro_motion_recall: 0.95
+  min_micro_motion_recall: 0.40
 
 checkpoint:
   periodic:

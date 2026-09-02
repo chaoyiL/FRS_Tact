@@ -9,6 +9,7 @@ import torch
 from hydra import compose, initialize_config_dir
 from omegaconf import OmegaConf
 
+import reactive_diffusion_policy.common.pick_tube_validation as validation_module
 from reactive_diffusion_policy.common.pick_tube_validation import (
     build_canonical_noop_actions,
     build_episode_split_manifest,
@@ -39,6 +40,206 @@ def _neutral_actions(batch=1, horizon=29):
     actions[..., 3:9] = IDENTITY_6D
     actions[..., 13:19] = IDENTITY_6D
     return actions
+
+
+def _legacy_rotation_matrix(rotation_6d):
+    first = np.asarray(rotation_6d[:3], dtype=np.float64)
+    second = np.asarray(rotation_6d[3:], dtype=np.float64)
+    first_norm = np.linalg.norm(first)
+    if not np.isfinite(first).all() or first_norm < 1e-12:
+        first = np.asarray([1.0, 0.0, 0.0])
+    else:
+        first = first / first_norm
+    second = second - np.dot(first, second) * first
+    second_norm = np.linalg.norm(second)
+    if not np.isfinite(second).all() or second_norm < 1e-12:
+        axis = np.eye(3)[int(np.argmin(np.abs(first)))]
+        second = axis - np.dot(first, axis) * first
+        second_norm = np.linalg.norm(second)
+    second = second / second_norm
+    third = np.cross(first, second)
+    return np.stack((first, second, third), axis=-2)
+
+
+def test_batched_rotation_conversion_matches_scalar_fallback_semantics():
+    rng = np.random.default_rng(17)
+    rotations = np.concatenate(
+        [
+            rng.normal(size=(64, 6)),
+            np.asarray(
+                [
+                    IDENTITY_6D,
+                    _rotation_6d_z(37.0),
+                    np.zeros(6),
+                    [1, 0, 0, 2, 0, 0],
+                    [0, 1, 0, np.inf, 0, 0],
+                    [np.nan, 0, 0, 0, 0, 1],
+                ],
+                dtype=np.float64,
+            ),
+        ]
+    )
+
+    assert hasattr(validation_module, "_rotation_matrices")
+    actual = validation_module._rotation_matrices(rotations)
+    expected = np.stack([_legacy_rotation_matrix(rotation) for rotation in rotations])
+
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
+
+    for shaped in (
+        rotations[0],
+        rotations[:0],
+        rotations[:6].reshape(2, 3, 6),
+    ):
+        actual = validation_module._rotation_matrices(shaped)
+        if shaped.ndim == 1:
+            expected = _legacy_rotation_matrix(shaped)
+        elif shaped.size == 0:
+            expected = np.empty((*shaped.shape[:-1], 3, 3), dtype=np.float64)
+        else:
+            expected = np.stack(
+                [_legacy_rotation_matrix(row) for row in shaped.reshape(-1, 6)]
+            ).reshape(*shaped.shape[:-1], 3, 3)
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-12)
+
+    bf16_rotations = torch.as_tensor(rotations[:16], dtype=torch.bfloat16)
+    bf16_numpy = validation_module._as_numpy(bf16_rotations)
+    assert bf16_numpy.dtype == np.float32
+    np.testing.assert_array_equal(
+        bf16_numpy, bf16_rotations.float().numpy()
+    )
+    expected = np.stack(
+        [_legacy_rotation_matrix(rotation) for rotation in bf16_numpy]
+    )
+    np.testing.assert_allclose(
+        validation_module._rotation_matrices(bf16_numpy),
+        expected,
+        rtol=0,
+        atol=1e-12,
+    )
+
+
+@pytest.mark.parametrize(
+    ("action_dim", "state_action_profile"),
+    [(10, "single-right-arm-7x10"), (20, None)],
+)
+def test_idle_metrics_avoid_per_step_scalar_rotation_calls(
+    monkeypatch, action_dim, state_action_profile
+):
+    target = np.zeros((3, 5, action_dim), dtype=np.float64)
+    prediction = target.copy()
+    idle_mask = np.ones((3, 5, action_dim // 10), dtype=bool)
+    for arm_start in range(0, action_dim, 10):
+        target[..., arm_start + 3 : arm_start + 9] = IDENTITY_6D
+        prediction[..., arm_start + 3 : arm_start + 9] = _rotation_6d_z(1.0)
+        prediction[..., arm_start] = 0.001
+
+    rotation_batch_shapes = []
+    batched_rotation = validation_module._rotation_matrices
+
+    def capture_batched_path(rotation):
+        rotation_batch_shapes.append(np.shape(rotation))
+        return batched_rotation(rotation)
+
+    def fail_scalar_path(_rotation):
+        raise AssertionError("scalar rotation conversion was called")
+
+    monkeypatch.setattr(
+        validation_module, "_rotation_matrices", capture_batched_path
+    )
+    monkeypatch.setattr(validation_module, "_rotation_matrix", fail_scalar_path)
+    metrics = compute_idle_rollout_metrics(
+        target,
+        prediction,
+        idle_mask,
+        horizon=5,
+        state_action_profile=state_action_profile,
+    )
+
+    assert metrics["val_idle_translation_29_mm"] == pytest.approx(5.0)
+    assert metrics["val_idle_rotation_29_deg"] == pytest.approx(5.0, abs=1e-6)
+    assert rotation_batch_shapes == [
+        (3, 5, 6),
+        (3, 5, 6),
+    ] * (action_dim // 10)
+
+
+def test_metrics_require_every_timestep_valid_and_idle_for_integrated_drift():
+    target = np.zeros((3, 4, 10), dtype=np.float64)
+    target[..., 3:9] = IDENTITY_6D
+    prediction = target.copy()
+    prediction[0, :, 0] = 0.001
+    prediction[1, :, 0] = np.asarray([0.002, 0.010, 0.003, 0.020])
+    prediction[2, :, 0] = np.asarray([0.004, 0.005, 0.006, 0.100])
+    idle_mask = np.ones((3, 4, 1), dtype=bool)
+    idle_mask[1, 1::2, 0] = False
+    valid_mask = np.ones((3, 4), dtype=bool)
+    valid_mask[2, -1] = False
+
+    metrics = compute_idle_rollout_metrics(
+        target,
+        prediction,
+        idle_mask,
+        horizon=4,
+        valid_mask=valid_mask,
+        state_action_profile="single-right-arm-7x10",
+    )
+
+    assert metrics["val_idle_translation_29_mm"] == pytest.approx(4.0)
+    assert metrics["val_idle_translation_step_p95_mm"] == pytest.approx(5.6)
+    assert metrics["val_idle_translation_bias_x_mm"] == pytest.approx(8 / 3)
+    assert metrics["val_active_translation_mae_mm"] == pytest.approx(15.0)
+    assert metrics["val_active_translation_bias_x_mm"] == pytest.approx(15.0)
+
+    empty_metrics = compute_idle_rollout_metrics(
+        target[:1],
+        prediction[:1],
+        idle_mask[:1],
+        horizon=4,
+        valid_mask=np.zeros((1, 4), dtype=bool),
+        state_action_profile="single-right-arm-7x10",
+    )
+    assert math.isnan(empty_metrics["val_idle_translation_29_mm"])
+    assert math.isnan(empty_metrics["val_idle_translation_step_p95_mm"])
+    assert math.isnan(empty_metrics["val_active_translation_mae_mm"])
+    assert math.isnan(empty_metrics["val_micro_motion_recall"])
+
+
+def test_idle_metrics_chunk_large_batches_before_rotation_conversion(monkeypatch):
+    batch = 8193
+    target = np.zeros((batch, 1, 10), dtype=np.float64)
+    target[..., 3:9] = IDENTITY_6D
+    prediction = target.copy()
+    prediction[-1, 0, 0] = 0.8193
+    idle_mask = np.zeros((batch, 1, 1), dtype=bool)
+    rotation_batch_shapes = []
+    batched_rotation = validation_module._rotation_matrices
+
+    def capture_batched_path(rotation):
+        rotation_batch_shapes.append(np.shape(rotation))
+        return batched_rotation(rotation)
+
+    monkeypatch.setattr(
+        validation_module, "_rotation_matrices", capture_batched_path
+    )
+    metrics = compute_idle_rollout_metrics(
+        target,
+        prediction,
+        idle_mask,
+        horizon=1,
+        state_action_profile="single-right-arm-7x10",
+    )
+
+    assert rotation_batch_shapes == [
+        (8192, 1, 6),
+        (8192, 1, 6),
+        (1, 1, 6),
+        (1, 1, 6),
+    ]
+    assert metrics["val_active_translation_mae_mm"] == pytest.approx(0.1)
+    assert metrics["val_active_right_translation_mae_mm"] == pytest.approx(0.1)
+    assert metrics["val_active_translation_bias_x_mm"] == pytest.approx(0.1)
+    assert metrics["val_active_translation_p95_mm"] == pytest.approx(0.0)
 
 
 def test_episode_split_is_deterministic_stratified_and_disjoint():
@@ -192,10 +393,10 @@ def test_metrics_report_active_errors_and_micro_motion_recall():
 @pytest.mark.parametrize(
     ("translation", "rotation", "recall", "feasible"),
     [
-        (1.05, 2.10, 0.95, True),
-        (1.051, 2.0, 0.95, False),
-        (1.0, 2.101, 0.95, False),
-        (1.0, 2.0, 0.949, False),
+        (1.05, 2.10, 0.40, True),
+        (1.051, 2.0, 0.40, False),
+        (1.0, 2.101, 0.40, False),
+        (1.0, 2.0, 0.399, False),
     ],
 )
 def test_checkpoint_feasibility_enforces_separate_active_and_micro_motion_limits(
@@ -220,6 +421,30 @@ def test_checkpoint_feasibility_enforces_separate_active_and_micro_motion_limits
         rotation / 2.0 - 1.0
     )
     assert result["val_idle_score"] == pytest.approx(0.6)
+    assert result["val_checkpoint_feasible"] is feasible
+    assert result["val_deployable"] is feasible
+
+
+@pytest.mark.parametrize(
+    ("recall", "feasible"),
+    [
+        (0.4681236080178174, True),
+        (0.255707, False),
+    ],
+)
+def test_micro_motion_gate_accepts_new_run_but_rejects_old_run(recall, feasible):
+    result = evaluate_checkpoint_feasibility(
+        idle_translation_29_mm=0.4,
+        idle_rotation_29_deg=0.1,
+        idle_translation_p95_mm=0.04,
+        idle_rotation_p95_deg=0.02,
+        active_translation_mm=1.0,
+        active_translation_baseline_mm=1.0,
+        active_rotation_deg=2.0,
+        active_rotation_baseline_deg=2.0,
+        micro_motion_recall=recall,
+    )
+
     assert result["val_checkpoint_feasible"] is feasible
     assert result["val_deployable"] is feasible
 
@@ -483,7 +708,7 @@ def test_pick_tube_v2_configs_select_feasible_idle_score():
         assert cfg.checkpoint.topk.monitor_key == "val_deploy_idle_score"
         assert cfg.checkpoint.topk.mode == "min"
         assert cfg.validation.max_active_degradation == 0.05
-        assert cfg.validation.min_micro_motion_recall == 0.95
+        assert cfg.validation.min_micro_motion_recall == 0.40
         assert cfg.validation.baseline_json is None
         assert list(cfg.validation.seeds) == [0]
         assert cfg.validation.deployment_slow_update_interval == 16

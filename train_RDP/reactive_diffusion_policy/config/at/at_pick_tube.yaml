@@ -24,6 +24,7 @@ policy:
   gripper_scale: 0.005
   idle_position_scale: 0.0001
   idle_rotation_scale: 0.0008726646259971648
-  idle_weight: 1.0
+  idle_weight: 2.0
   degenerate_weight: 1.0
   rot6_aux_weight: 0.05
+  micro_motion_weight: 1.0
