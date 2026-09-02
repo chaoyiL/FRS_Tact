@@ -74,3 +74,4 @@ dataset:
     idle_weight: ${at.policy.idle_weight}
     degenerate_weight: ${at.policy.degenerate_weight}
     rot6_aux_weight: ${at.policy.rot6_aux_weight}
+    micro_motion_weight: ${at.policy.micro_motion_weight}

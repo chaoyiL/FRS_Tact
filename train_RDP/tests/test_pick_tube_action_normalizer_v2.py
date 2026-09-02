@@ -141,8 +141,16 @@ def test_pick_tube_training_configs_select_v2_normalization_and_physical_loss():
     assert single_ldp_cfg.task.dataset.state_action_profile == (
         "single-right-arm-7x10"
     )
-    for vae_cfg in (at_cfg.policy, ldp_cfg.policy.at, ldp_cfg.task.dataset.at):
+    for vae_cfg in (
+        at_cfg.policy,
+        ldp_cfg.policy.at,
+        ldp_cfg.task.dataset.at,
+        single_at_cfg.policy,
+        single_ldp_cfg.policy.at,
+        single_ldp_cfg.task.dataset.at,
+    ):
         assert vae_cfg.idle_weight == 1.0
+        assert vae_cfg.micro_motion_weight == 1.0
         assert vae_cfg.position_scale == 1e-3
         assert vae_cfg.rotation_scale == np.deg2rad(1.0)
         assert vae_cfg.gripper_scale == 5e-3

@@ -27,3 +27,4 @@ policy:
   idle_weight: 1.0
   degenerate_weight: 1.0
   rot6_aux_weight: 0.05
+  micro_motion_weight: 1.0
