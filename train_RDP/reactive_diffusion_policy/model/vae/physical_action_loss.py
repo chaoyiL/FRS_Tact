@@ -151,7 +151,8 @@ def compute_physical_action_loss(
     rotation_terms = []
     gripper_terms = []
     idle_terms = []
-    micro_motion_terms = []
+    micro_motion_values = []
+    micro_motion_masks = []
     degenerate_terms = []
     rot6_aux_terms = []
     for arm_index, (position_slice, rotation_slice, gripper_index) in enumerate(arm_slices):
@@ -217,10 +218,10 @@ def compute_physical_action_loss(
         micro_motion_mask = (
             valid_mask & ~idle_arm_mask[..., arm_index] & target_is_micro_motion
         )
-        micro_motion_terms.append(_masked_mean(
-            micro_motion_position_value + micro_motion_rotation_value,
-            micro_motion_mask,
-        ))
+        micro_motion_values.append(
+            micro_motion_position_value + micro_motion_rotation_value
+        )
+        micro_motion_masks.append(micro_motion_mask)
         idle_position_error = torch.linalg.vector_norm(predicted_position, dim=-1)
         idle_value = (
             _scaled_huber(idle_position_error, resolved["idle_position_scale"])
@@ -232,7 +233,13 @@ def compute_physical_action_loss(
     rotation_loss = _arm_mean(rotation_terms)
     gripper_loss = _arm_mean(gripper_terms)
     idle_loss = _arm_mean(idle_terms)
-    micro_motion_loss = _arm_mean(micro_motion_terms)
+    # Average over actual micro targets, not over arms. Averaging an empty
+    # per-arm term would halve the signal whenever only one bimanual arm has
+    # a micro target and would make the same target train differently in 10D.
+    micro_motion_loss = _masked_mean(
+        torch.stack(micro_motion_values, dim=-1),
+        torch.stack(micro_motion_masks, dim=-1),
+    )
     degenerate_loss = _arm_mean(degenerate_terms)
     rot6_aux_loss = _arm_mean(rot6_aux_terms)
     total = (

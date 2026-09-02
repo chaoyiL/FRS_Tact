@@ -311,7 +311,7 @@ def test_micro_motion_loss_uses_low_contract_thresholds_as_scales(micro_motion):
             identity_rotation_error / math.radians(LOW_ROTATION_DELTA_DEG)
         )
         reconstruction_value += 0.5 * normalized_identity_error ** 2
-    expected = reconstruction_value / 2
+    expected = reconstruction_value
 
     torch.testing.assert_close(
         micro_motion_loss,
@@ -376,6 +376,42 @@ def test_bf16_cpu_autocast_preserves_micro_motion_classification(micro_motion):
     assert reference > 0
     assert actual > 0
     torch.testing.assert_close(actual, reference, atol=1e-6, rtol=1e-6)
+
+
+def test_micro_motion_loss_has_single_and_dual_arm_parity_for_one_target_arm():
+    dual_target = _identity_actions(batch=1, horizon=1)
+    dual_target[..., 0] = (
+        LOW_TRANSLATION_DELTA_M + HIGH_TRANSLATION_DELTA_M
+    ) / 2
+    dual_prediction = _identity_actions(batch=1, horizon=1).requires_grad_(True)
+    single_target = dual_target[..., :10].clone()
+    single_prediction = (
+        _identity_actions(batch=1, horizon=1)[..., :10].clone().requires_grad_(True)
+    )
+    valid_mask = torch.ones((1, 1), dtype=torch.bool)
+    weights = dict(DEFAULT_WEIGHTS, micro_motion_weight=1.0)
+
+    dual_loss = compute_bimanual_physical_loss(
+        dual_target,
+        dual_prediction,
+        valid_mask,
+        torch.zeros((1, 1, 2), dtype=torch.bool),
+        weights,
+    )["micro_motion_loss"]
+    single_loss = compute_bimanual_physical_loss(
+        single_target,
+        single_prediction,
+        valid_mask,
+        torch.zeros((1, 1, 1), dtype=torch.bool),
+        weights,
+    )["micro_motion_loss"]
+    dual_loss.backward()
+    single_loss.backward()
+
+    torch.testing.assert_close(dual_loss, single_loss)
+    torch.testing.assert_close(
+        dual_prediction.grad[..., :10], single_prediction.grad
+    )
 
 
 def test_nearly_collinear_projection_has_finite_loss_and_gradients():
