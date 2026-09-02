@@ -357,9 +357,7 @@ def test_training_configs_use_smolvla_names() -> None:
         "KaiyueChen/insert_01",
         "KaiyueChen/insert_02",
     ]
-    assert right["datasets"][0]["rename_map"] == {
-        "observation.images.camera0": "observation.images.camera1"
-    }
+    assert all(not source.get("rename_map") for source in right["datasets"])
     assert right["dataset"]["image_keys"] == ["observation.images.camera1"]
     assert right["dataset"]["state_dim"] == 7
     assert right["dataset"]["action_dim"] == 10

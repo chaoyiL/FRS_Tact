@@ -16,14 +16,11 @@ dataset:
     random_order: false
     tfs: {}
 
-# insert_01 stores its active single-hand RGB stream in camera0, while
-# insert_02 stores it in camera1 and keeps camera0 as a black placeholder.
-# Per-source renaming makes both datasets expose the same canonical camera1.
+# Both insert datasets store the valid right-hand RGB stream in camera1.
+# camera0 is a black placeholder and must never be sent to the model.
 datasets:
   - repo_id: KaiyueChen/insert_01
     root: /workspace/lerobot_v30/KaiyueChen/insert_01
-    rename_map:
-      observation.images.camera0: observation.images.camera1
 
   - repo_id: KaiyueChen/insert_02
     root: /workspace/lerobot_v30/KaiyueChen/insert_02
@@ -34,7 +31,7 @@ augmentation:
 
 policy:
   path: lerobot/smolvla_base
-  chunk_size: 20
+  chunk_size: 50
   n_action_steps: 10
   empty_cameras: 0
   num_vlm_layers: 16
@@ -44,12 +41,11 @@ policy:
   train_state_proj: true
   optimizer_lr: 5.0e-5
   scheduler_warmup_steps: 500
-  scheduler_decay_steps: 6000
+  scheduler_decay_steps: 12000
   device: cuda
   push_to_hub: false
 
-# Source-specific camera renaming above has already produced the final model
-# key, so no additional global rename is required.
+# The datasets already use the final model-facing camera1 key.
 rename_map: {}
 
 peft:
@@ -78,7 +74,7 @@ training:
   steps: 20000
   eval_steps: 1000
   max_eval_samples: 2560
-  save_freq: 500
+  save_freq: 1000
   log_freq: 20
   seed: 42
   resume_from: null

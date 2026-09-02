@@ -119,11 +119,10 @@ bash train_smolvla/scripts/start_smolvla_right_train.sh
 
 The default right-hand configuration mixes `KaiyueChen/insert_01` and
 `KaiyueChen/insert_02` with a 7D `observation.state` and 10D `action`.
-`insert_01`'s active `camera0` and `insert_02`'s active `camera1` are selected
-per source and canonicalized to the single model input
-`observation.images.camera1`; black placeholder and tactile cameras are pruned.
-The default batch size is 64 per GPU on two GPUs (global batch 128), with 6000
-steps and validation/checkpointing every 500 steps.
+Both datasets directly use `observation.images.camera1`; the black `camera0`
+placeholder and tactile cameras are pruned. The default batch size is 64 per GPU
+on two GPUs (global batch 128), with 20000 steps, validation every 1000 steps,
+and checkpointing every 500 steps.
 
 To inspect the generated official LeRobot command without training:
 
