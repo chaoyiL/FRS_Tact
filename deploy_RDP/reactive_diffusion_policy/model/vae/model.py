@@ -135,6 +135,7 @@ class VAE:
         idle_weight=1.0,
         degenerate_weight=1.0,
         rot6_aux_weight=0.0,
+        micro_motion_weight=0.0,
         physical_loss_weights=None,
     ):
         self.input_dim_h = horizon
@@ -168,6 +169,7 @@ class VAE:
             "idle_weight": idle_weight,
             "degenerate_weight": degenerate_weight,
             "rot6_aux_weight": rot6_aux_weight,
+            "micro_motion_weight": micro_motion_weight,
         }
         if physical_loss_weights is not None:
             self.physical_loss_weights.update(dict(physical_loss_weights))
