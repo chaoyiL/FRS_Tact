@@ -16,14 +16,13 @@ dataset:
     random_order: false
     tfs: {}
 
-# Both insert datasets store the valid right-hand RGB stream in camera1.
-# camera0 is a black placeholder and must never be sent to the model.
+# Both press datasets store the valid right-hand RGB stream in camera1.
 datasets:
-  - repo_id: KaiyueChen/insert_01
-    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+  - repo_id: KaiyueChen/press_01
+    root: /workspace/lerobot_v30/KaiyueChen/press_01
 
-  - repo_id: KaiyueChen/insert_02
-    root: /workspace/lerobot_v30/KaiyueChen/insert_02
+  - repo_id: KaiyueChen/press_02
+    root: /workspace/lerobot_v30/KaiyueChen/press_02
 
 augmentation:
   preset: balanced-light-v2
@@ -63,9 +62,9 @@ peft:
   lora_alpha: 16
 
 training:
-  output_dir: /workspace/outputs/smolvla_right_insert_0102
+  output_dir: /workspace/outputs/smolvla_right_press_0102
   existing_output: increment
-  job_name: smolvla_right_insert_0102
+  job_name: smolvla_right_press_0102
   # Per-GPU value: two GPUs produce a global batch of 128.
   batch_size: 64
   num_workers: 8
@@ -90,7 +89,7 @@ wandb:
   project: smolvla-right
   entity: null
   mode: auto
-  notes: SmolVLA right-hand insert_01+insert_02, 7D state, 10D action, one RGB camera
+  notes: SmolVLA right-hand press_01+press_02, 7D state, 10D action, one RGB camera
   run_id: null
   disable_artifact: true
   add_tags: true

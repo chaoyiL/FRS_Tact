@@ -354,8 +354,8 @@ def test_training_configs_use_smolvla_names() -> None:
 
     right = yaml.safe_load((config_dir / "train_smolvla_right.yaml").read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in right["datasets"]] == [
-        "KaiyueChen/insert_01",
-        "KaiyueChen/insert_02",
+        "KaiyueChen/press_01",
+        "KaiyueChen/press_02",
     ]
     assert all(not source.get("rename_map") for source in right["datasets"])
     assert right["dataset"]["image_keys"] == ["observation.images.camera1"]
@@ -363,7 +363,6 @@ def test_training_configs_use_smolvla_names() -> None:
     assert right["dataset"]["action_dim"] == 10
     assert right["augmentation"] == {"preset": "balanced-light-v2", "enabled": True}
     assert right["distributed"]["num_gpus"] == 2
-
 
 def test_single_gpu_precision_uses_yaml_value(monkeypatch) -> None:
     monkeypatch.delenv("ACCELERATE_MIXED_PRECISION", raising=False)
