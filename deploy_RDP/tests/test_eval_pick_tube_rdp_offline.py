@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import json
 from pathlib import Path
 
@@ -55,6 +56,33 @@ def test_load_snapshots_orders_numerically_and_decodes_rgb(snapshot_dir: Path) -
     np.testing.assert_allclose(
         snapshots[0].images["observation.images.camera0"][0, 0], [255, 0, 0], atol=2
     )
+
+
+def test_parse_step_ids_returns_sorted_unique_nonnegative_steps() -> None:
+    assert evaluator.parse_step_ids("10,2,10,7") == (2, 7, 10)
+
+    with pytest.raises(argparse.ArgumentTypeError, match="non-negative"):
+        evaluator.parse_step_ids("-1")
+
+
+def test_load_snapshots_decodes_only_selected_steps(
+    snapshot_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_read_rgb = evaluator._read_rgb
+    decoded = []
+
+    def read_rgb(path: Path, key: str) -> np.ndarray:
+        decoded.append(path)
+        return original_read_rgb(path, key)
+
+    monkeypatch.setattr(evaluator, "_read_rgb", read_rgb)
+    snapshots = evaluator.load_snapshots(snapshot_dir, step_ids=(2,))
+
+    assert [snapshot.step for snapshot in snapshots] == [2]
+    assert {path.parent.name for path in decoded} == {"step_000002"}
+
+    with pytest.raises(ValueError, match="earliest snapshot"):
+        evaluator.load_snapshots(snapshot_dir, step_ids=(10,))
 
 
 def test_build_server_state_uses_first_snapshot_as_relative_origin(snapshot_dir: Path) -> None:
@@ -244,7 +272,18 @@ def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loa
     ldp_checkpoint = tmp_path / "ldp.ckpt"
     at_checkpoint = tmp_path / "at.ckpt"
     tactile_pca_path = tmp_path / "pca.npz"
-    for path in (ldp_checkpoint, at_checkpoint, tactile_pca_path):
+
+    override_ldp = tmp_path / "override-ldp.ckpt"
+    override_at = tmp_path / "override-at.ckpt"
+    override_pca = tmp_path / "override-pca.npz"
+    for path in (
+        ldp_checkpoint,
+        at_checkpoint,
+        tactile_pca_path,
+        override_ldp,
+        override_at,
+        override_pca,
+    ):
         path.touch()
     tactile_encoder_dir = tmp_path / "encoder"
     tactile_encoder_dir.mkdir()
@@ -264,6 +303,7 @@ def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loa
         output_dim = 30
 
     def load_policy(*args, **kwargs):
+        captured["args"] = args
         captured.update(kwargs)
         interval = kwargs["slow_update_interval"]
         if isinstance(interval, bool) or not isinstance(interval, int) or interval != 16:
@@ -276,17 +316,22 @@ def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loa
     monkeypatch.setattr(evaluator, "load_config", lambda path: config)
     monkeypatch.setattr(evaluator, "load_policy", load_policy)
     monkeypatch.setattr(evaluator, "PickTubeRDPRuntime", lambda *args, **kwargs: object())
-    monkeypatch.setattr(evaluator, "load_snapshots", lambda path: [])
+
+    def load_snapshots(path, **kwargs):
+        captured["snapshot_kwargs"] = kwargs
+        return []
+
+    monkeypatch.setattr(evaluator, "load_snapshots", load_snapshots)
     monkeypatch.setattr(evaluator, "predict_independent_snapshots", lambda *args, **kwargs: {})
     monkeypatch.setattr(evaluator, "write_reports", lambda *args, **kwargs: {})
     from reactive_diffusion_policy.deploy import tactile_encoder_torch
     from reactive_diffusion_policy.model.tactile_pca import BimanualTactilePCA
 
-    monkeypatch.setattr(
-        BimanualTactilePCA,
-        "from_npz",
-        classmethod(lambda cls, path, device: FakePCA()),
-    )
+    def load_pca(cls, path, device):
+        captured["pca_path"] = path
+        return FakePCA()
+
+    monkeypatch.setattr(BimanualTactilePCA, "from_npz", classmethod(load_pca))
     monkeypatch.setattr(tactile_encoder_torch, "load_tactile_resnet18", lambda *args, **kwargs: object())
 
     arguments = (
@@ -301,3 +346,22 @@ def test_run_evaluation_passes_only_strict_control_slow16_to_required_policy_loa
     else:
         evaluator.run_evaluation(*arguments, device_name="cpu", seed=0)
         assert captured["slow_update_interval"] == expected_loader_interval
+
+    run_overrides = {
+        "ldp_checkpoint_override": override_ldp,
+        "at_checkpoint_override": override_at,
+        "tactile_pca_path_override": override_pca,
+        "allow_unqualified_checkpoint": True,
+        "step_ids": (2, 10),
+    }
+
+    if expected_loader_interval is not None:
+        evaluator.run_evaluation(
+            *arguments, device_name="cpu", seed=0, **run_overrides
+        )
+        assert captured["args"][:2] == (override_ldp, override_at)
+        assert captured["tactile_pca_path"] == override_pca
+        assert captured["pca_path"] == override_pca
+        assert captured["snapshot_kwargs"] == {"step_ids": (2, 10)}
+        assert captured["profile"] == evaluator.SINGLE_RIGHT_ARM_7X10
+        assert captured["allow_unqualified_checkpoint"] is True

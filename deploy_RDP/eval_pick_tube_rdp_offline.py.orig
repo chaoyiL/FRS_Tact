@@ -105,11 +105,6 @@ def load_snapshots(
     if step_ids is not None:
         requested = set(step_ids)
         available = {step for step, _ in step_directories}
-        first_step = min(available)
-        if first_step not in requested:
-            raise ValueError(
-                f"sampled replay must include earliest snapshot step {first_step}"
-            )
         missing = sorted(requested - available)
         if missing:
             raise ValueError(f"requested snapshot steps are missing: {missing}")

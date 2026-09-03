@@ -16,10 +16,10 @@ def test_right_config_uses_downloaded_single_right_bundle() -> None:
 
     assert config["model"] == {
         "ldp_checkpoint": (
-            "/home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/ldp/deployable.ckpt"
+            "/home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/ldp/latest.ckpt"
         ),
         "at_checkpoint": (
-            "/home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/at/deployable.ckpt"
+            "/home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/at/latest.ckpt"
         ),
         "tactile_encoder_dir": (
             "/home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824"

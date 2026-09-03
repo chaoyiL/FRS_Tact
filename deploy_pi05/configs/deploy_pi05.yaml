@@ -1,10 +1,10 @@
 # Plain-vision pi0.5 deployment configuration.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task1_0902_6k
 seed: 0
 num_steps: 10
 
 # 0: direct model control, 1: tube-extraction guard, 2: bread-and-ketchup squeeze guard.
-task: 1
+task: 0
 task1:
   max_world_xy_deviation_m: 0.005
   left_release_height_m: 0.10
@@ -57,8 +57,8 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets/
-  asset_id: two_tubes_0102
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task1_0902_6k/assets/
+  asset_id: pick_0102
   use_quantile_norm: true
 
 connection:
@@ -76,7 +76,7 @@ connection:
 
 observation:
   data_type: vision
-  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube.
   #Firstly, use the right hand to pick up the bread and put it on the table. Secondly, use the left hand to pick up the ketchup and squeeze it onto the bread.
   #Use the left hand to pick up the green tube, and then use the right hand to pick up the blue tube.
   #Firstly, use the left hand to pick up the blue tube, and then use the right hand to pick up the green tube. Next, use the left hand to place the blue tube back firstly, and then use the right hand to place the green tube back.
@@ -88,13 +88,13 @@ control:
   control_frequency: 10.0
   controller_frequency: 80.0
   action_horizon: 50
-  steps_per_inference: 50
+  steps_per_inference: 30
   # Reject one unsafe model chunk and immediately re-infer while holding position.
   # Stop the policy safely only after this many consecutive unsafe chunks.
   max_consecutive_unsafe_chunks: 3
 
 gripper:
-  hysteresis_enabled: true
+  hysteresis_enabled: True
   # VLA <= 0.09 locks the left gripper closed through return noise.
   # Reopening is allowed only once the VLA width reaches 0.10.
   left_close_threshold: 0.09

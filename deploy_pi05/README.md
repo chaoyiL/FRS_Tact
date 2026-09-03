@@ -6,8 +6,9 @@
 FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使用
 `/home/typhon/FRS_Tact` 根目录为 SmolVLA 准备的 Python 环境。
 
-本迁移**不修改** `vb3_robot_server`，也不会复制 checkpoint、token、tokenizer
-缓存或机器人端文件。机器人端必须由操作者使用其已经验证过的启动流程启动。
+本目录不复制 checkpoint、token、tokenizer 缓存或机器人端文件。
+`vb3_robot_server` 需要包含与本客户端匹配的 Pi0.5/FRS profile 校验与 wire 安全适配；
+机器人端必须由操作者使用已验证的启动流程启动。
 
 ## 目录和模式
 
@@ -16,11 +17,13 @@ FRS 训练、encoder 训练、数据集准备或模态分析代码。不要使�
 | 纯视觉 Pi0.5 | `configs/deploy_pi05.yaml` | `scripts/start_pi05.sh` | 旧版 `obs` / `action` 交换，无通用 ACK |
 | 纯视觉右手 Pi0.5 | `configs/deploy_pi05_right.yaml` | `scripts/start_pi05_right.sh` | 双臂 20D wire，客户端适配右手 7D/10D |
 | Pi0.5 + FRS | `configs/deploy_pi05_frs.yaml` | `scripts/start_pi05_frs.sh` | `frs_steering_v1` |
+| Pi0.5 + FRS 右手 | `configs/deploy_pi05_frs_right.yaml` | `scripts/start_pi05_right_frs.sh` | 双臂 20D wire，客户端适配右手 7D/10D |
 
-两个 YAML 都是完整、独立的配置。纯视觉配置使用 `observation.data_type: vision`，
-不含 `frs` 段；FRS 配置使用 `observation.data_type: vitac`，并保留 FRS steering
-和触觉 encoder 参数。二者目前使用同一 Pi0.5 checkpoint、归一化统计、相机映射、
-状态/动作维度与任务提示，只有观测和后处理路径不同。
+四个 YAML 都是完整、独立的配置。纯视觉配置使用
+`observation.data_type: vision`，不含 `frs` 段；FRS 配置使用
+`observation.data_type: vitac`，并保留 FRS steering 和触觉 encoder 参数。
+双臂与单右手 profile 分别使用与各自状态/动作维度、相机映射和归一化统计匹配的
+Pi0.5/FRS checkpoint，不得交叉混用。
 
 ## 首次安装
 
@@ -170,3 +173,28 @@ bash deploy_pi05/scripts/start_pi05_right.sh --max-iterations 1
 两端会打印同一 YAML 的 SHA256；发送 START 前必须确认完全一致。不要给该模式启用
 现有 `single_arm_mode=True` 的机器人底层路径：那条旧路径表示物理左臂。右手模型的
 单臂语义只存在于客户端，服务端硬件和安全校验仍是双臂模式。
+
+## FRS 右手 Pi0.5
+
+FRS 右手模式使用与纯视觉右手相同的物理/wire 边界：server 仍发布
+20D 双臂 state、接收 20D action，并以 `single_arm_mode=False` 运行机器人。
+客户端将 state 的 `[7:14]` 投影给右手模型，再将模型/FRS 的 10D 右手
+action 扩展为 20D，左臂保持当前姿态和夹爪宽度。
+
+两端必须显式使用同一份右手 FRS YAML：
+
+```bash
+# Terminal A: robot server
+cd /home/typhon/vb3_robot_server
+bash scripts/bimanual_pi05.sh --mode frs \
+  --config /home/typhon/FRS_Tact/deploy_pi05/configs/deploy_pi05_frs_right.yaml
+
+# Terminal B: policy client（先检查，再只运行一个 chunk）
+cd /home/typhon/FRS_Tact
+bash deploy_pi05/scripts/start_pi05_right_frs.sh --check
+bash deploy_pi05/scripts/start_pi05_right_frs.sh --max-iterations 1
+```
+
+启动真机前确认两端打印的 YAML SHA256 完全相同。不要将 server 的
+`n_robots`/wire action 维度改为 1/10，也不要启用旧的物理
+`single_arm_mode=True` 路径。

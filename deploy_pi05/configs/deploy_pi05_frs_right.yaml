@@ -40,9 +40,9 @@ frs:
   enabled: true
 
   # TODO: replace with the FRS checkpoint trained against the Pi0.5 checkpoint above.
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/frs/pi05_right_frs
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_right_insert_01_02
   # TODO: replace with the tactile encoder used to train that FRS checkpoint.
-  tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt
+  tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
 
   # Right-hand single-arm FRS accepts only these two inputs in this order.
   tactile_keys:
@@ -81,7 +81,7 @@ connection:
 
 observation:
   data_type: vitac
-  language_prompt: Use the right hand to complete the task.
+  language_prompt: Firstly, use the hand to pick up the tube and then insert it back.
   single_arm_mode: true
   controlled_arm: right
   no_state_obs_mode: false
@@ -93,9 +93,11 @@ control:
   # FRS steering executes the complete negotiated horizon.
   steps_per_inference: 50
 
-# Retained because the deployment runtime validates the gripper configuration.
-# With task=0, the bimanual latch/motion guards are not enabled.
+# Disable server-side snap/hysteresis so the gripper is driven continuously by
+# the original VLA output; normal hardware calibration and safety clipping remain.
+# Thresholds stay as validated fallback values for profiles that enable hysteresis.
 gripper:
+  hysteresis_enabled: false
   left_close_threshold: 0.08
   left_reopen_threshold: 0.10
   left_closed_command: 0.01

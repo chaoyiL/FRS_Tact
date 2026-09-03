@@ -24,6 +24,20 @@ def test_default_deploy_config_accepts_legacy_checkpoint_pairs() -> None:
     assert config["model"]["artifact_verification"] == "legacy-compatible"
 
 
+def test_server_config_negotiates_low_latency_rdp_step_v2() -> None:
+    config = deploy.load_config(ROOT / "configs" / "deploy_pick_tube_rdp.yaml")
+
+    payload = deploy.build_server_config(config)
+
+    assert payload["execution_protocol"] == "rdp_step_v2"
+    assert payload["policy_type"] == "rdp"
+    assert payload["observation_profile"] == "rdp_vitac_224"
+    assert payload["task"] == 0
+    assert payload["control_frequency"] == 30.0
+    assert payload["steps_per_inference"] == 1
+    assert payload["action_horizon"] == 1
+
+
 class FakeTactileEncoder(nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -407,6 +421,75 @@ def test_validate_release_qualification_rejects_recovery_checkpoints(
             ldp_checkpoint=ldp_checkpoint,
             at_checkpoint=at_checkpoint,
         )
+
+
+def test_unqualified_override_allows_legacy_checkpoints_without_release_evidence() -> None:
+    legacy_cfg = OmegaConf.create(
+        {
+            "n_obs_steps": 2,
+            "dataset_obs_temporal_downsample_ratio": 2,
+        }
+    )
+
+    with pytest.warns(UserWarning, match="release qualification checks are disabled"):
+        deploy.validate_release_qualification(
+            legacy_cfg,
+            legacy_cfg,
+            slow_update_interval=16,
+            ldp_checkpoint=Path("ldp/old-model.ckpt"),
+            at_checkpoint=Path("at/old-model.ckpt"),
+            allow_unqualified_checkpoint=True,
+        )
+
+
+def test_unqualified_override_allows_failed_at_and_ldp_evidence() -> None:
+    failed = {
+        "passed": False,
+        "score": 5.48,
+        "deployment_slow_update_interval": 15,
+        "phase_start": 1,
+    }
+
+    with pytest.warns(UserWarning, match="release qualification checks are disabled"):
+        deploy.validate_release_qualification(
+            release_cfg(**failed),
+            release_cfg(**failed),
+            slow_update_interval=16,
+            ldp_checkpoint=Path("ldp/latest.ckpt"),
+            at_checkpoint=Path("at/latest.ckpt"),
+            allow_unqualified_checkpoint=True,
+        )
+
+
+def test_unqualified_override_keeps_runtime_slow16_contract() -> None:
+    with pytest.raises(ValueError, match="slow_update_interval"):
+        deploy.validate_release_qualification(
+            OmegaConf.create({}),
+            OmegaConf.create({}),
+            slow_update_interval=15,
+            ldp_checkpoint=Path("ldp/latest.ckpt"),
+            at_checkpoint=Path("at/latest.ckpt"),
+            allow_unqualified_checkpoint=True,
+        )
+
+
+def test_unqualified_override_requires_manual_runtime_start() -> None:
+    deploy.validate_unqualified_runtime_mode(
+        allow_unqualified_checkpoint=True,
+        auto_start=False,
+    )
+
+    with pytest.raises(ValueError, match="auto_start"):
+        deploy.validate_unqualified_runtime_mode(
+            allow_unqualified_checkpoint=True,
+            auto_start=True,
+        )
+
+
+def test_parse_args_exposes_explicit_unqualified_checkpoint_switch() -> None:
+    arguments = deploy.parse_args(["--allow-unqualified-checkpoint"])
+
+    assert arguments.allow_unqualified_checkpoint is True
 
 
 def test_prepare_inference_config_drops_training_only_color_jitter() -> None:

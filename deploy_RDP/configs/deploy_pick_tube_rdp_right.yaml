@@ -1,10 +1,10 @@
 task: insert the object with the right hand
 
 model:
-  ldp_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/ldp/deployable.ckpt
-  at_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/at/deployable.ckpt
+  ldp_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_0902/insert/ldp/latest.ckpt
+  at_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_0902/insert/at/deployable.ckpt
   tactile_encoder_dir: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
-  tactile_pca_path: /home/typhon/FRS_Tact/checkpoints/model/rdp/rdp_0831/pca/tactile_pca_insert_01_02_encoder0824_2x15.npz
+  tactile_pca_path: /home/typhon/FRS_Tact/checkpoints/model/rdp_0902/insert/pca/tactile_pca_insert_01_02_encoder0824_2x15.npz
   state_action_profile: single-right-arm-7x10
   artifact_verification: strict
   device: cuda:0

@@ -6,7 +6,7 @@ import argparse
 import hashlib
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,7 @@ import numpy as np
 
 from .bridge_client import RobotBridgeClient
 from .deployment import (
+    SINGLE_RIGHT_ARM_PROFILE,
     ObservationSaver,
     cleanup_deployment_resources,
     configure_deployment_logging,
@@ -36,6 +37,7 @@ from .frs_config import (
     parse_task_switch,
 )
 from .policy import Pi05RemotePolicy
+from .right_arm_adapter import expand_right_action, project_right_observation
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "deploy_pi05_frs.yaml"
 LOGGER = logging.getLogger(__name__)
@@ -102,6 +104,28 @@ def _safe_trace(builder: Any, *args: Any) -> dict[str, Any] | None:
         return None
 
 
+def _prepare_frs_observation(
+    raw_observation: Mapping[str, Any], policy: Any, image_keys: Sequence[str]
+) -> dict[str, Any]:
+    observation = (
+        project_right_observation(raw_observation)
+        if getattr(policy.config, "state_action_profile", None)
+        == SINGLE_RIGHT_ARM_PROFILE
+        else raw_observation
+    )
+    return prepare_observation(
+        observation, state_dim=policy.config.state_dim, image_keys=image_keys
+    )
+
+
+def _wire_selected_action(
+    action: np.ndarray, raw_observation: Mapping[str, Any], policy: Any
+) -> np.ndarray:
+    if getattr(policy.config, "state_action_profile", None) == SINGLE_RIGHT_ARM_PROFILE:
+        return expand_right_action(action[np.newaxis, :], raw_observation)[0]
+    return action
+
+
 def _run_frs(
     bridge: RobotBridgeClient,
     frs: FRSRuntime,
@@ -134,8 +158,8 @@ def _run_frs(
             start.observation,
             logger=LOGGER,
         )
-        observation = prepare_observation(
-            start.observation, state_dim=frs.policy.config.state_dim, image_keys=image_keys
+        observation = _prepare_frs_observation(
+            start.observation, frs.policy, image_keys
         )
         ready = frs.begin_chunk(
             start.chunk_id, observation, task, seed=seed, num_steps=sample_steps
@@ -155,21 +179,20 @@ def _run_frs(
                 raise RuntimeError(f"expected FRSSteerRequest, got {type(message).__name__}")
             if message.chunk_id != start.chunk_id:
                 raise RuntimeError("FRSSteerRequest does not match the active chunk")
-            frame = prepare_observation(
-                message.observation,
-                state_dim=frs.policy.config.state_dim,
-                image_keys=image_keys,
+            frame = _prepare_frs_observation(
+                message.observation, frs.policy, image_keys
             )
             result = frs.steer_action(message.chunk_id, message.request_id, frame, message.action_index)
             action = np.asarray(result.selected_action, dtype=np.float32)
             expected = (frs.policy.config.robot_action_dim,)
             if action.shape != expected:
                 raise RuntimeError(f"FRS selected action must have shape {expected}, got {action.shape}")
+            wire_action = _wire_selected_action(action, message.observation, frs.policy)
             bridge.send_frs_steer_action(
                 message.chunk_id,
                 message.request_id,
                 message.action_index,
-                action,
+                wire_action,
                 trace=_safe_trace(_steer_trace, result, message),
             )
             ack = bridge.receive_frs_message(action_ack_timeout_s)
@@ -251,9 +274,7 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         )
         print("[client] Waiting for robot warmup observation")
         obs_seq, raw = bridge.receive_observation(timeout=timeout)
-        warmup = prepare_observation(
-            raw, state_dim=policy_config.state_dim, image_keys=image_keys
-        )
+        warmup = _prepare_frs_observation(raw, policy, image_keys)
         frs.reset_episode(warmup)
         for index in range(warmup_runs):
             started = time.perf_counter()

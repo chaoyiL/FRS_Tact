@@ -4,7 +4,9 @@ import ast
 import copy
 import inspect
 import json
+import os
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
@@ -172,9 +174,32 @@ def test_only_deployment_configs_and_launchers_remain() -> None:
     assert {path.name for path in (DEPLOY / "scripts").glob("*.sh")} == {
         "start_pi05.sh",
         "start_pi05_frs.sh",
+        "start_pi05_right_frs.sh",
         "start_pi05_right.sh",
         "start_remote_client.sh",
     }
+
+
+def test_pi05_right_frs_launcher_selects_checked_in_right_config() -> None:
+    environment = os.environ.copy()
+    environment.pop("PI05_DEPLOY_CONFIG", None)
+    environment.pop("PI05_FRS_DEPLOY_CONFIG", None)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(DEPLOY / "scripts/start_pi05_right_frs.sh"),
+            "--check",
+        ],
+        cwd=ROOT,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "mode=frs" in completed.stdout
+    assert f"config={DEPLOY / 'configs/deploy_pi05_frs_right.yaml'}" in completed.stdout
 
 
 def test_deployment_sources_do_not_import_removed_training_packages() -> None:

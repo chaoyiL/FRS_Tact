@@ -49,6 +49,7 @@ TACTILE_KEYS = (
 STATE_KEY = "observation.state"
 IMAGE_SIZE = 224
 STATE_DIM = 20
+RDP_EXECUTION_PROTOCOL = "rdp_step_v2"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -297,6 +298,7 @@ def validate_release_qualification(
     slow_update_interval: int,
     ldp_checkpoint: Path,
     at_checkpoint: Path,
+    allow_unqualified_checkpoint: bool = False,
 ) -> None:
     """Require release evidence compatible with the fixed robot slow16 schedule."""
     if (
@@ -308,6 +310,15 @@ def validate_release_qualification(
             "Deployment control.slow_update_interval must be exactly 16, "
             f"got {slow_update_interval!r}"
         )
+
+    if allow_unqualified_checkpoint:
+        warnings.warn(
+            "UNQUALIFIED CHECKPOINT override enabled: release qualification "
+            f"checks are disabled for LDP {ldp_checkpoint} and AT {at_checkpoint}.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return
 
     for role, cfg, checkpoint in (
         ("LDP", ldp_cfg, ldp_checkpoint),
@@ -333,13 +344,6 @@ def validate_release_qualification(
         if phase_start != 3:
             raise ValueError(
                 f"{role} checkpoint {checkpoint} derived phase_start must be exactly 3"
-            )
-
-        passed = OmegaConf.select(evidence, "passed")
-        if passed is not True:
-            raise ValueError(
-                f"{role} checkpoint {checkpoint} release_validation.passed "
-                "must be exactly True"
             )
 
         score = OmegaConf.select(evidence, "score")
@@ -377,6 +381,13 @@ def validate_release_qualification(
                 "deployment_slow_update_interval must be exactly 16"
             )
 
+        passed = OmegaConf.select(evidence, "passed")
+        if passed is not True:
+            raise ValueError(
+                f"{role} checkpoint {checkpoint} release_validation.passed "
+                "must be exactly True"
+            )
+
         if checkpoint.name != "deployable.ckpt":
             raise ValueError(
                 f"{role} checkpoint {checkpoint} must be named deployable.ckpt; "
@@ -394,6 +405,7 @@ def load_policy(
     profile: StateActionProfile = DUAL_ARM_20X20,
     artifact_verification: str = "strict",
     tactile_pca_path: Path | None = None,
+    allow_unqualified_checkpoint: bool = False,
 ):
     payload = _load_checkpoint_payload(ldp_checkpoint, "LDP")
     at_payload = _load_checkpoint_payload(at_checkpoint, "AT")
@@ -423,6 +435,7 @@ def load_policy(
         slow_update_interval=slow_update_interval,
         ldp_checkpoint=ldp_checkpoint,
         at_checkpoint=at_checkpoint,
+        allow_unqualified_checkpoint=allow_unqualified_checkpoint,
     )
     cfg.at_load_dir = str(at_checkpoint)
     cfg.policy.at.load_dir = str(at_checkpoint)
@@ -617,12 +630,49 @@ def _token(connection: dict[str, Any]) -> str | None:
     return token
 
 
-def run(config_path: Path, device_override: str | None = None) -> None:
+def validate_unqualified_runtime_mode(
+    *, allow_unqualified_checkpoint: bool, auto_start: bool
+) -> None:
+    if allow_unqualified_checkpoint and auto_start:
+        raise ValueError(
+            "--allow-unqualified-checkpoint requires runtime.auto_start=false"
+        )
+
+
+def build_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the fixed one-step RDP v2 wire contract."""
+    control = config["control"]
+    return {
+        "policy_type": "rdp",
+        "observation_profile": "rdp_vitac_224",
+        "task": 0,
+        "data_type": "vitac",
+        "language_prompt": str(config.get("task", "pick up two tubes")),
+        "control_frequency": float(control.get("control_frequency", 30.0)),
+        "controller_frequency": float(control.get("controller_frequency", 80.0)),
+        "single_arm_mode": False,
+        "no_state_obs_mode": False,
+        "steps_per_inference": 1,
+        "action_horizon": 1,
+        "execution_protocol": RDP_EXECUTION_PROTOCOL,
+    }
+
+
+def run(
+    config_path: Path,
+    device_override: str | None = None,
+    allow_unqualified_checkpoint: bool = False,
+) -> None:
     config = load_config(config_path)
     model_config = config["model"]
     connection = config["connection"]
     control = config["control"]
     runtime_config = config["runtime"]
+    auto_start = bool(runtime_config.get("auto_start", False))
+    validate_unqualified_runtime_mode(
+        allow_unqualified_checkpoint=allow_unqualified_checkpoint,
+        auto_start=auto_start,
+    )
     profile = resolve_state_action_profile(
         str(model_config.get("state_action_profile", DUAL_ARM_PROFILE))
     )
@@ -654,6 +704,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         profile=profile,
         artifact_verification=str(model_config.get("artifact_verification", "strict")),
         tactile_pca_path=tactile_pca_path,
+        allow_unqualified_checkpoint=allow_unqualified_checkpoint,
     )
     tactile_encoder = load_tactile_resnet18(encoder_dir, device=device)
     rdp = PickTubeRDPRuntime(
@@ -676,19 +727,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
         add_port=connection.get("add_port"),
         retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
     )
-    bridge.send_config(
-        {
-            "policy_type": "rdp",
-            "data_type": "vitac",
-            "language_prompt": str(config.get("task", "pick up two tubes")),
-            "control_frequency": float(control.get("control_frequency", 30.0)),
-            "controller_frequency": float(control.get("controller_frequency", 80.0)),
-            "single_arm_mode": False,
-            "no_state_obs_mode": False,
-            "steps_per_inference": 1,
-            "action_horizon": 1,
-        }
-    )
+    bridge.send_config(build_server_config(config))
 
     ack_timeout = float(connection.get("action_ack_timeout_s", 3.0))
     status_interval = float(runtime_config.get("status_interval_s", 2.0))
@@ -704,7 +743,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
                 torch.cuda.synchronize(device)
             print(f"[rdp] Warmup {index + 1}: {(time.perf_counter() - started) * 1000:.1f}ms")
         rdp.reset()
-        if not bool(runtime_config.get("auto_start", False)):
+        if not auto_start:
             input("[rdp] Ready. Press Enter to start the robot... ")
         bridge.send_state("start")
 
@@ -737,7 +776,7 @@ def run(config_path: Path, device_override: str | None = None) -> None:
             bridge.close()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",
@@ -745,9 +784,22 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).with_name("configs") / "deploy_pick_tube_rdp.yaml",
     )
     parser.add_argument("--device")
-    return parser.parse_args()
+    parser.add_argument(
+        "--allow-unqualified-checkpoint",
+        action="store_true",
+        help=(
+            "Skip AT/LDP release qualification and deployable filename checks. "
+            "Requires runtime.auto_start=false; model compatibility and artifact "
+            "pairing checks remain enabled."
+        ),
+    )
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     arguments = parse_args()
-    run(arguments.config.expanduser().resolve(), arguments.device)
+    run(
+        arguments.config.expanduser().resolve(),
+        arguments.device,
+        arguments.allow_unqualified_checkpoint,
+    )
