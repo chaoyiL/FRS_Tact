@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 from pathlib import Path
 
 import numpy as np
 import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,6 +50,17 @@ def _write_json(path: Path, value) -> None:
     path.write_text(json.dumps(value))
 
 
+def _jpeg_bytes(rgb: tuple[int, int, int], *, size: tuple[int, int] = (224, 224)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, rgb).save(buffer, format="JPEG", quality=100, subsampling=0)
+    return buffer.getvalue()
+
+
+def _write_jpeg(path: Path, rgb: tuple[int, int, int], *, size: tuple[int, int] = (256, 256)) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, rgb).save(path, format="JPEG", quality=100, subsampling=0)
+
+
 def _write_observation(root: Path, step: int, *, left_x: float, timestamp: float) -> None:
     step_dir = root / f"step_{step:06d}"
     _write_json(step_dir / "robot0_eef_pos.json", [[left_x, 2.0, 3.0]])
@@ -55,8 +68,37 @@ def _write_observation(root: Path, step: int, *, left_x: float, timestamp: float
     _write_json(step_dir / "robot0_gripper_width.json", [[0.04]])
     _write_json(step_dir / "robot1_eef_pos.json", [[0.0, 1.0, 0.0]])
     _write_json(step_dir / "robot1_eef_rot_axis_angle.json", [[0.0, 0.0, 0.0]])
+    _write_jpeg(step_dir / "camera0_rgb.jpg", (220, 10, 10))
+    _write_jpeg(step_dir / "camera1_rgb.jpg", (10, 220, 10))
     _write_json(step_dir / "robot1_gripper_width.json", [[0.05]])
     _write_json(step_dir / "timestamp.json", [timestamp])
+
+
+def _write_training_parquet(root: Path, name: str, rows: list[dict]) -> Path:
+    pyarrow = pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    path = root / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pyarrow.Table.from_pylist(rows), path)
+    return path
+
+
+def _training_row(
+    *, episode: int, frame: int, camera0: tuple[int, int, int], camera1: tuple[int, int, int], state_offset: float
+) -> dict:
+    state = np.arange(20, dtype=np.float32) + state_offset
+    action = state.copy()
+    action[9] = 0.08 if frame == 0 else 0.10
+    action[19] = 0.08
+    return {
+        "episode_index": episode,
+        "frame_index": frame,
+        "observation.state": state.tolist(),
+        "actions": action.tolist(),
+        "observation.images.camera0": {"bytes": _jpeg_bytes(camera0), "path": None},
+        "observation.images.camera1": {"bytes": _jpeg_bytes(camera1), "path": None},
+    }
 
 
 def test_chunk_parser_uses_the_sole_non_null_full_action_not_logger_source(tmp_path):
@@ -271,3 +313,15 @@ def test_chunk_parser_rejects_numeric_string_timestamp(tmp_path):
 
     with pytest.raises(ValueError, match="finite number"):
         module.load_chunk_trace(trace_path)
+
+
+def test_training_loader_reads_direct_parquets_as_rgb_20d_frames_in_deterministic_order(tmp_path):
+    module = _load_module()
+    root = tmp_path / "training"
+    _write_training_parquet(root, "episode_26.parquet", [_training_row(episode=26, frame=1, camera0=(10, 20, 230), camera1=(10, 230, 20), state_offset=2.0)])
+    _write_training_parquet(root, "episode_25.parquet", [_training_row(episode=25, frame=0, camera0=(230, 20, 10), camera1=(20, 10, 230), state_offset=1.0)])
+    corpus = module.load_training_parquets(root)
+    assert corpus.episode_indices.tolist() == [25, 26]
+    assert corpus.frame_indices.tolist() == [0, 1]
+    assert corpus.states.shape == corpus.actions.shape == (2, 20)
+    assert corpus.camera0_rgb.shape == corpus.camera1_rgb.shape == (2, 224, 224, 3)

@@ -8,6 +8,7 @@ fallback after the original prediction trace was unavailable.
 """
 
 
+import io
 import json
 import math
 import re
@@ -63,8 +64,28 @@ class SavedObservation:
     timestamp: float
     left_pose: np.ndarray
     left_gripper: float
+    camera0_rgb: np.ndarray
     right_pose: np.ndarray
     right_gripper: float
+    camera1_rgb: np.ndarray
+
+
+@dataclass(frozen=True)
+class TrainingCorpus:
+    """Validated direct-parquet training frames used only for offline comparison."""
+
+    root: Path
+    parquet_paths: tuple[Path, ...]
+    states: np.ndarray
+    actions: np.ndarray
+    episode_indices: np.ndarray
+    frame_indices: np.ndarray
+    camera0_rgb: np.ndarray
+    camera1_rgb: np.ndarray
+
+    @property
+    def action_gripper_close_counts(self) -> dict[str, int]:
+        return {"dim_9": int(np.count_nonzero(self.actions[:, 9] <= 0.09)), "dim_19": int(np.count_nonzero(self.actions[:, 19] <= 0.09))}
 
 
 def _numeric_payload(value: Any) -> bool:
@@ -229,6 +250,20 @@ def _saved_vector(step_dir: Path, filename: str, dimension: int) -> np.ndarray:
     return np.array(flattened, dtype=np.float64, copy=True)
 
 
+def _decode_rgb_image(path: Path) -> np.ndarray:
+    """Decode a saved JPEG through Pillow's RGB conversion, without a BGR swap."""
+    from PIL import Image
+
+    try:
+        with Image.open(path) as image:
+            rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+    except OSError as exc:
+        raise ValueError(f"could not decode saved RGB image: {path}") from exc
+    if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0 or rgb.dtype != np.uint8:
+        raise ValueError(f"saved image must be nonempty HWC uint8 RGB: {path}")
+    return np.ascontiguousarray(rgb)
+
+
 def load_saved_observations(path: Path) -> list[SavedObservation]:
     """Load per-step saved absolute Quest poses in numeric step order."""
     root = Path(path)
@@ -255,11 +290,74 @@ def load_saved_observations(path: Path) -> list[SavedObservation]:
                 timestamp=float(_saved_vector(step_dir, "timestamp.json", 1)[0]),
                 left_pose=left_pose,
                 left_gripper=float(_saved_vector(step_dir, "robot0_gripper_width.json", 1)[0]),
+                camera0_rgb=_decode_rgb_image(step_dir / "camera0_rgb.jpg"),
                 right_pose=right_pose,
                 right_gripper=float(_saved_vector(step_dir, "robot1_gripper_width.json", 1)[0]),
+                camera1_rgb=_decode_rgb_image(step_dir / "camera1_rgb.jpg"),
             )
         )
     return observations
+
+
+def _decode_parquet_image(cell: Any, root: Path, label: str) -> np.ndarray:
+    if isinstance(cell, dict):
+        raw, relative_path = cell.get("bytes"), cell.get("path")
+    else:
+        raw, relative_path = getattr(cell, "bytes", None), getattr(cell, "path", None)
+    if isinstance(raw, (bytes, bytearray)) and raw:
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(raw)) as image:
+                rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
+        except OSError as exc:
+            raise ValueError(f"could not decode {label} embedded JPEG") from exc
+        if rgb.ndim != 3 or rgb.shape[2] != 3 or rgb.shape[0] == 0 or rgb.shape[1] == 0:
+            raise ValueError(f"{label} must decode as nonempty HWC uint8 RGB")
+        return np.ascontiguousarray(rgb)
+    if isinstance(relative_path, str) and relative_path:
+        return _decode_rgb_image(root / relative_path)
+    raise ValueError(f"{label} must contain image bytes or a relative path")
+
+
+def load_training_parquets(root: Path) -> TrainingCorpus:
+    """Load direct episode parquet files with unrenamed camera0/camera1 keys."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise RuntimeError("pyarrow is required to read training parquet files") from exc
+    root = Path(root)
+    if not root.is_dir():
+        raise ValueError(f"training root does not exist: {root}")
+    paths = tuple(sorted(root.rglob("episode_*.parquet")))
+    records: list[tuple[int, int, np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    required = {"episode_index", "frame_index", "observation.state", "actions", "observation.images.camera0", "observation.images.camera1"}
+    for path in paths:
+        table = pq.read_table(path)
+        if not required <= set(table.column_names):
+            raise ValueError(f"training parquet lacks required direct columns: {path}")
+        for row in table.to_pylist():
+            state = _finite_array(row["observation.state"], (20,), f"{path} observation.state").astype(np.float32)
+            action = _finite_array(row["actions"], (20,), f"{path} actions").astype(np.float32)
+            records.append((_positive_integer(row["episode_index"], f"{path} episode_index"), _positive_integer(row["frame_index"], f"{path} frame_index"), state, action, _decode_parquet_image(row["observation.images.camera0"], root, f"{path} camera0"), _decode_parquet_image(row["observation.images.camera1"], root, f"{path} camera1")))
+    if not records:
+        raise ValueError(f"training root has no direct episode parquet frames: {root}")
+    records.sort(key=lambda item: (item[0], item[1]))
+    states = np.stack([item[2] for item in records])
+    actions = np.stack([item[3] for item in records])
+    episode_indices = np.asarray([item[0] for item in records], dtype=np.int64)
+    frame_indices = np.asarray([item[1] for item in records], dtype=np.int64)
+    camera0_rgb = np.stack([item[4] for item in records])
+    camera1_rgb = np.stack([item[5] for item in records])
+    return TrainingCorpus(
+        root=root,
+        parquet_paths=paths,
+        states=states,
+        actions=actions,
+        episode_indices=episode_indices,
+        frame_indices=frame_indices,
+        camera0_rgb=camera0_rgb,
+        camera1_rgb=camera1_rgb,
+    )
 
 
 def _rotation_matrix(pose: np.ndarray) -> np.ndarray:
@@ -410,3 +508,28 @@ def write_action_chain_csv(report: dict[str, Any], path: Path) -> None:
                     for field in fieldnames
                 }
             )
+
+
+def compare_observation_distributions(saved: list[SavedObservation], training: TrainingCorpus) -> dict[str, Any]:
+    if not saved:
+        raise ValueError("saved observations must be nonempty")
+    states = np.stack([reconstruct_state(item, saved[0]) for item in saved])
+    std = np.maximum(np.std(training.states, axis=0), 1e-6)
+    distances = np.linalg.norm((states[:, None] - training.states[None]) / std, axis=2).min(axis=1)
+
+
+def materialize_eval_overlay(corpus: TrainingCorpus, output: Path) -> Path:
+    output = Path(output)
+    if output.resolve() == corpus.root.resolve() or corpus.root.resolve() in output.resolve().parents:
+        raise ValueError("overlay output must not be inside the source training root")
+    meta, data = output / "meta", output / "data"
+    meta.mkdir(parents=True, exist_ok=True)
+    data.mkdir(parents=True, exist_ok=True)
+    rows = [{"episode_index": int(ep), "episode_length": int(np.count_nonzero(corpus.episode_indices == ep))} for ep in np.unique(corpus.episode_indices)]
+    (meta / "episodes.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+    (meta / "info.json").write_text(json.dumps({"fps": 30}))
+    for source in corpus.parquet_paths:
+        target = data / source.name
+        if target.exists() or target.is_symlink():
+            target.unlink()
+        target.symlink_to(source.resolve())
