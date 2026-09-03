@@ -517,7 +517,9 @@ def compare_observation_distributions(saved: list[SavedObservation], training: T
     std = np.maximum(np.std(training.states, axis=0), 1e-6)
     distances = np.linalg.norm((states[:, None] - training.states[None]) / std, axis=2).min(axis=1)
     def score(a, b):
-        return float(np.mean(np.abs(a[:, None].astype(float) - b[None].astype(float))))
+        online_rgb_means = np.mean(a.astype(float), axis=(1, 2))
+        training_rgb_means = np.mean(b.astype(float), axis=(1, 2))
+        return float(np.mean(np.abs(online_rgb_means[:, None] - training_rgb_means[None])))
     direct = score(np.stack([item.camera0_rgb for item in saved]), training.camera0_rgb) + score(np.stack([item.camera1_rgb for item in saved]), training.camera1_rgb)
     swapped = score(np.stack([item.camera0_rgb for item in saved]), training.camera1_rgb) + score(np.stack([item.camera1_rgb for item in saved]), training.camera0_rgb)
     camera = lambda images: {"mean": np.mean(images, axis=(0,1,2)).tolist(), "std": np.std(images, axis=(0,1,2)).tolist(), "luminance_quantiles": np.quantile(images @ np.array([0.2126,0.7152,0.0722]), [0.01,0.5,0.99]).tolist()}
@@ -540,3 +542,160 @@ def materialize_eval_overlay(corpus: TrainingCorpus, output: Path) -> Path:
             target.unlink()
         target.symlink_to(source.resolve())
     return output
+def _refuse_nested_output(output: Path, sources: Iterable[Path]) -> None:
+    """Reject report destinations that could mutate an input artifact tree."""
+    destination = Path(output).resolve()
+    for source in sources:
+        source_path = Path(source).resolve()
+        if destination == source_path or source_path in destination.parents:
+            raise ValueError(f"output directory must not equal or be inside input source: {source_path}")
+def _write_json(path: Path, payload: Any) -> None:
+    """Serialize report data only after proving every numeric value is finite."""
+    def convert(value: Any) -> Any:
+        if isinstance(value, np.ndarray):
+            return convert(value.tolist())
+        if isinstance(value, np.generic):
+            return convert(value.item())
+        if isinstance(value, dict):
+            return {str(key): convert(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [convert(item) for item in value]
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError("report contains a non-finite float")
+            return value
+        return value
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(convert(payload), indent=2, sort_keys=True) + "\n")
+def _write_state_distribution_csv(saved: list[SavedObservation], training: TrainingCorpus, comparison: dict[str, Any], path: Path) -> None:
+    import csv
+    online_states = np.stack([reconstruct_state(item, saved[0]) for item in saved])
+    training_quantiles = comparison["state"]["training_quantiles"]
+    distances = comparison["state"]["normalized_nearest_training_distance"]
+    with Path(path).open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=("dimension", "online_mean", "online_std", "training_q01", "training_q50", "training_q99", "nearest_training_distance"),
+        )
+        writer.writeheader()
+        for dimension in range(ACTION_DIMENSION):
+            writer.writerow(
+                {
+                    "dimension": dimension,
+                    "online_mean": float(np.mean(online_states[:, dimension])),
+                    "online_std": float(np.std(online_states[:, dimension])),
+                    "training_q01": training_quantiles[0][dimension],
+                    "training_q50": training_quantiles[1][dimension],
+                    "training_q99": training_quantiles[2][dimension],
+                    "nearest_training_distance": json.dumps(distances),
+                }
+            )
+def _write_camera_distribution_csv(comparison: dict[str, Any], path: Path) -> None:
+    import csv
+    with Path(path).open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=("source", "mean_rgb", "std_rgb", "luminance_quantiles"))
+        writer.writeheader()
+        for source, statistics in comparison["cameras"].items():
+            writer.writerow(
+                {
+                    "source": source,
+                    "mean_rgb": json.dumps(statistics["mean"]),
+                    "std_rgb": json.dumps(statistics["std"]),
+                    "luminance_quantiles": json.dumps(statistics["luminance_quantiles"]),
+                }
+            )
+def _save_gripper_and_left_z_plot(action_report: dict[str, Any], path: Path) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    figure, (gripper_axis, z_axis) = plt.subplots(2, 1, figsize=(9, 6), sharex=False)
+    for chunk in action_report["chunks"]:
+        raw_index = np.arange(len(chunk["raw_left_gripper"]))
+        selected_index = np.arange(len(chunk["absolute_left_quest_z"]))
+        label = "obs_seq={}".format(chunk["obs_seq"])
+        gripper_axis.plot(raw_index, chunk["raw_left_gripper"], label="left " + label)
+        gripper_axis.plot(raw_index, chunk["raw_right_gripper"], linestyle="--", label="right " + label)
+        z_axis.plot(raw_index, chunk["raw_left_local_z"], label="local raw " + label)
+        z_axis.plot(selected_index, chunk["absolute_left_quest_z"], linestyle="--", label="Quest waypoint " + label)
+    gripper_axis.set_ylabel("gripper")
+    gripper_axis.set_title("Raw action grippers")
+    gripper_axis.legend(loc="best")
+    z_axis.set_xlabel("action index")
+    z_axis.set_ylabel("left Z")
+    z_axis.set_title("Local raw Z and absolute Quest Z")
+    z_axis.legend(loc="best")
+    figure.tight_layout()
+    figure.savefig(path, dpi=144)
+    plt.close(figure)
+def _save_camera_contact_sheet(saved: list[SavedObservation], training: TrainingCorpus, path: Path) -> None:
+    from PIL import Image
+    frames = (
+        saved[0].camera0_rgb,
+        saved[0].camera1_rgb,
+        training.camera0_rgb[0],
+        training.camera1_rgb[0],
+    )
+    images = [Image.fromarray(np.asarray(frame, dtype=np.uint8), mode="RGB") for frame in frames]
+    cell_width = max(image.width for image in images)
+    cell_height = max(image.height for image in images)
+    sheet = Image.new("RGB", (cell_width * 2, cell_height * 2), "black")
+    for index, image in enumerate(images):
+        sheet.paste(image, ((index % 2) * cell_width, (index // 2) * cell_height))
+    sheet.save(path, format="JPEG", quality=95)
+def main(argv: list[str] | None = None) -> int:
+    """Build an offline SmolVLA diagnostic report from persisted artifacts."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Analyze a saved SmolVLA online run without deployment imports.")
+    parser.add_argument("--obs-dir", required=True, type=Path, help="saved observation step directory")
+    parser.add_argument("--trace-dir", required=True, type=Path, help="directory containing chunk/controller JSONL traces")
+    parser.add_argument("--training-root", required=True, type=Path, help="training corpus containing direct episode parquets")
+    parser.add_argument("--output-dir", required=True, type=Path, help="new or separate report directory")
+    args = parser.parse_args(argv)
+    try:
+        _refuse_nested_output(args.output_dir, (args.obs_dir, args.trace_dir, args.training_root))
+        observations = load_saved_observations(args.obs_dir)
+        chunks = load_chunk_trace(args.trace_dir / "chunk_trace.jsonl")
+        controller = load_controller_trace(args.trace_dir / "controller_trace.jsonl")
+        training = load_training_parquets(args.training_root)
+        action_report = analyze_action_chain(chunks, controller, observations)
+        comparison = compare_observation_distributions(observations, training)
+    except (RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
+    output = args.output_dir
+    output.mkdir(parents=True, exist_ok=True)
+    materialize_eval_overlay(training, output / "training_eval_overlay")
+    write_action_chain_csv(action_report, output / "action_chain.csv")
+    _write_json(output / "training_baseline.json", comparison)
+    _write_state_distribution_csv(observations, training, comparison, output / "state_distribution.csv")
+    _write_camera_distribution_csv(comparison, output / "camera_distribution.csv")
+    _save_gripper_and_left_z_plot(action_report, output / "gripper_and_left_z.png")
+    _save_camera_contact_sheet(observations, training, output / "camera_contact_sheet.jpg")
+    _write_json(
+        output / "summary.json",
+        {
+            "inputs": {
+                "obs_dir": str(args.obs_dir),
+                "trace_dir": str(args.trace_dir),
+                "training_root": str(args.training_root),
+            },
+            "counts": {
+                "saved_observations": len(observations),
+                "action_chunks": len(chunks),
+                "controller_samples": len(controller),
+                "training_frames": int(training.states.shape[0]),
+            },
+            "notes": {
+                "state_reference": "step0 approximate reference",
+                "image_resolution": "online raw 256 vs training raw224",
+                "image_color": "RGB no BGR swap",
+                "controller_frames": "controller mixed-frame warning",
+            },
+            "controller_target_frame_mismatch": action_report["controller_target_frame_mismatch"],
+            "camera_assignment": comparison["assignment"],
+            "raw_image_shapes": comparison["raw_image_shapes"],
+        },
+    )
+    return 0
+if __name__ == "__main__":
+    raise SystemExit(main())

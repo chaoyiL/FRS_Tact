@@ -325,3 +325,53 @@ def test_training_loader_reads_direct_parquets_as_rgb_20d_frames_in_deterministi
     assert corpus.frame_indices.tolist() == [0, 1]
     assert corpus.states.shape == corpus.actions.shape == (2, 20)
     assert corpus.camera0_rgb.shape == corpus.camera1_rgb.shape == (2, 224, 224, 3)
+
+
+def test_cli_requires_sources_writes_offline_artifacts_and_refuses_nested_output(tmp_path):
+    module = _load_module()
+    obs, trace, training, output = tmp_path / "obs", tmp_path / "trace", tmp_path / "training", tmp_path / "out"
+    _write_observation(obs, 0, left_x=1.0, timestamp=1.0)
+    (trace / "chunk_trace.jsonl").parent.mkdir()
+    (trace / "chunk_trace.jsonl").write_text(json.dumps(_chunk_row(obs_seq=1, vla_action=_actions())))
+    (trace / "controller_trace.jsonl").write_text(
+        json.dumps({"samples": [{"wall_time": 101.0, "ee_pose_left_z": 0.0}]})
+    )
+    _write_training_parquet(training, "episode_25.parquet", [_training_row(episode=25, frame=0, camera0=(220,10,10), camera1=(10,220,10), state_offset=0.0)])
+    args = [
+        "--obs-dir", str(obs), "--trace-dir", str(trace),
+        "--training-root", str(training), "--output-dir", str(output),
+    ]
+    module.main(args)
+
+    assert all(
+        (output / name).stat().st_size
+        for name in (
+            "summary.json", "action_chain.csv", "training_baseline.json",
+            "state_distribution.csv", "camera_distribution.csv",
+            "gripper_and_left_z.png", "camera_contact_sheet.jpg",
+        )
+    )
+    summary = json.loads((output / "summary.json").read_text())
+    assert summary["notes"] == {
+        "state_reference": "step0 approximate reference",
+        "image_resolution": "online raw 256 vs training raw224",
+        "image_color": "RGB no BGR swap",
+        "controller_frames": "controller mixed-frame warning",
+    }
+    assert summary["camera_assignment"]["recommended_assignment"] == "direct"
+
+    overlay = output / "training_eval_overlay"
+    assert json.loads((overlay / "meta" / "info.json").read_text()) == {"fps": 30}
+    assert json.loads((overlay / "meta" / "episodes.jsonl").read_text()) == {
+        "episode_index": 25, "episode_length": 1
+    }
+    link = overlay / "data" / "episode_25.parquet"
+    assert link.is_symlink()
+    assert link.resolve() == (training / "episode_25.parquet").resolve()
+
+    for source in (obs, trace, training):
+        with pytest.raises(SystemExit):
+            module.main([
+                "--obs-dir", str(obs), "--trace-dir", str(trace),
+                "--training-root", str(training), "--output-dir", str(source / "forbidden"),
+            ])
