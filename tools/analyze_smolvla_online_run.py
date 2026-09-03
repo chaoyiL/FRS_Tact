@@ -93,12 +93,9 @@ def _finite_array(value: Any, shape: tuple[int, ...], label: str) -> np.ndarray:
 
 
 def _finite_scalar(value: Any, label: str) -> float:
-    if isinstance(value, bool):
+    if not _numeric_payload(value) or isinstance(value, (list, tuple, np.ndarray)):
         raise ValueError(f"{label} must be a finite number")
-    try:
-        result = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"{label} must be a finite number") from exc
+    result = float(value)
     if not math.isfinite(result):
         raise ValueError(f"{label} must be a finite number")
     return result
@@ -317,7 +314,7 @@ def _sign_runs(values: np.ndarray) -> list[dict[str, int | str]]:
 def analyze_action_chain(
     chunks: list[ChunkRecord],
     controller: list[ControllerSample],
-    observations: list[SavedObservation],
+    observations: list[SavedObservation] | None = None,
 ) -> dict[str, Any]:
     """Summarize raw, selected, absolute, and controller layers per chunk.
 
@@ -328,23 +325,26 @@ def analyze_action_chain(
         raise ValueError("chunks must be nonempty")
     if not controller:
         raise ValueError("controller must be nonempty")
-    if not observations:
-        raise ValueError("observations must be nonempty")
+    chunk_sequences = [chunk.obs_seq for chunk in chunks]
+    if len(set(chunk_sequences)) != len(chunk_sequences):
+        raise ValueError("duplicate chunk obs_seq values are not allowed")
     observation_by_sequence: dict[int, SavedObservation] = {}
-    for observation in observations:
-        if observation.step % EXECUTED_ACTIONS != 0:
-            raise ValueError(f"saved observation step {observation.step} is not a multiple of 10")
-        sequence = observation.step // EXECUTED_ACTIONS + 1
-        if sequence in observation_by_sequence:
-            raise ValueError(f"duplicate saved observation mapping for obs_seq {sequence}")
-        observation_by_sequence[sequence] = observation
-    chunk_sequences = {chunk.obs_seq for chunk in chunks}
-    if set(observation_by_sequence) != chunk_sequences:
-        raise ValueError("saved observations must map one-to-one to chunk obs_seq values")
+    if observations is not None:
+        if not observations:
+            raise ValueError("observations must be nonempty when supplied")
+        for observation in observations:
+            if observation.step % EXECUTED_ACTIONS != 0:
+                raise ValueError(f"saved observation step {observation.step} is not a multiple of 10")
+            sequence = observation.step // EXECUTED_ACTIONS + 1
+            if sequence in observation_by_sequence:
+                raise ValueError(f"duplicate saved observation mapping for obs_seq {sequence}")
+            observation_by_sequence[sequence] = observation
+        if set(observation_by_sequence) != set(chunk_sequences):
+            raise ValueError("saved observations must map one-to-one to chunk obs_seq values")
     result_chunks: list[dict[str, Any]] = []
     controller_frame_mismatch = any(sample.target_left_robot_z is not None for sample in controller)
     for chunk in chunks:
-        observation = observation_by_sequence[chunk.obs_seq]
+        observation = observation_by_sequence.get(chunk.obs_seq)
         selected_timestamps = chunk.action_timestamps[:EXECUTED_ACTIONS]
         earliest = float(selected_timestamps.min())
         latest = float(selected_timestamps.max())
@@ -355,8 +355,8 @@ def analyze_action_chain(
         result_chunks.append(
             {
                 "obs_seq": chunk.obs_seq,
-                "saved_step": observation.step,
-                "saved_timestamp": observation.timestamp,
+                "saved_step": None if observation is None else observation.step,
+                "saved_timestamp": None if observation is None else observation.timestamp,
                 "chunk_timestamp": chunk.timestamp,
                 "prediction_field": chunk.prediction_field,
                 "prediction_source": chunk.prediction_source,

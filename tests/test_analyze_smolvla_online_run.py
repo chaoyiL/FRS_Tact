@@ -211,3 +211,63 @@ def test_action_chain_rejects_missing_or_nonconforming_saved_observation_mapping
             module.load_controller_trace(controller_path),
             module.load_saved_observations(saved),
         )
+
+
+def test_action_chain_rejects_duplicate_chunk_observation_sequences(tmp_path):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    row = _chunk_row(obs_seq=1, vla_action=_actions())
+    trace_path.write_text(json.dumps(row) + "\n" + json.dumps(row) + "\n")
+    controller_path = tmp_path / "controller_trace.jsonl"
+    controller_path.write_text(
+        json.dumps(
+            {
+                "pose_frame": "quest",
+                "samples": [{"wall_time": 101.0, "ee_pose_left_z": -0.45}],
+            }
+        )
+        + "\n"
+    )
+    saved = tmp_path / "saved"
+    _write_observation(saved, 0, left_x=1.0, timestamp=77.0)
+
+    with pytest.raises(ValueError, match="duplicate chunk obs_seq"):
+        module.analyze_action_chain(
+            module.load_chunk_trace(trace_path),
+            module.load_controller_trace(controller_path),
+            module.load_saved_observations(saved),
+        )
+
+
+def test_action_chain_preserves_two_argument_interface_without_saved_provenance(tmp_path):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    trace_path.write_text(json.dumps(_chunk_row(obs_seq=1, vla_action=_actions())) + "\n")
+    controller_path = tmp_path / "controller_trace.jsonl"
+    controller_path.write_text(
+        json.dumps(
+            {
+                "pose_frame": "quest",
+                "samples": [{"wall_time": 101.0, "ee_pose_left_z": -0.45}],
+            }
+        )
+        + "\n"
+    )
+
+    report = module.analyze_action_chain(
+        module.load_chunk_trace(trace_path), module.load_controller_trace(controller_path)
+    )
+
+    assert report["chunks"][0]["saved_step"] is None
+    assert report["chunks"][0]["saved_timestamp"] is None
+
+
+def test_chunk_parser_rejects_numeric_string_timestamp(tmp_path):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    row = _chunk_row(obs_seq=1, vla_action=_actions())
+    row["time"] = "101.0"
+    trace_path.write_text(json.dumps(row))
+
+    with pytest.raises(ValueError, match="finite number"):
+        module.load_chunk_trace(trace_path)
