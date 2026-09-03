@@ -115,7 +115,7 @@ def test_pi05_right_arm_profile_rejects_dual_arm_dimensions() -> None:
         load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="pi05")
 
 
-def test_pi05_frs_right_arm_uses_only_right_tactile_inputs() -> None:
+def test_pi05_frs_right_arm_uses_both_tactile_faces_of_arm_1() -> None:
     import yaml
 
     from deploy_pi05.deployment import load_deployment_config_bytes
@@ -133,7 +133,7 @@ def test_pi05_frs_right_arm_uses_only_right_tactile_inputs() -> None:
     )
     config["observation"].update(single_arm_mode=True, controlled_arm="right")
     config["frs"]["tactile_keys"] = [
-        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_1",
         "observation.images.tactile_right_1",
     ]
 
@@ -142,6 +142,57 @@ def test_pi05_frs_right_arm_uses_only_right_tactile_inputs() -> None:
     )
 
     assert loaded["frs"]["tactile_keys"] == config["frs"]["tactile_keys"]
+
+
+def test_checked_in_pi05_frs_right_config_uses_new_two_face_checkpoint() -> None:
+    from deploy_pi05.deployment import load_deployment_config
+
+    loaded = load_deployment_config(
+        DEPLOY / "configs/deploy_pi05_frs_right.yaml", mode="frs"
+    )
+
+    assert loaded["frs"]["tactile_keys"] == [
+        "observation.images.tactile_left_1",
+        "observation.images.tactile_right_1",
+    ]
+    assert loaded["frs"]["checkpoint"] == (
+        "/home/typhon/FRS_Tact/checkpoints/model/"
+        "pi05_frs_right_insert_01_two_face"
+    )
+
+
+def test_pi05_frs_right_arm_rejects_legacy_cross_arm_tactile_pair() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load(
+        (DEPLOY / "configs/deploy_pi05_frs_right.yaml").read_bytes()
+    )
+    config["frs"]["tactile_keys"] = [
+        "observation.images.tactile_right_0",
+        "observation.images.tactile_right_1",
+    ]
+
+    with pytest.raises(ValueError, match="tactile_left_1.*tactile_right_1"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="frs")
+
+
+def test_pi05_frs_right_arm_rejects_noncanonical_tactile_key_prefix() -> None:
+    import yaml
+
+    from deploy_pi05.deployment import load_deployment_config_bytes
+
+    config = yaml.safe_load(
+        (DEPLOY / "configs/deploy_pi05_frs_right.yaml").read_bytes()
+    )
+    config["frs"]["tactile_keys"] = [
+        "bogus.tactile_left_1",
+        "bogus.tactile_right_1",
+    ]
+
+    with pytest.raises(ValueError, match="tactile_left_1.*tactile_right_1"):
+        load_deployment_config_bytes(yaml.safe_dump(config).encode(), mode="frs")
 
 
 def test_deploy_pi05_contains_no_training_or_analysis_trees() -> None:

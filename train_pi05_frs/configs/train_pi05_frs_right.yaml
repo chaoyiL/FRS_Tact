@@ -1,7 +1,7 @@
 # Pi0.5 FRS 右手单臂完整训练流水线。
-# 固定合同：7D observation.state、10D action、右腕视觉、两路右手触觉。
-# 纯视觉 checkpoint 由以下命令下载到 /workspace/checkpoints/model/pi05_task3_0830_1w：
-# FRS_CHECKPOINT_ROOT=/workspace/checkpoints \
+# 固定合同：7D observation.state、10D action、右腕视觉、右手机械臂的左右两路触觉。
+# 纯视觉 checkpoint 由以下命令下载到 /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w：
+# FRS_CHECKPOINT_ROOT=/workspace/FRS_Tact/checkpoints \
 #   bash scripts/download_ckpt.sh KaiyueChen/pi05_task3_0830_1w
 checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
 allow_download: false
@@ -29,7 +29,8 @@ action_cache:
 
 tactile_embedding_cache:
   enabled: true
-  root: /workspace/tactile_embeddings_pi05_right_insert_01
+  # 新路径避免复用曾以 tactile_right_0 + tactile_right_1 生成的错误缓存。
+  root: /workspace/tactile_embeddings_pi05_right_insert_01_two_face
   dtype: float16
   precompute_batch_size: 128
   precompute_num_workers: 4
@@ -45,7 +46,8 @@ model:
   tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
   freeze_tactile_encoder: true
   tactile_keys:
-    - observation.images.tactile_right_0
+    # 后缀 1 表示右机械臂，left/right 表示同一夹爪的两侧触觉。
+    - observation.images.tactile_left_1
     - observation.images.tactile_right_1
   tactile_embedding_dim: 512
   tactile_num_tokens: 2
@@ -67,7 +69,8 @@ norm_stats:
   use_quantile_norm: true
 
 frs_training:
-  output: /workspace/frs_insert_01_pi05_right/run_composite_gated_right_01
+  # 新输出目录避免 resume/评估误读旧语义 checkpoint。
+  output: /workspace/frs_insert_01_pi05_right/run_composite_gated_right_two_face_01
   tactile_window_divisor: 5
   history_stride: 3
   # 单手 composite objective：Gate 先混合 GT/VLA endpoint，再计算一条 FM 路径。

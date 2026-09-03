@@ -29,7 +29,9 @@ CONFIG_PATH = TRAIN_ROOT / "configs" / "train_pi05_frs.yaml"
 LAUNCHER = TRAIN_ROOT / "scripts" / "start_frs_pi05_train.sh"
 
 
-def _valid_config(tmp_path: Path) -> dict[str, Any]:
+def _valid_config(
+    tmp_path: Path, *, state_width: int = 3, action_width: int = 2
+) -> dict[str, Any]:
     checkpoint = tmp_path / "checkpoint"
     (checkpoint / "params").mkdir(parents=True)
     encoder = tmp_path / "encoder"
@@ -69,8 +71,11 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
                     "episode_index": {"dtype": "int64", "shape": [1], "names": None},
                     "index": {"dtype": "int64", "shape": [1], "names": None},
                     "task_index": {"dtype": "int64", "shape": [1], "names": None},
-                    "actions": {"dtype": "float32", "shape": [2]},
-                    "observation.state": {"dtype": "float32", "shape": [3]},
+                    "actions": {"dtype": "float32", "shape": [action_width]},
+                    "observation.state": {
+                        "dtype": "float32",
+                        "shape": [state_width],
+                    },
                     "observation.images.camera0": {"dtype": "video", "shape": [3, 224, 224]},
                     "observation.images.camera1": {"dtype": "video", "shape": [3, 224, 224]},
                     "observation.images.tactile_left_0": {"dtype": "video", "shape": [3, 224, 224]},
@@ -86,17 +91,17 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
         json.dumps(
             {
                 "observation.state": {
-                    "min": [0.0, 0.0, 0.0],
-                    "max": [1.0, 1.0, 1.0],
-                    "mean": [0.5, 0.5, 0.5],
-                    "std": [1.0, 1.0, 1.0],
+                    "min": [0.0] * state_width,
+                    "max": [1.0] * state_width,
+                    "mean": [0.5] * state_width,
+                    "std": [1.0] * state_width,
                     "count": [2],
                 },
                 "actions": {
-                    "min": [0.0, 0.0],
-                    "max": [1.0, 1.0],
-                    "mean": [0.5, 0.5],
-                    "std": [1.0, 1.0],
+                    "min": [0.0] * action_width,
+                    "max": [1.0] * action_width,
+                    "mean": [0.5] * action_width,
+                    "std": [1.0] * action_width,
                     "count": [2],
                 },
             }
@@ -143,8 +148,14 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
                 "index": [0, 1],
                 "timestamp": [0.0, 1.0 / 30.0],
                 "task_index": [0, 0],
-                "observation.state": [[0.0, 0.0, 0.0], [0.1, 0.1, 0.1]],
-                "actions": [[0.0, 0.0], [0.1, 0.1]],
+                "observation.state": [
+                    [0.0] * state_width,
+                    [0.1] * state_width,
+                ],
+                "actions": [
+                    [0.0] * action_width,
+                    [0.1] * action_width,
+                ],
             }
         ),
         data_file,
@@ -166,16 +177,16 @@ def _valid_config(tmp_path: Path) -> dict[str, Any]:
             {
                 "norm_stats": {
                     "state": {
-                        "mean": [0.0, 0.0, 0.0],
-                        "std": [1.0, 1.0, 1.0],
-                        "q01": [-1.0, -1.0, -1.0],
-                        "q99": [1.0, 1.0, 1.0],
+                        "mean": [0.0] * state_width,
+                        "std": [1.0] * state_width,
+                        "q01": [-1.0] * state_width,
+                        "q99": [1.0] * state_width,
                     },
                     "actions": {
-                        "mean": [0.0, 0.0],
-                        "std": [1.0, 1.0],
-                        "q01": [-1.0, -1.0],
-                        "q99": [1.0, 1.0],
+                        "mean": [0.0] * action_width,
+                        "std": [1.0] * action_width,
+                        "q01": [-1.0] * action_width,
+                        "q99": [1.0] * action_width,
                     },
                 }
             }
@@ -336,13 +347,21 @@ def test_right_hand_config_has_fixed_single_arm_contract():
     assert model["action_dim"] == 10
     assert model["tactile_num_tokens"] == 2
     assert model["tactile_keys"] == [
-        "observation.images.tactile_right_0",
+        "observation.images.tactile_left_1",
         "observation.images.tactile_right_1",
     ]
     assert model["camera_map"] == {
         "right_wrist_0_rgb": "observation.images.camera1"
     }
-    assert config["checkpoint"] == "/workspace/checkpoints/model/pi05_task3_0830_1w"
+    assert config["tactile_embedding_cache"]["root"] == (
+        "/workspace/tactile_embeddings_pi05_right_insert_01_two_face"
+    )
+    assert config["frs_training"]["output"] == (
+        "/workspace/frs_insert_01_pi05_right/run_composite_gated_right_two_face_01"
+    )
+    assert config["checkpoint"] == (
+        "/workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w"
+    )
     assert config["datasets"] == [
         {
             "repo_id": "KaiyueChen/insert_01",
@@ -476,12 +495,21 @@ def test_pipeline_forwards_two_tactile_tokens_for_single_hand(
 ) -> None:
     from train_pi05_frs.tools import train_frs as train_tool
 
-    config = _valid_config(tmp_path)
-    config["model"]["tactile_keys"] = [
-        "observation.images.tactile_right_0",
-        "observation.images.tactile_right_1",
-    ]
-    config["model"]["tactile_num_tokens"] = 2
+    config = _valid_config(tmp_path, state_width=7, action_width=10)
+    config["model"].update(
+        state_action_profile="single-right-arm-7x10",
+        state_dim=7,
+        robot_action_dim=10,
+        action_dim=10,
+        tactile_keys=[
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
+        tactile_num_tokens=2,
+        camera_map={
+            "right_wrist_0_rgb": "observation.images.camera1",
+        },
+    )
     config["frs_training"]["loss_mode"] = COMPOSITE_GATED_LOSS_MODE
     config["frs_training"].pop("gate_lambda")
     cache_dir = Path(config["action_cache"]["root"]) / "org" / "demo"
@@ -497,6 +525,40 @@ def test_pipeline_forwards_two_tactile_tokens_for_single_hand(
     assert captured["loss_mode"] == COMPOSITE_GATED_LOSS_MODE
     assert captured["gate_lambda"] == 0.0
     assert captured["tactile_num_tokens"] == 2
+
+
+def test_single_right_profile_rejects_legacy_cross_arm_tactile_pair(
+    tmp_path: Path,
+) -> None:
+    config = _valid_config(tmp_path, state_width=7, action_width=10)
+    config["model"].update(
+        state_action_profile="single-right-arm-7x10",
+        state_dim=7,
+        robot_action_dim=10,
+        action_dim=10,
+        tactile_keys=[
+            "observation.images.tactile_right_0",
+            "observation.images.tactile_right_1",
+        ],
+        tactile_num_tokens=2,
+        camera_map={
+            "right_wrist_0_rgb": "observation.images.camera1",
+        },
+    )
+
+    with pytest.raises(ValueError, match="tactile_left_1.*tactile_right_1"):
+        validate_config(config, check_paths=False)
+
+
+def test_single_right_profile_rejects_noncanonical_tactile_key_prefix() -> None:
+    config = load_config(TRAIN_ROOT / "configs" / "train_pi05_frs_right.yaml")
+    config["model"]["tactile_keys"] = [
+        "bogus.tactile_left_1",
+        "bogus.tactile_right_1",
+    ]
+
+    with pytest.raises(ValueError, match="canonical tactile keys"):
+        validate_config(config, check_paths=False)
 
 
 def test_load_config_rejects_non_mapping_root(tmp_path: Path) -> None:

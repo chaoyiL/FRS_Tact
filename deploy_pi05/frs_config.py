@@ -10,6 +10,12 @@ from numbers import Real
 from typing import Any
 
 
+_SINGLE_RIGHT_TACTILE_KEYS = (
+    "observation.images.tactile_left_1",
+    "observation.images.tactile_right_1",
+)
+
+
 @dataclass(frozen=True)
 class GripperHysteresisConfig:
     left_close_threshold: float
@@ -170,13 +176,11 @@ def validate_frs_config_section(config: Mapping[str, Any]) -> None:
     if missing:
         raise ValueError(f"missing FRS config values: {missing}")
     if model.get("state_action_profile", "dual-arm-20x20") == "single-right-arm-7x10":
-        tactile_basenames = tuple(
-            str(key).rsplit(".", 1)[-1] for key in raw["tactile_keys"]
-        )
-        if tactile_basenames != ("tactile_right_0", "tactile_right_1"):
+        tactile_keys = tuple(str(key) for key in raw["tactile_keys"])
+        if tactile_keys != _SINGLE_RIGHT_TACTILE_KEYS:
             raise ValueError(
-                "single-right-arm FRS requires tactile_right_0 and tactile_right_1 "
-                "in that order"
+                "single-right-arm FRS requires observation.images.tactile_left_1 "
+                "and observation.images.tactile_right_1 in that order"
             )
     observation = _mapping(config.get("observation"), "observation")
     if observation.get("data_type") != "vitac":

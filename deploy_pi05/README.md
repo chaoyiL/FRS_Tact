@@ -181,6 +181,11 @@ FRS 右手模式使用与纯视觉右手相同的物理/wire 边界：server 仍
 客户端将 state 的 `[7:14]` 投影给右手模型，再将模型/FRS 的 10D 右手
 action 扩展为 20D，左臂保持当前姿态和夹爪宽度。
 
+该 profile 的两路触觉固定为 `tactile_left_1`、`tactile_right_1`：后缀 `_1`
+表示右机械臂，`left/right` 表示这只手夹爪的左右两块触觉。旧的
+`tactile_right_0`、`tactile_right_1` checkpoint 不能用于这个合同；必须使用按新键
+重建 tactile embedding cache 后重新训练得到的 FRS checkpoint。
+
 两端必须显式使用同一份右手 FRS YAML：
 
 ```bash

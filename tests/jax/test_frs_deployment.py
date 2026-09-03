@@ -2494,7 +2494,7 @@ def _pi05_contract_runtime(*, action_dim: int = 32) -> object:
 
     tactile_keys = (
         (
-            "observation.images.tactile_right_0",
+            "observation.images.tactile_left_1",
             "observation.images.tactile_right_1",
         )
         if action_dim == 10

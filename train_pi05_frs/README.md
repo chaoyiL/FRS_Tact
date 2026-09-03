@@ -42,13 +42,14 @@ session name; attach with `tmux attach -t <name>`.
 
 `configs/train_pi05_frs_right.yaml` is the independent right-hand configuration. Its fixed
 contract is 7D `observation.state`, 10D `action`, one right-wrist visual stream, and tactile keys
-`tactile_right_0`, `tactile_right_1` in that order. It is configured for the smaller
+`tactile_left_1`, `tactile_right_1` in that order. The `_1` suffix selects the right robot arm,
+while `left` and `right` select the two tactile faces on that hand. It is configured for the smaller
 `KaiyueChen/insert_01` repair set and the LoRA checkpoint
 `KaiyueChen/pi05_task3_0830_1w`; set the tactile-encoder path before starting it.
 
 ```bash
 # Download the pure-vision checkpoint to the path used by the YAML.
-FRS_CHECKPOINT_ROOT=/workspace/checkpoints \
+FRS_CHECKPOINT_ROOT=/workspace/FRS_Tact/checkpoints \
   bash scripts/download_ckpt.sh KaiyueChen/pi05_task3_0830_1w
 
 # Dependency-light input/configuration check.
@@ -61,7 +62,9 @@ bash train_pi05_frs/scripts/start_frs_pi05_right_train.sh
 The right-hand Pi0.5 checkpoint itself must use `action_dim: 10`, and its norm statistics must
 come from the same 7D-state/10D-action fine-tune. A dual-arm Pi0.5 checkpoint or dual-arm FRS
 checkpoint cannot be reused by only changing the profile. The right-hand decoder is explicitly
-configured with two tactile tokens. Its `composite_gated` objective follows the bimanual endpoint
+configured with two tactile tokens. Rebuild the tactile embedding cache and retrain FRS after any
+tactile-key change; the VLA action cache can be reused because its `camera1` mapping is unchanged.
+Its `composite_gated` objective follows the bimanual endpoint
 design with a scalar Gate: low/mid/high Gate maps to VLA/mixed/GT endpoint, then one FM loss is
 computed. Decode supervision uses the same VLA/mixed/GT weighting; high-Gate rank/repair and
 low-Gate safety constraints remain enabled.

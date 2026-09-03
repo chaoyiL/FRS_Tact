@@ -114,7 +114,10 @@ STATE_ACTION_PROFILES = {
     "single-right-arm-7x10": {
         "state_dim": 7,
         "robot_action_dim": 10,
-        "tactile_basenames": ("tactile_right_0", "tactile_right_1"),
+        "tactile_keys": (
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ),
         "camera_slots": {"right_wrist_0_rgb"},
     },
 }
@@ -993,12 +996,22 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
                 f"config.model dimensions do not match profile {profile_name}: "
                 f"state={state_dim}, robot_action={robot_action_dim}"
             )
-        tactile_basenames = tuple(str(key).rsplit(".", 1)[-1] for key in tactile_keys)
-        if tactile_basenames != profile["tactile_basenames"]:
-            raise ValueError(
-                f"config.model.tactile_keys do not match profile {profile_name}: "
-                f"{tactile_basenames!r} != {profile['tactile_basenames']!r}"
+        if "tactile_keys" in profile:
+            expected_tactile_keys = tuple(profile["tactile_keys"])
+            if tuple(tactile_keys) != expected_tactile_keys:
+                raise ValueError(
+                    f"config.model.tactile_keys must use the canonical tactile keys "
+                    f"for profile {profile_name}: {expected_tactile_keys!r}"
+                )
+        else:
+            tactile_basenames = tuple(
+                str(key).rsplit(".", 1)[-1] for key in tactile_keys
             )
+            if tactile_basenames != profile["tactile_basenames"]:
+                raise ValueError(
+                    f"config.model.tactile_keys do not match profile {profile_name}: "
+                    f"{tactile_basenames!r} != {profile['tactile_basenames']!r}"
+                )
         if set(camera_map) != profile["camera_slots"]:
             raise ValueError(
                 f"config.model.camera_map slots do not match profile {profile_name}: "
