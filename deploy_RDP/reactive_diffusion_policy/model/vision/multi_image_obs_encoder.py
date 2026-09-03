@@ -67,7 +67,9 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             share_rgb_model: bool=False,
             # renormalize rgb input with imagenet normalization
             # assuming input in [0,1]
-            imagenet_norm: bool=False
+            imagenet_norm: bool=False,
+            # Training-only config field. Deployment intentionally ignores it.
+            photometric_augmentation: Optional[dict]=None,
         ):
         """
         Assumes rgb input: B,C,H,W

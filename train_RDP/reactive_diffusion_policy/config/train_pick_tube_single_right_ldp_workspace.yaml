@@ -7,6 +7,15 @@ defaults:
 policy:
   obs_encoder:
     resize_shape: [224, 224]
+    photometric_augmentation:
+      type: Bread
+      identity_probability: 0.25
+      brightness_range: [0.8, 1.2]
+      contrast_range: [0.85, 1.30]
+      saturation_range: [0.80, 1.15]
+      blur_probability: 0.20
+      blur_kernel_sizes: [3, 5]
+      blur_sigma_range: [0.1, 1.0]
   at:
     action_loss_version: ${at.policy.action_loss_version}
     position_scale: ${at.policy.position_scale}

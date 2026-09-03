@@ -24,6 +24,7 @@ from reactive_diffusion_policy.common.replay_buffer import ReplayBuffer
 from reactive_diffusion_policy.common.artifact_manifest import (
     build_normalizer_cache_signature,
 )
+from reactive_diffusion_policy.common.normalize_util import get_image_range_normalizer
 from reactive_diffusion_policy.common.sampler import SequenceSampler
 from reactive_diffusion_policy.dataset.real_image_tactile_latent_diffusion_dataset import (
     RealImageTactileLatentDiffusionDataset,
@@ -33,7 +34,11 @@ from reactive_diffusion_policy.model.common.normalizer import (
     LinearNormalizer,
     SingleFieldLinearNormalizer,
 )
-from reactive_diffusion_policy.model.vision.multi_image_obs_encoder import TrainOnlyTransform
+from reactive_diffusion_policy.model.vision.multi_image_obs_encoder import (
+    BreadPhotometricAugmentation,
+    MultiImageObsEncoder,
+    TrainOnlyTransform,
+)
 
 
 def test_pick_tube_conversion_defaults_include_new_diverse_data():
@@ -367,6 +372,193 @@ def test_color_jitter_is_bypassed_in_eval_mode():
     output = transform(value)
 
     assert output is value
+
+
+def test_bread_photometric_augmentation_is_bypassed_in_eval_mode():
+    transform = BreadPhotometricAugmentation()
+    images = torch.rand(2, 2, 3, 8, 8)
+    transform.eval()
+
+    output = transform(images)
+
+    assert output is images
+
+
+def test_bread_photometric_augmentation_shares_factors_across_cameras():
+    transform = BreadPhotometricAugmentation(
+        identity_probability=0.0,
+        brightness_range=(1.2, 1.2),
+        contrast_range=(1.0, 1.0),
+        saturation_range=(1.0, 1.0),
+        blur_probability=0.0,
+    )
+    raw_images = torch.stack(
+        (
+            torch.full((3, 8, 8), 0.2),
+            torch.full((3, 8, 8), 0.4),
+        )
+    ).unsqueeze(0)
+    normalizer = get_image_range_normalizer()
+    images = normalizer.normalize(raw_images)
+
+    output = transform(images)
+
+    expected = normalizer.normalize(raw_images * 1.2)
+    torch.testing.assert_close(output, expected)
+
+
+def test_bread_photometric_augmentation_preserves_rdp_normalized_identity():
+    transform = BreadPhotometricAugmentation(
+        identity_probability=0.0,
+        brightness_range=(1.0, 1.0),
+        contrast_range=(1.0, 1.0),
+        saturation_range=(1.0, 1.0),
+        blur_probability=0.0,
+    )
+    normalizer = get_image_range_normalizer()
+    images = normalizer.normalize(torch.full((1, 2, 3, 8, 8), 0.25))
+
+    output = transform(images)
+
+    torch.testing.assert_close(output, images)
+
+
+def test_bread_photometric_augmentation_is_seed_reproducible_and_bounded():
+    transform = BreadPhotometricAugmentation(identity_probability=0.0)
+    images = torch.rand(3, 2, 3, 8, 8)
+
+    torch.manual_seed(7)
+    first = transform(images)
+    torch.manual_seed(7)
+    second = transform(images)
+
+    torch.testing.assert_close(first, second)
+    assert first.min() >= -1.0
+    assert first.max() <= 1.0
+
+
+def test_bread_photometric_augmentation_shares_nonconstant_camera_parameters():
+    transform = BreadPhotometricAugmentation(
+        identity_probability=0.0,
+        blur_probability=1.0,
+        blur_kernel_sizes=(3,),
+        blur_sigma_range=(0.5, 0.5),
+    )
+    raw_view = torch.rand(4, 3, 8, 8)
+    normalized = get_image_range_normalizer().normalize(raw_view)
+    images = torch.stack((normalized, normalized), dim=1)
+
+    torch.manual_seed(11)
+    output = transform(images)
+
+    torch.testing.assert_close(output[:, 0], output[:, 1])
+    assert not torch.equal(output[:, 0], images[:, 0])
+
+
+def test_bread_photometric_core_avoids_scalar_item_sync(monkeypatch):
+    transform = BreadPhotometricAugmentation(
+        identity_probability=0.0,
+        blur_probability=0.0,
+    )
+    images = torch.rand(3, 2, 3, 8, 8).mul(2.0).sub(1.0)
+
+    def reject_item(_self):
+        raise AssertionError("photometric core must not synchronize tensor scalars")
+
+    monkeypatch.setattr(torch.Tensor, "item", reject_item)
+
+    output = transform(images)
+
+    assert output.shape == images.shape
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"identity_probability": -0.1}, "identity_probability"),
+        ({"blur_probability": 1.1}, "blur_probability"),
+        ({"brightness_range": (1.2, 0.8)}, "brightness_range"),
+        ({"contrast_range": (0.0, 1.0)}, "contrast_range"),
+        ({"blur_kernel_sizes": (3, 4)}, "blur_kernel_sizes"),
+    ],
+)
+def test_bread_photometric_augmentation_rejects_invalid_config(kwargs, message):
+    with pytest.raises(ValueError, match=message):
+        BreadPhotometricAugmentation(**kwargs)
+
+
+def test_encoder_without_photometric_augmentation_keeps_mixed_rgb_shapes():
+    shape_meta = {
+        "obs": {
+            "camera1": {"shape": [3, 8, 8], "type": "rgb"},
+            "camera2": {"shape": [3, 6, 6], "type": "rgb"},
+        }
+    }
+    rgb_model = torch.nn.Sequential(
+        torch.nn.AdaptiveAvgPool2d(1),
+        torch.nn.Flatten(),
+    )
+    encoder = MultiImageObsEncoder(
+        shape_meta=shape_meta,
+        rgb_model=rgb_model,
+        photometric_augmentation=None,
+    )
+    obs = {
+        "camera1": torch.rand(2, 3, 8, 8),
+        "camera2": torch.rand(2, 3, 6, 6),
+    }
+
+    output = encoder(obs)
+
+    assert output.shape == (2, 6)
+
+
+def test_encoder_eval_bypasses_bread_stacking_for_mixed_rgb_shapes():
+    shape_meta = {
+        "obs": {
+            "camera1": {"shape": [3, 8, 8], "type": "rgb"},
+            "camera2": {"shape": [3, 6, 6], "type": "rgb"},
+        }
+    }
+    rgb_model = torch.nn.Sequential(
+        torch.nn.AdaptiveAvgPool2d(1),
+        torch.nn.Flatten(),
+    )
+    encoder = MultiImageObsEncoder(
+        shape_meta=shape_meta,
+        rgb_model=rgb_model,
+        photometric_augmentation={"type": "Bread"},
+    )
+    encoder.eval()
+    obs = {
+        "camera1": torch.rand(2, 3, 8, 8),
+        "camera2": torch.rand(2, 3, 6, 6),
+    }
+
+    output = encoder(obs)
+
+    assert output.shape == (2, 6)
+
+
+def test_single_right_ldp_bread_augmentation_keeps_random_crop():
+    OmegaConf.register_new_resolver("eval", eval, replace=True)
+    config_dir = str(
+        (Path(__file__).resolve().parents[1] / "reactive_diffusion_policy" / "config")
+    )
+    with initialize_config_dir(version_base=None, config_dir=config_dir):
+        cfg = compose(config_name="train_pick_tube_single_right_ldp_workspace")
+
+    augmentation = cfg.policy.obs_encoder.photometric_augmentation
+    assert augmentation.type == "Bread"
+    assert augmentation.identity_probability == 0.25
+    assert list(augmentation.brightness_range) == [0.8, 1.2]
+    assert list(augmentation.contrast_range) == [0.85, 1.30]
+    assert list(augmentation.saturation_range) == [0.80, 1.15]
+    assert augmentation.blur_probability == 0.20
+    assert list(augmentation.blur_kernel_sizes) == [3, 5]
+    assert list(augmentation.blur_sigma_range) == [0.1, 1.0]
+    assert cfg.policy.obs_encoder.random_transforms[0].type == "RandomCrop"
+    assert cfg.policy.obs_encoder.random_transforms[0].ratio == 0.9
 
 
 def test_validation_sampler_keeps_observation_read_limit_without_oversampling():

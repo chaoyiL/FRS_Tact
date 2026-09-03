@@ -1,8 +1,10 @@
 from typing import Dict, Tuple, Union, Optional
 import copy
+import math
 import torch
 import torch.nn as nn
 import torchvision
+from torchvision.transforms import functional as TVF
 from reactive_diffusion_policy.model.vision.crop_randomizer import CropRandomizer
 from reactive_diffusion_policy.model.common.module_attr_mixin import ModuleAttrMixin
 from reactive_diffusion_policy.common.pytorch_util import dict_apply, replace_submodules
@@ -19,6 +21,163 @@ class TrainOnlyTransform(nn.Module):
         if not self.training:
             return value
         return self.transform(value)
+
+
+class BreadPhotometricAugmentation(nn.Module):
+    """Apply the DECO Bread photometric contract across paired RGB views."""
+
+    def __init__(
+            self,
+            identity_probability: float = 0.25,
+            brightness_range: Tuple[float, float] = (0.8, 1.2),
+            contrast_range: Tuple[float, float] = (0.85, 1.30),
+            saturation_range: Tuple[float, float] = (0.80, 1.15),
+            blur_probability: float = 0.20,
+            blur_kernel_sizes: Tuple[int, ...] = (3, 5),
+            blur_sigma_range: Tuple[float, float] = (0.1, 1.0),
+        ):
+        super().__init__()
+        for name, value in (
+                ('identity_probability', identity_probability),
+                ('blur_probability', blur_probability),
+            ):
+            if not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be in [0, 1], got {value}")
+        self.identity_probability = float(identity_probability)
+        self.blur_probability = float(blur_probability)
+        self.brightness_range = self._validate_range(
+            'brightness_range', brightness_range)
+        self.contrast_range = self._validate_range(
+            'contrast_range', contrast_range)
+        self.saturation_range = self._validate_range(
+            'saturation_range', saturation_range)
+        self.blur_sigma_range = self._validate_range(
+            'blur_sigma_range', blur_sigma_range)
+        self.blur_kernel_sizes = tuple(int(kernel) for kernel in blur_kernel_sizes)
+        if not self.blur_kernel_sizes or any(
+                kernel <= 0 or kernel % 2 == 0
+                for kernel in self.blur_kernel_sizes):
+            raise ValueError(
+                "blur_kernel_sizes must contain positive odd integers, "
+                f"got {self.blur_kernel_sizes}"
+            )
+
+    @staticmethod
+    def _validate_range(name, value):
+        result = tuple(float(endpoint) for endpoint in value)
+        if (
+                len(result) != 2
+                or not all(math.isfinite(endpoint) for endpoint in result)
+                or result[0] <= 0.0
+                or result[0] > result[1]):
+            raise ValueError(
+                f"{name} must be an ordered positive pair, got {value}")
+        return result
+
+    @staticmethod
+    def _sample_range(value, batch_size, device, dtype):
+        low, high = value
+        draws = torch.rand(
+            (batch_size, 1, 1, 1, 1), device=device, dtype=dtype)
+        return low + (high - low) * draws
+
+    @staticmethod
+    def _rgb_to_grayscale(images):
+        red, green, blue = images.unbind(dim=-3)
+        grayscale = 0.2989 * red + 0.587 * green + 0.114 * blue
+        return grayscale.unsqueeze(-3).to(images.dtype)
+
+    @staticmethod
+    def _blend(images, reference, factors):
+        return (
+            factors * images + (1.0 - factors) * reference
+        ).clamp(0.0, 1.0).to(images.dtype)
+
+    def forward(self, images):
+        if not self.training:
+            return images
+        if images.ndim != 5:
+            raise ValueError(
+                "Bread photometric augmentation expects [B,V,C,H,W], "
+                f"got {tuple(images.shape)}"
+            )
+        if images.shape[-3] != 3:
+            raise ValueError(
+                "Bread photometric augmentation expects three RGB channels, "
+                f"got {images.shape[-3]}"
+            )
+
+        # RDP's observation normalizer maps RGB from [0, 1] to [-1, 1]
+        # before the encoder. Photometric operations must run in image space.
+        unit_images = images.add(1.0).mul(0.5)
+        batch_size = images.shape[0]
+        factor_args = (batch_size, images.device, images.dtype)
+        active = torch.rand(
+            (batch_size, 1, 1, 1, 1),
+            device=images.device,
+            dtype=images.dtype,
+        ) >= self.identity_probability
+
+        brightness = self._sample_range(
+            self.brightness_range, *factor_args)
+        contrast = self._sample_range(self.contrast_range, *factor_args)
+        saturation = self._sample_range(
+            self.saturation_range, *factor_args)
+
+        candidate = (unit_images * brightness).clamp(0.0, 1.0)
+        contrast_mean = self._rgb_to_grayscale(candidate).mean(
+            dim=(-3, -2, -1), keepdim=True)
+        candidate = self._blend(candidate, contrast_mean, contrast)
+        candidate = self._blend(
+            candidate, self._rgb_to_grayscale(candidate), saturation)
+        augmented = torch.where(active, candidate, unit_images)
+        del candidate, unit_images
+
+        if self.blur_probability > 0.0:
+            blur_selected = (
+                torch.rand((batch_size,), device=images.device)
+                < self.blur_probability
+            ) & active.flatten()
+            selected_indices = torch.nonzero(
+                blur_selected, as_tuple=False).flatten().tolist()
+            if selected_indices:
+                kernel_indices = torch.randint(
+                    len(self.blur_kernel_sizes),
+                    (batch_size,),
+                    device=images.device,
+                )
+                blur_sigmas = self._sample_range(
+                    self.blur_sigma_range, *factor_args).flatten()
+                for sample_index in selected_indices:
+                    kernel = self.blur_kernel_sizes[
+                        int(kernel_indices[sample_index].item())]
+                    sigma = float(blur_sigmas[sample_index].item())
+                    augmented[sample_index] = TVF.gaussian_blur(
+                        augmented[sample_index],
+                        [kernel, kernel],
+                        [sigma, sigma],
+                    )
+
+        normalized = augmented.mul_(2.0).sub_(1.0)
+        return torch.where(active, normalized, images)
+
+
+def build_photometric_augmentation(spec):
+    if spec is None:
+        return None
+    transform_type = spec.get('type')
+    if transform_type != 'Bread':
+        raise ValueError(
+            f"Unsupported photometric augmentation: {transform_type}")
+    return BreadPhotometricAugmentation(
+        identity_probability=spec.get('identity_probability', 0.25),
+        brightness_range=spec.get('brightness_range', (0.8, 1.2)),
+        contrast_range=spec.get('contrast_range', (0.85, 1.30)),
+        saturation_range=spec.get('saturation_range', (0.80, 1.15)),
+        blur_probability=spec.get('blur_probability', 0.20),
+        blur_kernel_sizes=spec.get('blur_kernel_sizes', (3, 5)),
+        blur_sigma_range=spec.get('blur_sigma_range', (0.1, 1.0)),
+    )
 
 
 def build_random_transforms(specs, input_shape):
@@ -67,7 +226,8 @@ class MultiImageObsEncoder(ModuleAttrMixin):
             share_rgb_model: bool=False,
             # renormalize rgb input with imagenet normalization
             # assuming input in [0,1]
-            imagenet_norm: bool=False
+            imagenet_norm: bool=False,
+            photometric_augmentation: Optional[dict]=None,
         ):
         """
         Assumes rgb input: B,C,H,W
@@ -170,16 +330,27 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         self.rgb_keys = rgb_keys
         self.low_dim_keys = low_dim_keys
         self.key_shape_map = key_shape_map
+        self.photometric_augmentation = build_photometric_augmentation(
+            photometric_augmentation)
 
     def forward(self, obs_dict):
         batch_size = None
         features = list()
+        rgb_obs = obs_dict
+        if self.training and self.photometric_augmentation is not None:
+            stacked_rgb = torch.stack(
+                [obs_dict[key] for key in self.rgb_keys], dim=1)
+            stacked_rgb = self.photometric_augmentation(stacked_rgb)
+            rgb_obs = {
+                key: stacked_rgb[:, index]
+                for index, key in enumerate(self.rgb_keys)
+            }
         # process rgb input
         if self.share_rgb_model:
             # pass all rgb obs to rgb model
             imgs = list()
             for key in self.rgb_keys:
-                img = obs_dict[key]
+                img = rgb_obs[key]
                 if batch_size is None:
                     batch_size = img.shape[0]
                 else:
@@ -201,7 +372,7 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         else:
             # run each rgb obs to independent models
             for key in self.rgb_keys:
-                img = obs_dict[key]
+                img = rgb_obs[key]
                 if batch_size is None:
                     batch_size = img.shape[0]
                 else:
