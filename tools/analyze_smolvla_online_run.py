@@ -516,6 +516,12 @@ def compare_observation_distributions(saved: list[SavedObservation], training: T
     states = np.stack([reconstruct_state(item, saved[0]) for item in saved])
     std = np.maximum(np.std(training.states, axis=0), 1e-6)
     distances = np.linalg.norm((states[:, None] - training.states[None]) / std, axis=2).min(axis=1)
+    def score(a, b):
+        return float(np.mean(np.abs(a[:, None].astype(float) - b[None].astype(float))))
+    direct = score(np.stack([item.camera0_rgb for item in saved]), training.camera0_rgb) + score(np.stack([item.camera1_rgb for item in saved]), training.camera1_rgb)
+    swapped = score(np.stack([item.camera0_rgb for item in saved]), training.camera1_rgb) + score(np.stack([item.camera1_rgb for item in saved]), training.camera0_rgb)
+    camera = lambda images: {"mean": np.mean(images, axis=(0,1,2)).tolist(), "std": np.std(images, axis=(0,1,2)).tolist(), "luminance_quantiles": np.quantile(images @ np.array([0.2126,0.7152,0.0722]), [0.01,0.5,0.99]).tolist()}
+    return {"state_reference":"saved_step_0_approximation","online_state_approximation":True,"state":{"normalized_nearest_training_distance":distances.tolist(),"training_std":std.tolist(),"training_quantiles":np.quantile(training.states,[.01,.5,.99],axis=0).tolist()},"action":{"quantiles":np.quantile(training.actions,[.01,.5,.99],axis=0).tolist(),"gripper_close_counts":training.action_gripper_close_counts},"raw_image_shapes":{"online":list(saved[0].camera0_rgb.shape),"training":list(training.camera0_rgb.shape[1:])},"cameras":{"online_camera0":camera(np.stack([x.camera0_rgb for x in saved])),"online_camera1":camera(np.stack([x.camera1_rgb for x in saved])),"training_camera0":camera(training.camera0_rgb),"training_camera1":camera(training.camera1_rgb)},"assignment":{"direct_score":direct,"swapped_score":swapped,"recommended_assignment":"direct" if direct < swapped else "swapped"}}
 
 
 def materialize_eval_overlay(corpus: TrainingCorpus, output: Path) -> Path:
@@ -533,3 +539,4 @@ def materialize_eval_overlay(corpus: TrainingCorpus, output: Path) -> Path:
         if target.exists() or target.is_symlink():
             target.unlink()
         target.symlink_to(source.resolve())
+    return output
