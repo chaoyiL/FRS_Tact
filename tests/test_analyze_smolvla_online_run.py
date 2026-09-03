@@ -37,9 +37,9 @@ def _chunk_row(*, obs_seq: int, vla_action=None, frs_action=None) -> dict:
         "vla_action": vla_action,
         "frs_action": frs_action,
         "prediction_source": "frs",
-        "selected_raw_actions": (raw if raw is not None else _actions())[:10],
+        "selected_raw_actions": [row[:] for row in (raw if raw is not None else _actions())[:10]],
         "absolute_waypoints": [[0.0, 0.0, -0.4 - 0.01 * index, 0.0, 0.0, 0.0, 0.1] * 2 for index in range(10)],
-        "action_timestamps": [101.0 + index for index in range(10)],
+        "action_timestamps": [101.0 + index for index in range(20)],
     }
 
 
@@ -101,6 +101,33 @@ def test_chunk_parser_requires_the_full_twenty_by_twenty_action_shape(tmp_path):
         module.load_chunk_trace(trace_path)
 
 
+@pytest.mark.parametrize("selected_count", [9, 10])
+def test_chunk_parser_requires_exact_first_ten_selected_actions(tmp_path, selected_count):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    row = _chunk_row(obs_seq=1, vla_action=_actions())
+    row["selected_raw_actions"] = row["selected_raw_actions"][:selected_count]
+    if selected_count == 10:
+        row["selected_raw_actions"][4][2] = 999.0
+    trace_path.write_text(json.dumps(row))
+
+    with pytest.raises(ValueError, match="selected_raw_actions"):
+        module.load_chunk_trace(trace_path)
+
+
+@pytest.mark.parametrize("bad_value", [True, "1.0"])
+def test_chunk_parser_rejects_boolean_and_string_action_values(tmp_path, bad_value):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    row = _chunk_row(obs_seq=1, vla_action=_actions())
+    row["vla_action"][0][0] = bad_value
+    row["selected_raw_actions"][0][0] = bad_value
+    trace_path.write_text(json.dumps(row))
+
+    with pytest.raises(ValueError, match="finite numeric"):
+        module.load_chunk_trace(trace_path)
+
+
 def test_saved_observations_sort_numeric_steps_and_reconstruct_20d_state(tmp_path):
     module = _load_module()
     saved = tmp_path / "saved"
@@ -138,9 +165,13 @@ def test_action_chain_reports_local_raw_z_absolute_quest_z_and_frame_mismatch(tm
         )
         + "\n"
     )
+    saved = tmp_path / "saved"
+    _write_observation(saved, 0, left_x=1.0, timestamp=88.5)
 
     report = module.analyze_action_chain(
-        module.load_chunk_trace(trace_path), module.load_controller_trace(controller_path)
+        module.load_chunk_trace(trace_path),
+        module.load_controller_trace(controller_path),
+        module.load_saved_observations(saved),
     )
     chunk = report["chunks"][0]
 
@@ -152,3 +183,31 @@ def test_action_chain_reports_local_raw_z_absolute_quest_z_and_frame_mismatch(tm
     assert chunk["cumulative_raw_left_local_z"][-1] == pytest.approx(0.2)
     assert chunk["controller_actual_left_quest_z"] == [-0.45]
     assert chunk["controller_target_left_robot_z"] == [-0.37]
+    assert chunk["saved_step"] == 0
+    assert chunk["saved_timestamp"] == 88.5
+    assert chunk["chunk_timestamp"] == 101.0
+
+
+def test_action_chain_rejects_missing_or_nonconforming_saved_observation_mapping(tmp_path):
+    module = _load_module()
+    trace_path = tmp_path / "chunk_trace.jsonl"
+    trace_path.write_text(json.dumps(_chunk_row(obs_seq=1, vla_action=_actions())) + "\n")
+    controller_path = tmp_path / "controller_trace.jsonl"
+    controller_path.write_text(
+        json.dumps(
+            {
+                "pose_frame": "quest",
+                "samples": [{"wall_time": 101.0, "ee_pose_left_z": -0.45}],
+            }
+        )
+        + "\n"
+    )
+    saved = tmp_path / "saved"
+    _write_observation(saved, 20, left_x=1.0, timestamp=77.0)
+
+    with pytest.raises(ValueError, match="one-to-one"):
+        module.analyze_action_chain(
+            module.load_chunk_trace(trace_path),
+            module.load_controller_trace(controller_path),
+            module.load_saved_observations(saved),
+        )

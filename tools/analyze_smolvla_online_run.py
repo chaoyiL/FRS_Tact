@@ -67,11 +67,26 @@ class SavedObservation:
     right_gripper: float
 
 
+def _numeric_payload(value: Any) -> bool:
+    if isinstance(value, np.ndarray):
+        return value.dtype.kind in "iuf"
+    if isinstance(value, (list, tuple)):
+        return all(_numeric_payload(item) for item in value)
+    return isinstance(value, (int, float, np.integer, np.floating)) and not isinstance(
+        value, (bool, np.bool_)
+    )
+
+
 def _finite_array(value: Any, shape: tuple[int, ...], label: str) -> np.ndarray:
+    if not _numeric_payload(value):
+        raise ValueError(f"{label} must be finite numeric data with shape {shape}")
     try:
-        array = np.asarray(value, dtype=np.float64)
+        raw_array = np.asarray(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} must be finite numeric data with shape {shape}") from exc
+    if raw_array.dtype.kind not in "iuf":
+        raise ValueError(f"{label} must be finite numeric data with shape {shape}")
+    array = raw_array.astype(np.float64, copy=False)
     if array.shape != shape or not np.isfinite(array).all():
         raise ValueError(f"{label} must be finite numeric data with shape {shape}, got {array.shape}")
     return np.array(array, dtype=np.float64, copy=True)
@@ -131,26 +146,21 @@ def load_chunk_trace(path: Path) -> list[ChunkRecord]:
         selected_value = row.get("selected_raw_actions")
         if selected_value is None:
             raise ValueError(f"{label} selected_raw_actions is required")
-        try:
-            selected_actions = np.asarray(selected_value, dtype=np.float64)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{label} selected_raw_actions must be finite numeric [N,20]") from exc
-        if (
-            selected_actions.ndim != 2
-            or selected_actions.shape[1:] != (ACTION_DIMENSION,)
-            or not 1 <= selected_actions.shape[0] <= EXECUTED_ACTIONS
-            or not np.isfinite(selected_actions).all()
-        ):
-            raise ValueError(f"{label} selected_raw_actions must be finite [1..10,20]")
-        selected_actions = np.array(selected_actions, dtype=np.float64, copy=True)
+        selected_actions = _finite_array(
+            selected_value,
+            (EXECUTED_ACTIONS, ACTION_DIMENSION),
+            f"{label} selected_raw_actions",
+        )
+        if not np.array_equal(selected_actions, raw_actions[:EXECUTED_ACTIONS]):
+            raise ValueError(f"{label} selected_raw_actions must equal the first 10 raw actions")
         absolute_waypoints = _finite_array(
             row.get("absolute_waypoints"),
-            (selected_actions.shape[0], WAYPOINT_DIMENSION),
+            (EXECUTED_ACTIONS, WAYPOINT_DIMENSION),
             f"{label} absolute_waypoints",
         )
         action_timestamps = _finite_array(
             row.get("action_timestamps"),
-            (selected_actions.shape[0],),
+            (ACTION_SHAPE[0],),
             f"{label} action_timestamps",
         )
         chunks.append(
@@ -208,10 +218,15 @@ def _saved_vector(step_dir: Path, filename: str, dimension: int) -> np.ndarray:
         value = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON in saved observation file: {path}") from exc
+    if not _numeric_payload(value):
+        raise ValueError(f"{path} must contain finite numeric data")
     try:
-        flattened = np.asarray(value, dtype=np.float64).reshape(-1)
+        raw_array = np.asarray(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path} must contain finite numeric data") from exc
+    if raw_array.dtype.kind not in "iuf":
+        raise ValueError(f"{path} must contain finite numeric data")
+    flattened = raw_array.astype(np.float64, copy=False).reshape(-1)
     if flattened.shape != (dimension,) or not np.isfinite(flattened).all():
         raise ValueError(f"{path} must contain finite data with flattened shape ({dimension},)")
     return np.array(flattened, dtype=np.float64, copy=True)
@@ -299,16 +314,11 @@ def _sign_runs(values: np.ndarray) -> list[dict[str, int | str]]:
     return runs
 
 
-def _first_predecessor_disagreement(chunk: ChunkRecord) -> str | None:
-    count = len(chunk.selected_actions)
-    if not np.array_equal(chunk.raw_actions[:count], chunk.selected_actions):
-        return "raw_to_selected"
-    if len(chunk.absolute_waypoints) != count:
-        return "selected_to_absolute"
-    return None
-
-
-def analyze_action_chain(chunks: list[ChunkRecord], controller: list[ControllerSample]) -> dict[str, Any]:
+def analyze_action_chain(
+    chunks: list[ChunkRecord],
+    controller: list[ControllerSample],
+    observations: list[SavedObservation],
+) -> dict[str, Any]:
     """Summarize raw, selected, absolute, and controller layers per chunk.
 
     Raw action dimension 2 is a local TCP-frame translation.  It is therefore
@@ -318,11 +328,26 @@ def analyze_action_chain(chunks: list[ChunkRecord], controller: list[ControllerS
         raise ValueError("chunks must be nonempty")
     if not controller:
         raise ValueError("controller must be nonempty")
+    if not observations:
+        raise ValueError("observations must be nonempty")
+    observation_by_sequence: dict[int, SavedObservation] = {}
+    for observation in observations:
+        if observation.step % EXECUTED_ACTIONS != 0:
+            raise ValueError(f"saved observation step {observation.step} is not a multiple of 10")
+        sequence = observation.step // EXECUTED_ACTIONS + 1
+        if sequence in observation_by_sequence:
+            raise ValueError(f"duplicate saved observation mapping for obs_seq {sequence}")
+        observation_by_sequence[sequence] = observation
+    chunk_sequences = {chunk.obs_seq for chunk in chunks}
+    if set(observation_by_sequence) != chunk_sequences:
+        raise ValueError("saved observations must map one-to-one to chunk obs_seq values")
     result_chunks: list[dict[str, Any]] = []
     controller_frame_mismatch = any(sample.target_left_robot_z is not None for sample in controller)
     for chunk in chunks:
-        earliest = float(chunk.action_timestamps.min())
-        latest = float(chunk.action_timestamps.max())
+        observation = observation_by_sequence[chunk.obs_seq]
+        selected_timestamps = chunk.action_timestamps[:EXECUTED_ACTIONS]
+        earliest = float(selected_timestamps.min())
+        latest = float(selected_timestamps.max())
         aligned = [sample for sample in controller if earliest <= sample.wall_time <= latest]
         raw_left_z = chunk.raw_actions[:, 2]
         raw_left_gripper = chunk.raw_actions[:, 9]
@@ -330,8 +355,9 @@ def analyze_action_chain(chunks: list[ChunkRecord], controller: list[ControllerS
         result_chunks.append(
             {
                 "obs_seq": chunk.obs_seq,
-                "saved_step": (chunk.obs_seq - 1) * EXECUTED_ACTIONS,
-                "timestamp": chunk.timestamp,
+                "saved_step": observation.step,
+                "saved_timestamp": observation.timestamp,
+                "chunk_timestamp": chunk.timestamp,
                 "prediction_field": chunk.prediction_field,
                 "prediction_source": chunk.prediction_source,
                 "action_timestamps": chunk.action_timestamps.tolist(),
@@ -346,7 +372,6 @@ def analyze_action_chain(chunks: list[ChunkRecord], controller: list[ControllerS
                 "right_close_count": int(np.count_nonzero(raw_right_gripper <= 0.09)),
                 "raw_left_local_z_sign_runs": _sign_runs(raw_left_z),
                 "cumulative_raw_left_local_z": np.cumsum(raw_left_z).tolist(),
-                "first_predecessor_disagreement": _first_predecessor_disagreement(chunk),
             }
         )
     return {
@@ -367,12 +392,11 @@ def write_action_chain_csv(report: dict[str, Any], path: Path) -> None:
     if not isinstance(rows, list):
         raise ValueError("report must contain a chunks list")
     fieldnames = (
-        "obs_seq", "saved_step", "timestamp", "prediction_field", "prediction_source",
+        "obs_seq", "saved_step", "saved_timestamp", "chunk_timestamp", "prediction_field", "prediction_source",
         "action_timestamps", "raw_left_gripper", "raw_right_gripper", "raw_left_local_z",
         "selected_actions", "absolute_left_quest_z", "controller_actual_left_quest_z",
         "controller_target_left_robot_z", "left_close_count", "right_close_count",
         "raw_left_local_z_sign_runs", "cumulative_raw_left_local_z",
-        "first_predecessor_disagreement",
     )
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
