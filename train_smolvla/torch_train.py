@@ -268,6 +268,67 @@ def _source_image_keys(config: dict[str, Any], source: dict[str, Any]) -> list[s
     return [inverse.get(key, key) for key in canonical_keys]
 
 
+def _project_parquet_features(
+    features: Any,
+    selected_images: set[str],
+) -> tuple[Any, list[str]] | None:
+    """Keep only selected image columns before Hugging Face writes Arrow cache.
+
+    LeRobot 0.6.1 otherwise materializes every embedded image column and only
+    drops unused cameras after ``Dataset.from_parquet`` has filled the cache.
+    """
+    if features is None:
+        return None
+    feature_names = list(features)
+    visual_names = {
+        key for key in feature_names if str(key).startswith("observation.images.")
+    }
+    if not visual_names:
+        return None
+    missing = selected_images - visual_names
+    if missing:
+        raise KeyError(
+            f"selected cameras are absent from parquet features: {sorted(missing)}; "
+            f"available={sorted(visual_names)}"
+        )
+    columns = [
+        key for key in feature_names if key not in visual_names or key in selected_images
+    ]
+    return type(features)({key: features[key] for key in columns}), columns
+
+
+def _make_projected_nested_dataset_loader(
+    original_loader: Callable[..., Any],
+    selected_images: set[str],
+) -> Callable[..., Any]:
+    """Wrap LeRobot's parquet loader with source-specific column projection."""
+
+    def load_nested_dataset(pq_dir, features=None, episodes=None):
+        projection = _project_parquet_features(features, selected_images)
+        if projection is None:
+            return original_loader(pq_dir, features=features, episodes=episodes)
+
+        projected_features, columns = projection
+        paths = sorted(Path(pq_dir).glob("*/*.parquet"))
+        if not paths:
+            raise FileNotFoundError(
+                f"Provided directory does not contain any parquet file: {pq_dir}"
+            )
+
+        import pyarrow.dataset as pa_ds
+        from datasets import Dataset
+
+        filters = pa_ds.field("episode_index").isin(episodes) if episodes is not None else None
+        return Dataset.from_parquet(
+            [str(path) for path in paths],
+            filters=filters,
+            features=projected_features,
+            columns=columns,
+        )
+
+    return load_nested_dataset
+
+
 def validate_dataset_contract(config: dict[str, Any]) -> None:
     """Validate every v3.0 source against one shared state/action/camera contract."""
     dataset = config["dataset"]
@@ -540,8 +601,22 @@ def make_multi_dataset_factory(config: dict[str, Any], upstream_factory: Any) ->
                 cfg.dataset.repo_id = source["repo_id"]
                 cfg.dataset.root = source["root"]
                 cfg.dataset.revision = source["revision"]
-                train_dataset, eval_dataset = upstream_factory(cfg)
                 selected_images = set(_source_image_keys(config, source))
+                # Patch the symbol imported by DatasetReader, not merely
+                # lerobot.datasets.io_utils.  This ensures column projection
+                # happens inside Dataset.from_parquet, before Arrow files are
+                # written, while preserving the official factory around it.
+                from lerobot.datasets import dataset_reader as dataset_reader_module
+
+                original_nested_loader = dataset_reader_module.load_nested_dataset
+                dataset_reader_module.load_nested_dataset = _make_projected_nested_dataset_loader(
+                    original_nested_loader,
+                    selected_images,
+                )
+                try:
+                    train_dataset, eval_dataset = upstream_factory(cfg)
+                finally:
+                    dataset_reader_module.load_nested_dataset = original_nested_loader
                 source_rename = source.get("rename_map") or {}
                 train_datasets.append(
                     _select_dataset_cameras(train_dataset, selected_images, source_rename)
