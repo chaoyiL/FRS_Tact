@@ -6,9 +6,13 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.analyze_smolvla_online_run import load_chunk_trace, load_saved_observations, reconstruct_state
 from tools.eval_smolvla_pytorch_offline import _predict_chunk, frame_seed, load_eval_runtime

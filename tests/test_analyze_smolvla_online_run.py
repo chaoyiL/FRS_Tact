@@ -375,3 +375,31 @@ def test_cli_requires_sources_writes_offline_artifacts_and_refuses_nested_output
                 "--obs-dir", str(obs), "--trace-dir", str(trace),
                 "--training-root", str(training), "--output-dir", str(source / "forbidden"),
             ])
+
+
+def test_camera_assignment_reports_indeterminate_on_tie(tmp_path):
+    module = _load_module()
+    image = np.full((2, 2, 3), 42, dtype=np.uint8)
+    saved = [module.SavedObservation(
+        step=0,
+        timestamp=0.0,
+        left_pose=np.zeros(6),
+        right_pose=np.zeros(6),
+        left_gripper=0.1,
+        right_gripper=0.1,
+        camera0_rgb=image,
+        camera1_rgb=image,
+    )]
+    training = module.TrainingCorpus(
+        root=tmp_path,
+        parquet_paths=(),
+        episode_indices=np.zeros(1, dtype=np.int64),
+        frame_indices=np.zeros(1, dtype=np.int64),
+        states=np.zeros((1, 20)),
+        actions=np.zeros((1, 20)),
+        camera0_rgb=image[None],
+        camera1_rgb=image[None],
+    )
+
+    result = module.compare_observation_distributions(saved, training)
+    assert result["assignment"]["recommended_assignment"] == "indeterminate"
