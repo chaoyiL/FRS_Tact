@@ -1,18 +1,16 @@
-# 纯视觉 SmolVLA 双臂训练配置，字段与官方 LeRobot 训练流程对齐。
-# 启动：bash train_smolvla/scripts/start_smolvla_train.sh
+# Pure-vision SmolVLA training for the dual-arm two-tubes task.
+# Canonical model contract: 20D state, 20D action, two RGB cameras.
 
 dataset:
-  # 数据必须先通过 scripts/download_data.sh 下载并转换为 LeRobot v3.0。
   expected_fps: 30
   state_dim: 20
   action_dim: 20
+  # Raw dataset camera keys. Extra tactile image streams are intentionally ignored.
   image_keys:
     - observation.images.camera0
     - observation.images.camera1
   eval_split: 0.10
-  # SmolVLA balanced-light-v2 is applied jointly at batch level below. Keep the
-  # per-camera LeRobot transforms disabled to avoid double augmentation and
-  # independent random parameters for the two views.
+  # The local balanced-light-v2 augmenter is used instead.
   image_transforms:
     enable: false
     max_num_transforms: 2
@@ -44,9 +42,8 @@ dataset:
         kwargs:
           sharpness: [0.8, 1.2]
 
-# Add one entry per LeRobot v3.0 source. Training splits each source into
-# train/eval episodes, concatenates them, and globally shuffles all frames.
-# Without explicit weights, sampling is proportional to each source's frames.
+# Sources are split into train/eval episodes independently, then concatenated.
+# With no explicit weights, frame sampling is proportional to source size.
 datasets:
   - repo_id: KaiyueChen/two_tubes_01
     root: /workspace/lerobot_v30/KaiyueChen/two_tubes_01
@@ -60,16 +57,15 @@ datasets:
   - repo_id: KaiyueChen/two_tubes_04
     root: /workspace/lerobot_v30/KaiyueChen/two_tubes_04
 
-# SmolVLA balanced-light-v2, calibrated from the reference recipe:
-# 25% identity and 75% mild brightness/contrast/saturation jitter, with one shared draw for both cameras
-# in each sample. Non-identity samples have a 20% blur probability.
+# One shared transform draw is applied to both RGB cameras in each sample.
 augmentation:
   preset: balanced-light-v2
   enabled: true
 
 policy:
   path: lerobot/smolvla_base
-  chunk_size: 20
+  # Predict 50 future actions, but re-plan after executing 10 actions.
+  chunk_size: 50
   n_action_steps: 10
   empty_cameras: 0
   num_vlm_layers: 16
@@ -83,12 +79,11 @@ policy:
   device: cuda
   push_to_hub: false
 
-# 与数据中的相机键对应；双臂配置把左右腕相机统一成模型的 camera1/camera2。
+# Map the two raw RGB streams to SmolVLA's model-facing camera names.
 rename_map:
   observation.images.camera0: observation.images.camera1
   observation.images.camera1: observation.images.camera2
 
-# FRS_Tact 混合微调方式：VLM 注意力使用 LoRA，动作专家和动作投影完整训练。
 peft:
   enable: true
   method_type: LORA
@@ -104,37 +99,33 @@ peft:
   lora_alpha: 16
 
 training:
-  output_dir: /workspace/outputs/smolvla_task1
-  # Preserve an existing/failed run and choose a timestamped directory.
+  # Use a fresh name so horizon-20 and horizon-50 checkpoints cannot be confused.
+  output_dir: /workspace/outputs/smolvla_two_tubes_0104_h50
   existing_output: increment
-  job_name: smolvla_task1
-  # batch_size 和 num_workers 均为每张 GPU 的数值。
+  job_name: smolvla_two_tubes_0104_h50
+  # Per-GPU value: two GPUs produce a global batch of 128.
   batch_size: 64
   num_workers: 8
   steps: 30000
-  eval_steps: 500
+  eval_steps: 2000
   max_eval_samples: 0
   save_freq: 2000
   log_freq: 20
   seed: 1000
-  # 填写完整 checkpoint 的 pretrained_model/train_config.json；新训练保持 null。
   resume_from: null
 
 distributed:
   num_gpus: 2
   num_machines: 1
   mixed_precision: bf16
-  # LeRobot lets rank 0 prepare all local datasets before rank 1. Five datasets
-  # can exceed Accelerate/NCCL's 600-second default on network-backed storage.
   timeout_seconds: 7200
 
 wandb:
   enable: true
-  project: smolvla-task1
+  project: smolvla-two-tubes
   entity: null
-  # auto: online when WANDB_API_KEY/~/.netrc exists, otherwise offline.
   mode: auto
-  notes: PyTorch SmolVLA pure-vision dual-arm training
+  notes: SmolVLA dual-arm two_tubes_01-04, horizon 50, re-plan every 10 actions
   run_id: null
   disable_artifact: true
   add_tags: true

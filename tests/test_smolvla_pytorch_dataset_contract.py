@@ -352,6 +352,17 @@ def test_training_configs_use_smolvla_names() -> None:
     assert not (config_dir / "train_pytorch.yaml").exists()
     assert not (config_dir / "train_pytorch_right.yaml").exists()
 
+    dual = yaml.safe_load((config_dir / "train_smolvla.yaml").read_text(encoding="utf-8"))
+    assert [source["repo_id"] for source in dual["datasets"]] == [
+        "KaiyueChen/two_tubes_01",
+        "KaiyueChen/two_tubes_02",
+        "KaiyueChen/two_tubes_03",
+        "KaiyueChen/two_tubes_04",
+    ]
+    assert dual["policy"]["chunk_size"] == 50
+    assert dual["policy"]["n_action_steps"] == 10
+    assert dual["training"]["output_dir"].endswith("_h50")
+
     right = yaml.safe_load((config_dir / "train_smolvla_right.yaml").read_text(encoding="utf-8"))
     assert [source["repo_id"] for source in right["datasets"]] == [
         "KaiyueChen/press_01",
