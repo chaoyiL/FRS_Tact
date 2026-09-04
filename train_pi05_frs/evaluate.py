@@ -13,6 +13,8 @@ from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_metadata
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import LEARNED_RESIDUAL_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import validate_learned_residual_gated_objective_metadata
 from train_pi05_frs.utils.data import CachedTactileEmbeddingBatches
 from train_pi05_frs.utils.data import TactileConditionedBatches
 from train_pi05_frs.utils.data import resolve_tactile_window
@@ -72,12 +74,12 @@ def _evaluate_decoder_legacy(
         )
 
     extra = checkpoint_metadata.get("extra_metadata") or {}
+    loss_mode = str(extra.get("loss_mode", "gt"))
     if tactile_window_divisor is None:
         tactile_window_divisor = int(extra.get("tactile_window_divisor", 1))
     if history_stride is None:
         history_stride = int(extra.get("history_stride", 1))
     if target is None:
-        loss_mode = str(extra.get("loss_mode", "gt"))
         target = "predicted" if loss_mode == "predicted" else "gt"
     action_horizon = int(pairs.manifest["action_horizon"])
     tactile_window = resolve_tactile_window(
@@ -99,7 +101,11 @@ def _evaluate_decoder_legacy(
         history_stride=history_stride,
         build_episode_baselines=(
             str(extra.get("loss_mode", "gt"))
-            in ("gated", COMPOSITE_GATED_LOSS_MODE)
+            in (
+                "gated",
+                COMPOSITE_GATED_LOSS_MODE,
+                LEARNED_RESIDUAL_GATED_LOSS_MODE,
+            )
         ),
         num_workers=num_workers,
         prefetch_batches=prefetch_batches,
@@ -123,6 +129,7 @@ def _evaluate_decoder_legacy(
             solver=solver,
             keep_predictions=save_predictions,
             target=target,
+            loss_mode=str(extra.get("loss_mode", "gt")),
             gate_tau=extra.get("gate_tau"),
             gate_temperature=extra.get("gate_temperature"),
             low_gate_threshold=float(extra.get("low_gate_threshold", 0.3)),
@@ -133,6 +140,13 @@ def _evaluate_decoder_legacy(
             ),
             rank_margin=float(extra.get("rank_margin", 0.0)),
             repair_margin=float(extra.get("repair_margin", 0.0)),
+            oracle_safe_mse_threshold=float(
+                extra.get("oracle_safe_mse_threshold", 0.01)
+            ),
+            oracle_repair_mse_threshold=float(
+                extra.get("oracle_repair_mse_threshold", 0.03)
+            ),
+            residual_bound=float(extra.get("residual_bound", 0.25)),
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, float | int | str] = {
@@ -166,6 +180,18 @@ def _evaluate_decoder_legacy(
                     "high_gate_harm_p95": result.high_gate_harm_p95,
                     "high_gate_rank_satisfied_frac": result.high_gate_rank_satisfied_frac,  # type: ignore[dict-item]
                     "high_gate_repair_satisfied_frac": result.high_gate_repair_satisfied_frac,  # type: ignore[dict-item]
+                }
+            )
+        if result.gate_classification_accuracy is not None:
+            metrics.update(
+                {
+                    "gate_classification_accuracy": result.gate_classification_accuracy,
+                    "gate_safe_accuracy": result.gate_safe_accuracy,
+                    "gate_repair_accuracy": result.gate_repair_accuracy,
+                    "execute_arm9_mse": result.execute_arm9_mse,
+                    "preserve_arm9_mse": result.preserve_arm9_mse,
+                    "residual_tail_p95": result.residual_tail_p95,
+                    "residual_tail_max": result.residual_tail_max,
                 }
             )
         atomic_write_json(output_dir / "metrics.json", metrics)
@@ -222,8 +248,16 @@ def _evaluate_decoder_legacy(
                     conditioner=conditioner,
                     num_steps=num_steps,
                     solver=solver,
-                    num_trajectory_samples=num_trajectory_samples,
-                    num_episode_strips=num_episode_strips,
+                    num_trajectory_samples=(
+                        0
+                        if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
+                        else num_trajectory_samples
+                    ),
+                    num_episode_strips=(
+                        0
+                        if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
+                        else num_episode_strips
+                    ),
                 )
             except Exception as exc:
                 print(f"warning: could not render evaluation plots: {exc}", flush=True)
@@ -359,8 +393,12 @@ def evaluate_decoder(
             image_cache_size=image_cache_size,
             loaded_checkpoint=(model, checkpoint_metadata),
         )
-    if loss_mode != BIMANUAL_LOSS_MODE:
-        raise ValueError("multi-source evaluation currently requires bimanual_gated")
+    if loss_mode not in (BIMANUAL_LOSS_MODE, LEARNED_RESIDUAL_GATED_LOSS_MODE):
+        raise ValueError(
+            "multi-source evaluation currently requires bimanual_gated or "
+            "learned_residual_gated"
+        )
+    learned_residual = loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
 
     if cache_dirs is not None:
         if not cache_dirs:
@@ -372,11 +410,14 @@ def evaluate_decoder(
                 "multi-dataset evaluation requires tactile embedding cache root and tactile keys"
             )
         evaluation_tactile_keys: Sequence[object] = tactile_keys
-        _validate_bimanual_evaluation_contract(
-            extra,
-            action_dim=int(model.config.action_dim),
-            tactile_keys=evaluation_tactile_keys,
-        )
+        if learned_residual:
+            validate_learned_residual_gated_objective_metadata(extra)
+        else:
+            _validate_bimanual_evaluation_contract(
+                extra,
+                action_dim=int(model.config.action_dim),
+                tactile_keys=evaluation_tactile_keys,
+            )
         source_names = [str(source["repo_id"]) for source in dataset_sources]
         pairs: CachedPairs | MultiCachedPairs = MultiCachedPairs(
             cache_dirs, source_names=source_names
@@ -478,7 +519,9 @@ def evaluate_decoder(
                 f"checkpoint resnet_embedding_dim={model.config.resnet_embedding_dim}."
             )
         keep_actions = save_predictions or (
-            write_plots and loss_mode == BIMANUAL_LOSS_MODE
+            write_plots
+            and loss_mode
+            in (BIMANUAL_LOSS_MODE, LEARNED_RESIDUAL_GATED_LOSS_MODE)
         )
         result = evaluate_split(
             model,
@@ -500,6 +543,13 @@ def evaluate_decoder(
             repair_margin=repair_margin,
             rank_low_gate_threshold=low_threshold,
             rank_high_gate_threshold=high_threshold,
+            oracle_safe_mse_threshold=float(
+                extra.get("oracle_safe_mse_threshold", 0.01)
+            ),
+            oracle_repair_mse_threshold=float(
+                extra.get("oracle_repair_mse_threshold", 0.03)
+            ),
+            residual_bound=float(extra.get("residual_bound", 0.25)),
         )
         output_dir.mkdir(parents=True, exist_ok=True)
         metrics: dict[str, Any] = {
@@ -528,10 +578,64 @@ def evaluate_decoder(
             "relative_gt_error": result.relative_gt_error,
             "composite_fm": result.composite_fm,
             "bimanual_quadrants": result.bimanual_quadrants,
-            "bimanual_gate_region_counts": result.bimanual_gate_region_counts.tolist(),
+            "bimanual_gate_region_counts": (
+                result.bimanual_gate_region_counts.tolist()
+                if result.bimanual_gate_region_counts is not None
+                else None
+            ),
             "rank_low_gate_threshold": low_threshold,
             "rank_high_gate_threshold": high_threshold,
         }
+        if result.gate_classification_accuracy is not None:
+            metrics.update(
+                {
+                    "gate_classification_accuracy": result.gate_classification_accuracy,
+                    "gate_safe_accuracy": result.gate_safe_accuracy,
+                    "gate_repair_accuracy": result.gate_repair_accuracy,
+                    "execute_arm9_mse": result.execute_arm9_mse,
+                    "preserve_arm9_mse": result.preserve_arm9_mse,
+                    "residual_tail_p95": result.residual_tail_p95,
+                    "residual_tail_max": result.residual_tail_max,
+                }
+            )
+
+        if learned_residual:
+            atomic_write_json(output_dir / "metrics.json", metrics)
+            if save_predictions and result.predictions is not None:
+                np.savez(
+                    output_dir / "predictions.npz",
+                    cache_indices=result.cache_indices,
+                    predicted_actions=result.predictions,
+                )
+            if write_plots:
+                try:
+                    plot_paths = write_evaluation_plots(
+                        output_dir=output_dir,
+                        result=result,
+                        pairs=pairs,
+                        model=model,
+                        conditioner=conditioner,
+                        num_steps=num_steps,
+                        solver=solver,
+                        num_trajectory_samples=0,
+                        num_episode_strips=0,
+                    )
+                except Exception as exc:
+                    print(
+                        f"warning: could not render evaluation plots: {exc}",
+                        flush=True,
+                    )
+                else:
+                    for plot_path in plot_paths:
+                        print(f"plot={plot_path}")
+            print(
+                f"validation_samples={len(result.cache_indices)} solver={solver} "
+                f"target={result.target} mse_gt={result.mse_gt:.8f} "
+                f"gate_accuracy={result.gate_classification_accuracy:.8f}"
+            )
+            print(f"evaluation={output_dir}")
+            return metrics
+
         for wrist in ("left", "right"):
             for metric_name in (
                 "gate_w",

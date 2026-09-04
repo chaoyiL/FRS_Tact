@@ -25,6 +25,7 @@ from train_pi05_frs.utils.checkpoint import resolve_checkpoint_snapshot
 from train_pi05_frs.utils.checkpoint import save_checkpoint
 from train_pi05_frs.utils.bimanual_schema import bimanual_objective_metadata
 from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
+from train_pi05_frs.utils.objective_schema import learned_residual_gated_objective_metadata
 from train_pi05_frs.utils.model import DecoderConfig
 from train_pi05_frs.utils.model import TactileConditionedFlowDecoder
 from train_pi05_frs.utils.model import bimanual_composite_endpoint
@@ -272,6 +273,148 @@ def test_bimanual_evaluate_decoder_emits_source_local_and_wrist_outputs(
     assert rows[2]["mse_gt_left"] == "4.0"
 
 
+def test_learned_residual_multicache_evaluation_uses_checkpoint_thresholds_and_plots(
+    tmp_path, monkeypatch
+):
+    class FakePairs:
+        manifest = {
+            "action_horizon": 1,
+            "action_dim": 10,
+            "state_dim": 0,
+            "records_sha256": "records",
+        }
+
+        def __init__(self, cache_dirs, *, source_names):
+            assert len(cache_dirs) == len(source_names) == 1
+
+    class FakeConditioner:
+        resnet_embedding_dim = 4
+
+        def __init__(self, pairs, **kwargs):
+            del pairs
+            assert kwargs["build_episode_baselines"] is True
+
+        def close(self):
+            return None
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(
+            action_horizon=1,
+            action_dim=10,
+            state_conditioning=False,
+            tactile_window=1,
+            resnet_embedding_dim=4,
+        )
+    )
+    extra = {
+        "loss_mode": "learned_residual_gated",
+        **learned_residual_gated_objective_metadata(
+            oracle_safe_mse_threshold=0.012,
+            oracle_repair_mse_threshold=0.034,
+            residual_bound=0.21,
+        ),
+        "cache_records_sha256": "records",
+        "gate_tau": 0.4,
+        "gate_temperature": 0.1,
+        "tactile_window_divisor": 1,
+        "history_stride": 1,
+    }
+    result = EvaluationResult(
+        target="gt",
+        flow_loss=0.0,
+        mse=0.2,
+        rmse=np.sqrt(0.2),
+        mae=0.1,
+        flow_loss_gt=0.0,
+        mse_gt=0.2,
+        rmse_gt=np.sqrt(0.2),
+        mae_gt=0.1,
+        flow_loss_pred=0.0,
+        mse_pred=0.1,
+        rmse_pred=np.sqrt(0.1),
+        mae_pred=0.05,
+        cache_indices=np.asarray([0]),
+        sample_flow_loss=np.zeros((1,)),
+        sample_mse=np.asarray([0.2]),
+        sample_rmse=np.asarray([np.sqrt(0.2)]),
+        sample_mae=np.asarray([0.1]),
+        sample_mse_gt=np.asarray([0.2]),
+        sample_mae_gt=np.asarray([0.1]),
+        sample_mse_pred=np.asarray([0.1]),
+        sample_mae_pred=np.asarray([0.05]),
+        predictions=np.zeros((1, 1, 10), dtype=np.float32),
+        gate_classification_accuracy=0.8,
+        gate_safe_accuracy=0.9,
+        gate_repair_accuracy=0.7,
+        execute_arm9_mse=0.03,
+        preserve_arm9_mse=0.004,
+        residual_tail_p95=0.12,
+        residual_tail_max=0.18,
+    )
+    monkeypatch.setattr(evaluate_module, "MultiCachedPairs", FakePairs)
+    monkeypatch.setattr(
+        evaluate_module, "CachedTactileEmbeddingBatches", FakeConditioner
+    )
+    monkeypatch.setattr(
+        evaluate_module,
+        "load_checkpoint",
+        lambda path: (model, {"epoch": 2, "extra_metadata": extra}),
+    )
+    captured = {}
+    monkeypatch.setattr(
+        evaluate_module,
+        "evaluate_split",
+        lambda *args, **kwargs: captured.update(kwargs) or result,
+    )
+    plot_calls = []
+    monkeypatch.setattr(
+        evaluate_module,
+        "write_evaluation_plots",
+        lambda **kwargs: plot_calls.append(kwargs) or (),
+    )
+
+    metrics = evaluate_module.evaluate_decoder(
+        cache_dir=None,
+        cache_dirs=[tmp_path / "cache"],
+        dataset_sources=[{"repo_id": "dataset-a"}],
+        tactile_embedding_cache_root=tmp_path / "tactile-cache",
+        tactile_keys=["tactile_left_1", "tactile_right_1"],
+        tactile_embedding_dim=4,
+        tactile_image_size=8,
+        tactile_encoder_dir=tmp_path / "encoder",
+        checkpoint_dir=tmp_path / "checkpoint",
+        output_dir=tmp_path / "output",
+        dataset_repo_id=None,
+        dataset_root=None,
+        tactile_window_divisor=None,
+        history_stride=None,
+        batch_size=1,
+        num_steps=1,
+        solver="euler",
+        target=None,
+        save_predictions=False,
+        write_plots=True,
+        num_trajectory_samples=1,
+        num_episode_strips=1,
+        num_workers=0,
+        prefetch_batches=1,
+        load_threads=1,
+        pipeline_prefetch=1,
+        image_cache_size=0,
+    )
+
+    assert captured["loss_mode"] == "learned_residual_gated"
+    assert captured["oracle_safe_mse_threshold"] == pytest.approx(0.012)
+    assert captured["oracle_repair_mse_threshold"] == pytest.approx(0.034)
+    assert captured["residual_bound"] == pytest.approx(0.21)
+    assert captured["keep_predictions"] is True
+    assert metrics["gate_safe_accuracy"] == pytest.approx(0.9)
+    assert metrics["residual_tail_p95"] == pytest.approx(0.12)
+    assert len(plot_calls) == 1
+    assert plot_calls[0]["num_trajectory_samples"] == 0
+    assert plot_calls[0]["num_episode_strips"] == 0
+
+
 def test_bimanual_evaluation_uses_first_20_dims_and_keeps_wrists_separate(
     monkeypatch,
 ):
@@ -490,6 +633,81 @@ def test_single_hand_low_gate_safety_preserves_vla_not_nearest_endpoint() -> Non
     )
 
     assert float(loss[0]) == pytest.approx(0.97)
+
+
+def test_learned_residual_evaluation_reports_oracle_gate_and_tail_metrics(
+    monkeypatch,
+) -> None:
+    gt_action = np.zeros((2, 1, 10), dtype=np.float32)
+    vla_action = np.zeros_like(gt_action)
+    vla_action[0, :, :9] = np.sqrt(0.005)
+    vla_action[1, :, :9] = np.sqrt(0.04)
+    prediction = np.array(vla_action, copy=True)
+    prediction[1, :, :9] = 0.0
+    residual = np.asarray(
+        [[[0.1] * 9], [[-0.2] * 9]], dtype=np.float32
+    )
+    gate_logits = np.asarray([[-2.0], [2.0]], dtype=np.float32)
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((2, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1]),
+                np.zeros_like(gt_action),
+                vla_action,
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 2, 4), dtype=np.float32),
+            )
+
+        def baseline_tokens_for_cache_indices(self, indices):
+            assert list(indices) == [0, 1]
+            return np.zeros((2, 2, 4), dtype=np.float32)
+
+        def tactile_change_for_cache_indices(self, indices, current_tokens):
+            assert list(indices) == [0, 1]
+            assert current_tokens.shape == (2, 2, 4)
+            return np.asarray([0.2, 0.8], dtype=np.float32)
+
+    monkeypatch.setattr(
+        model_module,
+        "decode_learned_residual_actions",
+        lambda *args, **kwargs: (
+            jnp.asarray(prediction),
+            jax.nn.sigmoid(jnp.asarray(gate_logits[:, 0])),
+            jnp.asarray(residual),
+        ),
+    )
+
+    result = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="learned_residual_gated",
+        oracle_safe_mse_threshold=0.01,
+        oracle_repair_mse_threshold=0.03,
+    )
+
+    assert result.gate_classification_accuracy == pytest.approx(1.0)
+    assert result.gate_safe_accuracy == pytest.approx(1.0)
+    assert result.gate_repair_accuracy == pytest.approx(1.0)
+    assert result.execute_arm9_mse == pytest.approx(0.0)
+    assert result.preserve_arm9_mse == pytest.approx(0.0)
+    assert result.residual_tail_max == pytest.approx(0.2)
+    assert result.residual_tail_p95 == pytest.approx(0.2)
+    np.testing.assert_allclose(
+        result.sample_gate_w,
+        jax.nn.sigmoid(jnp.asarray(gate_logits[:, 0])),
+    )
+    np.testing.assert_allclose(result.sample_tactile_change, [0.2, 0.8])
+    np.testing.assert_allclose(result.predictions[..., 9], vla_action[..., 9])
 
 
 def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
@@ -1123,6 +1341,42 @@ def test_composite_resume_requires_exact_objective_metadata():
         )
 
 
+def test_learned_residual_resume_requires_v3_objective_metadata():
+    valid = {
+        "extra_metadata": {
+            "loss_mode": "learned_residual_gated",
+            **learned_residual_gated_objective_metadata(
+                oracle_safe_mse_threshold=0.01,
+                oracle_repair_mse_threshold=0.03,
+                residual_bound=0.25,
+            ),
+        }
+    }
+    _validate_resume_loss_objective(
+        valid,
+        loss_mode="learned_residual_gated",
+        action_dim=10,
+        oracle_safe_mse_threshold=0.01,
+        oracle_repair_mse_threshold=0.03,
+        residual_bound=0.25,
+    )
+    with pytest.raises(ValueError, match="oracle_repair_mse_threshold"):
+        _validate_resume_loss_objective(
+            valid,
+            loss_mode="learned_residual_gated",
+            action_dim=10,
+            oracle_safe_mse_threshold=0.01,
+            oracle_repair_mse_threshold=0.04,
+            residual_bound=0.25,
+        )
+    with pytest.raises(ValueError, match="learned_residual_gated"):
+        _validate_resume_loss_objective(
+            {"extra_metadata": {"loss_mode": "composite_gated"}},
+            loss_mode="learned_residual_gated",
+            action_dim=10,
+        )
+
+
 def test_bimanual_checkpoint_selection_uses_worst_source_wrist_metrics():
     metrics = {
         "val_mse_gt": 0.25,
@@ -1200,6 +1454,50 @@ def test_scalar_checkpoint_selection_enforces_new_safety_constraints_and_order()
         **kwargs,
     )
     assert infeasible[0] > 0.0
+
+
+def test_v3_checkpoint_selection_prioritizes_gate_accuracy_then_execution() -> None:
+    kwargs = {
+        "loss_mode": "learned_residual_gated",
+        "max_low_gate_unsafe_frac": 0.05,
+        "min_high_gate_gain": 0.0,
+        "min_high_gate_rank_satisfied_frac": 0.8,
+    }
+    base = {
+        "val_gate_classification_accuracy": 0.85,
+        "val_gate_repair_accuracy": 0.8,
+        "val_gate_safe_accuracy": 0.9,
+        "val_execute_arm9_mse": 0.02,
+        "val_preserve_arm9_mse": 0.01,
+        "val_residual_tail_p95": 0.1,
+    }
+
+    key = checkpoint_selection_key(base, **kwargs)
+    assert key == pytest.approx((0.0, -0.8, -0.85, 0.02, 0.01, 0.1))
+    assert checkpoint_selection_key(
+        {
+            **base,
+            "val_gate_repair_accuracy": 0.9,
+            "val_gate_safe_accuracy": 0.9,
+            "val_gate_classification_accuracy": 0.9,
+            "val_execute_arm9_mse": 1.0,
+        },
+        **kwargs,
+    ) < key
+    assert checkpoint_selection_key(
+        {**base, "val_execute_arm9_mse": 0.01}, **kwargs
+    ) < key
+    collapsed = checkpoint_selection_key(
+        {
+            **base,
+            "val_gate_repair_accuracy": 1.0,
+            "val_gate_safe_accuracy": 0.0,
+            "val_gate_classification_accuracy": 0.5,
+            "val_execute_arm9_mse": 0.0,
+        },
+        **kwargs,
+    )
+    assert key < collapsed
 
 
 def test_32d_composite_steers_first_20_and_preserves_vla_tail():

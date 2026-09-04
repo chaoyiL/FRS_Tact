@@ -21,13 +21,25 @@ from train_pi05_frs.utils.bimanual_schema import validate_bimanual_objective_met
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
 from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
+from train_pi05_frs.utils.objective_schema import LEARNED_RESIDUAL_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import learned_residual_gated_objective_metadata
+from train_pi05_frs.utils.objective_schema import validate_learned_residual_gated_objective_metadata
 from train_pi05_frs.utils.objective_schema import validate_composite_gated_objective_metadata
 
 LossMode = Literal[
-    "gt", "predicted", "gated", "composite_gated", "bimanual_gated"
+    "gt",
+    "predicted",
+    "gated",
+    "composite_gated",
+    "learned_residual_gated",
+    "bimanual_gated",
 ]
 SCALAR_GATED_LOSS_MODES = ("gated", COMPOSITE_GATED_LOSS_MODE)
-ALL_GATED_LOSS_MODES = (*SCALAR_GATED_LOSS_MODES, BIMANUAL_LOSS_MODE)
+ALL_GATED_LOSS_MODES = (
+    *SCALAR_GATED_LOSS_MODES,
+    LEARNED_RESIDUAL_GATED_LOSS_MODE,
+    BIMANUAL_LOSS_MODE,
+)
 
 
 def _validate_bimanual_training_contract(
@@ -116,6 +128,9 @@ def _validate_resume_loss_objective(
     *,
     loss_mode: LossMode,
     action_dim: int,
+    oracle_safe_mse_threshold: float | None = None,
+    oracle_repair_mse_threshold: float | None = None,
+    residual_bound: float | None = None,
 ) -> None:
     """Require exact objective metadata before resuming a versioned loss mode."""
 
@@ -124,6 +139,24 @@ def _validate_resume_loss_objective(
         if not isinstance(extra, Mapping):
             raise ValueError("resume checkpoint is missing composite objective metadata")
         validate_composite_gated_objective_metadata(extra)
+        return
+    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        extra = checkpoint_metadata.get("extra_metadata")
+        if not isinstance(extra, Mapping):
+            raise ValueError(
+                "resume checkpoint is missing learned residual objective metadata"
+            )
+        if extra.get("loss_mode") != LEARNED_RESIDUAL_GATED_LOSS_MODE:
+            raise ValueError(
+                "learned_residual_gated cannot resume a checkpoint from a "
+                "different loss objective"
+            )
+        validate_learned_residual_gated_objective_metadata(
+            extra,
+            oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+            oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+            residual_bound=residual_bound,
+        )
         return
     if loss_mode != BIMANUAL_LOSS_MODE:
         return
@@ -205,6 +238,33 @@ def checkpoint_selection_key(
             -min(value[1] for value in wrist_values),
             max(value[2] for value in wrist_values),
             aggregate_gt_mse,
+        )
+    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        key_values = (
+            float(metrics.get("val_gate_classification_accuracy", float("nan"))),
+            float(metrics.get("val_gate_repair_accuracy", float("nan"))),
+            float(metrics.get("val_gate_safe_accuracy", float("nan"))),
+            float(metrics.get("val_execute_arm9_mse", float("nan"))),
+            float(metrics.get("val_preserve_arm9_mse", float("nan"))),
+            float(metrics.get("val_residual_tail_p95", float("nan"))),
+        )
+        if not all(math.isfinite(value) for value in key_values):
+            return (float("inf"),) * 6
+        (
+            classification_accuracy,
+            repair_accuracy,
+            safe_accuracy,
+            execute_mse,
+            preserve_mse,
+            tail_p95,
+        ) = key_values
+        return (
+            0.0,
+            -min(repair_accuracy, safe_accuracy),
+            -classification_accuracy,
+            execute_mse,
+            preserve_mse,
+            tail_p95,
         )
     if loss_mode not in SCALAR_GATED_LOSS_MODES:
         return (0.0, aggregate_mse)
@@ -337,6 +397,13 @@ def train_decoder(
     low_gate_safety_weight: float,
     low_gate_safety_margin: float,
     low_gate_regression_margin: float = 0.005,
+    oracle_safe_mse_threshold: float = 0.01,
+    oracle_repair_mse_threshold: float = 0.03,
+    gate_classification_weight: float = 1.0,
+    residual_loss_weight: float = 1.0,
+    execute_loss_weight: float = 4.0,
+    preserve_loss_weight: float = 4.0,
+    residual_bound: float = 0.25,
     rank_weight: float,
     rank_margin: float,
     repair_weight: float,
@@ -520,12 +587,19 @@ def train_decoder(
         "worst_dataset_repair_penalty_high_w",
         "min_dataset_repair_satisfied_high_frac",
     )
-    if loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE):
+    if loss_mode in (
+        COMPOSITE_GATED_LOSS_MODE,
+        LEARNED_RESIDUAL_GATED_LOSS_MODE,
+        BIMANUAL_LOSS_MODE,
+    ):
         history_fields.insert(4, "train_loss_composite_fm")
         history_fields.extend(
             ("val_composite_fm", "val_mse_vla_gt", "val_gt_gain", "val_relative_gt_error")
         )
-    if loss_mode == COMPOSITE_GATED_LOSS_MODE:
+    if loss_mode in (
+        COMPOSITE_GATED_LOSS_MODE,
+        LEARNED_RESIDUAL_GATED_LOSS_MODE,
+    ):
         history_fields.extend(
             (
                 "val_gate_w_mean",
@@ -541,6 +615,22 @@ def train_decoder(
                 "val_gate_n_high",
                 "val_low_safe_frac",
                 "checkpoint_selection_feasible",
+            )
+        )
+    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        history_fields.extend(
+            (
+                "train_loss_gate_classification",
+                "train_loss_residual",
+                "train_loss_execute",
+                "train_loss_preserve",
+                "val_gate_classification_accuracy",
+                "val_gate_safe_accuracy",
+                "val_gate_repair_accuracy",
+                "val_execute_arm9_mse",
+                "val_preserve_arm9_mse",
+                "val_residual_tail_p95",
+                "val_residual_tail_max",
             )
         )
     if loss_mode == BIMANUAL_LOSS_MODE:
@@ -604,7 +694,8 @@ def train_decoder(
     if loss_mode not in ("gt", "predicted", *ALL_GATED_LOSS_MODES):
         raise ValueError(
             "loss_mode must be 'gt', 'predicted', 'gated', "
-            f"'{COMPOSITE_GATED_LOSS_MODE}', or '{BIMANUAL_LOSS_MODE}', "
+            f"'{COMPOSITE_GATED_LOSS_MODE}', "
+            f"'{LEARNED_RESIDUAL_GATED_LOSS_MODE}', or '{BIMANUAL_LOSS_MODE}', "
             f"got {loss_mode!r}."
         )
     eval_target = "predicted" if loss_mode == "predicted" else "gt"
@@ -638,6 +729,20 @@ def train_decoder(
         raise ValueError("best_max_high_gate_harm_p95 must be non-negative.")
     if not 0.0 <= best_max_low_gate_regression_frac <= 1.0:
         raise ValueError("best_max_low_gate_regression_frac must be in [0, 1].")
+    if not 0.0 <= oracle_safe_mse_threshold < oracle_repair_mse_threshold:
+        raise ValueError(
+            "oracle thresholds must satisfy 0 <= safe < repair."
+        )
+    for name, value in (
+        ("gate_classification_weight", gate_classification_weight),
+        ("residual_loss_weight", residual_loss_weight),
+        ("execute_loss_weight", execute_loss_weight),
+        ("preserve_loss_weight", preserve_loss_weight),
+    ):
+        if value < 0.0:
+            raise ValueError(f"{name} must be non-negative, got {value}.")
+    if residual_bound <= 0.0:
+        raise ValueError("residual_bound must be positive.")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
     start_epoch = 1
@@ -695,6 +800,9 @@ def train_decoder(
             resume_metadata,
             loss_mode=loss_mode,
             action_dim=int(pairs.manifest["action_dim"]),
+            oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+            oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+            residual_bound=residual_bound,
         )
         start_epoch = int(resume_metadata["epoch"]) + 1
     action_horizon = int(pairs.manifest["action_horizon"])
@@ -747,6 +855,16 @@ def train_decoder(
         state_conditioning=state_conditioning,
         state_dim=int(pairs.manifest["state_dim"]) if state_conditioning else 0,
         num_tactile_tokens=tactile_num_tokens,
+        output_mode=(
+            "learned_residual_gate"
+            if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
+            else "flow"
+        ),
+        residual_bound=(
+            residual_bound
+            if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
+            else 0.5
+        ),
     )
     if resume_metadata is None:
         model = TactileConditionedFlowDecoder(decoder_config, rngs=nnx.Rngs(seed))
@@ -876,6 +994,14 @@ def train_decoder(
             f"gate_regions=[{low_gate_threshold:g},{high_gate_threshold:g}] "
             "(one mixed GT/VLA endpoint; primary eval=gt)"
         )
+    elif loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        print(
+            "loss_mode=learned_residual_gated learned execute gate + bounded arm9 "
+            "residual; dim9 gripper preserved from VLA "
+            f"oracle=[safe<={oracle_safe_mse_threshold:g},"
+            f"repair>={oracle_repair_mse_threshold:g}] "
+            f"residual_bound={residual_bound:g}"
+        )
     else:
         print(
             "loss_mode=bimanual_gated objective-v2 masked composite FM "
@@ -915,7 +1041,10 @@ def train_decoder(
 
     if loss_mode == BIMANUAL_LOSS_MODE:
         best_key = (float("inf"),) * 5
-    elif loss_mode in SCALAR_GATED_LOSS_MODES:
+    elif loss_mode in (
+        *SCALAR_GATED_LOSS_MODES,
+        LEARNED_RESIDUAL_GATED_LOSS_MODE,
+    ):
         best_key = (float("inf"),) * 6
     else:
         best_key = (float("inf"), float("inf"))
@@ -951,6 +1080,14 @@ def train_decoder(
                 losses: list[float] = []
                 weights: list[int] = []
                 component_names = (
+                    (
+                        "gate_classification",
+                        "residual",
+                        "execute",
+                        "preserve",
+                    )
+                    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE
+                    else
                     (
                         "gt_fm",
                         "vla_fm",
@@ -1020,7 +1157,16 @@ def train_decoder(
                         batch_gate_w = float(np.mean(gate_w))
                         batch_gate_w_left = 0.0
                         batch_gate_w_right = 0.0
+                    elif loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+                        baseline_tokens = (
+                            conditioner.baseline_tokens_for_cache_indices(indices)
+                        )
+                        gate_w = np.zeros((batch_n,), dtype=np.float32)
+                        batch_gate_w = 0.0
+                        batch_gate_w_left = 0.0
+                        batch_gate_w_right = 0.0
                     else:
+                        baseline_tokens = None
                         gate_w = np.ones((batch_n,), dtype=np.float32)
                         batch_gate_w = 1.0
                         batch_gate_w_left = 0.0
@@ -1031,6 +1177,18 @@ def train_decoder(
                         )
                     else:
                         batch_source_indices = np.zeros((batch_n,), dtype=np.int32)
+                    v3_train_kwargs: dict[str, Any] = {}
+                    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+                        v3_train_kwargs = {
+                            "baseline_tokens": jnp.asarray(baseline_tokens),
+                            "oracle_safe_mse_threshold": oracle_safe_mse_threshold,
+                            "oracle_repair_mse_threshold": oracle_repair_mse_threshold,
+                            "gate_classification_weight": gate_classification_weight,
+                            "residual_loss_weight": residual_loss_weight,
+                            "execute_loss_weight": execute_loss_weight,
+                            "preserve_loss_weight": preserve_loss_weight,
+                            "residual_bound": residual_bound,
+                        }
                     loss, batch_components = train_step(
                         model,
                         optimizer,
@@ -1056,6 +1214,7 @@ def train_decoder(
                         repair_margin=repair_margin,
                         low_gate_threshold=low_gate_threshold,
                         high_gate_threshold=high_gate_threshold,
+                        **v3_train_kwargs,
                     )
                     losses.append(float(jax.device_get(loss)))
                     for name, value in batch_components.items():
@@ -1071,6 +1230,8 @@ def train_decoder(
                                 f" gate_w_left={batch_gate_w_left:.4f}"
                                 f" gate_w_right={batch_gate_w_right:.4f}"
                             )
+                        elif loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+                            extra = " learned_gate=online"
                         else:
                             extra = ""
                         print(
@@ -1113,6 +1274,13 @@ def train_decoder(
                     "low_gate_safety_weight": low_gate_safety_weight,
                     "low_gate_safety_margin": low_gate_safety_margin,
                     "low_gate_regression_margin": low_gate_regression_margin,
+                    "oracle_safe_mse_threshold": oracle_safe_mse_threshold,
+                    "oracle_repair_mse_threshold": oracle_repair_mse_threshold,
+                    "gate_classification_weight": gate_classification_weight,
+                    "residual_loss_weight": residual_loss_weight,
+                    "execute_loss_weight": execute_loss_weight,
+                    "preserve_loss_weight": preserve_loss_weight,
+                    "residual_bound": residual_bound,
                     "rank_weight": rank_weight,
                     "rank_margin": rank_margin,
                     "repair_weight": repair_weight,
@@ -1135,10 +1303,22 @@ def train_decoder(
                     ),
                     "eval_every": eval_every,
                 }
-                if loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE):
+                if loss_mode in (
+                    COMPOSITE_GATED_LOSS_MODE,
+                    LEARNED_RESIDUAL_GATED_LOSS_MODE,
+                    BIMANUAL_LOSS_MODE,
+                ):
                     checkpoint_extra.pop("gate_lambda")
                 if loss_mode == COMPOSITE_GATED_LOSS_MODE:
                     checkpoint_extra.update(composite_gated_objective_metadata())
+                if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+                    checkpoint_extra.update(
+                        learned_residual_gated_objective_metadata(
+                            oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+                            oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+                            residual_bound=residual_bound,
+                        )
+                    )
                 if loss_mode == BIMANUAL_LOSS_MODE:
                     checkpoint_extra.update(
                         bimanual_objective_metadata(
@@ -1154,7 +1334,11 @@ def train_decoder(
                         num_steps=validation_steps,
                         keep_predictions=(
                             loss_mode
-                            in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+                            in (
+                                COMPOSITE_GATED_LOSS_MODE,
+                                LEARNED_RESIDUAL_GATED_LOSS_MODE,
+                                BIMANUAL_LOSS_MODE,
+                            )
                             and write_plots
                         ),
                         solver=aux_decode_solver,
@@ -1176,6 +1360,9 @@ def train_decoder(
                         low_gate_regression_margin=low_gate_regression_margin,
                         rank_margin=rank_margin,
                         repair_margin=repair_margin,
+                        oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+                        oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+                        residual_bound=residual_bound,
                     )
                     metrics: dict[str, float | str | int] = {
                         "train_loss_total": train_loss,
@@ -1225,6 +1412,73 @@ def train_decoder(
                                     validation.high_gate_repair_satisfied_frac
                                 ),
                             }
+                        )
+                    if loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+                        if (
+                            validation.sample_gate_w is None
+                            or validation.sample_tactile_change is None
+                        ):
+                            raise ValueError(
+                                "learned residual validation is missing Gate diagnostics"
+                            )
+                        gate_values = np.asarray(validation.sample_gate_w)
+                        change_values = np.asarray(validation.sample_tactile_change)
+                        low_gate = gate_values <= low_gate_threshold
+                        high_gate = gate_values >= high_gate_threshold
+                        mid_gate = ~(low_gate | high_gate)
+                        metrics.update(
+                            {
+                                "val_gate_classification_accuracy": float(
+                                    validation.gate_classification_accuracy
+                                ),
+                                "val_gate_safe_accuracy": float(
+                                    validation.gate_safe_accuracy
+                                ),
+                                "val_gate_repair_accuracy": float(
+                                    validation.gate_repair_accuracy
+                                ),
+                                "val_execute_arm9_mse": float(
+                                    validation.execute_arm9_mse
+                                ),
+                                "val_preserve_arm9_mse": float(
+                                    validation.preserve_arm9_mse
+                                ),
+                                "val_residual_tail_p95": float(
+                                    validation.residual_tail_p95
+                                ),
+                                "val_residual_tail_max": float(
+                                    validation.residual_tail_max
+                                ),
+                                "val_mse_vla_gt": float(validation.mse_vla_gt),
+                                "val_gt_gain": float(validation.gt_gain),
+                                "val_relative_gt_error": float(
+                                    validation.relative_gt_error
+                                ),
+                                "val_gate_w_mean": float(np.mean(gate_values)),
+                                "val_gate_w_p10": float(np.quantile(gate_values, 0.1)),
+                                "val_gate_w_p50": float(np.quantile(gate_values, 0.5)),
+                                "val_gate_w_p90": float(np.quantile(gate_values, 0.9)),
+                                "val_tactile_change_mean": float(
+                                    np.mean(change_values)
+                                ),
+                                "val_tactile_change_p10": float(
+                                    np.quantile(change_values, 0.1)
+                                ),
+                                "val_tactile_change_p50": float(
+                                    np.quantile(change_values, 0.5)
+                                ),
+                                "val_tactile_change_p90": float(
+                                    np.quantile(change_values, 0.9)
+                                ),
+                                "val_gate_n_low": int(np.count_nonzero(low_gate)),
+                                "val_gate_n_mid": int(np.count_nonzero(mid_gate)),
+                                "val_gate_n_high": int(np.count_nonzero(high_gate)),
+                                "val_low_safe_frac": 1.0
+                                - float(validation.low_gate_unsafe_frac),
+                            }
+                        )
+                        metrics["checkpoint_selection_feasible"] = int(
+                            _best_key(metrics)[0] == 0.0
                         )
                     if loss_mode == COMPOSITE_GATED_LOSS_MODE:
                         if (
@@ -1378,7 +1632,14 @@ def train_decoder(
                         else:
                             for path in bimanual_plots:
                                 print(f"bimanual_plot={path}", flush=True)
-                    if loss_mode == COMPOSITE_GATED_LOSS_MODE and write_plots:
+                    if (
+                        loss_mode
+                        in (
+                            COMPOSITE_GATED_LOSS_MODE,
+                            LEARNED_RESIDUAL_GATED_LOSS_MODE,
+                        )
+                        and write_plots
+                    ):
                         try:
                             single_hand_plots = plot_single_hand_diagnostics(
                                 history_path,
@@ -1526,6 +1787,7 @@ def build_parser() -> argparse.ArgumentParser:
             "predicted",
             "gated",
             COMPOSITE_GATED_LOSS_MODE,
+            LEARNED_RESIDUAL_GATED_LOSS_MODE,
             BIMANUAL_LOSS_MODE,
         ),
         default="gt",
@@ -1578,6 +1840,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--low-gate-safety-weight", type=float, default=0.5)
     parser.add_argument("--low-gate-safety-margin", type=float, default=0.03)
     parser.add_argument("--low-gate-regression-margin", type=float, default=0.005)
+    parser.add_argument("--oracle-safe-mse-threshold", type=float, default=0.01)
+    parser.add_argument("--oracle-repair-mse-threshold", type=float, default=0.03)
+    parser.add_argument("--gate-classification-weight", type=float, default=1.0)
+    parser.add_argument("--residual-loss-weight", type=float, default=1.0)
+    parser.add_argument("--execute-loss-weight", type=float, default=4.0)
+    parser.add_argument("--preserve-loss-weight", type=float, default=4.0)
+    parser.add_argument("--residual-bound", type=float, default=0.25)
     parser.add_argument("--rank-weight", type=float, default=2.0)
     parser.add_argument("--rank-margin", type=float, default=0.0)
     parser.add_argument("--repair-weight", type=float, default=2.0)
@@ -1687,7 +1956,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         gate_temperature=args.gate_temperature,
         gate_lambda=(
             0.0
-            if args.loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+            if args.loss_mode
+            in (
+                COMPOSITE_GATED_LOSS_MODE,
+                LEARNED_RESIDUAL_GATED_LOSS_MODE,
+                BIMANUAL_LOSS_MODE,
+            )
             else args.gate_lambda
         ),
         aux_decode_weight=args.aux_decode_weight,
@@ -1698,6 +1972,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         low_gate_safety_weight=args.low_gate_safety_weight,
         low_gate_safety_margin=args.low_gate_safety_margin,
         low_gate_regression_margin=args.low_gate_regression_margin,
+        oracle_safe_mse_threshold=args.oracle_safe_mse_threshold,
+        oracle_repair_mse_threshold=args.oracle_repair_mse_threshold,
+        gate_classification_weight=args.gate_classification_weight,
+        residual_loss_weight=args.residual_loss_weight,
+        execute_loss_weight=args.execute_loss_weight,
+        preserve_loss_weight=args.preserve_loss_weight,
+        residual_bound=args.residual_bound,
         rank_weight=args.rank_weight,
         rank_margin=args.rank_margin,
         repair_weight=args.repair_weight,

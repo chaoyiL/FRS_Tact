@@ -79,6 +79,17 @@ HISTORY_FIELDS = (
     "val_gt_gain",
     "val_relative_gt_error",
     "checkpoint_selection_feasible",
+    "train_loss_gate_classification",
+    "train_loss_residual",
+    "train_loss_execute",
+    "train_loss_preserve",
+    "val_gate_classification_accuracy",
+    "val_gate_safe_accuracy",
+    "val_gate_repair_accuracy",
+    "val_execute_arm9_mse",
+    "val_preserve_arm9_mse",
+    "val_residual_tail_p95",
+    "val_residual_tail_max",
 ) + tuple(
     f"val_{metric}_{wrist}"
     for wrist in BIMANUAL_WRISTS
@@ -163,16 +174,41 @@ def plot_training_history(
     mse_pred_epochs, val_mse_pred = _finite_series(rows, "val_mse_pred")
     n_high_epochs, n_high_w = _finite_series(rows, "val_n_high_w")
     n_low_epochs, n_low_w = _finite_series(rows, "val_n_low_w")
+    v3_repair_epochs, v3_repair_accuracy = _finite_series(
+        rows, "val_gate_repair_accuracy"
+    )
+    v3_safe_epochs, v3_safe_accuracy = _finite_series(
+        rows, "val_gate_safe_accuracy"
+    )
+    v3_execute_epochs, v3_execute_mse = _finite_series(
+        rows, "val_execute_arm9_mse"
+    )
+    v3_preserve_epochs, v3_preserve_mse = _finite_series(
+        rows, "val_preserve_arm9_mse"
+    )
+    v3_tail_epochs, v3_tail_p95 = _finite_series(
+        rows, "val_residual_tail_p95"
+    )
 
     has_stratified = bool(high_gt_epochs or low_gt_epochs or high_pred_epochs or low_pred_epochs)
     has_overall_mse = bool(mse_gt_epochs or mse_pred_epochs)
     has_val_mse = has_stratified or has_overall_mse
     has_counts = bool(n_high_epochs or n_low_epochs)
+    has_v3_gate = bool(v3_repair_epochs or v3_safe_epochs)
+    has_v3_action = bool(
+        v3_execute_epochs or v3_preserve_epochs or v3_tail_epochs
+    )
 
     destination = output_path or history_path.with_name("training_curves.png")
     destination.parent.mkdir(parents=True, exist_ok=True)
 
-    n_rows = 1 + int(has_val_mse) + int(has_counts)
+    n_rows = (
+        1
+        + int(has_val_mse)
+        + int(has_counts)
+        + int(has_v3_gate)
+        + int(has_v3_action)
+    )
     fig, axes = plt.subplots(
         n_rows,
         1,
@@ -300,6 +336,46 @@ def plot_training_history(
             )
         axes[row].set_ylabel("# val samples")
         axes[row].set_title("Validation sample counts by gate weight", pad=8)
+        axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        row += 1
+
+    if has_v3_gate:
+        if v3_repair_epochs:
+            axes[row].plot(
+                v3_repair_epochs,
+                v3_repair_accuracy,
+                label="repair Gate accuracy",
+                color="#C44E52",
+                marker="o",
+            )
+        if v3_safe_epochs:
+            axes[row].plot(
+                v3_safe_epochs,
+                v3_safe_accuracy,
+                label="safe Gate accuracy",
+                color="#55A868",
+                marker="s",
+            )
+        axes[row].set_ylim(-0.05, 1.05)
+        axes[row].set_ylabel("accuracy")
+        axes[row].set_title("Learned residual Gate classification", pad=8)
+        axes[row].grid(True, alpha=0.3)
+        axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
+        row += 1
+
+    if has_v3_action:
+        for epochs_, values, label, color in (
+            (v3_execute_epochs, v3_execute_mse, "execute arm9 MSE", "#C44E52"),
+            (v3_preserve_epochs, v3_preserve_mse, "preserve arm9 MSE", "#4C72B0"),
+            (v3_tail_epochs, v3_tail_p95, "residual |tail| p95", "#8172B2"),
+        ):
+            if epochs_:
+                axes[row].plot(
+                    epochs_, values, label=label, color=color, marker="o"
+                )
+        axes[row].set_ylabel("value")
+        axes[row].set_title("Learned residual execution and tail", pad=8)
         axes[row].grid(True, alpha=0.3)
         axes[row].legend(loc="best", fontsize=8, framealpha=0.92)
         row += 1

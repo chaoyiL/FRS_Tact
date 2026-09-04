@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import math
 from functools import partial
 from typing import Literal
@@ -21,9 +22,13 @@ from train_pi05_frs.utils.bimanual_schema import (
 )
 from train_pi05_frs.utils.integration import fireflow_integrate_velocity
 from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import LEARNED_RESIDUAL_GATED_LOSS_MODE
 
 Array = jax.Array
 FlowSolver = Literal["euler", "fireflow"]
+_OPTIMIZER_UPDATE_REQUIRES_MODEL = (
+    "model" in inspect.signature(nnx.Optimizer.update).parameters
+)
 DEFAULT_GRU_HIDDEN_DIM = 256
 DEFAULT_RESNET_EMBEDDING_DIM = 512
 DECODER_INPUT_VERSION = 2
@@ -54,6 +59,8 @@ class DecoderConfig:
     state_conditioning: bool = False
     state_dim: int = 0
     decoder_input_version: int = DECODER_INPUT_VERSION
+    output_mode: str = "flow"
+    residual_bound: float = 0.5
 
     def __post_init__(self) -> None:
         if min(
@@ -80,6 +87,14 @@ class DecoderConfig:
                 f"decoder_input_version must be {DECODER_INPUT_VERSION}, "
                 f"got {self.decoder_input_version}."
             )
+        if self.output_mode not in ("flow", "learned_residual_gate"):
+            raise ValueError(f"unsupported decoder output_mode: {self.output_mode!r}")
+        if not math.isfinite(self.residual_bound) or self.residual_bound <= 0.0:
+            raise ValueError(
+                f"residual_bound must be finite and positive, got {self.residual_bound}"
+            )
+        if self.output_mode == "learned_residual_gate" and self.action_dim != 10:
+            raise ValueError("learned_residual_gate requires action_dim=10")
 
     @property
     def tactile_token_dim(self) -> int:
@@ -197,14 +212,20 @@ class TactileConditionedFlowDecoder(nnx.Module):
             self.state_norm = nnx.LayerNorm(config.state_dim, rngs=rngs)
             self.state_fc1 = nnx.Linear(config.state_dim, config.model_dim, rngs=rngs)
             self.state_fc2 = nnx.Linear(config.model_dim, config.model_dim, rngs=rngs)
-        self.blocks = [
+        blocks = [
             ConditionedTransformerBlock(
                 config.model_dim, config.num_heads, config.mlp_ratio, rngs=rngs
             )
             for _ in range(config.depth)
         ]
+        self.blocks = nnx.List(blocks) if hasattr(nnx, "List") else blocks
         self.out_norm = nnx.LayerNorm(config.model_dim, rngs=rngs)
         self.action_out = nnx.Linear(config.model_dim, config.action_dim, rngs=rngs)
+        if config.output_mode == "learned_residual_gate":
+            self.baseline_proj = nnx.Linear(
+                config.resnet_embedding_dim, config.model_dim, rngs=rngs
+            )
+            self.gate_out = nnx.Linear(config.model_dim, 1, rngs=rngs)
 
     def encode_tactile_tokens(self, tactile_seq: Array) -> Array:
         """``[B, T, N, D] → [B, N, H]`` via shared GRU over each sensor stream."""
@@ -287,6 +308,230 @@ class TactileConditionedFlowDecoder(nnx.Module):
         for block in self.blocks:
             x = block(x, condition)
         return self.action_out(self.out_norm(x))
+
+    def predict_residual_gate(
+        self,
+        vla_action: Array,
+        tactile_seq: Array,
+        episode_baseline: Array,
+        *,
+        state: Array | None = None,
+        state_keep_mask: Array | None = None,
+    ) -> tuple[Array, Array]:
+        """Predict a bounded arm residual and one learned Gate logit per chunk."""
+
+        if self.config.output_mode != "learned_residual_gate":
+            raise ValueError(
+                "predict_residual_gate requires output_mode='learned_residual_gate'"
+            )
+        expected_action = (
+            tactile_seq.shape[0],
+            self.config.action_horizon,
+            self.config.action_dim,
+        )
+        if vla_action.shape != expected_action:
+            raise ValueError(
+                f"Expected VLA action shape {expected_action}, got {vla_action.shape}."
+            )
+        expected_baseline = (
+            tactile_seq.shape[0],
+            self.config.num_tactile_tokens,
+            self.config.resnet_embedding_dim,
+        )
+        if episode_baseline.shape != expected_baseline:
+            raise ValueError(
+                f"Expected episode baseline shape {expected_baseline}, "
+                f"got {episode_baseline.shape}."
+            )
+        condition = self.encode_condition(tactile_seq, state, state_keep_mask)
+        baseline_tokens = self.baseline_proj(episode_baseline)
+        condition = jnp.concatenate((condition, baseline_tokens), axis=1)
+        hidden = self.action_in(vla_action)
+        hidden = hidden + sequence_position_embedding(
+            hidden.shape[1], self.config.model_dim
+        )[None, :, :]
+        for block in self.blocks:
+            hidden = block(hidden, condition)
+        hidden = self.out_norm(hidden)
+        residual = float(self.config.residual_bound) * jnp.tanh(
+            self.action_out(hidden)[..., :9]
+        )
+        gate_logits = self.gate_out(jnp.mean(hidden, axis=1))
+        return residual, gate_logits
+
+
+def learned_residual_gate_labels(
+    vla_action: Array,
+    gt_action: Array,
+    *,
+    oracle_safe_mse_threshold: float,
+    oracle_repair_mse_threshold: float,
+) -> tuple[Array, Array, Array]:
+    """Return binary Gate labels, supervised mask, and arm9 chunk error."""
+
+    if vla_action.ndim != 3 or vla_action.shape != gt_action.shape:
+        raise ValueError("VLA and GT actions must have matching [B, T, A] shapes")
+    if vla_action.shape[-1] != 10:
+        raise ValueError("learned residual Gate labels require 10D actions")
+    safe_threshold = float(oracle_safe_mse_threshold)
+    repair_threshold = float(oracle_repair_mse_threshold)
+    if not 0.0 <= safe_threshold < repair_threshold:
+        raise ValueError(
+            "oracle thresholds must satisfy 0 <= safe < repair, got "
+            f"{safe_threshold}, {repair_threshold}"
+        )
+    error = jnp.mean(
+        jnp.square(vla_action[..., :9] - gt_action[..., :9]), axis=(1, 2)
+    )
+    safe = error <= safe_threshold
+    repair = error >= repair_threshold
+    labels = repair.astype(error.dtype)
+    return labels, safe | repair, error
+
+
+def apply_learned_residual_gate(
+    vla_action: Array,
+    residual: Array,
+    gate_logits: Array,
+) -> Array:
+    """Apply a chunk Gate to arm9 and preserve the frozen VLA gripper."""
+
+    if vla_action.ndim != 3 or vla_action.shape[-1] != 10:
+        raise ValueError("learned residual Gate inference requires VLA actions [B, T, 10]")
+    expected_residual = vla_action.shape[:-1] + (9,)
+    if residual.shape != expected_residual:
+        raise ValueError(
+            f"Expected residual shape {expected_residual}, got {residual.shape}."
+        )
+    expected_gate = (vla_action.shape[0], 1)
+    if gate_logits.shape != expected_gate:
+        raise ValueError(
+            f"Expected chunk gate logits shape {expected_gate}, got {gate_logits.shape}."
+        )
+    gate = jax.nn.sigmoid(gate_logits)[:, None, :]
+    arm = vla_action[..., :9] + gate * residual
+    return jnp.concatenate((arm, vla_action[..., 9:10]), axis=-1)
+
+
+def infer_learned_residual_gate(
+    model: "TactileConditionedFlowDecoder",
+    vla_action: Array,
+    tactile_seq: Array,
+    episode_baseline: Array,
+    *,
+    state: Array | None = None,
+) -> tuple[Array, Array, Array]:
+    """Predict and apply a gated arm residual while preserving VLA gripper output."""
+
+    residual, gate_logits = model.predict_residual_gate(
+        vla_action,
+        tactile_seq,
+        episode_baseline,
+        state=state,
+    )
+    executed = apply_learned_residual_gate(vla_action, residual, gate_logits)
+    return executed, residual, gate_logits
+
+
+def decode_learned_residual_actions(
+    model: "TactileConditionedFlowDecoder",
+    predicted_action: Array,
+    tactile_seq: Array,
+    baseline_tokens: Array,
+    *,
+    state: Array | None = None,
+) -> tuple[Array, Array, Array]:
+    """Decode v3 actions as execution, chunk Gate probability, and arm residual."""
+
+    executed, residual, gate_logits = infer_learned_residual_gate(
+        model,
+        predicted_action,
+        tactile_seq,
+        baseline_tokens,
+        state=state,
+    )
+    return executed, jax.nn.sigmoid(gate_logits[:, 0]), residual
+
+
+def learned_residual_gate_loss_components_per_sample(
+    residual: Array,
+    gate_logits: Array,
+    vla_action: Array,
+    gt_action: Array,
+    *,
+    oracle_safe_mse_threshold: float,
+    oracle_repair_mse_threshold: float,
+) -> dict[str, Array]:
+    """Return unweighted v3 losses, leaving weighting to the training loop."""
+
+    labels, gate_mask, _ = learned_residual_gate_labels(
+        vla_action,
+        gt_action,
+        oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+        oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+    )
+    expected_residual = vla_action.shape[:-1] + (9,)
+    if residual.shape != expected_residual:
+        raise ValueError(
+            f"Expected residual shape {expected_residual}, got {residual.shape}."
+        )
+    if gate_logits.shape != (vla_action.shape[0], 1):
+        raise ValueError("gate_logits must have shape [B, 1]")
+    target_residual = gt_action[..., :9] - vla_action[..., :9]
+    residual_error = residual - target_residual
+    absolute_residual_error = jnp.abs(residual_error)
+    residual_huber = jnp.where(
+        absolute_residual_error <= 1.0,
+        0.5 * jnp.square(residual_error),
+        absolute_residual_error - 0.5,
+    )
+    residual_loss = jnp.mean(residual_huber, axis=(1, 2))
+    gate_loss = optax.sigmoid_binary_cross_entropy(
+        gate_logits[:, 0], labels
+    )
+    safe = (~labels.astype(bool)) & gate_mask
+    repair = labels.astype(bool) & gate_mask
+    safe_count = jnp.sum(safe.astype(gate_loss.dtype))
+    repair_count = jnp.sum(repair.astype(gate_loss.dtype))
+    batch_size = jnp.asarray(gate_loss.shape[0], dtype=gate_loss.dtype)
+    both_classes = (safe_count > 0.0) & (repair_count > 0.0)
+    safe_scale = jnp.where(
+        safe_count > 0.0,
+        jnp.where(both_classes, 0.5, 1.0)
+        * batch_size
+        / jnp.maximum(safe_count, 1.0),
+        0.0,
+    )
+    repair_scale = jnp.where(
+        repair_count > 0.0,
+        jnp.where(both_classes, 0.5, 1.0)
+        * batch_size
+        / jnp.maximum(repair_count, 1.0),
+        0.0,
+    )
+    gate_loss = gate_loss * (
+        safe.astype(gate_loss.dtype) * safe_scale
+        + repair.astype(gate_loss.dtype) * repair_scale
+    )
+    executed = apply_learned_residual_gate(vla_action, residual, gate_logits)
+    executed_gt_mse = jnp.mean(
+        jnp.square(executed[..., :9] - gt_action[..., :9]), axis=(1, 2)
+    )
+    executed_vla_mse = jnp.mean(
+        jnp.square(executed[..., :9] - vla_action[..., :9]), axis=(1, 2)
+    )
+    return {
+        "gate_classification": gate_loss,
+        "residual": residual_loss,
+        # Keep these weights independent of the safe/repair prevalence in a
+        # minibatch: their batch means become the corresponding group means.
+        "execute": _active_group_normalized_per_sample(
+            executed_gt_mse, repair.astype(executed_gt_mse.dtype)
+        ),
+        "preserve": _active_group_normalized_per_sample(
+            executed_vla_mse, safe.astype(executed_vla_mse.dtype)
+        ),
+    }
 
 
 def flow_matching_loss_per_sample(
@@ -1085,6 +1330,12 @@ def gated_flow_matching_loss_per_sample(
         "low_gate_threshold",
         "high_gate_threshold",
         "state_dropout_rate",
+        "oracle_safe_mse_threshold",
+        "oracle_repair_mse_threshold",
+        "gate_classification_weight",
+        "residual_loss_weight",
+        "execute_loss_weight",
+        "preserve_loss_weight",
     ),
 )
 def _train_step_jit(
@@ -1113,6 +1364,13 @@ def _train_step_jit(
     repair_margin: float = 0.0,
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
+    baseline_tokens: Array | None = None,
+    oracle_safe_mse_threshold: float = 0.01,
+    oracle_repair_mse_threshold: float = 0.03,
+    gate_classification_weight: float = 1.0,
+    residual_loss_weight: float = 1.0,
+    execute_loss_weight: float = 1.0,
+    preserve_loss_weight: float = 1.0,
 ) -> tuple[Array, dict[str, Array]]:
     if not 0.0 <= state_dropout_rate < 1.0:
         raise ValueError(f"state_dropout_rate must be in [0, 1), got {state_dropout_rate}.")
@@ -1222,6 +1480,36 @@ def _train_step_jit(
                 name: jnp.mean(per_sample[name])
                 for name in TRAIN_LOSS_COMPONENT_NAMES
             }
+        elif loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+            if baseline_tokens is None:
+                raise ValueError(
+                    "baseline_tokens are required for learned_residual_gated"
+                )
+            residual, gate_logits = candidate.predict_residual_gate(
+                predicted_action,
+                tactile_seq,
+                baseline_tokens,
+                state=state,
+                state_keep_mask=state_keep_mask,
+            )
+            per_sample = learned_residual_gate_loss_components_per_sample(
+                residual,
+                gate_logits,
+                predicted_action,
+                gt_action,
+                oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+                oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+            )
+            weights = {
+                "gate_classification": float(gate_classification_weight),
+                "residual": float(residual_loss_weight),
+                "execute": float(execute_loss_weight),
+                "preserve": float(preserve_loss_weight),
+            }
+            components = {
+                name: weights[name] * jnp.mean(per_sample[name])
+                for name in weights
+            }
         elif loss_mode == "bimanual_gated":
             per_sample = bimanual_loss_components_per_sample(
                 candidate,
@@ -1253,14 +1541,18 @@ def _train_step_jit(
         else:
             raise ValueError(
                 "loss_mode must be 'gt', 'predicted', 'gated', "
-                f"'{COMPOSITE_GATED_LOSS_MODE}', or 'bimanual_gated', "
+                f"'{COMPOSITE_GATED_LOSS_MODE}', "
+                f"'{LEARNED_RESIDUAL_GATED_LOSS_MODE}', or 'bimanual_gated', "
                 f"got {loss_mode!r}."
             )
         loss = sum(components.values())
         return loss, components
 
     (loss, components), gradients = nnx.value_and_grad(loss_fn, has_aux=True)(model)
-    optimizer.update(gradients)
+    if _OPTIMIZER_UPDATE_REQUIRES_MODEL:
+        optimizer.update(model, gradients)
+    else:
+        optimizer.update(gradients)
     return loss, components
 
 
@@ -1290,6 +1582,14 @@ def train_step(
     repair_margin: float = 0.0,
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
+    baseline_tokens: Array | None = None,
+    oracle_safe_mse_threshold: float = 0.01,
+    oracle_repair_mse_threshold: float = 0.03,
+    gate_classification_weight: float = 1.0,
+    residual_loss_weight: float = 1.0,
+    execute_loss_weight: float = 1.0,
+    preserve_loss_weight: float = 1.0,
+    residual_bound: float | None = None,
 ) -> tuple[Array, dict[str, Array]]:
     """Validate host-side Gate contracts before the compiled optimizer update."""
 
@@ -1307,6 +1607,22 @@ def train_step(
             )
         if source_indices is not None and source_indices.shape != (x_base.shape[0],):
             raise ValueError("source_indices must have shape [B]")
+    elif loss_mode == LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        if model.config.output_mode != "learned_residual_gate":
+            raise ValueError(
+                "learned_residual_gated requires output_mode='learned_residual_gate'"
+            )
+        if baseline_tokens is None:
+            raise ValueError(
+                "baseline_tokens are required for learned_residual_gated"
+            )
+        if residual_bound is not None and not math.isclose(
+            float(residual_bound), float(model.config.residual_bound)
+        ):
+            raise ValueError(
+                "residual_bound must match the model config: "
+                f"{residual_bound} != {model.config.residual_bound}"
+            )
     return _train_step_jit(
         model,
         optimizer,
@@ -1332,6 +1648,13 @@ def train_step(
         repair_margin=repair_margin,
         low_gate_threshold=low_gate_threshold,
         high_gate_threshold=high_gate_threshold,
+        baseline_tokens=baseline_tokens,
+        oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+        oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+        gate_classification_weight=gate_classification_weight,
+        residual_loss_weight=residual_loss_weight,
+        execute_loss_weight=execute_loss_weight,
+        preserve_loss_weight=preserve_loss_weight,
     )
 
 

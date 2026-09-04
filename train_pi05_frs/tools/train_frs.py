@@ -28,6 +28,7 @@ from train_pi05_frs.utils.bimanual_schema import BIMANUAL_LOSS_MODE
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_action_dim
 from train_pi05_frs.utils.bimanual_schema import validate_bimanual_tactile_keys
 from train_pi05_frs.utils.objective_schema import COMPOSITE_GATED_LOSS_MODE
+from train_pi05_frs.utils.objective_schema import LEARNED_RESIDUAL_GATED_LOSS_MODE
 
 
 TRAIN_ROOT = Path(__file__).resolve().parents[1]
@@ -136,6 +137,13 @@ TRAINING_KEYS = {
     "low_gate_safety_weight",
     "low_gate_safety_margin",
     "low_gate_regression_margin",
+    "oracle_safe_mse_threshold",
+    "oracle_repair_mse_threshold",
+    "gate_classification_weight",
+    "residual_loss_weight",
+    "execute_loss_weight",
+    "preserve_loss_weight",
+    "residual_bound",
     "rank_low_gate_threshold",
     "rank_high_gate_threshold",
     "rank_weight",
@@ -906,11 +914,17 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         "predicted",
         "gated",
         COMPOSITE_GATED_LOSS_MODE,
+        LEARNED_RESIDUAL_GATED_LOSS_MODE,
         BIMANUAL_LOSS_MODE,
     ):
         raise ValueError("config.frs_training.loss_mode is invalid")
     if (
-        loss_mode in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+        loss_mode
+        in (
+            COMPOSITE_GATED_LOSS_MODE,
+            LEARNED_RESIDUAL_GATED_LOSS_MODE,
+            BIMANUAL_LOSS_MODE,
+        )
         and "gate_lambda" in training
     ):
         raise ValueError(
@@ -1150,6 +1164,13 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         "low_gate_safety_weight": 0.0,
         "low_gate_safety_margin": 0.03,
         "low_gate_regression_margin": 0.005,
+        "oracle_safe_mse_threshold": 0.01,
+        "oracle_repair_mse_threshold": 0.03,
+        "gate_classification_weight": 1.0,
+        "residual_loss_weight": 1.0,
+        "execute_loss_weight": 4.0,
+        "preserve_loss_weight": 4.0,
+        "residual_bound": 0.25,
         "rank_low_gate_threshold": 0.3,
         "rank_high_gate_threshold": 0.7,
         "rank_weight": 0.0,
@@ -1177,12 +1198,20 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         raise ValueError("config.frs_training.gate_temperature must be positive")
     if numbers["learning_rate"] <= 0.0 or numbers["grad_clip_norm"] <= 0.0:
         raise ValueError("config.frs_training learning_rate and grad_clip_norm must be positive")
+    if numbers["residual_bound"] <= 0.0:
+        raise ValueError("config.frs_training.residual_bound must be positive")
     for key in (
         "gate_lambda",
         "aux_decode_weight",
         "low_gate_safety_weight",
         "low_gate_safety_margin",
         "low_gate_regression_margin",
+        "oracle_safe_mse_threshold",
+        "oracle_repair_mse_threshold",
+        "gate_classification_weight",
+        "residual_loss_weight",
+        "execute_loss_weight",
+        "preserve_loss_weight",
         "rank_weight",
         "rank_margin",
         "repair_weight",
@@ -1196,6 +1225,14 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     high = numbers["rank_high_gate_threshold"]
     if not 0.0 <= low < high <= 1.0:
         raise ValueError("config.frs_training gate thresholds must satisfy 0 <= low < high <= 1")
+    if not (
+        0.0
+        <= numbers["oracle_safe_mse_threshold"]
+        < numbers["oracle_repair_mse_threshold"]
+    ):
+        raise ValueError(
+            "config.frs_training oracle thresholds must satisfy 0 <= safe < repair"
+        )
     for key in (
         "best_max_low_gate_unsafe_frac",
         "best_min_high_gate_rank_satisfied_frac",
@@ -1377,7 +1414,11 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         gate_lambda=(
             0.0
             if training.get("loss_mode", "gated")
-            in (COMPOSITE_GATED_LOSS_MODE, BIMANUAL_LOSS_MODE)
+            in (
+                COMPOSITE_GATED_LOSS_MODE,
+                LEARNED_RESIDUAL_GATED_LOSS_MODE,
+                BIMANUAL_LOSS_MODE,
+            )
             else float(training.get("gate_lambda", 1.0))
         ),
         aux_decode_weight=float(training.get("aux_decode_weight", 1.0)),
@@ -1388,6 +1429,19 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         low_gate_regression_margin=float(
             training.get("low_gate_regression_margin", 0.005)
         ),
+        oracle_safe_mse_threshold=float(
+            training.get("oracle_safe_mse_threshold", 0.01)
+        ),
+        oracle_repair_mse_threshold=float(
+            training.get("oracle_repair_mse_threshold", 0.03)
+        ),
+        gate_classification_weight=float(
+            training.get("gate_classification_weight", 1.0)
+        ),
+        residual_loss_weight=float(training.get("residual_loss_weight", 1.0)),
+        execute_loss_weight=float(training.get("execute_loss_weight", 4.0)),
+        preserve_loss_weight=float(training.get("preserve_loss_weight", 4.0)),
+        residual_bound=float(training.get("residual_bound", 0.25)),
         rank_weight=float(training.get("rank_weight", 0.0)),
         rank_margin=float(training.get("rank_margin", 0.0)),
         repair_weight=float(training.get("repair_weight", 0.0)),

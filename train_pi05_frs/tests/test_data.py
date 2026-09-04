@@ -11,6 +11,7 @@ import numpy as np
 from train_pi05_frs.utils.data import NUM_TACTILE_STREAMS
 from train_pi05_frs.utils.data import TACTILE_KEYS
 from train_pi05_frs.utils.data import TactileConditionedBatches
+from train_pi05_frs.utils.data import CachedTactileEmbeddingBatches
 from train_pi05_frs.utils.data import gate_weights_from_change
 from train_pi05_frs.utils.data import resolve_dataset_repo_id
 from train_pi05_frs.utils.data import resolve_tactile_window
@@ -203,6 +204,10 @@ class DataHelpersTest(unittest.TestCase):
             0: np.ones((4, 4), dtype=np.float32),
         }
 
+        baseline = conditioner.baseline_tokens_for_cache_indices([0, 1])
+        self.assertEqual(baseline.shape, (2, 4, 4))
+        self.assertTrue(np.allclose(baseline, 1.0))
+
         def fake_encode(images):
             images = jnp.asarray(images)
             reduced = jnp.mean(images, axis=(1, 2, 3))
@@ -242,6 +247,25 @@ class DataHelpersTest(unittest.TestCase):
             np.asarray(tactile_seq[:, -1, :, :]),
         )
         self.assertEqual(per_wrist.shape, (2, 2))
+
+    def test_cached_conditioner_returns_source_episode_baseline_tokens(self):
+        conditioner = CachedTactileEmbeddingBatches.__new__(
+            CachedTactileEmbeddingBatches
+        )
+        conditioner.episode_baselines = {
+            (0, 3): np.full((2, 4), 3.0, dtype=np.float32),
+            (1, 7): np.full((2, 4), 7.0, dtype=np.float32),
+        }
+        conditioner._source_episode_frames = lambda indices: (
+            np.asarray([0, 1]),
+            np.asarray(indices),
+            np.asarray([3, 7]),
+        )
+
+        baseline = conditioner.baseline_tokens_for_cache_indices([4, 9])
+
+        self.assertEqual(baseline.shape, (2, 2, 4))
+        self.assertTrue(np.allclose(baseline[:, 0, 0], [3.0, 7.0]))
 
 
 if __name__ == "__main__":

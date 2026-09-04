@@ -37,6 +37,8 @@ class DecoderConfig:
     state_conditioning: bool = False
     state_dim: int = 0
     decoder_input_version: int = DECODER_INPUT_VERSION
+    output_mode: str = "flow"
+    residual_bound: float = 0.5
 
     def __post_init__(self) -> None:
         if min(
@@ -63,6 +65,14 @@ class DecoderConfig:
                 f"decoder_input_version must be {DECODER_INPUT_VERSION}, "
                 f"got {self.decoder_input_version}."
             )
+        if self.output_mode not in ("flow", "learned_residual_gate"):
+            raise ValueError(f"unsupported decoder output_mode: {self.output_mode!r}")
+        if not math.isfinite(self.residual_bound) or self.residual_bound <= 0.0:
+            raise ValueError(
+                f"residual_bound must be finite and positive, got {self.residual_bound}"
+            )
+        if self.output_mode == "learned_residual_gate" and self.action_dim != 10:
+            raise ValueError("learned_residual_gate requires action_dim=10")
 
     @property
     def tactile_token_dim(self) -> int:
@@ -180,14 +190,20 @@ class TactileConditionedFlowDecoder(nnx.Module):
             self.state_norm = nnx.LayerNorm(config.state_dim, rngs=rngs)
             self.state_fc1 = nnx.Linear(config.state_dim, config.model_dim, rngs=rngs)
             self.state_fc2 = nnx.Linear(config.model_dim, config.model_dim, rngs=rngs)
-        self.blocks = [
+        blocks = [
             ConditionedTransformerBlock(
                 config.model_dim, config.num_heads, config.mlp_ratio, rngs=rngs
             )
             for _ in range(config.depth)
         ]
+        self.blocks = nnx.List(blocks) if hasattr(nnx, "List") else blocks
         self.out_norm = nnx.LayerNorm(config.model_dim, rngs=rngs)
         self.action_out = nnx.Linear(config.model_dim, config.action_dim, rngs=rngs)
+        if config.output_mode == "learned_residual_gate":
+            self.baseline_proj = nnx.Linear(
+                config.resnet_embedding_dim, config.model_dim, rngs=rngs
+            )
+            self.gate_out = nnx.Linear(config.model_dim, 1, rngs=rngs)
 
     def encode_tactile_tokens(self, tactile_seq: Array) -> Array:
         """``[B, T, N, D] → [B, N, H]`` via shared GRU over each sensor stream."""
@@ -270,6 +286,101 @@ class TactileConditionedFlowDecoder(nnx.Module):
         for block in self.blocks:
             x = block(x, condition)
         return self.action_out(self.out_norm(x))
+
+    def predict_residual_gate(
+        self,
+        vla_action: Array,
+        tactile_seq: Array,
+        episode_baseline: Array,
+        *,
+        state: Array | None = None,
+        state_keep_mask: Array | None = None,
+    ) -> tuple[Array, Array]:
+        """Predict a bounded arm residual and one learned Gate logit per chunk."""
+
+        if self.config.output_mode != "learned_residual_gate":
+            raise ValueError(
+                "predict_residual_gate requires output_mode='learned_residual_gate'"
+            )
+        expected_action = (
+            tactile_seq.shape[0],
+            self.config.action_horizon,
+            self.config.action_dim,
+        )
+        if vla_action.shape != expected_action:
+            raise ValueError(
+                f"Expected VLA action shape {expected_action}, got {vla_action.shape}."
+            )
+        expected_baseline = (
+            tactile_seq.shape[0],
+            self.config.num_tactile_tokens,
+            self.config.resnet_embedding_dim,
+        )
+        if episode_baseline.shape != expected_baseline:
+            raise ValueError(
+                f"Expected episode baseline shape {expected_baseline}, "
+                f"got {episode_baseline.shape}."
+            )
+        condition = self.encode_condition(tactile_seq, state, state_keep_mask)
+        baseline_tokens = self.baseline_proj(episode_baseline)
+        condition = jnp.concatenate((condition, baseline_tokens), axis=1)
+        hidden = self.action_in(vla_action)
+        hidden = hidden + sequence_position_embedding(
+            hidden.shape[1], self.config.model_dim
+        )[None, :, :]
+        for block in self.blocks:
+            hidden = block(hidden, condition)
+        hidden = self.out_norm(hidden)
+        residual = float(self.config.residual_bound) * jnp.tanh(
+            self.action_out(hidden)[..., :9]
+        )
+        gate_logits = self.gate_out(jnp.mean(hidden, axis=1))
+        return residual, gate_logits
+
+
+def apply_learned_residual_gate(
+    vla_action: Array,
+    residual: Array,
+    gate_logits: Array,
+) -> Array:
+    """Apply a chunk Gate to arm9 and preserve the frozen VLA gripper."""
+
+    if vla_action.ndim != 3 or vla_action.shape[-1] != 10:
+        raise ValueError("learned residual Gate inference requires VLA actions [B, T, 10]")
+    expected_residual = vla_action.shape[:-1] + (9,)
+    if residual.shape != expected_residual:
+        raise ValueError(
+            f"Expected residual shape {expected_residual}, got {residual.shape}."
+        )
+    expected_gate = (vla_action.shape[0], 1)
+    if gate_logits.shape != expected_gate:
+        raise ValueError(
+            f"Expected chunk gate logits shape {expected_gate}, got {gate_logits.shape}."
+        )
+    gate = jax.nn.sigmoid(gate_logits)[:, None, :]
+    arm = vla_action[..., :9] + gate * residual
+    return jnp.concatenate((arm, vla_action[..., 9:10]), axis=-1)
+
+
+@nnx.jit
+def infer_learned_residual_gate(
+    model: TactileConditionedFlowDecoder,
+    vla_action: Array,
+    tactile_seq: Array,
+    episode_baseline: Array,
+    *,
+    state: Array | None = None,
+) -> tuple[Array, Array, Array]:
+    """Run objective-v3 inference and return execution, bounded residual, and logits."""
+
+    residual, gate_logits = model.predict_residual_gate(
+        vla_action,
+        tactile_seq,
+        episode_baseline,
+        state=state,
+    )
+    executed = apply_learned_residual_gate(vla_action, residual, gate_logits)
+    return executed, residual, gate_logits
 
 
 @partial(nnx.jit, static_argnames=("num_steps",))

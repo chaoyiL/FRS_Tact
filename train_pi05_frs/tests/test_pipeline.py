@@ -535,6 +535,62 @@ def test_pipeline_forwards_two_tactile_tokens_for_single_hand(
     assert captured["best_max_low_gate_regression_frac"] == pytest.approx(0.05)
 
 
+def test_v3_config_reuses_caches_and_forwards_learned_residual_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from train_pi05_frs import train as train_module
+    from train_pi05_frs.tools import train_frs as train_tool
+
+    v2 = load_config(TRAIN_ROOT / "configs" / "train_pi05_frs_right.yaml")
+    v3 = load_config(TRAIN_ROOT / "configs" / "train_pi05_frs_right_v3.yaml")
+    assert v3["action_cache"] == v2["action_cache"]
+    assert v3["tactile_embedding_cache"] == v2["tactile_embedding_cache"]
+    assert v3["frs_training"]["loss_mode"] == "learned_residual_gated"
+    assert v3["frs_training"]["output"].endswith("learned_residual_v3_01")
+    assert v3["frs_training"]["resume"] is False
+    assert v3["frs_training"]["resume_from"] is None
+    assert "learned_residual_gated" in train_module.ALL_GATED_LOSS_MODES
+
+    config = _valid_config(tmp_path, state_width=7, action_width=10)
+    config["model"].update(
+        state_action_profile="single-right-arm-7x10",
+        state_dim=7,
+        robot_action_dim=10,
+        action_dim=10,
+        tactile_keys=[
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ],
+        tactile_num_tokens=2,
+        camera_map={"right_wrist_0_rgb": "observation.images.camera1"},
+    )
+    training = config["frs_training"]
+    training["loss_mode"] = "learned_residual_gated"
+    training.pop("gate_lambda")
+    v3_values = {
+        "oracle_safe_mse_threshold": 0.01,
+        "oracle_repair_mse_threshold": 0.03,
+        "gate_classification_weight": 1.0,
+        "residual_loss_weight": 1.0,
+        "execute_loss_weight": 4.0,
+        "preserve_loss_weight": 4.0,
+        "residual_bound": 0.25,
+    }
+    training.update(v3_values)
+    cache_dir = Path(config["action_cache"]["root"]) / "org" / "demo"
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "manifest.json").write_text("{}", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(
+        train_tool, "train_decoder", lambda **kwargs: captured.update(kwargs)
+    )
+
+    train_tool.train_from_config(config)
+
+    for name, expected in v3_values.items():
+        assert captured[name] == pytest.approx(expected)
+
+
 def test_single_right_profile_rejects_legacy_cross_arm_tactile_pair(
     tmp_path: Path,
 ) -> None:

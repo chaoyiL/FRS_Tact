@@ -26,6 +26,7 @@ from .frs_inference.decoder import (
     DECODER_INPUT_VERSION,
     decode_actions,
     decode_bimanual_actions,
+    infer_learned_residual_gate,
 )
 from .frs_inference.decoder_checkpoint import load_checkpoint as load_frs_checkpoint
 from .frs_inference.encoder_checkpoint import load_tactile_encoder
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 
 _BIMANUAL_STEERED_ACTION_DIM = 20
 _COMPOSITE_GATED_LOSS_MODE = "composite_gated"
+_LEARNED_RESIDUAL_GATED_LOSS_MODE = "learned_residual_gated"
 _GRIPPER_ACTION_INDICES = (9, 19)
 _POSITION_ACTION_SLICES = (slice(0, 3), slice(10, 13))
 _ROTATION_ACTION_SLICES = (slice(3, 9), slice(13, 19))
@@ -389,6 +391,39 @@ def _validate_loss_contract(
     loss_mode = extra.get("loss_mode")
     if loss_mode == "gated":
         return
+    if loss_mode == _LEARNED_RESIDUAL_GATED_LOSS_MODE:
+        expected = {
+            "loss_objective_version": 3,
+            "model_architecture": "single_arm_vla_residual_gate_v1",
+            "action_dim": 10,
+            "steered_action_dim": 9,
+            "gripper_index": 9,
+            "gripper_policy": "vla_runtime_preserved",
+            "gate_granularity": "chunk",
+            "residual_parameterization": "bounded_normalized_vla_additive",
+            "gate_label_policy": "arm9_chunk_mse_two_threshold",
+        }
+        for field, value in expected.items():
+            _require_equal(extra.get(field), value, field)
+        _require_equal(action_dim, 10, "action_dim")
+        try:
+            safe = float(extra["oracle_safe_mse_threshold"])
+            repair = float(extra["oracle_repair_mse_threshold"])
+            residual_bound = float(extra["residual_bound"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError(
+                "learned_residual_gated checkpoint is missing valid oracle thresholds "
+                "or residual_bound"
+            ) from error
+        if not all(math.isfinite(value) for value in (safe, repair, residual_bound)):
+            raise ValueError("learned_residual_gated numeric metadata must be finite")
+        if not 0.0 <= safe < repair:
+            raise ValueError(
+                "learned_residual_gated oracle thresholds must satisfy 0 <= safe < repair"
+            )
+        if residual_bound <= 0.0:
+            raise ValueError("learned_residual_gated residual_bound must be positive")
+        return
     if loss_mode == _COMPOSITE_GATED_LOSS_MODE:
         objective_version = extra.get("loss_objective_version")
         if objective_version == 1:
@@ -606,9 +641,31 @@ class FRSRuntime:
                 "frs.hard_low_gate_bypass requires a single-arm composite_gated "
                 "objective-v2 checkpoint"
             )
+        learned_residual = extra.get("loss_mode") == _LEARNED_RESIDUAL_GATED_LOSS_MODE
+        expected_output_mode = "learned_residual_gate" if learned_residual else "flow"
+        _require_equal(
+            getattr(decoder, "output_mode", "flow"),
+            expected_output_mode,
+            "decoder output_mode",
+        )
+        if learned_residual:
+            _require_equal(
+                float(getattr(decoder, "residual_bound", float("nan"))),
+                float(extra["residual_bound"]),
+                "decoder residual_bound",
+            )
         _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
-        _require_equal(str(extra.get("aux_decode_solver")), self.config.decode_solver, "decode_solver")
-        _require_equal(int(extra.get("aux_decode_steps", 0)), self.config.decode_steps, "decode_steps")
+        if not learned_residual:
+            _require_equal(
+                str(extra.get("aux_decode_solver")),
+                self.config.decode_solver,
+                "decode_solver",
+            )
+            _require_equal(
+                int(extra.get("aux_decode_steps", 0)),
+                self.config.decode_steps,
+                "decode_steps",
+            )
         deployed_fingerprint = None
         if self.config.verify_source_checkpoint_fingerprint:
             deployed_fingerprint = _checkpoint_fingerprint(self.policy.checkpoint)
@@ -675,6 +732,14 @@ class FRSRuntime:
             and extra.get("loss_mode") == "bimanual_gated"
         )
 
+    def _uses_learned_residual_gate(self) -> bool:
+        extra = self.metadata.get("extra_metadata")
+        return bool(
+            isinstance(extra, Mapping)
+            and extra.get("loss_mode") == _LEARNED_RESIDUAL_GATED_LOSS_MODE
+            and extra.get("loss_objective_version") == 3
+        )
+
     def _decode_action_chunk(
         self,
         x_base: Any,
@@ -703,6 +768,35 @@ class FRSRuntime:
             num_steps=self.config.decode_steps,
             solver=self.config.decode_solver,
             **kwargs,
+        )
+
+    def _infer_action_chunk(
+        self,
+        x_base: Any,
+        tactile: Any,
+        *,
+        frozen_endpoint: Any,
+        state: jax.Array | None,
+    ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
+        if self._uses_learned_residual_gate():
+            assert self._episode_baseline is not None
+            executed, residual, gate_logits = infer_learned_residual_gate(
+                self.model,
+                jnp.asarray(frozen_endpoint, dtype=jnp.float32),
+                tactile,
+                jnp.asarray(self._episode_baseline[None, ...], dtype=jnp.float32),
+                state=state,
+            )
+            return executed, residual, gate_logits
+        return (
+            self._decode_action_chunk(
+                x_base,
+                tactile,
+                frozen_endpoint=frozen_endpoint,
+                state=state,
+            ),
+            None,
+            None,
         )
 
     @staticmethod
@@ -734,6 +828,8 @@ class FRSRuntime:
         self.last_diagnostics: FRSDiagnostics | None = None
         self.last_vla_normalized: np.ndarray | None = None
         self.last_frs_normalized: np.ndarray | None = None
+        self.last_gate_probability: float | None = None
+        self.last_bounded_residual: np.ndarray | None = None
 
     def reset_episode(self, initial_observation: Mapping[str, Any]) -> None:
         baseline = self._readonly(self._encode_observation(initial_observation))
@@ -749,6 +845,22 @@ class FRSRuntime:
         self._vla_translation_latched = (False, False)
         self._clear_chunk_state()
 
+    def _reverse_or_vla_base(
+        self,
+        observation: Mapping[str, Any],
+        task: str,
+        normalized: Any,
+    ) -> Any:
+        if self._uses_learned_residual_gate():
+            return normalized
+        return self.policy.reverse_action_chunk(
+            observation,
+            task,
+            normalized,
+            num_steps=self.config.reverse_steps,
+            solver=self.config.reverse_solver,
+        )
+
     def warmup(
         self,
         observation: Mapping[str, Any],
@@ -760,15 +872,9 @@ class FRSRuntime:
         if self._episode_baseline is None:
             raise RuntimeError("reset_episode must be called before warmup")
         normalized = self.policy.predict_action_chunk(observation, task, seed=seed, num_steps=sample_steps)
-        x_base = self.policy.reverse_action_chunk(
-            observation,
-            task,
-            normalized,
-            num_steps=self.config.reverse_steps,
-            solver=self.config.reverse_solver,
-        )
+        x_base = self._reverse_or_vla_base(observation, task, normalized)
         state = self._normalized_state(observation)
-        decoded = self._decode_action_chunk(
+        decoded, _, _ = self._infer_action_chunk(
             x_base,
             jnp.asarray(self.history.window_tokens()[None, ...]),
             frozen_endpoint=normalized,
@@ -791,13 +897,7 @@ class FRSRuntime:
             raise RuntimeError(f"active chunk {self._active_chunk_id} must be ended first")
         started = time.time()
         normalized = self.policy.predict_action_chunk(observation, task, seed=seed, num_steps=num_steps)
-        x_base = self.policy.reverse_action_chunk(
-            observation,
-            task,
-            normalized,
-            num_steps=self.config.reverse_steps,
-            solver=self.config.reverse_solver,
-        )
+        x_base = self._reverse_or_vla_base(observation, task, normalized)
         normalized_array = self._model_chunk(normalized, name="normalized pi0.5 actions")
         x_base_array = self._model_chunk(x_base, name="reverse-flow base")
         robot_actions = self._readonly(self.policy.unnormalize_actions(normalized_array))
@@ -957,6 +1057,7 @@ class FRSRuntime:
             )
         decode_started = time.time()
         residual_clamped = False
+        learned_residual_array: np.ndarray | None = None
         if low_gate_bypassed:
             decoded_array = np.array(self._action_vla_normalized, copy=True)
             delta = 0.0
@@ -969,12 +1070,37 @@ class FRSRuntime:
             )
         else:
             state = self._normalized_state(observation)
-            decoded = self._decode_action_chunk(
+            decoded, learned_residual, learned_gate_logits = self._infer_action_chunk(
                 self._x_base_device,
                 tactile,
                 frozen_endpoint=self._action_vla_normalized,
                 state=state,
             )
+            if learned_residual is not None and learned_gate_logits is not None:
+                residual_array = np.asarray(
+                    jax.device_get(learned_residual), dtype=np.float32
+                )
+                learned_residual_array = residual_array
+                expected_residual = self._action_vla_normalized.shape[:-1] + (9,)
+                if (
+                    residual_array.shape != expected_residual
+                    or not np.isfinite(residual_array).all()
+                ):
+                    raise ValueError(
+                        "learned FRS residual must be finite with shape "
+                        f"{expected_residual}, got {residual_array.shape}"
+                    )
+                residual_bound = float(extra["residual_bound"])
+                if float(np.max(np.abs(residual_array))) > residual_bound + 1e-6:
+                    raise ValueError("learned FRS residual exceeded checkpoint residual_bound")
+                logits_array = np.asarray(
+                    jax.device_get(learned_gate_logits), dtype=np.float32
+                )
+                if logits_array.shape != (1, 1) or not np.isfinite(logits_array).all():
+                    raise ValueError("learned FRS Gate logits must be finite with shape (1, 1)")
+                gate_weight = _gate_weight(
+                    float(logits_array[0, 0]), tau=0.0, temperature=1.0
+                )
             decoded_array, delta, max_abs, residual_clamped = self._validated_decoded(decoded)
         decode_finished = time.time()
         selected = decoded_array[0, action_index]
@@ -1044,4 +1170,10 @@ class FRSRuntime:
         self.last_diagnostics = diagnostics
         self.last_vla_normalized = self._readonly(self._action_vla_normalized)
         self.last_frs_normalized = self._readonly(decoded_array)
+        self.last_gate_probability = gate_weight
+        self.last_bounded_residual = (
+            None
+            if learned_residual_array is None
+            else self._readonly(learned_residual_array)
+        )
         return result

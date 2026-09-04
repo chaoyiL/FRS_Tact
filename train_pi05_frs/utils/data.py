@@ -32,7 +32,9 @@ from train_pi05_frs.utils.window_io import (
 
 Array = jax.Array
 SplitName = Literal["train", "val"]
-LossMode = Literal["gt", "predicted", "gated"]
+LossMode = Literal[
+    "gt", "predicted", "gated", "composite_gated", "learned_residual_gated"
+]
 
 
 def resolve_tactile_window(*, action_horizon: int, window_divisor: int) -> int:
@@ -340,6 +342,24 @@ class TactileConditionedBatches:
         print(f"episode_baselines={len(baselines)} (first-frame ResNet tokens)", flush=True)
         return baselines
 
+    def baseline_tokens_for_cache_indices(
+        self, cache_indices: Sequence[int]
+    ) -> np.ndarray:
+        """Return episode first-frame tactile tokens aligned with cache indices."""
+
+        if not self.episode_baselines:
+            raise RuntimeError(
+                "Episode baselines are empty; call build_episode_baseline_embeddings() first."
+            )
+        arrays = self.pairs.arrays
+        baselines = []
+        for cache_index in cache_indices:
+            episode_index = int(arrays["episode_index"][cache_index])
+            if episode_index not in self.episode_baselines:
+                raise KeyError(f"Missing episode baseline for episode_index={episode_index}.")
+            baselines.append(self.episode_baselines[episode_index])
+        return np.stack(baselines, axis=0).astype(np.float32, copy=False)
+
     def tactile_change_for_cache_indices(
         self,
         cache_indices: Sequence[int],
@@ -640,6 +660,24 @@ class CachedTactileEmbeddingBatches:
         self.episode_baselines = baselines
         print(f"episode_baselines={len(baselines)} (cached first-frame tokens)", flush=True)
         return baselines
+
+    def baseline_tokens_for_cache_indices(
+        self, cache_indices: Sequence[int]
+    ) -> np.ndarray:
+        """Return source-aware episode baseline tokens aligned with cache indices."""
+
+        if not self.episode_baselines:
+            raise RuntimeError("episode baselines have not been built")
+        source_indices, _, episode_indices = self._source_episode_frames(cache_indices)
+        return np.stack(
+            [
+                self.episode_baselines[(int(source_index), int(episode_index))]
+                for source_index, episode_index in zip(
+                    source_indices, episode_indices, strict=True
+                )
+            ],
+            axis=0,
+        ).astype(np.float32, copy=False)
 
     def tactile_change_for_cache_indices(
         self,

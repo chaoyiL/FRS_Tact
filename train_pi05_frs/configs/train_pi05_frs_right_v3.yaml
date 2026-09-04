@@ -1,0 +1,121 @@
+# Pi0.5 FRS v3：右手单臂 learned residual Gate。
+checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+allow_download: false
+
+datasets:
+  - repo_id: KaiyueChen/insert_01
+    root: /workspace/lerobot_v30/KaiyueChen/insert_01
+    action_key: action
+
+# v3 复用相同 VLA action cache，不需要重新生成 Pi0.5 actions。
+action_cache:
+  root: /workspace/frs_insert_01_pi05_right/action_cache_slerpflow_k50_state_v3
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: slerpflow
+  batch_size: 64
+  load_workers: 4
+  flush_every: 8
+  inference_seed: 0
+  split_seed: 42
+  val_fraction: 0.1
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  max_episodes: null
+  max_samples: null
+
+# v3 同样复用正确的右手双面触觉 embedding cache。
+tactile_embedding_cache:
+  enabled: true
+  root: /workspace/tactile_embeddings_pi05_right_insert_01_two_face
+  dtype: float16
+  precompute_batch_size: 128
+  precompute_num_workers: 4
+  precompute_prefetch_factor: 2
+  precompute_video_backend: torchcodec
+  precompute_flush_every: 20
+
+model:
+  state_action_profile: single-right-arm-7x10
+  state_dim: 7
+  robot_action_dim: 10
+  use_tactile_encoder: true
+  tactile_encoder_path: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
+  freeze_tactile_encoder: true
+  tactile_keys:
+    - observation.images.tactile_left_1
+    - observation.images.tactile_right_1
+  tactile_embedding_dim: 512
+  tactile_num_tokens: 2
+  tactile_image_size: 224
+  state_conditioning: true
+  state_dropout_rate: 0.1
+  camera_map:
+    right_wrist_0_rgb: observation.images.camera1
+  action_dim: 10
+  action_horizon: 50
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
+
+norm_stats:
+  dir: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  asset_id: insert_0102_train90
+  use_quantile_norm: true
+
+frs_training:
+  # 独立目录保证不会把 composite_gated v2 当成 v3 resume。
+  output: /workspace/frs_insert_01_pi05_right/run_learned_residual_v3_01
+  tactile_window_divisor: 5
+  history_stride: 3
+  loss_mode: learned_residual_gated
+
+  # Oracle 只监督明确安全/明确需修复样本，中间带不监督 Gate 分类。
+  oracle_safe_mse_threshold: 0.01
+  oracle_repair_mse_threshold: 0.03
+  gate_classification_weight: 1.0
+  residual_loss_weight: 1.0
+  execute_loss_weight: 4.0
+  preserve_loss_weight: 4.0
+  residual_bound: 0.25
+
+  # 公共评估与 checkpoint 约束；high-rank 仅作诊断。
+  gate_tau: 0.4
+  gate_temperature: 0.1
+  aux_decode_weight: 0.0
+  aux_decode_steps: 10
+  aux_decode_solver: fireflow
+  low_gate_safety_weight: 0.0
+  low_gate_safety_margin: 0.03
+  low_gate_regression_margin: 0.005
+  rank_low_gate_threshold: 0.3
+  rank_high_gate_threshold: 0.7
+  rank_weight: 0.0
+  rank_margin: 0.0
+  repair_weight: 0.0
+  repair_margin: 0.0
+  best_max_low_gate_unsafe_frac: 0.05
+  best_min_high_gate_gain: 0.0
+  best_min_high_gate_rank_satisfied_frac: 0.8
+  best_min_high_gate_repair_satisfied_frac: 0.8
+  best_max_high_gate_harm_p95: 0.03
+  best_max_low_gate_regression_frac: 0.05
+
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  learning_rate: 3.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  lr_reference_dim: 256
+  min_lr_ratio: 0.1
+  lr_schedule: cosine
+  batch_size: 128
+  epochs: 30
+  validation_steps: 10
+  eval_every: 5
+  seed: 42
+  write_plots: true
+  resume: false
+  resume_from: null

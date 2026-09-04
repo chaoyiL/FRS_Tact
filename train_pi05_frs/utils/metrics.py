@@ -70,6 +70,13 @@ class EvaluationResult:
     high_gate_harm_p95: float | None = None
     high_gate_rank_satisfied_frac: float | None = None
     high_gate_repair_satisfied_frac: float | None = None
+    gate_classification_accuracy: float | None = None
+    gate_safe_accuracy: float | None = None
+    gate_repair_accuracy: float | None = None
+    execute_arm9_mse: float | None = None
+    preserve_arm9_mse: float | None = None
+    residual_tail_p95: float | None = None
+    residual_tail_max: float | None = None
     # Endpoint-baseline metrics are additive and do not alter legacy fields.
     mse_vla_gt: float | None = None
     gt_gain: float | None = None
@@ -431,6 +438,10 @@ def _evaluate_split_legacy(
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
     track_composite: bool = False,
+    track_learned_residual: bool = False,
+    oracle_safe_mse_threshold: float = 0.01,
+    oracle_repair_mse_threshold: float = 0.03,
+    residual_bound: float = 0.25,
 ) -> EvaluationResult:
     from train_pi05_frs.utils.data import gate_weights_from_change
 
@@ -451,8 +462,11 @@ def _evaluate_split_legacy(
     vla_actions: list[np.ndarray] = []
     tactile_changes: list[np.ndarray] = []
     gate_weights: list[np.ndarray] = []
+    gate_probability_parts: list[np.ndarray] = []
+    residual_parts: list[np.ndarray] = []
     track_tactile = (
-        gate_tau is not None
+        not track_learned_residual
+        and gate_tau is not None
         and gate_temperature is not None
         and bool(conditioner.episode_baselines)
     )
@@ -465,17 +479,48 @@ def _evaluate_split_legacy(
         predicted_action = jnp.asarray(predicted_np)
         state = jnp.asarray(state_np)
         t = jnp.full((len(indices),), 0.5, dtype=jnp.float32)
-        flow_gt = flow_matching_loss_per_sample(
-            model, x_base, gt_action, t, tactile_seq, state=state
-        )
-        flow_pred = flow_matching_loss_per_sample(
-            model, x_base, predicted_action, t, tactile_seq, state=state
-        )
-        prediction = decode_actions(
-            model, x_base, tactile_seq, num_steps=num_steps, solver=solver, state=state
-        )
+        if track_learned_residual:
+            from train_pi05_frs.utils.model import decode_learned_residual_actions
+
+            baseline_tokens = conditioner.baseline_tokens_for_cache_indices(indices)
+            prediction, gate_probability, residual = decode_learned_residual_actions(
+                model,
+                predicted_action,
+                tactile_seq,
+                jnp.asarray(baseline_tokens),
+                state=state,
+            )
+            flow_gt = jnp.zeros((len(indices),), dtype=jnp.float32)
+            flow_pred = jnp.zeros((len(indices),), dtype=jnp.float32)
+            gate_probability_parts.append(
+                np.asarray(jax.device_get(gate_probability), dtype=np.float32)
+            )
+            residual_parts.append(
+                np.asarray(jax.device_get(residual), dtype=np.float32)
+            )
+            current_tokens = np.asarray(
+                tactile_seq[:, -1, :, :], dtype=np.float32
+            )
+            tactile_changes.append(
+                conditioner.tactile_change_for_cache_indices(
+                    indices, current_tokens
+                )
+            )
+        else:
+            flow_gt = flow_matching_loss_per_sample(
+                model, x_base, gt_action, t, tactile_seq, state=state
+            )
+            flow_pred = flow_matching_loss_per_sample(
+                model, x_base, predicted_action, t, tactile_seq, state=state
+            )
+            prediction = decode_actions(
+                model, x_base, tactile_seq, num_steps=num_steps, solver=solver, state=state
+            )
         endpoint_width = (
-            9 if track_composite and prediction.shape[-1] == 10 else prediction.shape[-1]
+            9
+            if (track_composite or track_learned_residual)
+            and prediction.shape[-1] == 10
+            else prediction.shape[-1]
         )
         endpoint_prediction = prediction[..., :endpoint_width]
         endpoint_gt = gt_action[..., :endpoint_width]
@@ -547,9 +592,45 @@ def _evaluate_split_legacy(
         primary_flow, primary_mse, primary_mae = all_flow_pred, all_mse_pred, all_mae_pred
     primary_rmse = np.sqrt(primary_mse)
 
-    if tactile_changes:
+    if track_learned_residual:
+        all_gate_probability = np.concatenate(gate_probability_parts)
+        all_residual = np.concatenate(residual_parts)
+        oracle_safe = all_pi05_gt_mse <= float(oracle_safe_mse_threshold)
+        oracle_repair = all_pi05_gt_mse >= float(oracle_repair_mse_threshold)
+        classified = oracle_safe | oracle_repair
+        predicted_execute = all_gate_probability >= 0.5
+        gate_classification_accuracy = _mean_or_nan(
+            (predicted_execute[classified] == oracle_repair[classified]).astype(
+                np.float32
+            )
+        )
+        gate_safe_accuracy = _mean_or_nan(
+            (~predicted_execute[oracle_safe]).astype(np.float32)
+        )
+        gate_repair_accuracy = _mean_or_nan(
+            predicted_execute[oracle_repair].astype(np.float32)
+        )
+        execute_arm9_mse = _mean_or_nan(all_mse_gt[oracle_repair])
+        preserve_arm9_mse = _mean_or_nan(all_mse_pred[oracle_safe])
+        residual_abs = np.abs(all_residual)
+        residual_tail_p95 = float(np.quantile(residual_abs, 0.95))
+        residual_tail_max = float(np.max(residual_abs))
+    else:
+        gate_classification_accuracy = None
+        gate_safe_accuracy = None
+        gate_repair_accuracy = None
+        execute_arm9_mse = None
+        preserve_arm9_mse = None
+        residual_tail_p95 = None
+        residual_tail_max = None
+
+    if track_learned_residual or tactile_changes:
         all_change = np.concatenate(tactile_changes)
-        all_gate = np.concatenate(gate_weights)
+        all_gate = (
+            all_gate_probability
+            if track_learned_residual
+            else np.concatenate(gate_weights)
+        )
         tactile_change = float(np.mean(all_change))
         tactile_sim = float(np.mean(1.0 - all_change))
         gate_w_mean = float(np.mean(all_gate))
@@ -645,6 +726,13 @@ def _evaluate_split_legacy(
         high_gate_harm_p95=high_gate_harm_p95,
         high_gate_rank_satisfied_frac=high_gate_rank_satisfied_frac,
         high_gate_repair_satisfied_frac=high_gate_repair_satisfied_frac,
+        gate_classification_accuracy=gate_classification_accuracy,
+        gate_safe_accuracy=gate_safe_accuracy,
+        gate_repair_accuracy=gate_repair_accuracy,
+        execute_arm9_mse=execute_arm9_mse,
+        preserve_arm9_mse=preserve_arm9_mse,
+        residual_tail_p95=residual_tail_p95,
+        residual_tail_max=residual_tail_max,
         mse_vla_gt=float(np.mean(all_pi05_gt_mse)),
         gt_gain=float(np.mean(all_gt_gain)),
         relative_gt_error=_ratio_of_means(all_mse_gt, all_pi05_gt_mse),
@@ -685,6 +773,9 @@ def evaluate_split(
     loss_mode: str | None = None,
     rank_low_gate_threshold: float | None = None,
     rank_high_gate_threshold: float | None = None,
+    oracle_safe_mse_threshold: float = 0.01,
+    oracle_repair_mse_threshold: float = 0.03,
+    residual_bound: float = 0.25,
 ) -> EvaluationResult:
     """Evaluate legacy/scalar modes or add independent wrist metrics for bimanual.
 
@@ -712,6 +803,10 @@ def evaluate_split(
             rank_margin=rank_margin,
             repair_margin=repair_margin,
             track_composite=(loss_mode == COMPOSITE_GATED_LOSS_MODE),
+            track_learned_residual=(loss_mode == "learned_residual_gated"),
+            oracle_safe_mse_threshold=oracle_safe_mse_threshold,
+            oracle_repair_mse_threshold=oracle_repair_mse_threshold,
+            residual_bound=residual_bound,
         )
     from train_pi05_frs.utils.data import gate_weights_from_change
 
