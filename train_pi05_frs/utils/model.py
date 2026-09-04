@@ -454,6 +454,7 @@ def composite_endpoint(
     *,
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
+    steered_action_dim: int | None = None,
 ) -> tuple[Array, Array]:
     """Return one scalar-Gate endpoint between the frozen VLA action and GT."""
 
@@ -468,6 +469,15 @@ def composite_endpoint(
     )
     weights = effective[:, None, None]
     target = weights * gt_action + (1.0 - weights) * predicted_action
+    if steered_action_dim is not None:
+        width = int(steered_action_dim)
+        if not 0 < width <= gt_action.shape[-1]:
+            raise ValueError(
+                f"steered_action_dim must be in [1, {gt_action.shape[-1]}], got {width}"
+            )
+        target = jnp.concatenate(
+            [target[..., :width], predicted_action[..., width:]], axis=-1
+        )
     return target, effective
 
 
@@ -721,6 +731,9 @@ def gated_loss_components_per_sample(
         low_gate_threshold=low_gate_threshold,
         high_gate_threshold=high_gate_threshold,
     )
+    steered_action_dim = (
+        9 if use_composite_endpoint and gt_action.shape[-1] == 10 else None
+    )
     if use_composite_endpoint:
         target, _ = composite_endpoint(
             gt_action,
@@ -728,6 +741,7 @@ def gated_loss_components_per_sample(
             gate_weights,
             low_gate_threshold=low_gate_threshold,
             high_gate_threshold=high_gate_threshold,
+            steered_action_dim=steered_action_dim,
         )
         composite_flow = flow_matching_loss_per_sample(
             model,
@@ -798,12 +812,31 @@ def gated_loss_components_per_sample(
         )
     raw_weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     high_strength = raw_weights * (raw_weights >= float(high_gate_threshold))
+    decoded_for_aux = (
+        None
+        if decoded is None
+        else (
+            decoded[..., :steered_action_dim]
+            if steered_action_dim is not None
+            else decoded
+        )
+    )
+    gt_for_aux = (
+        gt_action[..., :steered_action_dim]
+        if steered_action_dim is not None
+        else gt_action
+    )
+    predicted_for_aux = (
+        predicted_action[..., :steered_action_dim]
+        if steered_action_dim is not None
+        else predicted_action
+    )
     if aux_decode_weight != 0.0:
-        assert decoded is not None
-        mse_gt = jnp.mean(jnp.square(decoded - gt_action), axis=(1, 2))
+        assert decoded_for_aux is not None
+        mse_gt = jnp.mean(jnp.square(decoded_for_aux - gt_for_aux), axis=(1, 2))
         if use_composite_endpoint:
             mse_pred = jnp.mean(
-                jnp.square(decoded - predicted_action), axis=(1, 2)
+                jnp.square(decoded_for_aux - predicted_for_aux), axis=(1, 2)
             )
             components["decode"] = float(aux_decode_weight) * (
                 effective_weights * mse_gt
@@ -814,31 +847,31 @@ def gated_loss_components_per_sample(
                 aux_decode_weight
             ) * _active_group_normalized_per_sample(mse_gt, high_strength)
     if low_gate_safety_weight != 0.0:
-        assert decoded is not None
+        assert decoded_for_aux is not None
         components["low_safety"] = float(low_gate_safety_weight) * low_gate_safety_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
+            decoded_for_aux,
+            gt_for_aux,
+            predicted_for_aux,
             gate_weights,
             tolerance=low_gate_safety_margin,
             low_gate_threshold=low_gate_threshold,
         )
     if rank_weight != 0.0:
-        assert decoded is not None
+        assert decoded_for_aux is not None
         components["rank"] = float(rank_weight) * gate_preference_ranking_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
+            decoded_for_aux,
+            gt_for_aux,
+            predicted_for_aux,
             gate_weights,
             margin=rank_margin,
             high_gate_threshold=high_gate_threshold,
         )
     if repair_weight != 0.0:
-        assert decoded is not None
+        assert decoded_for_aux is not None
         components["repair"] = float(repair_weight) * high_gate_repair_loss_per_sample(
-            decoded,
-            gt_action,
-            predicted_action,
+            decoded_for_aux,
+            gt_for_aux,
+            predicted_for_aux,
             gate_weights,
             margin=repair_margin,
             high_gate_threshold=high_gate_threshold,

@@ -189,6 +189,8 @@ def test_pytorch_right_runtime_payload_preserves_single_arm_contract(monkeypatch
     client = _load_pytorch_remote_client_for_test(monkeypatch)
     sent_payloads: list[dict[str, object]] = []
     events: list[object] = []
+    sent_actions: list[np.ndarray] = []
+    config = yaml.safe_load(RIGHT_CONFIG.read_text(encoding="utf-8"))
 
     class FakeDevice:
         type = "cpu"
@@ -206,21 +208,23 @@ def test_pytorch_right_runtime_payload_preserves_single_arm_contract(monkeypatch
         def receive_observation(self, *, timeout: float) -> tuple[int, dict[str, object]]:
             events.append(("receive", timeout))
             return 10 * len(events), {
-                "observation.state": np.zeros(7, dtype=np.float32),
-                "observation.images.camera0": np.zeros((2, 2, 3), dtype=np.uint8),
+                "observation.state": np.arange(20, dtype=np.float32),
+                "observation.images.camera0": np.full((2, 2, 3), 11, dtype=np.uint8),
+                "observation.images.camera1": np.full((2, 2, 3), 22, dtype=np.uint8),
             }
 
         def send_state(self, state: str, obs_seq: int | None = None) -> None:
             events.append(("state", state, obs_seq))
 
         def send_action(self, action: np.ndarray, obs_seq: int) -> None:
+            sent_actions.append(action.copy())
             events.append(("action", action.shape, obs_seq))
 
         def close(self) -> None:
             events.append("close")
 
     class FakePolicy:
-        config = SimpleNamespace(chunk_size=20)
+        config = SimpleNamespace(chunk_size=50)
 
         def to(self, device: object):
             del device
@@ -234,7 +238,20 @@ def test_pytorch_right_runtime_payload_preserves_single_arm_contract(monkeypatch
 
     monkeypatch.setattr(client, "_load_policy", lambda *args, **kwargs: FakePolicy())
     monkeypatch.setattr(client, "_policy_contract", lambda policy: (7, 10, ("observation.images.camera1",)))
-    monkeypatch.setattr(client, "_predict_chunk", lambda *args, **kwargs: np.zeros((20, 10), dtype=np.float32))
+    right_action = np.arange(500, dtype=np.float32).reshape(50, 10) / 1000.0
+
+    def predict_chunk(_policy, _preprocess, _postprocess, frame):
+        np.testing.assert_array_equal(
+            frame["observation.state"], np.arange(7, 14, dtype=np.float32)
+        )
+        np.testing.assert_array_equal(
+            frame["observation.images.camera1"],
+            np.full((2, 2, 3), 22, dtype=np.uint8),
+        )
+        assert "observation.images.camera0" not in frame
+        return right_action
+
+    monkeypatch.setattr(client, "_predict_chunk", predict_chunk)
     monkeypatch.setattr(client, "make_pre_post_processors", lambda *args, **kwargs: (None, None))
     monkeypatch.setattr(client, "RobotBridgeClient", FakeBridge)
     monkeypatch.setattr("builtins.input", lambda *args, **kwargs: "")
@@ -246,15 +263,131 @@ def test_pytorch_right_runtime_payload_preserves_single_arm_contract(monkeypatch
         {
             "data_type": "vision",
             "observation_profile": "smolvla_vision_256",
-            "language_prompt": "Use the right hand to complete the task.",
-            "control_frequency": 20.0,
+            "language_prompt": config["observation"]["language_prompt"],
+            "state_action_profile": "single-right-arm-7x10",
+            "controlled_arm": "right",
+            "control_frequency": 30.0,
             "controller_frequency": 80.0,
-            "single_arm_mode": True,
+            "single_arm_mode": False,
             "no_state_obs_mode": False,
-            "steps_per_inference": 5,
-            "action_horizon": 20,
+            "steps_per_inference": 10,
+            "action_horizon": 50,
+            "task": 0,
+            "gripper_hysteresis_enabled": False,
+            "left_gripper_close_threshold": 0.09,
+            "left_gripper_reopen_threshold": 0.10,
+            "left_gripper_closed_command": 0.01,
+            "right_gripper_close_threshold": 0.09,
+            "right_gripper_reopen_threshold": 0.10,
+            "right_gripper_closed_command": 0.01,
         }
     ]
+    assert len(sent_actions) == 1
+    assert sent_actions[0].shape == (50, 20)
+    np.testing.assert_array_equal(sent_actions[0][:, 10:], right_action)
+    expected_left = np.zeros((50, 10), dtype=np.float32)
+    expected_left[:, 3] = 1.0
+    expected_left[:, 7] = 1.0
+    expected_left[:, 9] = 6.0
+    np.testing.assert_array_equal(sent_actions[0][:, :10], expected_left)
+
+
+def test_pytorch_right_adapter_projects_bimanual_observation(monkeypatch) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    right_image = np.full((2, 3, 3), 22, dtype=np.uint8)
+    raw = {
+        "observation.state": np.arange(20, dtype=np.float32),
+        "observation.images.camera0": np.full((2, 3, 3), 11, dtype=np.uint8),
+        "observation.images.camera1": right_image,
+    }
+
+    projected = client.project_right_observation(raw)
+
+    np.testing.assert_array_equal(
+        projected["observation.state"], np.arange(7, 14, dtype=np.float32)
+    )
+    np.testing.assert_array_equal(
+        projected["observation.images.camera1"], right_image
+    )
+
+
+@pytest.mark.parametrize(
+    "state",
+    (
+        np.zeros(19, dtype=np.float32),
+        np.full(20, np.nan, dtype=np.float32),
+    ),
+)
+def test_pytorch_right_adapter_rejects_invalid_bimanual_state(
+    monkeypatch, state: np.ndarray
+) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+
+    with pytest.raises(ValueError, match="bimanual server state"):
+        client.project_right_observation({"observation.state": state})
+
+
+@pytest.mark.parametrize(
+    ("model_image_keys", "rename_map"),
+    (
+        (("observation.images.camera0",), {}),
+        (
+            ("observation.images.camera1",),
+            {"observation.images.camera0": "observation.images.camera1"},
+        ),
+    ),
+)
+def test_pytorch_right_rejects_non_camera1_visual_contract(
+    monkeypatch,
+    model_image_keys: tuple[str, ...],
+    rename_map: dict[str, str],
+) -> None:
+    client = _load_pytorch_remote_client_for_test(monkeypatch)
+    config = yaml.safe_load(RIGHT_CONFIG.read_text(encoding="utf-8"))
+    config["device"] = "cpu"
+    config["rename_map"] = rename_map
+
+    class FakeDevice:
+        type = "cpu"
+
+    class FakePolicy:
+        config = SimpleNamespace(chunk_size=50)
+
+        def to(self, device: object):
+            del device
+            return self
+
+        def eval(self):
+            return self
+
+        def reset(self) -> None:
+            pass
+
+    monkeypatch.setattr(client, "_load_config", lambda _path: config)
+    monkeypatch.setattr(
+        client.torch, "device", lambda _value: FakeDevice(), raising=False
+    )
+    monkeypatch.setattr(client, "_load_policy", lambda *args, **kwargs: FakePolicy())
+    monkeypatch.setattr(
+        client,
+        "_policy_contract",
+        lambda _policy: (7, 10, model_image_keys),
+    )
+    monkeypatch.setattr(
+        client,
+        "make_pre_post_processors",
+        lambda *args, **kwargs: (None, None),
+    )
+    monkeypatch.setattr(
+        client,
+        "RobotBridgeClient",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("bridge must not start for an invalid visual contract")
+        ),
+    )
+
+    with pytest.raises(ValueError, match="only physical camera1"):
+        client.run(RIGHT_CONFIG, max_iterations_override=1)
 
 
 @pytest.mark.parametrize(

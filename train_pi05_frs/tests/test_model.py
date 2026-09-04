@@ -399,8 +399,8 @@ def test_single_hand_composite_evaluation_retains_plot_inputs(monkeypatch) -> No
         high_gate_threshold=0.7,
     )
 
-    np.testing.assert_allclose(result.sample_composite_fm, [0.0, 1.0])
-    assert result.composite_fm == pytest.approx(0.5)
+    np.testing.assert_allclose(result.sample_composite_fm, [0.1, 1.0])
+    assert result.composite_fm == pytest.approx(0.55)
     np.testing.assert_allclose(result.sample_mse_vla_gt, [1.0, 1.0])
     np.testing.assert_allclose(result.sample_gt_gain, [1.0, 0.0])
     assert result.sample_gate_w.shape == (2,)
@@ -408,6 +408,69 @@ def test_single_hand_composite_evaluation_retains_plot_inputs(monkeypatch) -> No
     np.testing.assert_allclose(result.predictions, prediction)
     np.testing.assert_allclose(result.gt_actions, gt_action)
     np.testing.assert_allclose(result.vla_actions, vla_action)
+
+
+def test_single_hand_composite_evaluation_ignores_gripper_metrics(monkeypatch) -> None:
+    gt_action = np.zeros((2, 1, 10), dtype=np.float32)
+    vla_action = np.ones_like(gt_action)
+    vla_action[..., 9] = -75.0
+    prediction = np.ones_like(gt_action)
+    prediction[0, :, :9] = 0.0
+    prediction[..., 9] = 100.0
+
+    class FakeConditioner:
+        episode_baselines = {0: np.zeros((2, 4), dtype=np.float32)}
+
+        def batches(self, split, *, batch_size, shuffle, seed):
+            del batch_size, shuffle, seed
+            assert split == "val"
+            yield (
+                np.asarray([0, 1], dtype=np.int64),
+                np.zeros_like(gt_action),
+                vla_action,
+                gt_action,
+                np.zeros((2, 0), dtype=np.float32),
+                np.zeros((2, 1, 2, 4), dtype=np.float32),
+            )
+
+        def tactile_change_for_cache_indices(self, indices, current_tokens):
+            del indices, current_tokens
+            return np.asarray([1.0, 0.0], dtype=np.float32)
+
+    monkeypatch.setattr(
+        metrics_module,
+        "flow_matching_loss_per_sample",
+        lambda *args, **kwargs: np.zeros((2,), dtype=np.float32),
+    )
+    monkeypatch.setattr(metrics_module, "decode_actions", lambda *args, **kwargs: prediction)
+
+    result = evaluate_split(
+        object(),  # type: ignore[arg-type]
+        FakeConditioner(),  # type: ignore[arg-type]
+        split="val",
+        batch_size=2,
+        num_steps=1,
+        keep_predictions=True,
+        loss_mode="composite_gated",
+        gate_tau=0.5,
+        gate_temperature=0.1,
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+    )
+
+    np.testing.assert_allclose(result.sample_mse_gt, [0.0, 1.0])
+    np.testing.assert_allclose(result.sample_mse_pred, [1.0, 0.0])
+    np.testing.assert_allclose(result.sample_mse_vla_gt, [1.0, 1.0])
+    assert result.mse_gt == pytest.approx(0.5)
+    assert result.mse_pred == pytest.approx(0.5)
+    assert result.mse_vla_gt == pytest.approx(1.0)
+    assert result.high_gate_gain == pytest.approx(1.0)
+    assert result.high_gate_rank_satisfied_frac == pytest.approx(1.0)
+    assert result.high_gate_repair_satisfied_frac == pytest.approx(1.0)
+    assert result.low_gate_unsafe_frac == pytest.approx(0.0)
+    assert result.predictions.shape[-1] == 10
+    np.testing.assert_allclose(result.predictions[..., 9], 100.0)
+    np.testing.assert_allclose(result.vla_actions[..., 9], -75.0)
 
 
 def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
@@ -1086,6 +1149,47 @@ def test_scalar_composite_endpoint_uses_three_gate_regions():
 
     np.testing.assert_allclose(effective, [0.0, 0.5, 1.0])
     np.testing.assert_allclose(target[:, 0, 0], [0.0, 0.5, 1.0])
+
+
+def test_single_hand_composite_training_preserves_and_ignores_gripper(monkeypatch):
+    gt = jnp.zeros((2, 1, 10), dtype=jnp.float32)
+    vla = jnp.ones_like(gt)
+    decoded = vla.at[1, :, :9].set(0.0).at[..., 9].set(100.0)
+    gates = jnp.asarray([0.1, 0.9], dtype=jnp.float32)
+    captured = {}
+
+    def fake_flow(model, x_base, target, t, tactile_seq, **kwargs):
+        del model, x_base, t, tactile_seq, kwargs
+        captured["target"] = np.asarray(target)
+        return jnp.zeros((2,), dtype=jnp.float32)
+
+    monkeypatch.setattr(model_module, "flow_matching_loss_per_sample", fake_flow)
+    monkeypatch.setattr(model_module, "decode_actions", lambda *args, **kwargs: decoded)
+
+    components = model_module.gated_loss_components_per_sample(
+        object(),  # type: ignore[arg-type]
+        jnp.zeros_like(gt),
+        gt,
+        vla,
+        jnp.full((2,), 0.5),
+        jnp.zeros((2, 1, 2, 4)),
+        gates,
+        gate_lambda=0.0,
+        aux_decode_weight=1.0,
+        low_gate_safety_weight=1.0,
+        low_gate_safety_margin=0.03,
+        rank_weight=1.0,
+        rank_margin=0.0,
+        repair_weight=1.0,
+        repair_margin=0.0,
+        use_composite_endpoint=True,
+    )
+
+    np.testing.assert_allclose(captured["target"][..., 9], 1.0)
+    np.testing.assert_allclose(components["decode"], [0.0, 0.0])
+    np.testing.assert_allclose(components["low_safety"], [0.0, 0.0])
+    np.testing.assert_allclose(components["rank"], [0.0, 0.0])
+    np.testing.assert_allclose(components["repair"], [0.0, 0.0])
 
 
 def test_scalar_composite_decode_matches_bimanual_endpoint_weighting(monkeypatch):

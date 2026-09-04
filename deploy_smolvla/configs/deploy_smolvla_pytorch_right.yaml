@@ -1,12 +1,11 @@
 # Right-hand single-arm pure-vision SmolVLA deployment (PyTorch).
 backend: pytorch_smolvla
 # Must be a PyTorch checkpoint trained with 7D state and 10D action.
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/smolvla_right
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/smolvla_press_0903_2w
 revision: null
 allow_download: false
 device: cuda
-rename_map:
-  observation.images.camera0: observation.images.camera1
+rename_map: {}
 
 connection:
   address: 127.0.0.1
@@ -24,7 +23,8 @@ connection:
 observation:
   state_action_profile: single-right-arm-7x10
   data_type: vision
-  language_prompt: Use the right hand to complete the task.
+  task: 0
+  language_prompt: Use the hand to press the button of the bread machine.
   single_arm_mode: true
   controlled_arm: right
   no_state_obs_mode: false
@@ -32,8 +32,19 @@ observation:
 control:
   control_frequency: 20.0
   controller_frequency: 80.0
-  action_horizon: 20
-  steps_per_inference: 5
+  action_horizon: 50
+  steps_per_inference: 50
+
+# The robot bridge remains bimanual. Disable hysteresis so the right-hand model
+# controls its gripper directly while the projected left-hand command holds.
+gripper:
+  hysteresis_enabled: false
+  left_close_threshold: 0.09
+  left_reopen_threshold: 0.10
+  left_closed_command: 0.01
+  right_close_threshold: 0.09
+  right_reopen_threshold: 0.10
+  right_closed_command: 0.01
 
 runtime:
   auto_start: false

@@ -155,7 +155,7 @@ def plot_single_hand_training_overview(
         ("val_mse_vla_gt", "MSE(VLA, GT), frozen", "#555555"),
     ):
         _series(axes[2], rows, field, label, color)
-    _finish(axes[2], "10D validation decode errors", "MSE")
+    _finish(axes[2], "9D arm validation decode errors (gripper excluded)", "MSE")
 
     _series(axes[3], rows, "val_gt_gain", "GT gain", "#55A868")
     _series(
@@ -466,7 +466,11 @@ def plot_single_hand_action_examples(
                 label=curve_label,
                 linestyle=linestyle,
             )
-        _finish(axes[row, 3], f"Gripper action dim {gripper}", "action")
+        _finish(
+            axes[row, 3],
+            f"Raw FRS gripper dim {gripper} (deployment uses VLA)",
+            "action",
+        )
         axes[row, 3].set_xlabel("horizon step")
     fig.suptitle("Single-hand retained action examples", fontsize=15)
     return _save(fig, output_path)

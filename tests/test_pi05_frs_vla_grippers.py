@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import numpy as np
 import deploy_pi05.frs_runtime as frs_runtime_module
 
-from deploy_pi05.frs_runtime import FRSRuntime
+from deploy_pi05.frs_runtime import FRSRuntime, _validate_loss_contract
+from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
 from deploy_pi05.frs_config import GripperHysteresisConfig, Task1MotionGainConfig
 
 
@@ -27,6 +28,20 @@ def _runtime() -> FRSRuntime:
     runtime._action_vla_normalized[0, :, 9] = (0.11, 0.22, 0.33)
     runtime._action_vla_normalized[0, :, 19] = (0.44, 0.55, 0.66)
     return runtime
+
+
+def test_pi05_runtime_accepts_arm9_vla_gripper_objective() -> None:
+    _validate_loss_contract(
+        {
+            "loss_mode": "composite_gated",
+            **composite_gated_objective_metadata(),
+        },
+        action_dim=10,
+        tactile_keys=(
+            "observation.images.tactile_left_1",
+            "observation.images.tactile_right_1",
+        ),
+    )
 
 
 def test_validated_decoded_restores_pi05_vla_grippers_before_safety_checks() -> None:

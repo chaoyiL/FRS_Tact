@@ -44,6 +44,7 @@ finally:
         sys.path.insert(_index, _entry)
 
 from .bridge_client import RobotBridgeClient
+from .right_arm_adapter import expand_right_action, project_right_observation
 
 SMOLVLA_OBSERVATION_PROFILE = "smolvla_vision_256"
 SINGLE_RIGHT_ARM_PROFILE = "single-right-arm-7x10"
@@ -207,17 +208,24 @@ def _server_config_payload(
     task: int | None = None,
     gripper_config: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    profile = str(observation_config.get("state_action_profile", "dual-arm-20x20"))
+    single_right = profile == SINGLE_RIGHT_ARM_PROFILE
     payload = {
         "data_type": "vision",
         "observation_profile": SMOLVLA_OBSERVATION_PROFILE,
         "language_prompt": observation_config["language_prompt"],
         "control_frequency": float(control["control_frequency"]),
         "controller_frequency": float(control["controller_frequency"]),
-        "single_arm_mode": bool(observation_config["single_arm_mode"]),
+        "single_arm_mode": (
+            False if single_right else bool(observation_config["single_arm_mode"])
+        ),
         "no_state_obs_mode": bool(observation_config["no_state_obs_mode"]),
         "steps_per_inference": int(control["steps_per_inference"]),
         "action_horizon": int(action_horizon),
     }
+    if single_right:
+        payload["state_action_profile"] = profile
+        payload["controlled_arm"] = observation_config.get("controlled_arm")
     if task is not None:
         payload["task"] = int(task)
     if gripper_config is not None:
@@ -310,6 +318,17 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
         {model: robot for robot, model in rename_map.items()}.get(key, key)
         for key in model_image_keys
     )
+    if profile == SINGLE_RIGHT_ARM_PROFILE:
+        expected_right_images = ("observation.images.camera1",)
+        if (
+            tuple(model_image_keys) != expected_right_images
+            or robot_image_keys != expected_right_images
+        ):
+            raise ValueError(
+                "right-hand checkpoint must use only physical camera1; "
+                f"model images={list(model_image_keys)}, "
+                f"robot images={list(robot_image_keys)}"
+            )
     print(
         f"[client] Contract: backend=pytorch profile={profile} state_dim={state_dim} "
         f"action_dim={action_dim} images={list(robot_image_keys)}"
@@ -329,16 +348,8 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             observation_config,
             control,
             action_horizon=horizon,
-            task=(
-                int(observation_config["task"])
-                if profile != SINGLE_RIGHT_ARM_PROFILE
-                else None
-            ),
-            gripper_config=(
-                _section(config, "gripper")
-                if profile != SINGLE_RIGHT_ARM_PROFILE
-                else None
-            ),
+            task=int(observation_config["task"]),
+            gripper_config=_section(config, "gripper"),
         )
     )
     task = str(observation_config["language_prompt"])
@@ -350,8 +361,13 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
     )
 
     def prepare(observation: Mapping[str, Any]) -> dict[str, Any]:
+        policy_observation = (
+            project_right_observation(observation)
+            if profile == SINGLE_RIGHT_ARM_PROFILE
+            else observation
+        )
         return _prepare_frame(
-            observation,
+            policy_observation,
             task=task,
             device=device,
             state_dim=state_dim,
@@ -382,7 +398,12 @@ def run(config_path: Path, max_iterations_override: int | None = None) -> None:
             action = _predict_chunk(policy, preprocess, postprocess, prepare(observation))
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
-            bridge.send_action(action, obs_seq)
+            wire_action = (
+                expand_right_action(action, observation)
+                if profile == SINGLE_RIGHT_ARM_PROFILE
+                else action
+            )
+            bridge.send_action(wire_action, obs_seq)
             # The legacy vision protocol signals completion by publishing the
             # next observation; it does not send a generic action_ack.
             iteration += 1

@@ -471,9 +471,15 @@ def _evaluate_split_legacy(
         prediction = decode_actions(
             model, x_base, tactile_seq, num_steps=num_steps, solver=solver, state=state
         )
-        mse_gt, mae_gt = _per_sample_errors(prediction, gt_action)
-        mse_pred, mae_pred = _per_sample_errors(prediction, predicted_action)
-        pi05_gt_mse, _ = _per_sample_errors(predicted_action, gt_action)
+        endpoint_width = (
+            9 if track_composite and prediction.shape[-1] == 10 else prediction.shape[-1]
+        )
+        endpoint_prediction = prediction[..., :endpoint_width]
+        endpoint_gt = gt_action[..., :endpoint_width]
+        endpoint_vla = predicted_action[..., :endpoint_width]
+        mse_gt, mae_gt = _per_sample_errors(endpoint_prediction, endpoint_gt)
+        mse_pred, mae_pred = _per_sample_errors(endpoint_prediction, endpoint_vla)
+        pi05_gt_mse, _ = _per_sample_errors(endpoint_vla, endpoint_gt)
 
         cache_indices.append(indices)
         flow_gt_parts.append(np.asarray(jax.device_get(flow_gt)))
@@ -504,6 +510,7 @@ def _evaluate_split_legacy(
                     jnp.asarray(gate_w),
                     low_gate_threshold=low_gate_threshold,
                     high_gate_threshold=high_gate_threshold,
+                    steered_action_dim=(9 if gt_action.shape[-1] == 10 else None),
                 )
                 composite_flow = flow_matching_loss_per_sample(
                     model,

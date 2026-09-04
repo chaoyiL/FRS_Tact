@@ -370,17 +370,28 @@ def _validate_loss_contract(
     if loss_mode == "gated":
         return
     if loss_mode == _COMPOSITE_GATED_LOSS_MODE:
-        _require_equal(extra.get("loss_objective_version"), 1, "loss_objective_version")
-        _require_equal(
-            extra.get("endpoint_policy"),
-            "scalar_three_region_composite",
-            "endpoint_policy",
-        )
-        _require_equal(
-            extra.get("decode_policy"),
-            "scalar_three_region_composite",
-            "decode_policy",
-        )
+        objective_version = extra.get("loss_objective_version")
+        if objective_version == 1:
+            expected = {
+                "endpoint_policy": "scalar_three_region_composite",
+                "decode_policy": "scalar_three_region_composite",
+            }
+        elif objective_version == 2:
+            expected = {
+                "endpoint_policy": "scalar_three_region_arm9_vla_gripper",
+                "decode_policy": "scalar_three_region_arm9_vla_gripper",
+                "action_dim": 10,
+                "steered_action_dim": 9,
+                "gripper_index": 9,
+                "gripper_policy": "vla_endpoint_preserved",
+            }
+        else:
+            raise ValueError(
+                "FRS checkpoint mismatch for loss_objective_version: "
+                f"{objective_version!r} is unsupported"
+            )
+        for field, value in expected.items():
+            _require_equal(extra.get(field), value, field)
         return
     if loss_mode != "bimanual_gated":
         raise ValueError(f"unsupported FRS loss_mode: {loss_mode!r}")
