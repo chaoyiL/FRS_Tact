@@ -1,7 +1,9 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import deploy_pi05.frs_runtime as frs_runtime_module
+import pytest
 
 from deploy_pi05.frs_runtime import FRSRuntime, _validate_loss_contract
 from train_pi05_frs.utils.objective_schema import composite_gated_objective_metadata
@@ -15,8 +17,13 @@ def _runtime() -> FRSRuntime:
         max_normalized_delta_rms=4.0,
     )
     runtime.policy = SimpleNamespace(
-        config=SimpleNamespace(action_horizon=3, action_dim=20),
+        config=SimpleNamespace(
+            action_horizon=3,
+            action_dim=20,
+            robot_action_dim=20,
+        ),
     )
+    runtime._gripper_action_indices = (9, 19)
     runtime.metadata = {"extra_metadata": {"loss_mode": "bimanual_gated"}}
     runtime.task1_motion_gain = Task1MotionGainConfig(
         approach_translation_gain=1.0,
@@ -50,7 +57,7 @@ def test_validated_decoded_restores_pi05_vla_grippers_before_safety_checks() -> 
     decoded[..., 9] = 100.0
     decoded[..., 19] = -100.0
 
-    validated, _, max_abs = runtime._validated_decoded(decoded)
+    validated, _, max_abs, _ = runtime._validated_decoded(decoded)
 
     np.testing.assert_array_equal(
         validated[..., (9, 19)],
@@ -59,6 +66,160 @@ def test_validated_decoded_restores_pi05_vla_grippers_before_safety_checks() -> 
     np.testing.assert_array_equal(validated[..., :9], decoded[..., :9])
     np.testing.assert_array_equal(validated[..., 10:19], decoded[..., 10:19])
     assert max_abs == np.float32(0.66)
+
+
+def test_parse_frs_config_defaults_and_accepts_deployment_guards(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "checkpoint"
+    encoder = tmp_path / "encoder"
+    checkpoint.mkdir()
+    encoder.mkdir()
+    raw = {
+        "checkpoint": str(checkpoint),
+        "tactile_encoder_checkpoint": str(encoder),
+        "tactile_keys": ["left", "right"],
+        "tactile_window_divisor": 5,
+        "reverse_steps": 50,
+        "reverse_solver": "slerpflow",
+        "decode_steps": 10,
+        "decode_solver": "fireflow",
+    }
+
+    defaults = frs_runtime_module.parse_frs_config(
+        raw, config_path=tmp_path / "deploy.yaml"
+    )
+    enabled = frs_runtime_module.parse_frs_config(
+        {
+            **raw,
+            "hard_low_gate_bypass": True,
+            "max_normalized_residual_abs": 0.5,
+        },
+        config_path=tmp_path / "deploy.yaml",
+    )
+
+    assert defaults.hard_low_gate_bypass is False
+    assert defaults.max_normalized_residual_abs is None
+    assert enabled.hard_low_gate_bypass is True
+    assert enabled.max_normalized_residual_abs == pytest.approx(0.5)
+
+
+def test_validated_decoded_clamps_only_arm9_residual_and_preserves_gripper() -> None:
+    runtime = _runtime()
+    runtime.policy.config.action_dim = 10
+    runtime.policy.config.robot_action_dim = 10
+    runtime._gripper_action_indices = (9,)
+    runtime.metadata = {
+        "extra_metadata": {
+            "loss_mode": "composite_gated",
+            "loss_objective_version": 2,
+            "steered_action_dim": 9,
+        }
+    }
+    runtime.config.max_normalized_residual_abs = 0.5
+    runtime._action_vla_normalized = np.zeros((1, 3, 10), dtype=np.float32)
+    runtime._action_vla_normalized[..., 9] = 0.25
+    decoded = np.full((1, 3, 10), 2.0, dtype=np.float32)
+    decoded[..., 1] = -3.0
+    decoded[..., 9] = 100.0
+
+    validated, delta, max_abs, clamped = runtime._validated_decoded(decoded)
+
+    np.testing.assert_array_equal(validated[..., 0], 0.5)
+    np.testing.assert_array_equal(validated[..., 1], -0.5)
+    np.testing.assert_array_equal(validated[..., 2:9], 0.5)
+    np.testing.assert_array_equal(validated[..., 9], 0.25)
+    assert delta == pytest.approx(np.sqrt((9 * 0.25) / 10))
+    assert max_abs == pytest.approx(0.5)
+    assert clamped is True
+
+
+class _Arm9History:
+    window = 10
+
+    def __init__(self) -> None:
+        self.append_calls = 0
+
+    def append(self, _tokens: np.ndarray) -> None:
+        self.append_calls += 1
+
+    def window_tokens(self) -> np.ndarray:
+        return np.zeros((10, 2, 1), dtype=np.float32)
+
+
+def test_low_gate_bypass_uses_checkpoint_gate_and_skips_decode_and_ensemble(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _runtime()
+    runtime.task = 0
+    runtime.policy.config.action_dim = 10
+    runtime.policy.config.robot_action_dim = 10
+    runtime.policy.unnormalize_actions = lambda action: np.asarray(action) * 10.0
+    runtime._gripper_action_indices = (9,)
+    runtime.config.hard_low_gate_bypass = True
+    runtime.config.max_normalized_residual_abs = 0.5
+    runtime.config.temporal_ensemble_coeff = 0.1
+    runtime.config.decode_steps = 10
+    runtime.config.decode_solver = "fireflow"
+    runtime.metadata = {
+        "extra_metadata": {
+            "loss_mode": "composite_gated",
+            "loss_objective_version": 2,
+            "gate_tau": 0.4,
+            "gate_temperature": 0.1,
+            "low_gate_threshold": 0.3,
+            "steered_action_dim": 9,
+        }
+    }
+    vla = np.arange(30, dtype=np.float32).reshape(1, 3, 10) / 100.0
+    runtime._action_vla_normalized = vla
+    runtime._action_vla = vla * 10.0
+    runtime._action_vla[0, 1, 9] = 0.123
+    runtime._active_chunk_id = 4
+    runtime._x_base = np.zeros_like(vla)
+    runtime._x_base_device = runtime._x_base
+    runtime._episode_baseline = np.zeros((2, 1), dtype=np.float32)
+    runtime.history = _Arm9History()
+    runtime._request_results = {
+        10: (
+            4,
+            0,
+            b"old",
+            SimpleNamespace(decoded_normalized=np.full_like(vla, 99.0)),
+        )
+    }
+    runtime._last_action_index = 0
+    runtime.last_diagnostics = None
+    runtime.last_vla_normalized = None
+    runtime.last_frs_normalized = None
+    runtime._payload_hash = lambda _observation: b"current"
+    runtime._encode_observation = lambda _observation: np.zeros(
+        (2, 1), dtype=np.float32
+    )
+    runtime._normalized_state = lambda _observation: (_ for _ in ()).throw(
+        AssertionError("low-Gate bypass must run before state/decode")
+    )
+    runtime._decode_action_chunk = lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("low-Gate bypass must skip decode")
+    )
+    monkeypatch.setattr(
+        frs_runtime_module,
+        "tactile_change_from_tokens",
+        lambda *_args: np.asarray([0.0], dtype=np.float32),
+    )
+
+    result = runtime.steer_action(4, 11, {}, 1)
+
+    np.testing.assert_array_equal(result.decoded_normalized, vla)
+    np.testing.assert_array_equal(result.selected_normalized, vla[0, 1])
+    expected_robot = vla[0, 1] * 10.0
+    expected_robot[9] = 0.123
+    np.testing.assert_array_equal(result.selected_action, expected_robot)
+    assert runtime.history.append_calls == 1
+    assert result.diagnostics.gate_weight == pytest.approx(
+        1.0 / (1.0 + np.exp(4.0))
+    )
+    assert result.diagnostics.bypassed is True
+    assert result.diagnostics.clamped is False
+    assert result.diagnostics.delta_rms == pytest.approx(0.0)
 
 
 class _History:

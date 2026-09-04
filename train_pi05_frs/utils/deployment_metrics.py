@@ -51,6 +51,7 @@ def _summary(
     low_gate_threshold: float,
     high_gate_threshold: float,
     low_gate_safety_margin: float,
+    low_gate_regression_margin: float,
     rank_margin: float,
     repair_margin: float,
 ) -> dict[str, float | int]:
@@ -65,8 +66,10 @@ def _summary(
     mse_frs_gt = _per_sample_mse(frs, gt)
     mse_frs_vla = _per_sample_mse(frs, vla)
     mse_vla_gt = _per_sample_mse(vla, gt)
-    low_safe = np.minimum(mse_frs_gt[low], mse_frs_vla[low]) <= float(
-        low_gate_safety_margin
+    low_safe = mse_frs_vla[low] <= float(low_gate_safety_margin)
+    low_regression = (
+        mse_frs_gt[low]
+        > mse_vla_gt[low] + float(low_gate_regression_margin)
     )
     high_rank = (
         mse_frs_gt[high] + float(rank_margin) <= mse_frs_vla[high]
@@ -74,6 +77,7 @@ def _summary(
     high_repair = (
         mse_frs_gt[high] + float(repair_margin) <= mse_vla_gt[high]
     )
+    high_harm = np.maximum(mse_frs_gt[high] - mse_vla_gt[high], 0.0)
 
     result: dict[str, float | int] = {
         "sample_count": int(len(gates)),
@@ -89,7 +93,9 @@ def _summary(
         ),
         "low_safe_frac": float(np.mean(low_safe)),
         "low_unsafe_frac": float(1.0 - np.mean(low_safe)),
+        "low_gate_regression_frac": float(np.mean(low_regression)),
         "high_gain": float(np.mean(mse_vla_gt[high] - mse_frs_gt[high])),
+        "high_gate_harm_p95": float(np.quantile(high_harm, 0.95)),
         "high_rank_satisfied_frac": float(np.mean(high_rank)),
         "high_repair_satisfied_frac": float(np.mean(high_repair)),
     }
@@ -115,6 +121,7 @@ def deployment_aligned_single_hand_metrics(
     low_gate_threshold: float,
     high_gate_threshold: float,
     low_gate_safety_margin: float,
+    low_gate_regression_margin: float = 0.005,
     rank_margin: float,
     repair_margin: float,
 ) -> Mapping[str, dict[str, float | int]]:
@@ -141,6 +148,7 @@ def deployment_aligned_single_hand_metrics(
         "low_gate_threshold": low_gate_threshold,
         "high_gate_threshold": high_gate_threshold,
         "low_gate_safety_margin": low_gate_safety_margin,
+        "low_gate_regression_margin": low_gate_regression_margin,
         "rank_margin": rank_margin,
         "repair_margin": repair_margin,
     }

@@ -135,6 +135,7 @@ TRAINING_KEYS = {
     "aux_decode_solver",
     "low_gate_safety_weight",
     "low_gate_safety_margin",
+    "low_gate_regression_margin",
     "rank_low_gate_threshold",
     "rank_high_gate_threshold",
     "rank_weight",
@@ -144,6 +145,9 @@ TRAINING_KEYS = {
     "best_max_low_gate_unsafe_frac",
     "best_min_high_gate_gain",
     "best_min_high_gate_rank_satisfied_frac",
+    "best_min_high_gate_repair_satisfied_frac",
+    "best_max_high_gate_harm_p95",
+    "best_max_low_gate_regression_frac",
     "model_dim",
     "depth",
     "num_heads",
@@ -1145,6 +1149,7 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         "aux_decode_weight": 1.0,
         "low_gate_safety_weight": 0.0,
         "low_gate_safety_margin": 0.03,
+        "low_gate_regression_margin": 0.005,
         "rank_low_gate_threshold": 0.3,
         "rank_high_gate_threshold": 0.7,
         "rank_weight": 0.0,
@@ -1154,6 +1159,9 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         "best_max_low_gate_unsafe_frac": 0.1,
         "best_min_high_gate_gain": 0.0,
         "best_min_high_gate_rank_satisfied_frac": 0.8,
+        "best_min_high_gate_repair_satisfied_frac": 0.8,
+        "best_max_high_gate_harm_p95": 0.03,
+        "best_max_low_gate_regression_frac": 0.05,
         "learning_rate": 3e-4,
         "weight_decay": 1e-4,
         "grad_clip_norm": 1.0,
@@ -1174,10 +1182,12 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         "aux_decode_weight",
         "low_gate_safety_weight",
         "low_gate_safety_margin",
+        "low_gate_regression_margin",
         "rank_weight",
         "rank_margin",
         "repair_weight",
         "repair_margin",
+        "best_max_high_gate_harm_p95",
         "weight_decay",
     ):
         if numbers[key] < 0.0:
@@ -1189,6 +1199,8 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
     for key in (
         "best_max_low_gate_unsafe_frac",
         "best_min_high_gate_rank_satisfied_frac",
+        "best_min_high_gate_repair_satisfied_frac",
+        "best_max_low_gate_regression_frac",
         "min_lr_ratio",
     ):
         if not 0.0 <= numbers[key] <= 1.0:
@@ -1373,6 +1385,9 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         aux_decode_solver=str(training.get("aux_decode_solver", "fireflow")),
         low_gate_safety_weight=float(training.get("low_gate_safety_weight", 0.0)),
         low_gate_safety_margin=float(training.get("low_gate_safety_margin", 0.03)),
+        low_gate_regression_margin=float(
+            training.get("low_gate_regression_margin", 0.005)
+        ),
         rank_weight=float(training.get("rank_weight", 0.0)),
         rank_margin=float(training.get("rank_margin", 0.0)),
         repair_weight=float(training.get("repair_weight", 0.0)),
@@ -1384,6 +1399,15 @@ def train_from_config(config: Mapping[str, Any]) -> None:
         best_max_low_gate_unsafe_frac=float(training.get("best_max_low_gate_unsafe_frac", 0.1)),
         best_min_high_gate_gain=float(training.get("best_min_high_gate_gain", 0.0)),
         best_min_high_gate_rank_satisfied_frac=float(training.get("best_min_high_gate_rank_satisfied_frac", 0.8)),
+        best_min_high_gate_repair_satisfied_frac=float(
+            training.get("best_min_high_gate_repair_satisfied_frac", 0.8)
+        ),
+        best_max_high_gate_harm_p95=float(
+            training.get("best_max_high_gate_harm_p95", 0.03)
+        ),
+        best_max_low_gate_regression_frac=float(
+            training.get("best_max_low_gate_regression_frac", 0.05)
+        ),
         model_dim=_positive_int(training, "model_dim", 256),
         depth=_positive_int(training, "depth", 6),
         num_heads=_positive_int(training, "num_heads", 4),

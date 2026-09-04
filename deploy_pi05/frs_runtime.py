@@ -66,6 +66,9 @@ class FRSDiagnostics:
     tactile_change: float
     delta_rms: float
     max_normalized_action_abs: float
+    gate_weight: float | None = None
+    bypassed: bool = False
+    clamped: bool = False
 
 
 @dataclass(frozen=True)
@@ -113,6 +116,8 @@ class FRSConfig:
     verify_source_checkpoint_fingerprint: bool
     max_normalized_action_abs: float
     max_normalized_delta_rms: float
+    hard_low_gate_bypass: bool = False
+    max_normalized_residual_abs: float | None = None
 
 
 def _local_directory(value: Any, *, config_path: Path, name: str) -> Path:
@@ -131,6 +136,13 @@ def _optional_nonnegative(value: Any, *, name: str) -> float | None:
     parsed = float(value)
     if not math.isfinite(parsed) or parsed < 0:
         raise ValueError(f"{name} must be null or a finite non-negative number")
+    return parsed
+
+
+def _optional_positive(value: Any, *, name: str) -> float | None:
+    parsed = _optional_nonnegative(value, name=name)
+    if parsed is not None and parsed <= 0:
+        raise ValueError(f"{name} must be null or a finite positive number")
     return parsed
 
 
@@ -287,6 +299,9 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
     max_delta = float(raw.get("max_normalized_delta_rms", 4.0))
     if not math.isfinite(max_abs) or not math.isfinite(max_delta) or min(max_abs, max_delta) <= 0:
         raise ValueError("FRS normalized-action safety limits must be finite and positive")
+    hard_low_gate_bypass = raw.get("hard_low_gate_bypass", False)
+    if type(hard_low_gate_bypass) is not bool:
+        raise ValueError("frs.hard_low_gate_bypass must be a boolean")
     return FRSConfig(
         checkpoint=_local_directory(raw["checkpoint"], config_path=config_path, name="FRS checkpoint"),
         tactile_encoder_checkpoint=_local_directory(
@@ -313,6 +328,11 @@ def parse_frs_config(raw: Mapping[str, Any], *, config_path: Path) -> FRSConfig:
         verify_source_checkpoint_fingerprint=bool(raw.get("verify_source_checkpoint_fingerprint", False)),
         max_normalized_action_abs=max_abs,
         max_normalized_delta_rms=max_delta,
+        hard_low_gate_bypass=hard_low_gate_bypass,
+        max_normalized_residual_abs=_optional_positive(
+            raw.get("max_normalized_residual_abs"),
+            name="frs.max_normalized_residual_abs",
+        ),
     )
 
 
@@ -415,6 +435,43 @@ def _validate_loss_contract(
             "frs.tactile_keys must contain the fixed bimanual tactile key order "
             f"{_BIMANUAL_TACTILE_KEY_BASENAMES!r}, got {basenames!r}"
         )
+
+
+def _checkpoint_gate_contract(
+    extra: Mapping[str, Any],
+) -> tuple[float, float, float] | None:
+    if not (
+        extra.get("loss_mode") == _COMPOSITE_GATED_LOSS_MODE
+        and extra.get("loss_objective_version") == 2
+        and extra.get("steered_action_dim") == 9
+    ):
+        return None
+    try:
+        tau = float(extra["gate_tau"])
+        temperature = float(extra["gate_temperature"])
+        low_threshold = float(extra["low_gate_threshold"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(
+            "single-arm FRS checkpoint is missing a valid gate_tau, "
+            "gate_temperature, or low_gate_threshold"
+        ) from error
+    if not all(math.isfinite(value) for value in (tau, temperature, low_threshold)):
+        raise ValueError("single-arm FRS checkpoint gate metadata must be finite")
+    if not 0.0 <= tau <= 1.0:
+        raise ValueError("single-arm FRS checkpoint gate_tau must be in [0, 1]")
+    if temperature <= 0.0:
+        raise ValueError("single-arm FRS checkpoint gate_temperature must be positive")
+    if not 0.0 <= low_threshold <= 1.0:
+        raise ValueError("single-arm FRS checkpoint low_gate_threshold must be in [0, 1]")
+    return tau, temperature, low_threshold
+
+
+def _gate_weight(change: float, *, tau: float, temperature: float) -> float:
+    scaled = (float(change) - tau) / temperature
+    if scaled >= 0.0:
+        return 1.0 / (1.0 + math.exp(-scaled))
+    exp_scaled = math.exp(scaled)
+    return exp_scaled / (1.0 + exp_scaled)
 
 
 class TactileHistory:
@@ -543,6 +600,12 @@ class FRSRuntime:
             action_dim=decoder.action_dim,
             tactile_keys=self.config.tactile_keys,
         )
+        gate_contract = _checkpoint_gate_contract(extra)
+        if self.config.hard_low_gate_bypass and gate_contract is None:
+            raise ValueError(
+                "frs.hard_low_gate_bypass requires a single-arm composite_gated "
+                "objective-v2 checkpoint"
+            )
         _require_equal(int(extra.get("history_stride", 0)), self.config.history_stride, "history_stride")
         _require_equal(str(extra.get("aux_decode_solver")), self.config.decode_solver, "decode_solver")
         _require_equal(int(extra.get("aux_decode_steps", 0)), self.config.decode_steps, "decode_steps")
@@ -782,7 +845,7 @@ class FRSRuntime:
             digest.update(value.tobytes(order="C"))
         return digest.digest()
 
-    def _validated_decoded(self, decoded: Any) -> tuple[np.ndarray, float, float]:
+    def _validated_decoded(self, decoded: Any) -> tuple[np.ndarray, float, float, bool]:
         assert self._action_vla_normalized is not None
         array = np.asarray(jax.device_get(decoded), dtype=np.float32)
         expected = (1, self.policy.config.action_horizon, self.policy.config.action_dim)
@@ -804,6 +867,24 @@ class FRSRuntime:
         ]
         if not np.isfinite(array).all():
             raise ValueError(f"FRS output must be finite with shape {expected}, got {array.shape}")
+        residual_clamped = False
+        residual_limit = getattr(self.config, "max_normalized_residual_abs", None)
+        if residual_limit is not None:
+            arm_indices = tuple(
+                index
+                for index in range(safety_width)
+                if index not in self._gripper_action_indices
+            )
+            residual = (
+                array[..., arm_indices]
+                - self._action_vla_normalized[..., arm_indices]
+            )
+            residual_clamped = bool(np.any(np.abs(residual) > residual_limit))
+            array[..., arm_indices] = self._action_vla_normalized[..., arm_indices] + np.clip(
+                residual,
+                -residual_limit,
+                residual_limit,
+            )
         physical = array[..., :safety_width]
         vla_physical = self._action_vla_normalized[..., :safety_width]
         delta = float(np.sqrt(np.mean(np.square(physical - vla_physical))))
@@ -818,7 +899,7 @@ class FRSRuntime:
                 f"FRS normalized delta safety limit exceeded: {delta:.4f} > "
                 f"{self.config.max_normalized_delta_rms:.4f}"
             )
-        return array, delta, max_abs
+        return array, delta, max_abs, residual_clamped
 
     def steer_action(
         self,
@@ -858,18 +939,46 @@ class FRSRuntime:
         tactile = jnp.asarray(self.history.window_tokens()[None, ...], dtype=jnp.float32)
         change = tactile_change_from_tokens(current[None, ...], self._episode_baseline[None, ...])
         encode_finished = time.time()
-        state = self._normalized_state(observation)
-        decode_started = time.time()
-        decoded = self._decode_action_chunk(
-            self._x_base_device,
-            tactile,
-            frozen_endpoint=self._action_vla_normalized,
-            state=state,
+        extra = self.metadata.get("extra_metadata")
+        gate_contract = (
+            _checkpoint_gate_contract(extra) if isinstance(extra, Mapping) else None
         )
-        decoded_array, delta, max_abs = self._validated_decoded(decoded)
+        gate_weight = None
+        low_gate_bypassed = False
+        if gate_contract is not None:
+            tau, temperature, low_threshold = gate_contract
+            gate_weight = _gate_weight(
+                float(change[0]),
+                tau=tau,
+                temperature=temperature,
+            )
+            low_gate_bypassed = bool(
+                self.config.hard_low_gate_bypass and gate_weight <= low_threshold
+            )
+        decode_started = time.time()
+        residual_clamped = False
+        if low_gate_bypassed:
+            decoded_array = np.array(self._action_vla_normalized, copy=True)
+            delta = 0.0
+            max_abs = float(
+                np.max(
+                    np.abs(
+                        decoded_array[..., : self.policy.config.robot_action_dim]
+                    )
+                )
+            )
+        else:
+            state = self._normalized_state(observation)
+            decoded = self._decode_action_chunk(
+                self._x_base_device,
+                tactile,
+                frozen_endpoint=self._action_vla_normalized,
+                state=state,
+            )
+            decoded_array, delta, max_abs, residual_clamped = self._validated_decoded(decoded)
         decode_finished = time.time()
         selected = decoded_array[0, action_index]
-        if self.config.temporal_ensemble_coeff is not None:
+        if not low_gate_bypassed and self.config.temporal_ensemble_coeff is not None:
             candidates = [
                 item.decoded_normalized[0, action_index] for *_, item in self._request_results.values()
             ]
@@ -906,7 +1015,14 @@ class FRSRuntime:
         robot_selected[list(self._gripper_action_indices)] = self._action_vla[
             0, action_index, list(self._gripper_action_indices)
         ]
-        diagnostics = FRSDiagnostics(float(change[0]), delta, max_abs)
+        diagnostics = FRSDiagnostics(
+            float(change[0]),
+            delta,
+            max_abs,
+            gate_weight=gate_weight,
+            bypassed=low_gate_bypassed,
+            clamped=residual_clamped,
+        )
         result = FRSSteerResult(
             chunk_id=chunk_id,
             request_id=request_id,

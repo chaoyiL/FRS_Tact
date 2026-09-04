@@ -468,9 +468,28 @@ def test_single_hand_composite_evaluation_ignores_gripper_metrics(monkeypatch) -
     assert result.high_gate_rank_satisfied_frac == pytest.approx(1.0)
     assert result.high_gate_repair_satisfied_frac == pytest.approx(1.0)
     assert result.low_gate_unsafe_frac == pytest.approx(0.0)
+    assert result.low_gate_regression_frac == pytest.approx(0.0)
+    assert result.high_gate_harm_p95 == pytest.approx(0.0)
     assert result.predictions.shape[-1] == 10
     np.testing.assert_allclose(result.predictions[..., 9], 100.0)
     np.testing.assert_allclose(result.vla_actions[..., 9], -75.0)
+
+
+def test_single_hand_low_gate_safety_preserves_vla_not_nearest_endpoint() -> None:
+    decoded = jnp.zeros((1, 1, 1), dtype=jnp.float32)
+    gt = jnp.zeros_like(decoded)
+    vla = jnp.ones_like(decoded)
+
+    loss = model_module.low_gate_safety_loss_per_sample(
+        decoded,
+        gt,
+        vla,
+        jnp.asarray([0.0], dtype=jnp.float32),
+        tolerance=0.03,
+        low_gate_threshold=0.3,
+    )
+
+    assert float(loss[0]) == pytest.approx(0.97)
 
 
 def test_bimanual_aggregate_metrics_and_selection_ignore_padding_tail(
@@ -1036,6 +1055,7 @@ def test_bimanual_trainer_validation_writes_finite_source_wrist_selection(
     assert evaluation_kwargs["low_gate_threshold"] == pytest.approx(0.3)
     assert evaluation_kwargs["high_gate_threshold"] == pytest.approx(0.7)
     assert evaluation_kwargs["low_gate_safety_margin"] == pytest.approx(0.03)
+    assert evaluation_kwargs["low_gate_regression_margin"] == pytest.approx(0.005)
     assert evaluation_kwargs["rank_margin"] == pytest.approx(0.0)
     assert evaluation_kwargs["repair_margin"] == pytest.approx(0.0)
     assert evaluation_kwargs["keep_predictions"] is expected_keep_predictions
@@ -1123,6 +1143,63 @@ def test_bimanual_checkpoint_selection_uses_worst_source_wrist_metrics():
     )
 
     assert key == pytest.approx((0.25, 0.1, -0.7, 0.15, 0.25))
+
+
+def test_scalar_checkpoint_selection_enforces_new_safety_constraints_and_order():
+    common = {
+        "val_mse": 0.02,
+        "val_low_gate_unsafe_frac": 0.04,
+        "val_high_gate_gain": 0.10,
+        "val_high_gate_rank_satisfied_frac": 0.90,
+        "val_high_gate_repair_satisfied_frac": 0.90,
+        "val_high_gate_harm_p95": 0.02,
+        "val_low_gate_regression_frac": 0.04,
+    }
+    kwargs = {
+        "loss_mode": "composite_gated",
+        "max_low_gate_unsafe_frac": 0.05,
+        "min_high_gate_gain": 0.0,
+        "min_high_gate_rank_satisfied_frac": 0.8,
+        "min_high_gate_repair_satisfied_frac": 0.8,
+        "max_high_gate_harm_p95": 0.03,
+        "max_low_gate_regression_frac": 0.05,
+    }
+
+    feasible = checkpoint_selection_key(common, **kwargs)
+    assert feasible == pytest.approx((0.0, -0.90, 0.02, 0.04, -0.10, 0.02))
+
+    low_rank_composite = checkpoint_selection_key(
+        {**common, "val_high_gate_rank_satisfied_frac": 0.0}, **kwargs
+    )
+    assert low_rank_composite[0] == pytest.approx(0.0)
+
+    low_rank_legacy = checkpoint_selection_key(
+        {**common, "val_high_gate_rank_satisfied_frac": 0.0},
+        **{**kwargs, "loss_mode": "gated"},
+    )
+    assert low_rank_legacy[0] > 0.0
+
+    lower_repair = checkpoint_selection_key(
+        {
+            **common,
+            "val_high_gate_repair_satisfied_frac": 0.85,
+            "val_high_gate_harm_p95": 0.0,
+            "val_mse": 0.0,
+        },
+        **kwargs,
+    )
+    assert feasible < lower_repair
+
+    infeasible = checkpoint_selection_key(
+        {
+            **common,
+            "val_high_gate_repair_satisfied_frac": 0.70,
+            "val_high_gate_harm_p95": 0.04,
+            "val_low_gate_regression_frac": 0.10,
+        },
+        **kwargs,
+    )
+    assert infeasible[0] > 0.0
 
 
 def test_32d_composite_steers_first_20_and_preserves_vla_tail():

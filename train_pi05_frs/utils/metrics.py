@@ -65,7 +65,9 @@ class EvaluationResult:
     n_high_w: int | None = None
     n_low_w: int | None = None
     low_gate_unsafe_frac: float | None = None
+    low_gate_regression_frac: float | None = None
     high_gate_gain: float | None = None
+    high_gate_harm_p95: float | None = None
     high_gate_rank_satisfied_frac: float | None = None
     high_gate_repair_satisfied_frac: float | None = None
     # Endpoint-baseline metrics are additive and do not alter legacy fields.
@@ -425,6 +427,7 @@ def _evaluate_split_legacy(
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
     low_gate_safety_margin: float = 0.03,
+    low_gate_regression_margin: float = 0.005,
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
     track_composite: bool = False,
@@ -555,11 +558,25 @@ def _evaluate_split_legacy(
         low = all_gate <= float(low_gate_threshold)
         high = all_gate >= float(high_gate_threshold)
         low_gate_unsafe_frac = _mean_or_nan(
-            (np.minimum(all_mse_gt, all_mse_pred)[low] > low_gate_safety_margin).astype(
-                np.float32
-            )
+            (all_mse_pred[low] > low_gate_safety_margin).astype(np.float32)
+        )
+        low_gate_regression_frac = _mean_or_nan(
+            (
+                all_mse_gt[low]
+                > all_pi05_gt_mse[low] + float(low_gate_regression_margin)
+            ).astype(np.float32)
         )
         high_gate_gain = _mean_or_nan(all_pi05_gt_mse[high] - all_mse_gt[high])
+        high_gate_harm_p95 = (
+            float(
+                np.quantile(
+                    np.maximum(all_mse_gt[high] - all_pi05_gt_mse[high], 0.0),
+                    0.95,
+                )
+            )
+            if np.any(high)
+            else float("nan")
+        )
         high_gate_rank_satisfied_frac = _mean_or_nan(
             (all_mse_gt[high] + rank_margin <= all_mse_pred[high]).astype(np.float32)
         )
@@ -580,7 +597,9 @@ def _evaluate_split_legacy(
             "n_low_w": None,
         }
         low_gate_unsafe_frac = None
+        low_gate_regression_frac = None
         high_gate_gain = None
+        high_gate_harm_p95 = None
         high_gate_rank_satisfied_frac = None
         high_gate_repair_satisfied_frac = None
         all_change = None
@@ -621,7 +640,9 @@ def _evaluate_split_legacy(
         n_high_w=stratified["n_high_w"],  # type: ignore[arg-type]
         n_low_w=stratified["n_low_w"],  # type: ignore[arg-type]
         low_gate_unsafe_frac=low_gate_unsafe_frac,
+        low_gate_regression_frac=low_gate_regression_frac,
         high_gate_gain=high_gate_gain,
+        high_gate_harm_p95=high_gate_harm_p95,
         high_gate_rank_satisfied_frac=high_gate_rank_satisfied_frac,
         high_gate_repair_satisfied_frac=high_gate_repair_satisfied_frac,
         mse_vla_gt=float(np.mean(all_pi05_gt_mse)),
@@ -658,6 +679,7 @@ def evaluate_split(
     low_gate_threshold: float = 0.3,
     high_gate_threshold: float = 0.7,
     low_gate_safety_margin: float = 0.03,
+    low_gate_regression_margin: float = 0.005,
     rank_margin: float = 0.0,
     repair_margin: float = 0.0,
     loss_mode: str | None = None,
@@ -686,6 +708,7 @@ def evaluate_split(
             low_gate_threshold=low_gate_threshold,
             high_gate_threshold=high_gate_threshold,
             low_gate_safety_margin=low_gate_safety_margin,
+            low_gate_regression_margin=low_gate_regression_margin,
             rank_margin=rank_margin,
             repair_margin=repair_margin,
             track_composite=(loss_mode == COMPOSITE_GATED_LOSS_MODE),

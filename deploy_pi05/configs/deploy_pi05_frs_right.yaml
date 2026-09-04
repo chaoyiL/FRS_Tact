@@ -39,10 +39,9 @@ norm_stats:
 frs:
   enabled: true
 
-  # This distinct path intentionally prevents the legacy right_0/right_1 checkpoint
-  # from being used with the corrected right-hand two-face tactile contract.
-  # Replace it with the newly trained FRS checkpoint at this path.
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_right_insert_01_two_face
+  # Uploaded arm9 epoch-10 baseline. The runtime guards below make low-Gate
+  # execution exactly VLA and clamp all remaining arm residuals.
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_insert_01_right_two_face_arm9_epoch10
   # TODO: replace with the tactile encoder used to train that FRS checkpoint.
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
 
@@ -67,6 +66,10 @@ frs:
   verify_source_checkpoint_fingerprint: false
   max_normalized_action_abs: 8.0
   max_normalized_delta_rms: 4.0
+  # Exactly preserve VLA in the training-defined low-Gate region; otherwise
+  # bound every arm residual while retaining the original VLA gripper action.
+  hard_low_gate_bypass: true
+  max_normalized_residual_abs: 0.5
 
 connection:
   address: 127.0.0.1

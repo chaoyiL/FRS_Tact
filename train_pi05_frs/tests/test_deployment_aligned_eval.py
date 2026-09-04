@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from train_pi05_frs.tools.evaluate_deployment_checkpoints import (
+    _flatten_metrics,
     discover_validation_checkpoints,
 )
 from train_pi05_frs.utils.deployment_metrics import (
@@ -32,6 +33,7 @@ def test_deployment_metrics_exclude_raw_frs_gripper() -> None:
         low_gate_threshold=0.3,
         high_gate_threshold=0.7,
         low_gate_safety_margin=0.03,
+        low_gate_regression_margin=0.005,
         rank_margin=0.0,
         repair_margin=0.0,
     )
@@ -44,6 +46,8 @@ def test_deployment_metrics_exclude_raw_frs_gripper() -> None:
     assert arm9["high_rank_satisfied_frac"] == pytest.approx(1.0)
     assert arm9["high_repair_satisfied_frac"] == pytest.approx(1.0)
     assert arm9["low_safe_frac"] == pytest.approx(1.0)
+    assert arm9["low_gate_regression_frac"] == pytest.approx(0.0)
+    assert arm9["high_gate_harm_p95"] == pytest.approx(0.0)
 
     runtime10 = metrics["runtime10"]
     assert runtime10["mse_frs_gt"] == pytest.approx(0.85)
@@ -53,6 +57,57 @@ def test_deployment_metrics_exclude_raw_frs_gripper() -> None:
     assert runtime10["high_rank_satisfied_frac"] == pytest.approx(1.0)
     assert runtime10["high_repair_satisfied_frac"] == pytest.approx(1.0)
     assert runtime10["low_safe_frac"] == pytest.approx(1.0)
+    assert runtime10["low_gate_regression_frac"] == pytest.approx(0.0)
+    assert runtime10["high_gate_harm_p95"] == pytest.approx(0.0)
+
+
+def test_deployment_low_gate_safety_means_direct_vla_preservation() -> None:
+    gt = np.zeros((2, 1, 10), dtype=np.float32)
+    vla = np.ones_like(gt)
+    frs = np.array(vla, copy=True)
+    frs[0, ..., :9] = 0.0
+    gates = np.asarray([0.1, 0.9], dtype=np.float32)
+
+    metrics = deployment_aligned_single_hand_metrics(
+        frs,
+        gt,
+        vla,
+        gates,
+        gripper_index=9,
+        low_gate_threshold=0.3,
+        high_gate_threshold=0.7,
+        low_gate_safety_margin=0.03,
+        low_gate_regression_margin=0.005,
+        rank_margin=0.0,
+        repair_margin=0.0,
+    )
+
+    assert metrics["arm9"]["low_safe_frac"] == pytest.approx(0.0)
+    assert metrics["arm9"]["low_unsafe_frac"] == pytest.approx(1.0)
+
+
+def test_deployment_checkpoint_feasibility_uses_new_harm_constraints() -> None:
+    values = {
+        "low_unsafe_frac": 0.01,
+        "low_gate_regression_frac": 0.06,
+        "high_gain": 0.1,
+        "high_rank_satisfied_frac": 0.9,
+        "high_repair_satisfied_frac": 0.9,
+        "high_gate_harm_p95": 0.02,
+    }
+
+    row = _flatten_metrics(
+        epoch=1,
+        checkpoint=Path("checkpoint"),
+        summaries={"arm9": values},
+        max_low_gate_unsafe_frac=0.05,
+        min_high_gate_gain=0.0,
+        min_high_gate_repair_satisfied_frac=0.8,
+        max_high_gate_harm_p95=0.03,
+        max_low_gate_regression_frac=0.05,
+    )
+
+    assert row["arm9_checkpoint_feasible"] == 0
 
 
 def test_deployment_metrics_reject_empty_gate_regions() -> None:
@@ -67,6 +122,7 @@ def test_deployment_metrics_reject_empty_gate_regions() -> None:
             low_gate_threshold=0.3,
             high_gate_threshold=0.7,
             low_gate_safety_margin=0.03,
+            low_gate_regression_margin=0.005,
             rank_margin=0.0,
             repair_margin=0.0,
         )

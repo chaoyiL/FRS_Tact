@@ -656,13 +656,12 @@ def low_gate_safety_loss_per_sample(
     tolerance: float,
     low_gate_threshold: float = 0.3,
 ) -> Array:
-    """Penalize low-Gate decodes only when far from both acceptable endpoints."""
+    """Penalize low-Gate decodes that drift away from the frozen VLA endpoint."""
     if tolerance < 0:
         raise ValueError(f"low-gate safety tolerance must be non-negative, got {tolerance}.")
-    mse_gt = jnp.mean(jnp.square(decoded_action - gt_action), axis=(1, 2))
+    del gt_action
     mse_pred = jnp.mean(jnp.square(decoded_action - predicted_action), axis=(1, 2))
-    nearest = jnp.minimum(mse_gt, mse_pred)
-    penalty = jax.nn.relu(nearest - float(tolerance))
+    penalty = jax.nn.relu(mse_pred - float(tolerance))
     weights = jnp.clip(jax.lax.stop_gradient(gate_weights), 0.0, 1.0)
     strength = (1.0 - weights) * (weights <= float(low_gate_threshold))
     return _active_group_normalized_per_sample(penalty, strength)

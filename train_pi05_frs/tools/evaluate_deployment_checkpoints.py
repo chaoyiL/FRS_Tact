@@ -72,7 +72,9 @@ def _flatten_metrics(
     summaries: dict[str, dict[str, float | int]],
     max_low_gate_unsafe_frac: float,
     min_high_gate_gain: float,
-    min_high_gate_rank_satisfied_frac: float,
+    min_high_gate_repair_satisfied_frac: float,
+    max_high_gate_harm_p95: float,
+    max_low_gate_regression_frac: float,
 ) -> dict[str, float | int | str]:
     row: dict[str, float | int | str] = {
         "epoch": int(epoch),
@@ -83,8 +85,11 @@ def _flatten_metrics(
         row[f"{scope}_checkpoint_feasible"] = int(
             float(values["low_unsafe_frac"]) <= max_low_gate_unsafe_frac
             and float(values["high_gain"]) >= min_high_gate_gain
-            and float(values["high_rank_satisfied_frac"])
-            >= min_high_gate_rank_satisfied_frac
+            and float(values["high_repair_satisfied_frac"])
+            >= min_high_gate_repair_satisfied_frac
+            and float(values["high_gate_harm_p95"]) <= max_high_gate_harm_p95
+            and float(values["low_gate_regression_frac"])
+            <= max_low_gate_regression_frac
         )
     return row
 
@@ -254,6 +259,9 @@ def evaluate_checkpoints(
                 low_gate_threshold=low_threshold,
                 high_gate_threshold=high_threshold,
                 low_gate_safety_margin=float(extra.get("low_gate_safety_margin", 0.03)),
+                low_gate_regression_margin=float(
+                    extra.get("low_gate_regression_margin", 0.005)
+                ),
                 rank_margin=float(extra.get("rank_margin", 0.0)),
                 repair_margin=float(extra.get("repair_margin", 0.0)),
             )
@@ -265,8 +273,14 @@ def evaluate_checkpoints(
                     extra.get("best_max_low_gate_unsafe_frac", 0.1)
                 ),
                 min_high_gate_gain=float(extra.get("best_min_high_gate_gain", 0.0)),
-                min_high_gate_rank_satisfied_frac=float(
-                    extra.get("best_min_high_gate_rank_satisfied_frac", 0.8)
+                min_high_gate_repair_satisfied_frac=float(
+                    extra.get("best_min_high_gate_repair_satisfied_frac", 0.8)
+                ),
+                max_high_gate_harm_p95=float(
+                    extra.get("best_max_high_gate_harm_p95", 0.03)
+                ),
+                max_low_gate_regression_frac=float(
+                    extra.get("best_max_low_gate_regression_frac", 0.05)
                 ),
             )
             rows.append(row)

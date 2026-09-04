@@ -44,6 +44,8 @@ _HISTORY_FIELDS = frozenset(
         "val_gate_n_mid",
         "val_gate_n_high",
         "val_low_safe_frac",
+        "val_low_gate_regression_frac",
+        "val_high_gate_harm_p95",
         "val_high_gate_rank_satisfied_frac",
         "val_high_gate_repair_satisfied_frac",
         "checkpoint_selection_feasible",
@@ -159,6 +161,9 @@ def plot_single_hand_training_overview(
 
     _series(axes[3], rows, "val_gt_gain", "GT gain", "#55A868")
     _series(
+        axes[3], rows, "val_high_gate_harm_p95", "high-Gate harm p95", "#C44E52"
+    )
+    _series(
         axes[3], rows, "val_relative_gt_error", "relative GT error", "#8172B2"
     )
     axes[3].axhline(0, color="#555555", linestyle="--", linewidth=1.2)
@@ -166,6 +171,13 @@ def plot_single_hand_training_overview(
     _finish(axes[3], "Improvement over frozen VLA", "value")
 
     _series(axes[4], rows, "val_low_safe_frac", "low-Gate safe", "#4C72B0")
+    _series(
+        axes[4],
+        rows,
+        "val_low_gate_regression_frac",
+        "low-Gate regression",
+        "#937860",
+    )
     _series(
         axes[4],
         rows,

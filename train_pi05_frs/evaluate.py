@@ -128,6 +128,9 @@ def _evaluate_decoder_legacy(
             low_gate_threshold=float(extra.get("low_gate_threshold", 0.3)),
             high_gate_threshold=float(extra.get("high_gate_threshold", 0.7)),
             low_gate_safety_margin=float(extra.get("low_gate_safety_margin", 0.03)),
+            low_gate_regression_margin=float(
+                extra.get("low_gate_regression_margin", 0.005)
+            ),
             rank_margin=float(extra.get("rank_margin", 0.0)),
             repair_margin=float(extra.get("repair_margin", 0.0)),
         )
@@ -158,7 +161,9 @@ def _evaluate_decoder_legacy(
             metrics.update(
                 {
                     "low_gate_unsafe_frac": result.low_gate_unsafe_frac,
+                    "low_gate_regression_frac": result.low_gate_regression_frac,
                     "high_gate_gain": result.high_gate_gain,  # type: ignore[dict-item]
+                    "high_gate_harm_p95": result.high_gate_harm_p95,
                     "high_gate_rank_satisfied_frac": result.high_gate_rank_satisfied_frac,  # type: ignore[dict-item]
                     "high_gate_repair_satisfied_frac": result.high_gate_repair_satisfied_frac,  # type: ignore[dict-item]
                 }
@@ -488,6 +493,9 @@ def evaluate_decoder(
             gate_tau=float(extra["gate_tau"]),
             gate_temperature=float(extra["gate_temperature"]),
             low_gate_safety_margin=low_safety_margin,
+            low_gate_regression_margin=float(
+                extra.get("low_gate_regression_margin", 0.005)
+            ),
             rank_margin=rank_margin,
             repair_margin=repair_margin,
             rank_low_gate_threshold=low_threshold,

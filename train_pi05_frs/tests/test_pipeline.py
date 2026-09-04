@@ -275,6 +275,7 @@ def _valid_config(
             "aux_decode_solver": "fireflow",
             "low_gate_safety_weight": 0.5,
             "low_gate_safety_margin": 0.03,
+            "low_gate_regression_margin": 0.005,
             "rank_low_gate_threshold": 0.3,
             "rank_high_gate_threshold": 0.7,
             "rank_weight": 2.0,
@@ -284,6 +285,9 @@ def _valid_config(
             "best_max_low_gate_unsafe_frac": 0.1,
             "best_min_high_gate_gain": 0.0,
             "best_min_high_gate_rank_satisfied_frac": 0.8,
+            "best_min_high_gate_repair_satisfied_frac": 0.8,
+            "best_max_high_gate_harm_p95": 0.03,
+            "best_max_low_gate_regression_frac": 0.05,
             "model_dim": 256,
             "depth": 6,
             "num_heads": 4,
@@ -525,6 +529,10 @@ def test_pipeline_forwards_two_tactile_tokens_for_single_hand(
     assert captured["loss_mode"] == COMPOSITE_GATED_LOSS_MODE
     assert captured["gate_lambda"] == 0.0
     assert captured["tactile_num_tokens"] == 2
+    assert captured["low_gate_regression_margin"] == pytest.approx(0.005)
+    assert captured["best_min_high_gate_repair_satisfied_frac"] == pytest.approx(0.8)
+    assert captured["best_max_high_gate_harm_p95"] == pytest.approx(0.03)
+    assert captured["best_max_low_gate_regression_frac"] == pytest.approx(0.05)
 
 
 def test_single_right_profile_rejects_legacy_cross_arm_tactile_pair(

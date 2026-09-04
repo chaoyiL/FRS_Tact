@@ -140,12 +140,16 @@ def checkpoint_selection_key(
     max_low_gate_unsafe_frac: float,
     min_high_gate_gain: float,
     min_high_gate_rank_satisfied_frac: float,
+    min_high_gate_repair_satisfied_frac: float = 0.8,
+    max_high_gate_harm_p95: float = 0.03,
+    max_low_gate_regression_frac: float = 0.05,
 ) -> tuple[float, ...]:
     """Return the lower-is-better checkpoint key for the active objective.
 
     Bimanual selection keeps the source-project contract: each wrist is first
     reduced across datasets, then the worst wrist controls the five-element key.
-    Legacy modes retain the previous two-element key and scalar-gated violation.
+    Legacy modes retain the previous two-element key. Scalar-Gated checkpoints
+    must satisfy all safety/repair constraints before deterministic quality sorting.
     """
 
     aggregate_mse = float(metrics.get("val_mse", float("inf")))
@@ -210,16 +214,50 @@ def checkpoint_selection_key(
     high_rank = float(
         metrics.get("val_high_gate_rank_satisfied_frac", float("nan"))
     )
-    if not all(math.isfinite(value) for value in (low_unsafe, high_gain, high_rank)):
-        return (float("inf"), aggregate_mse)
+    high_repair = float(
+        metrics.get("val_high_gate_repair_satisfied_frac", float("nan"))
+    )
+    high_harm = float(metrics.get("val_high_gate_harm_p95", float("nan")))
+    low_regression = float(
+        metrics.get("val_low_gate_regression_frac", float("nan"))
+    )
+    required_values = (
+        low_unsafe,
+        high_gain,
+        high_repair,
+        high_harm,
+        low_regression,
+        aggregate_mse,
+    )
+    if loss_mode == "gated":
+        required_values = (*required_values, high_rank)
+    if not all(math.isfinite(value) for value in required_values):
+        return (float("inf"),) * 6
     violation = (
         max(0.0, low_unsafe - max_low_gate_unsafe_frac)
         / max(max_low_gate_unsafe_frac, 1e-8)
         + max(0.0, min_high_gate_gain - high_gain)
-        + max(0.0, min_high_gate_rank_satisfied_frac - high_rank)
-        / max(min_high_gate_rank_satisfied_frac, 1e-8)
+        + (
+            max(0.0, min_high_gate_rank_satisfied_frac - high_rank)
+            / max(min_high_gate_rank_satisfied_frac, 1e-8)
+            if loss_mode == "gated"
+            else 0.0
+        )
+        + max(0.0, min_high_gate_repair_satisfied_frac - high_repair)
+        / max(min_high_gate_repair_satisfied_frac, 1e-8)
+        + max(0.0, high_harm - max_high_gate_harm_p95)
+        / max(max_high_gate_harm_p95, 1e-8)
+        + max(0.0, low_regression - max_low_gate_regression_frac)
+        / max(max_low_gate_regression_frac, 1e-8)
     )
-    return (violation, aggregate_mse)
+    return (
+        violation,
+        -high_repair,
+        high_harm,
+        low_unsafe,
+        -high_gain,
+        aggregate_mse,
+    )
 
 
 def _validate_training_path_boundaries(
@@ -298,6 +336,7 @@ def train_decoder(
     aux_decode_solver: str,
     low_gate_safety_weight: float,
     low_gate_safety_margin: float,
+    low_gate_regression_margin: float = 0.005,
     rank_weight: float,
     rank_margin: float,
     repair_weight: float,
@@ -309,6 +348,9 @@ def train_decoder(
     best_max_low_gate_unsafe_frac: float,
     best_min_high_gate_gain: float,
     best_min_high_gate_rank_satisfied_frac: float,
+    best_min_high_gate_repair_satisfied_frac: float = 0.8,
+    best_max_high_gate_harm_p95: float = 0.03,
+    best_max_low_gate_regression_frac: float = 0.05,
     model_dim: int,
     depth: int,
     num_heads: int,
@@ -427,7 +469,9 @@ def train_decoder(
         "val_n_high_w",
         "val_n_low_w",
         "val_low_gate_unsafe_frac",
+        "val_low_gate_regression_frac",
         "val_high_gate_gain",
+        "val_high_gate_harm_p95",
         "val_high_gate_rank_satisfied_frac",
         "val_high_gate_repair_satisfied_frac",
     ]
@@ -586,6 +630,14 @@ def train_decoder(
         raise ValueError("best_max_low_gate_unsafe_frac must be in [0, 1].")
     if not 0.0 <= best_min_high_gate_rank_satisfied_frac <= 1.0:
         raise ValueError("best_min_high_gate_rank_satisfied_frac must be in [0, 1].")
+    if not 0.0 <= best_min_high_gate_repair_satisfied_frac <= 1.0:
+        raise ValueError(
+            "best_min_high_gate_repair_satisfied_frac must be in [0, 1]."
+        )
+    if best_max_high_gate_harm_p95 < 0.0:
+        raise ValueError("best_max_high_gate_harm_p95 must be non-negative.")
+    if not 0.0 <= best_max_low_gate_regression_frac <= 1.0:
+        raise ValueError("best_max_low_gate_regression_frac must be in [0, 1].")
 
     resume_dir = _resolve_resume_dir(output_dir=output_dir, resume=resume, resume_from=resume_from)
     start_epoch = 1
@@ -785,6 +837,7 @@ def train_decoder(
             raise ValueError(f"{name} must be non-negative, got {value}.")
     for name, value in (
         ("low_gate_safety_margin", low_gate_safety_margin),
+        ("low_gate_regression_margin", low_gate_regression_margin),
         ("rank_margin", rank_margin),
         ("repair_margin", repair_margin),
     ):
@@ -853,13 +906,19 @@ def train_decoder(
             min_high_gate_rank_satisfied_frac=(
                 best_min_high_gate_rank_satisfied_frac
             ),
+            min_high_gate_repair_satisfied_frac=(
+                best_min_high_gate_repair_satisfied_frac
+            ),
+            max_high_gate_harm_p95=best_max_high_gate_harm_p95,
+            max_low_gate_regression_frac=best_max_low_gate_regression_frac,
         )
 
-    best_key = (
-        (float("inf"),) * 5
-        if loss_mode == BIMANUAL_LOSS_MODE
-        else (float("inf"), float("inf"))
-    )
+    if loss_mode == BIMANUAL_LOSS_MODE:
+        best_key = (float("inf"),) * 5
+    elif loss_mode in SCALAR_GATED_LOSS_MODES:
+        best_key = (float("inf"),) * 6
+    else:
+        best_key = (float("inf"), float("inf"))
     best_path = output_dir / "best" / CHECKPOINT_NAME
     if best_path.exists():
         with best_path.open(encoding="utf-8") as file:
@@ -1053,6 +1112,7 @@ def train_decoder(
                     "aux_decode_solver": aux_decode_solver,
                     "low_gate_safety_weight": low_gate_safety_weight,
                     "low_gate_safety_margin": low_gate_safety_margin,
+                    "low_gate_regression_margin": low_gate_regression_margin,
                     "rank_weight": rank_weight,
                     "rank_margin": rank_margin,
                     "repair_weight": repair_weight,
@@ -1065,6 +1125,13 @@ def train_decoder(
                     "best_min_high_gate_gain": best_min_high_gate_gain,
                     "best_min_high_gate_rank_satisfied_frac": (
                         best_min_high_gate_rank_satisfied_frac
+                    ),
+                    "best_min_high_gate_repair_satisfied_frac": (
+                        best_min_high_gate_repair_satisfied_frac
+                    ),
+                    "best_max_high_gate_harm_p95": best_max_high_gate_harm_p95,
+                    "best_max_low_gate_regression_frac": (
+                        best_max_low_gate_regression_frac
                     ),
                     "eval_every": eval_every,
                 }
@@ -1106,6 +1173,7 @@ def train_decoder(
                         low_gate_threshold=low_gate_threshold,
                         high_gate_threshold=high_gate_threshold,
                         low_gate_safety_margin=low_gate_safety_margin,
+                        low_gate_regression_margin=low_gate_regression_margin,
                         rank_margin=rank_margin,
                         repair_margin=repair_margin,
                     )
@@ -1143,7 +1211,13 @@ def train_decoder(
                                 "val_low_gate_unsafe_frac": float(
                                     validation.low_gate_unsafe_frac
                                 ),
+                                "val_low_gate_regression_frac": float(
+                                    validation.low_gate_regression_frac
+                                ),
                                 "val_high_gate_gain": float(validation.high_gate_gain),
+                                "val_high_gate_harm_p95": float(
+                                    validation.high_gate_harm_p95
+                                ),
                                 "val_high_gate_rank_satisfied_frac": float(
                                     validation.high_gate_rank_satisfied_frac
                                 ),
@@ -1503,6 +1577,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--aux-decode-solver", choices=("euler", "fireflow"), default="fireflow")
     parser.add_argument("--low-gate-safety-weight", type=float, default=0.5)
     parser.add_argument("--low-gate-safety-margin", type=float, default=0.03)
+    parser.add_argument("--low-gate-regression-margin", type=float, default=0.005)
     parser.add_argument("--rank-weight", type=float, default=2.0)
     parser.add_argument("--rank-margin", type=float, default=0.0)
     parser.add_argument("--repair-weight", type=float, default=2.0)
@@ -1515,6 +1590,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--best-min-high-gate-gain", type=float, default=0.0)
     parser.add_argument(
         "--best-min-high-gate-rank-satisfied-frac", type=float, default=0.8
+    )
+    parser.add_argument(
+        "--best-min-high-gate-repair-satisfied-frac", type=float, default=0.8
+    )
+    parser.add_argument("--best-max-high-gate-harm-p95", type=float, default=0.03)
+    parser.add_argument(
+        "--best-max-low-gate-regression-frac", type=float, default=0.05
     )
 
     parser.add_argument("--model-dim", type=int, default=256)
@@ -1615,6 +1697,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         aux_decode_solver=args.aux_decode_solver,
         low_gate_safety_weight=args.low_gate_safety_weight,
         low_gate_safety_margin=args.low_gate_safety_margin,
+        low_gate_regression_margin=args.low_gate_regression_margin,
         rank_weight=args.rank_weight,
         rank_margin=args.rank_margin,
         repair_weight=args.repair_weight,
@@ -1627,6 +1710,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         best_min_high_gate_gain=args.best_min_high_gate_gain,
         best_min_high_gate_rank_satisfied_frac=(
             args.best_min_high_gate_rank_satisfied_frac
+        ),
+        best_min_high_gate_repair_satisfied_frac=(
+            args.best_min_high_gate_repair_satisfied_frac
+        ),
+        best_max_high_gate_harm_p95=args.best_max_high_gate_harm_p95,
+        best_max_low_gate_regression_frac=(
+            args.best_max_low_gate_regression_frac
         ),
         model_dim=args.model_dim,
         depth=args.depth,

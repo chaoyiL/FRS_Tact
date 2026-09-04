@@ -71,7 +71,7 @@ norm_stats:
 frs_training:
   # 新输出目录避免 resume/评估误读旧语义 checkpoint。
   # 部署一致版本：0:9 由 FRS 修复，dim 9 夹爪始终保留 VLA。
-  output: /workspace/frs_insert_01_pi05_right/run_composite_gated_right_two_face_arm9_01
+  output: /workspace/frs_insert_01_pi05_right/run_composite_gated_right_two_face_arm9_guarded_02
   tactile_window_divisor: 5
   history_stride: 3
   # 单手 composite objective：Gate 先混合 GT/VLA endpoint，再计算一条 FM 路径。
@@ -83,15 +83,19 @@ frs_training:
   aux_decode_solver: fireflow
   low_gate_safety_weight: 0.5
   low_gate_safety_margin: 0.03
+  low_gate_regression_margin: 0.005
   rank_low_gate_threshold: 0.3
   rank_high_gate_threshold: 0.7
   rank_weight: 4.0
   rank_margin: 0.0
   repair_weight: 2.0
   repair_margin: 0.0
-  best_max_low_gate_unsafe_frac: 0.1
+  best_max_low_gate_unsafe_frac: 0.05
   best_min_high_gate_gain: 0.0
   best_min_high_gate_rank_satisfied_frac: 0.8
+  best_min_high_gate_repair_satisfied_frac: 0.8
+  best_max_high_gate_harm_p95: 0.03
+  best_max_low_gate_regression_frac: 0.05
   model_dim: 256
   depth: 6
   num_heads: 4
@@ -104,7 +108,9 @@ frs_training:
   min_lr_ratio: 0.1
   lr_schedule: cosine
   batch_size: 128
-  epochs: 100
+  # First guarded rerun: enough to compare epochs 5/10/15/20/25/30 without
+  # spending another full 100-epoch run on a checkpoint that misses hard gates.
+  epochs: 30
   validation_steps: 10
   eval_every: 5
   seed: 42
