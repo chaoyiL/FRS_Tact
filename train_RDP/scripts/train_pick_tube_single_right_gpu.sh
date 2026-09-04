@@ -2,7 +2,8 @@
 set -euo pipefail
 
 # Single-right-arm pick-tube PCA30 training entry point for an RTX PRO 6000.
-# AT is trained first; LDP only consumes an explicitly qualified AT release.
+# AT is trained first; LDP prefers the qualified AT release and falls back to
+# the latest training checkpoint so an all-stage run can continue.
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RDP_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
@@ -36,6 +37,8 @@ BASELINE_JSON=${BASELINE_JSON:-}
 
 AT_DIR=${AT_DIR:-${OUTPUT_ROOT}/at_${RUN_ID}}
 LDP_DIR=${LDP_DIR:-${OUTPUT_ROOT}/ldp_${RUN_ID}}
+AT_DEPLOYABLE_CKPT=${AT_DIR}/checkpoints/deployable.ckpt
+AT_LATEST_CKPT=${AT_DIR}/checkpoints/latest.ckpt
 
 usage() {
   cat <<'USAGE'
@@ -51,7 +54,7 @@ Examples:
     bash scripts/train_pick_tube_single_right_gpu.sh all
 
   # Train only LDP from an existing AT checkpoint
-  AT_CKPT=/absolute/path/to/at/checkpoints/deployable.ckpt \
+  AT_CKPT=/absolute/path/to/at/checkpoints/latest.ckpt \
     RUN_ID=single_right_pca30_v2 \
     bash scripts/train_pick_tube_single_right_gpu.sh ldp
 
@@ -80,6 +83,69 @@ run() {
   if [[ "${DRY_RUN}" != "1" ]]; then
     "$@"
   fi
+}
+
+verify_ldp_image_augmentation() {
+  env "RDP_DIR=${RDP_DIR}" "${PYTHON_BIN}" - <<'PY'
+import os
+from pathlib import Path
+
+from hydra import compose, initialize_config_dir
+from omegaconf import OmegaConf
+
+from reactive_diffusion_policy.model.vision.multi_image_obs_encoder import (
+    BreadPhotometricAugmentation,
+    build_photometric_augmentation,
+)
+
+config_dir = Path(os.environ["RDP_DIR"]) / "reactive_diffusion_policy" / "config"
+with initialize_config_dir(version_base=None, config_dir=str(config_dir)):
+    cfg = compose(config_name="train_pick_tube_single_right_ldp_workspace")
+
+spec = OmegaConf.to_container(
+    cfg.policy.obs_encoder.photometric_augmentation,
+    resolve=True,
+)
+expected = {
+    "type": "Bread",
+    "identity_probability": 0.25,
+    "brightness_range": [0.8, 1.2],
+    "contrast_range": [0.85, 1.30],
+    "saturation_range": [0.80, 1.15],
+    "blur_probability": 0.20,
+    "blur_kernel_sizes": [3, 5],
+    "blur_sigma_range": [0.1, 1.0],
+}
+if spec != expected:
+    raise SystemExit(
+        "LDP image augmentation preflight FAILED: expected Bread config "
+        f"{expected}, got {spec}"
+    )
+
+transforms = OmegaConf.to_container(
+    cfg.policy.obs_encoder.random_transforms,
+    resolve=True,
+)
+if not any(
+    transform.get("type") == "RandomCrop" and float(transform.get("ratio", 0)) == 0.9
+    for transform in transforms
+):
+    raise SystemExit(
+        "LDP image augmentation preflight FAILED: RandomCrop(ratio=0.9) is missing"
+    )
+
+augmentation = build_photometric_augmentation(spec)
+if not isinstance(augmentation, BreadPhotometricAugmentation):
+    raise SystemExit(
+        "LDP image augmentation preflight FAILED: Bread implementation was not built"
+    )
+
+print(
+    "LDP image augmentation preflight OK: "
+    "RandomCrop(0.9) + Bread(identity=0.25, brightness=0.8-1.2, "
+    "contrast=0.85-1.30, saturation=0.80-1.15, blur=0.20)"
+)
+PY
 }
 
 case "${STAGE}" in
@@ -139,6 +205,11 @@ if [[ ! -x "${ACCELERATE_BIN}" ]]; then
   echo "Run: bash scripts/install_pick_tube_training_env.sh" >&2
   exit 1
 fi
+
+if [[ "${STAGE}" != "at" && "${DRY_RUN}" != "1" ]]; then
+  verify_ldp_image_augmentation
+fi
+
 if [[ ! -d "${DATASET_PATH}/replay_buffer.zarr" ]]; then
   echo "Dataset not found: ${DATASET_PATH}/replay_buffer.zarr" >&2
   echo "Generate it with scripts/setup_pick_tube_single_right_data.sh convert." >&2
@@ -196,30 +267,32 @@ train_at() {
   )
   run env "CUDA_VISIBLE_DEVICES=${GPU_ID}" "${args[@]}"
 
-  AT_CKPT=${AT_DIR}/checkpoints/deployable.ckpt
-  if [[ "${DRY_RUN}" != "1" ]]; then
-    if [[ ! -f "${AT_CKPT}" ]]; then
-      echo "AT deployable checkpoint was not produced: ${AT_CKPT}; latest is recovery-only and cannot start LDP training." >&2
-      exit 1
-    fi
-  fi
-  echo "AT deployable checkpoint: ${AT_CKPT}"
+  AT_CKPT=
+  resolve_at_checkpoint
+  echo "AT checkpoint for LDP: ${AT_CKPT}"
 }
 
 resolve_at_checkpoint() {
-  AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}
-  if [[ "${AT_CKPT}" != */checkpoints/deployable.ckpt ]]; then
-    echo "AT checkpoint must be checkpoints/deployable.ckpt; latest is recovery-only: ${AT_CKPT}" >&2
+  if [[ -n "${AT_CKPT:-}" ]]; then
+    if [[ "${DRY_RUN}" != "1" && ! -f "${AT_CKPT}" ]]; then
+      echo "AT checkpoint not found: ${AT_CKPT}" >&2
+      exit 1
+    fi
+    return
+  fi
+  if [[ "${DRY_RUN}" == "1" || -f "${AT_DEPLOYABLE_CKPT}" ]]; then
+    AT_CKPT=${AT_DEPLOYABLE_CKPT}
+  elif [[ -f "${AT_LATEST_CKPT}" ]]; then
+    AT_CKPT=${AT_LATEST_CKPT}
+    echo "warning: AT deployable checkpoint is unavailable; continuing LDP training from ${AT_LATEST_CKPT}" >&2
+  else
+    echo "AT checkpoint not found; checked ${AT_DEPLOYABLE_CKPT} and ${AT_LATEST_CKPT}" >&2
     exit 1
   fi
 }
 
 train_ldp() {
   resolve_at_checkpoint
-  if [[ "${DRY_RUN}" != "1" && ! -f "${AT_CKPT}" ]]; then
-    echo "AT deployable checkpoint not found: ${AT_CKPT}; latest is recovery-only and cannot start LDP training." >&2
-    exit 1
-  fi
 
   local args=(
     "${ACCELERATE_BIN}" launch

@@ -749,20 +749,42 @@ def test_pick_tube_launchers_allow_missing_baseline():
         assert "checkpoints will remain non-deployable" in script
 
 
-def test_single_right_launcher_requires_deployable_at_and_ldp_checkpoints():
+def test_single_right_launcher_falls_back_to_latest_at_checkpoint_for_ldp():
     script = (
         Path(__file__).resolve().parents[1]
         / "scripts"
         / "train_pick_tube_single_right_gpu.sh"
     ).read_text(encoding="utf-8")
 
-    assert "AT_CKPT=${AT_CKPT:-${AT_DIR}/checkpoints/deployable.ckpt}" in script
-    assert "${AT_DIR}/checkpoints/latest.ckpt" not in script
-    assert "latest is recovery-only" in script
-    assert "AT deployable checkpoint not found" in script
+    assert "AT_DEPLOYABLE_CKPT=${AT_DIR}/checkpoints/deployable.ckpt" in script
+    assert "AT_LATEST_CKPT=${AT_DIR}/checkpoints/latest.ckpt" in script
+    assert 'elif [[ -f "${AT_LATEST_CKPT}" ]]' in script
+    assert "AT_CKPT=${AT_LATEST_CKPT}" in script
+    assert "AT checkpoint must be checkpoints/deployable.ckpt" not in script
+    assert "AT checkpoint not found" in script
     assert "${LDP_DIR}/checkpoints/deployable.ckpt" in script
     assert "AT/LDP will auto-calibrate on the first valid deployment validation" in script
     assert "checkpoints will remain non-deployable" not in script
+
+
+def test_single_right_launcher_verifies_bread_augmentation_before_ldp_training():
+    script = (
+        Path(__file__).resolve().parents[1]
+        / "scripts"
+        / "train_pick_tube_single_right_gpu.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "verify_ldp_image_augmentation" in script
+    assert "BreadPhotometricAugmentation" in script
+    assert "train_pick_tube_single_right_ldp_workspace" in script
+    assert "identity_probability" in script
+    assert "brightness_range" in script
+    assert "contrast_range" in script
+    assert "saturation_range" in script
+    assert "blur_probability" in script
+    assert "RandomCrop" in script
+    assert "LDP image augmentation preflight OK" in script
+    assert script.index("verify_ldp_image_augmentation") < script.index("train_ldp()")
 
 
 def test_generic_launcher_requires_deployable_at_and_ldp_checkpoints():
