@@ -41,6 +41,25 @@ bash scripts/download_data.sh \
   --dataset pick_tube_06
 ```
 
+The dual-arm `train_smolvla.yaml` path is pure vision. Prepare its four sources
+with the visual-only switch so converted v3 parquet files retain only camera0,
+camera1, and the non-visual state/action/index fields:
+
+```bash
+bash scripts/download_data.sh \
+  --smolvla-visual-only \
+  --dataset two_tubes_01 \
+  --dataset two_tubes_02 \
+  --dataset two_tubes_03 \
+  --dataset two_tubes_04
+```
+
+The projection is applied while v2.1 data is written as v3.0, so tactile image
+columns do not enter the persistent converted copy. If a full v3.0 directory
+already exists, the same command projects one parquet at a time and atomically
+replaces it; metadata is changed only after every parquet succeeds. Do not use
+this switch for a local dataset copy that must later feed tactile/FRS training.
+
 Then list the matching local sources:
 
 ```yaml

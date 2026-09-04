@@ -36,6 +36,7 @@ require_package("jsonlines", extra="dataset")
 import jsonlines
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import tqdm
 from datasets import Dataset, Features, Image
 from huggingface_hub import HfApi, snapshot_download
@@ -71,6 +72,49 @@ V21 = "v2.1"
 V30 = "v3.0"
 LEGACY_ACTION_KEY = "actions"
 CANONICAL_ACTION_KEY = "action"
+
+
+def select_visual_mapping(
+    mapping: dict[str, Any],
+    *,
+    all_visual_keys: set[str],
+    keep_visual_keys: set[str] | None,
+) -> dict[str, Any]:
+    """Drop unselected image/video entries while preserving non-visual fields."""
+    if keep_visual_keys is None:
+        return mapping
+    return {
+        key: value
+        for key, value in mapping.items()
+        if key not in all_visual_keys or key in keep_visual_keys
+    }
+
+
+def resolve_visual_selection(
+    root: Path,
+    keep_visual_keys: list[str] | None,
+) -> tuple[set[str], set[str] | None]:
+    """Validate an optional visual-only conversion contract."""
+    info = load_info(root)
+    all_visual_keys = {
+        key
+        for key, feature in info.features.items()
+        if feature.get("dtype") in {"image", "video"}
+    }
+    if keep_visual_keys is None:
+        return all_visual_keys, None
+    requested = set(keep_visual_keys)
+    if len(requested) != len(keep_visual_keys):
+        raise ValueError(f"Duplicate --keep-visual-key values: {keep_visual_keys}")
+    missing = requested - all_visual_keys
+    if missing:
+        raise ValueError(
+            f"Requested visual keys are absent from the dataset: {sorted(missing)}; "
+            f"available={sorted(all_visual_keys)}"
+        )
+    if not requested:
+        raise ValueError("At least one --keep-visual-key value is required")
+    return all_visual_keys, requested
 
 
 def canonicalize_action_mapping(mapping: dict[str, Any], *, source: str) -> dict[str, Any]:
@@ -111,12 +155,21 @@ def legacy_load_episodes(local_dir: Path) -> dict:
     return {item["episode_index"]: item for item in sorted(episodes, key=lambda x: x["episode_index"])}
 
 
-def legacy_load_episodes_stats(local_dir: Path) -> dict:
+def legacy_load_episodes_stats(
+    local_dir: Path,
+    all_visual_keys: set[str] | None = None,
+    keep_visual_keys: set[str] | None = None,
+) -> dict:
     episodes_stats = load_jsonlines(local_dir / LEGACY_EPISODES_STATS_PATH)
+    all_visual_keys = all_visual_keys or set()
     return {
-        item["episode_index"]: canonicalize_action_mapping(
-            cast_stats_to_numpy(item["stats"]),
-            source=f"{LEGACY_EPISODES_STATS_PATH} episode {item['episode_index']}",
+        item["episode_index"]: select_visual_mapping(
+            canonicalize_action_mapping(
+                cast_stats_to_numpy(item["stats"]),
+                source=f"{LEGACY_EPISODES_STATS_PATH} episode {item['episode_index']}",
+            ),
+            all_visual_keys=all_visual_keys,
+            keep_visual_keys=keep_visual_keys,
         )
         for item in sorted(episodes_stats, key=lambda x: x["episode_index"])
     }
@@ -157,9 +210,19 @@ def concat_data_files(
     chunk_idx: int,
     file_idx: int,
     image_keys: list[str],
+    dropped_visual_keys: set[str] | None = None,
 ) -> None:
+    dropped_visual_keys = dropped_visual_keys or set()
     dataframes = [
-        canonicalize_action_dataframe(pd.read_parquet(file), source=str(file))
+        canonicalize_action_dataframe(
+            pd.read_parquet(
+                file,
+                columns=[
+                    key for key in pq.read_schema(file).names if key not in dropped_visual_keys
+                ],
+            ),
+            source=str(file),
+        )
         for file in paths_to_cat
     ]
     concatenated_df = pd.concat(dataframes, ignore_index=True)
@@ -179,9 +242,23 @@ def concat_data_files(
     concatenated_df.to_parquet(path, index=False, schema=schema)
 
 
-def convert_data(root: Path, new_root: Path, data_file_size_in_mb: int) -> list[dict]:
+def convert_data(
+    root: Path,
+    new_root: Path,
+    data_file_size_in_mb: int,
+    all_visual_keys: set[str] | None = None,
+    keep_visual_keys: set[str] | None = None,
+) -> list[dict]:
     ep_paths = sorted((root / "data").glob("*/*.parquet"))
-    image_keys = get_image_keys(root)
+    all_visual_keys = all_visual_keys or set()
+    image_keys = [
+        key
+        for key in get_image_keys(root)
+        if keep_visual_keys is None or key in keep_visual_keys
+    ]
+    dropped_visual_keys = (
+        set() if keep_visual_keys is None else all_visual_keys - keep_visual_keys
+    )
 
     chunk_idx = 0
     file_idx = 0
@@ -197,7 +274,14 @@ def convert_data(root: Path, new_root: Path, data_file_size_in_mb: int) -> list[
         ep_num_frames = get_parquet_num_frames(ep_path)
 
         if size_in_mb + ep_size_in_mb >= data_file_size_in_mb and paths_to_cat:
-            concat_data_files(paths_to_cat, new_root, chunk_idx, file_idx, image_keys)
+            concat_data_files(
+                paths_to_cat,
+                new_root,
+                chunk_idx,
+                file_idx,
+                image_keys,
+                dropped_visual_keys,
+            )
             chunk_idx, file_idx = update_chunk_file_indices(chunk_idx, file_idx, DEFAULT_CHUNK_SIZE)
             size_in_mb = 0
             paths_to_cat = []
@@ -216,7 +300,14 @@ def convert_data(root: Path, new_root: Path, data_file_size_in_mb: int) -> list[
         paths_to_cat.append(ep_path)
 
     if paths_to_cat:
-        concat_data_files(paths_to_cat, new_root, chunk_idx, file_idx, image_keys)
+        concat_data_files(
+            paths_to_cat,
+            new_root,
+            chunk_idx,
+            file_idx,
+            image_keys,
+            dropped_visual_keys,
+        )
 
     return episodes_metadata
 
@@ -231,10 +322,19 @@ def get_image_keys(root: Path) -> list[str]:
     return [key for key, feature in info.features.items() if feature["dtype"] == "image"]
 
 
-def convert_videos(root: Path, new_root: Path, video_file_size_in_mb: int) -> list[dict] | None:
+def convert_videos(
+    root: Path,
+    new_root: Path,
+    video_file_size_in_mb: int,
+    keep_visual_keys: set[str] | None = None,
+) -> list[dict] | None:
     logging.info("Converting videos from %s to %s", root, new_root)
 
-    video_keys = sorted(get_video_keys(root))
+    video_keys = sorted(
+        key
+        for key in get_video_keys(root)
+        if keep_visual_keys is None or key in keep_visual_keys
+    )
     if not video_keys:
         return None
 
@@ -382,11 +482,17 @@ def convert_episodes_metadata(
     new_root: Path,
     episodes_metadata: list[dict],
     episodes_video_metadata: list[dict] | None = None,
+    all_visual_keys: set[str] | None = None,
+    keep_visual_keys: set[str] | None = None,
 ) -> None:
     logging.info("Converting episodes metadata from %s to %s", root, new_root)
 
     episodes_legacy_metadata = legacy_load_episodes(root)
-    episodes_stats = legacy_load_episodes_stats(root)
+    episodes_stats = legacy_load_episodes_stats(
+        root,
+        all_visual_keys=all_visual_keys,
+        keep_visual_keys=keep_visual_keys,
+    )
 
     num_eps_set = {len(episodes_legacy_metadata), len(episodes_metadata)}
     if episodes_video_metadata is not None:
@@ -412,6 +518,8 @@ def convert_info(
     new_root: Path,
     data_file_size_in_mb: int,
     video_file_size_in_mb: int,
+    all_visual_keys: set[str] | None = None,
+    keep_visual_keys: set[str] | None = None,
 ) -> None:
     info = load_info(root)
     # load_info() already ignores legacy-only fields such as total_chunks and
@@ -422,7 +530,13 @@ def convert_info(
     info.data_path = DEFAULT_DATA_PATH
     info.video_path = DEFAULT_VIDEO_PATH if info.video_path is not None else None
     info.fps = int(info.fps)
-    info.features = canonicalize_action_mapping(info.features, source=str(root / "meta/info.json"))
+    info.features = select_visual_mapping(
+        canonicalize_action_mapping(info.features, source=str(root / "meta/info.json")),
+        all_visual_keys=all_visual_keys or set(),
+        keep_visual_keys=keep_visual_keys,
+    )
+    if not any(feature["dtype"] == "video" for feature in info.features.values()):
+        info.video_path = None
 
     logging.info("Converting info from %s to %s", root, new_root)
     for feature in info.features.values():
@@ -439,11 +553,12 @@ def convert_dataset(
     root: str | Path | None = None,
     push_to_hub: bool = True,
     force_conversion: bool = False,
+    keep_visual_keys: list[str] | None = None,
 ) -> None:
     data_file_size_in_mb = data_file_size_in_mb or DEFAULT_DATA_FILE_SIZE_IN_MB
     video_file_size_in_mb = video_file_size_in_mb or DEFAULT_VIDEO_FILE_SIZE_IN_MB
 
-    if root is None and not force_conversion:
+    if root is None and not force_conversion and keep_visual_keys is None:
         try:
             print("Trying to download v3.0 version of the dataset from the hub...")
             snapshot_download(
@@ -476,11 +591,38 @@ def convert_dataset(
     if not use_local_dataset:
         snapshot_download(repo_id, repo_type="dataset", revision=V21, local_dir=root)
 
-    convert_info(root, new_root, data_file_size_in_mb, video_file_size_in_mb)
+    all_visual_keys, selected_visual_keys = resolve_visual_selection(root, keep_visual_keys)
+
+    convert_info(
+        root,
+        new_root,
+        data_file_size_in_mb,
+        video_file_size_in_mb,
+        all_visual_keys,
+        selected_visual_keys,
+    )
     convert_tasks(root, new_root)
-    episodes_metadata = convert_data(root, new_root, data_file_size_in_mb)
-    episodes_videos_metadata = convert_videos(root, new_root, video_file_size_in_mb)
-    convert_episodes_metadata(root, new_root, episodes_metadata, episodes_videos_metadata)
+    episodes_metadata = convert_data(
+        root,
+        new_root,
+        data_file_size_in_mb,
+        all_visual_keys,
+        selected_visual_keys,
+    )
+    episodes_videos_metadata = convert_videos(
+        root,
+        new_root,
+        video_file_size_in_mb,
+        selected_visual_keys,
+    )
+    convert_episodes_metadata(
+        root,
+        new_root,
+        episodes_metadata,
+        episodes_videos_metadata,
+        all_visual_keys,
+        selected_visual_keys,
+    )
 
     shutil.move(root, old_root)
     shutil.move(new_root, root)
@@ -532,6 +674,16 @@ def main() -> None:
         default=True,
     )
     parser.add_argument("--force-conversion", action="store_true")
+    parser.add_argument(
+        "--keep-visual-key",
+        dest="keep_visual_keys",
+        action="append",
+        default=None,
+        help=(
+            "Keep only this image/video feature during conversion. Repeat the option "
+            "for multiple cameras. Non-visual columns are always preserved."
+        ),
+    )
     args = parser.parse_args()
     convert_dataset(**vars(args))
 

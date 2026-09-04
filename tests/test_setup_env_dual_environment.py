@@ -113,6 +113,10 @@ def test_download_data_falls_back_to_the_smolvla_training_environment() -> None:
     assert '"${SMOLVLA_TORCH_PYTHON:-}"' in source
     assert "DATA_TOOL_PYTHON 不可执行，尝试其他 Python 3.12 环境" in source
     assert "--insert_01" in source
+    assert "--smolvla-visual-only" in source
+    assert "project_lerobot_v30_visual.py" in source
+    assert "--keep-visual-key=observation.images.camera0" in source
+    assert "--keep-visual-key=observation.images.camera1" in source
     assert "--pi05_frs_train" in source
 
 

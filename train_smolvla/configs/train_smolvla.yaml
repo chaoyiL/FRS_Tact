@@ -5,7 +5,7 @@ dataset:
   expected_fps: 30
   state_dim: 20
   action_dim: 20
-  # Raw dataset camera keys. Extra tactile image streams are intentionally ignored.
+  # Visual-only v3 datasets contain exactly these two RGB streams.
   image_keys:
     - observation.images.camera0
     - observation.images.camera1
@@ -45,6 +45,7 @@ dataset:
 # Sources are split into train/eval episodes independently, then concatenated.
 # With no explicit weights, frame sampling is proportional to source size.
 datasets:
+  # Prepare these roots with scripts/download_data.sh --smolvla-visual-only.
   - repo_id: KaiyueChen/two_tubes_01
     root: /workspace/lerobot_v30/KaiyueChen/two_tubes_01
 

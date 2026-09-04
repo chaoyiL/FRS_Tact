@@ -77,6 +77,7 @@ mkdir -p "${HF_HUB_CACHE}" "${HF_DATASETS_CACHE}" "${HF_LEROBOT_HOME}" "${TMPDIR
 # 原始 Hugging Face snapshot、转换工作目录和最终 v3.0 数据都放在 workspace。
 HF_DATASET_CACHE_DIR="${HF_DATASET_CACHE_DIR:-${WORKSPACE_ROOT}/huggingface/datasets}"
 REQUESTED_DATASETS=()
+SMOLVLA_VISUAL_ONLY=0
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     while (( $# > 0 )); do
         case "$1" in
@@ -89,6 +90,10 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
                 REQUESTED_DATASETS+=("insert_01")
                 shift
                 ;;
+            --smolvla-visual-only)
+                SMOLVLA_VISUAL_ONLY=1
+                shift
+                ;;
             --cache-dir)
                 [[ $# -ge 2 ]] || { echo "--cache-dir requires a path" >&2; exit 2; }
                 HF_DATASET_CACHE_DIR="$2"
@@ -96,10 +101,11 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
                 ;;
             -h|--help)
                 cat <<'EOF'
-Usage: bash scripts/download_data.sh [--dataset NAME | --insert_01]... [--cache-dir PATH]
+Usage: bash scripts/download_data.sh [--dataset NAME | --insert_01]... [--smolvla-visual-only] [--cache-dir PATH]
 
 Without --dataset, downloads the datasets enabled in the DATASETS list.
 --insert_01 is a shortcut for --dataset insert_01.
+--smolvla-visual-only keeps only camera0 and camera1 plus non-visual fields.
 This is the only supported training-dataset download and v2.1 -> v3.0 path.
 EOF
                 exit 0
@@ -287,6 +293,18 @@ verify_v30_action_key() {
     log "验证 v3.0 动作字段已在转换时写为 action: ${dataset_dir}"
     "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/canonicalize_lerobot_action_key.py" \
         --check "${dataset_dir}" >&2
+}
+
+project_smolvla_visual_only() {
+    local dataset_dir="$1"
+    if (( SMOLVLA_VISUAL_ONLY == 0 )); then
+        return 0
+    fi
+    log "Projecting SmolVLA visual-only data (camera0 + camera1): ${dataset_dir}"
+    "${DATA_PYTHON}" "${PROJECT_ROOT}/tools/project_lerobot_v30_visual.py" \
+        "${dataset_dir}" \
+        --keep-visual-key observation.images.camera0 \
+        --keep-visual-key observation.images.camera1 >&2
 }
 
 get_hf_repo_cache_dir() {
@@ -559,6 +577,14 @@ upgrade_dataset_to_v30() {
     local leftover_v30
     local version=""
     local avail_kb=""
+    local -a converter_visual_args=()
+
+    if (( SMOLVLA_VISUAL_ONLY == 1 )); then
+        converter_visual_args=(
+            --keep-visual-key=observation.images.camera0
+            --keep-visual-key=observation.images.camera1
+        )
+    fi
 
     final_dir="$(get_v30_dataset_dir "$dataset_name")"
     work_dir="$(get_v30_work_dataset_dir "$dataset_name")"
@@ -570,6 +596,7 @@ upgrade_dataset_to_v30() {
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
             canonicalize_v30_action_key "$final_dir"
+            project_smolvla_visual_only "$final_dir"
             log "本地已存在 v3.0 数据集，跳过升级: ${final_dir}"
             cleanup_local_convert_work "$dataset_name"
             UPGRADED_DATASET_DIR="$final_dir"
@@ -581,6 +608,7 @@ upgrade_dataset_to_v30() {
     if [[ "$version" == "v3.0" ]]; then
         log "下载产物已是 v3.0，直接作为升级结果: ${snapshot_dir}"
         verify_v30_action_key "$snapshot_dir"
+        project_smolvla_visual_only "$snapshot_dir"
         rm -rf "$old_backup" "$leftover_v30" "$work_dir"
         UPGRADED_DATASET_DIR="$snapshot_dir"
         return 0
@@ -616,6 +644,7 @@ upgrade_dataset_to_v30() {
         --repo-id="$repo_id" \
         --root="$work_dir" \
         --push-to-hub=false \
+        "${converter_visual_args[@]}" \
         --force-conversion >&2
     then
         log "错误: v2.1 → v3.0 转换失败（数据集仍是原来的 v2.1，并未升级成功）"
@@ -669,6 +698,7 @@ download_dataset() {
         version="$(get_dataset_version "$final_dir")"
         if [[ "$version" == "v3.0" ]]; then
             canonicalize_v30_action_key "$final_dir"
+            project_smolvla_visual_only "$final_dir"
             log "最终目录已是 v3.0，跳过下载与转换: ${final_dir}"
             create_lerobot_symlink "$dataset_name" "$final_dir"
             return 0
@@ -695,6 +725,7 @@ download_dataset() {
         log "错误: 升级后未得到有效目录"
         return 1
     fi
+    project_smolvla_visual_only "$upgraded_dir"
     create_lerobot_symlink "$dataset_name" "$upgraded_dir"
     log "完成下载与升级 ${repo_id}"
 }
@@ -720,6 +751,11 @@ main() {
     log "v3.0 转换工作目录: ${V30_CONVERT_WORK_ROOT}"
     log "数据集数量: ${#DATASETS[@]}"
     log "============================================"
+    if (( SMOLVLA_VISUAL_ONLY == 1 )); then
+        log "SmolVLA visual-only projection: enabled (camera0 + camera1)"
+    else
+        log "SmolVLA visual-only projection: disabled"
+    fi
 
     for dataset_name in "${DATASETS[@]}"; do
         download_dataset "$dataset_name"
