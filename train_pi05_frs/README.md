@@ -74,6 +74,35 @@ With `write_plots: true`, every validation event refreshes `training_curves.png`
 `eval_every: 5`, so these files first appear after epoch 5 and are then overwritten at epochs
 10, 15, and so on with the latest validation result.
 
+### Task4 press, right-hand v3 training
+
+`configs/train_pi05_frs_right_press_v3.yaml` copies the insert v3 training hyperparameters
+and uses `KaiyueChen/press_01` with `KaiyueChen/pi05_task4_0830_6k`. It keeps the frozen
+right-hand two-face tactile encoder and the `learned_residual_gated` objective, with separate
+press action-cache, tactile-cache, and training-output directories. It starts a new FRS run
+with `resume: false` and `resume_from: null`.
+
+The configured norm asset is `press_0102`, matching the repository's task4 plain-vision
+deployment configuration. Confirm that the downloaded checkpoint contains
+`assets/press_0102/norm_stats.json`; use the checkpoint's original statistics even though
+this FRS run uses only `press_01`. The dataset root must contain the complete LeRobot v3
+dataset, including both right-hand tactile video streams.
+
+```bash
+cd /workspace/FRS_Tact
+
+# Prepare missing inputs; the dataset command also performs supported v2.1 -> v3.0 conversion.
+FRS_CHECKPOINT_ROOT=/workspace/FRS_Tact/checkpoints \
+  bash scripts/download_ckpt.sh KaiyueChen/pi05_task4_0830_6k
+bash scripts/download_data.sh --dataset press_01
+
+bash train_pi05_frs/scripts/start_frs_pi05_right_press_v3_train.sh --check
+bash train_pi05_frs/scripts/start_frs_pi05_right_press_v3_train.sh
+```
+
+The shortcut defaults to tmux session `frs_pi05_press_v3_train` and runs the same ordered
+pipeline: checkpoint smoke, tactile embeddings, Pi0.5 action cache, then FRS training.
+
 ### Physical bimanual training
 
 `configs/train_pi05_frs_bimanual_gated.yaml` is the independent configuration for the fixed
