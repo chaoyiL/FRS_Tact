@@ -44,7 +44,11 @@ tail -f /DATA/ljl/substage/rdp_original/logs/original_rdp_v1.log
 tail -f /DATA/ljl/substage/rdp_original/outputs/insert/original_rdp_v1/pipeline.log
 ```
 
-总日志显示任务开始、结束和失败；每个任务的 `pipeline.log` 包含准备进度、训练进度和错误，`pipeline.json` 保存本次实际命令。单独运行或续训：
+总日志实时汇总两张 GPU 的输出，带时间、GPU、任务名和阶段前缀，例如 `[21:10:00][GPU 0][insert][AT 4/5]`。它显示训练参数、数据集列表、各阶段开始/完成/耗时、原始数据准备进度、训练 loss 与进度条、错误信息。每个任务的 `pipeline.log` 同时保留该任务的输出，`pipeline.json` 保存实际命令。
+
+子进程无输出时，每隔 30 秒报告当前阶段的 `RUNNING` 和已用时间；这表示进程尚未退出，不代表已经完成新的训练步骤。可通过 `LOG_HEARTBEAT_SECONDS` 调整间隔。
+
+已经运行的旧进程不会因 `git pull` 自动改变日志方式。当前任务可以直接用 `tail -F` 同时跟踪 insert/press 的 `pipeline.log`；新启动的队列使用上述汇总日志。单独运行或续训：
 
 ```bash
 # 只准备全部数据，仍然每 GPU 一路。

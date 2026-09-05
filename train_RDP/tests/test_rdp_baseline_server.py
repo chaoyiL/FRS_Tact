@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import io
 
 import pytest
 
@@ -70,3 +71,29 @@ def test_failed_task_stops_its_queue_while_other_gpu_finishes(tmp_path, monkeypa
     assert not (tmp_path / 'two_tubes').exists()
     assert (tmp_path / 'press').read_text() == '1'
     assert (tmp_path / 'bread').read_text() == '1'
+
+
+def test_live_output_copies_progress_stderr_and_reports_silent_process():
+    from rdp_baseline.server import stream_process
+    program = ('import sys,time; '
+               'print("encoder ready", flush=True); '
+               'sys.stderr.write("progress 25%\\rprogress 50%\\r"); sys.stderr.flush(); '
+               'time.sleep(0.15); print("finished", flush=True)')
+    events = []
+    log = io.StringIO()
+    with subprocess.Popen([sys.executable, '-u', '-c', program], stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, text=True, bufsize=1) as process:
+        assert stream_process(process, log, '[GPU 0][insert][tactile]',
+                              events.append, heartbeat_seconds=.04) == 0
+    merged = '\n'.join(events)
+    for value in ['encoder ready', 'progress 25%', 'progress 50%', 'finished']:
+        assert value in merged and value in log.getvalue()
+    assert 'RUNNING' in merged
+    assert all('[GPU 0][insert][tactile]' in event for event in events)
+
+
+def test_at_and_ldp_have_separate_progress_stages(tmp_path):
+    from rdp_baseline.server import commands, command_stage
+    plan = commands('train', 'insert', '0', {'WORK_ROOT':str(tmp_path)}, 'test')
+    assert [command_stage(item) for item in plan] == ['AT', 'LDP']
+    assert all(item[1]['PYTHONUNBUFFERED'] == '1' for item in plan)

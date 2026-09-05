@@ -5,10 +5,13 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import queue
+import re
 import shlex
 import signal
 import subprocess
 import threading
+import time
 
 RDP_DIR = Path(__file__).resolve().parents[1]
 DATASETS = {
@@ -38,6 +41,7 @@ def commands(stage, task, gpu, environ, run_id):
     workers = environ.get('NUM_WORKERS', '32')
     environment = {
         'CUDA_VISIBLE_DEVICES': gpu,
+        'PYTHONUNBUFFERED': '1',
         'OMP_NUM_THREADS': environ.get('OMP_NUM_THREADS', '4'),
         'MKL_NUM_THREADS': environ.get('MKL_NUM_THREADS', '4'),
     }
@@ -70,12 +74,12 @@ def commands(stage, task, gpu, environ, run_id):
                    AT_EPOCHS=environ.get('AT_EPOCHS', '601'), LDP_EPOCHS=environ.get('LDP_EPOCHS', '401'),
                    WANDB_MODE=environ.get('WANDB_MODE', 'offline'),
                    AT_CKPT=str(work / 'outputs' / task / run_id / 'at/checkpoints/latest.ckpt'))
-        cmd = ['bash', str(RDP_DIR / 'scripts/train_rdp_baseline.sh'),
-               'all' if stage in ('all', 'train') else stage,
-               'task=single_right' if arms == 'right' else 'task=dual_arm', f'task.name={task}',
-               f'training.resume={environ.get("RESUME", "false")}',
-               f'training.checkpoint_every={environ.get("CHECKPOINT_EVERY", "10")}']
-        result.append((cmd, env, []))
+        for training_stage in (('at', 'ldp') if stage in ('all', 'train') else (stage,)):
+            cmd = ['bash', str(RDP_DIR / 'scripts/train_rdp_baseline.sh'), training_stage,
+                   'task=single_right' if arms == 'right' else 'task=dual_arm', f'task.name={task}',
+                   f'training.resume={environ.get("RESUME", "false")}',
+                   f'training.checkpoint_every={environ.get("CHECKPOINT_EVERY", "10")}']
+            result.append((cmd, env, []))
     return result
 
 
@@ -83,6 +87,56 @@ def format_command(command):
     argv, env, unset = command
     return shlex.join(['env', *[v for key in unset for v in ('-u', key)],
                        *[f'{key}={value}' for key, value in env.items()], *argv])
+
+
+def command_stage(command):
+    argv = command[0]
+    for argument in argv:
+        name = Path(argument).name
+        if name == 'precompute_pick_tube_v21_tactile_embeddings.py':
+            return 'tactile'
+        if name == 'fit_pick_tube_tactile_pca.py':
+            return 'PCA'
+        if name == 'prepare_baseline_data.py':
+            return 'convert'
+        if name == 'train_rdp_baseline.sh':
+            return argv[argv.index(argument) + 1].upper()
+    return 'process'
+
+
+def stream_process(process, log, prefix, emit, heartbeat_seconds=30):
+    """Tee stdout/stderr, including CR progress bars, while reporting silence."""
+    lines = queue.Queue(maxsize=256)
+    started = time.monotonic()
+
+    def reader():
+        try:
+            # Popen text mode translates tqdm's carriage returns to newlines.
+            for line in process.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)
+
+    thread = threading.Thread(target=reader, daemon=True)
+    thread.start()
+    while True:
+        try:
+            line = lines.get(timeout=heartbeat_seconds)
+        except queue.Empty:
+            message = f'RUNNING elapsed={time.monotonic()-started:.0f}s; waiting for subprocess output'
+        else:
+            if line is None:
+                break
+            message = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', line).strip()
+            if not message:
+                continue
+        formatted = f'[{datetime.now():%H:%M:%S}]{prefix} {message}'
+        log.write(formatted + '\n')
+        log.flush()
+        emit(formatted)
+    thread.join()
+    process.stdout.close()
+    return process.wait()
 
 
 def main():
@@ -98,10 +152,16 @@ def main():
     if not gpus or any(not gpu.isdigit() for gpu in gpus) or len(set(gpus)) != len(gpus):
         parser.error('GPU_IDS must contain distinct comma-separated GPU indices')
     run_id = env.get('RUN_ID', datetime.now().strftime('%Y%m%d_%H%M%S'))
+    heartbeat = float(env.get('LOG_HEARTBEAT_SECONDS', '30'))
+    if heartbeat <= 0:
+        parser.error('LOG_HEARTBEAT_SECONDS must be positive')
     lanes = [(gpu, tasks[index::len(gpus)]) for index, gpu in enumerate(gpus)]
     print(f'RDP baseline run: {run_id}', flush=True)
     for gpu, selected in lanes:
         print(f'GPU {gpu}: {" -> ".join(selected)}', flush=True)
+    print(f'AT: epochs={env.get("AT_EPOCHS", "601")} batch={env.get("AT_BATCH", "64")} FP32; '
+          f'LDP: epochs={env.get("LDP_EPOCHS", "401")} batch={env.get("LDP_BATCH", "64")} '
+          f'precision={env.get("MIXED_PRECISION", "bf16")}; workers={env.get("NUM_WORKERS", "32")}', flush=True)
     if env.get('DRY_RUN') == '1':
         for gpu, selected in lanes:
             for task in selected:
@@ -112,7 +172,12 @@ def main():
     work = Path(env.get('WORK_ROOT', '/DATA/ljl/substage/rdp_original'))
     active = set()
     lock = threading.Lock()
+    console_lock = threading.Lock()
     stop = threading.Event()
+
+    def emit(message):
+        with console_lock:
+            print(message, flush=True)
 
     def run_lane(gpu, selected):
         for task in selected:
@@ -124,9 +189,9 @@ def main():
             (output / 'pipeline.json').write_text(json.dumps({
                 'task': task, 'datasets': DATASETS[task], 'gpu': gpu, 'run_id': run_id,
                 'commands': [format_command(cmd) for cmd in plan]}, indent=2) + '\n')
-            print(f'[{task}] GPU {gpu}; log: {output / "pipeline.log"}', flush=True)
+            emit(f'[{task}] GPU {gpu}; datasets={",".join(DATASETS[task])}; log: {output / "pipeline.log"}')
             with (output / 'pipeline.log').open('a', buffering=1) as log:
-                for cmd in plan:
+                for index, cmd in enumerate(plan, 1):
                     if stop.is_set():
                         return
                     argv, overrides, unset = cmd
@@ -134,18 +199,29 @@ def main():
                     for key in unset:
                         child_env.pop(key, None)
                     log.write(f'\n{datetime.now().isoformat()} {format_command(cmd)}\n')
+                    prefix = f'[GPU {gpu}][{task}][{command_stage(cmd)} {index}/{len(plan)}]'
+                    started = time.monotonic()
+                    message = f'[{datetime.now():%H:%M:%S}]{prefix} START'
+                    log.write(message + '\n')
+                    emit(message)
                     with lock:
                         if stop.is_set():
                             return
                         process = subprocess.Popen(argv, env=child_env, cwd=RDP_DIR,
-                                                   stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+                                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                   text=True, encoding='utf-8', errors='replace', bufsize=1,
+                                                   start_new_session=True)
                         active.add(process)
-                    result = process.wait()
+                    result = stream_process(process, log, prefix, emit, heartbeat)
                     with lock:
                         active.discard(process)
+                    status = 'DONE' if result == 0 else 'FAILED'
+                    message = f'[{datetime.now():%H:%M:%S}]{prefix} {status} elapsed={time.monotonic()-started:.1f}s exit={result}'
+                    log.write(message + '\n')
+                    emit(message)
                     if result:
                         raise RuntimeError(f'{task} failed (exit {result}); see {output / "pipeline.log"}')
-            print(f'[{task}] completed', flush=True)
+            emit(f'[{task}] completed')
 
     pool = ThreadPoolExecutor(max_workers=len(gpus))
     failed = False
