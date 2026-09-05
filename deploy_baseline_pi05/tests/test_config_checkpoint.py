@@ -154,7 +154,7 @@ def test_relative_asset_paths_resolve_once_against_yaml_directory_from_any_cwd(
             captured["policy_source"] = received.source.checkpoint
 
     class Encoder:
-        def __init__(self, checkpoint, *, tactile_keys):
+        def __init__(self, checkpoint, *, tactile_keys, key_map):
             captured["encoder"] = checkpoint
             self.tactile_keys = tactile_keys
 

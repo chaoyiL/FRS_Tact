@@ -8,7 +8,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from train_baseline_pi05.config import DecoderTrainConfig, TACTILE_KEYS
+from train_baseline_pi05.config import DecoderTrainConfig, RIGHT_TACTILE_KEYS, TACTILE_KEYS
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,6 @@ class DirectDecoderConfig:
     def validate(self) -> None:
         expected_integers = {
             "action_horizon": 50,
-            "action_dim": 20,
             "tactile_dim": 512,
             "d_model": 128,
             "nhead": 4,
@@ -57,6 +56,10 @@ class DirectDecoderConfig:
                 raise ValueError(f"{name} must be an integer for the direct decoder contract.")
             if value != required:
                 raise ValueError(f"{name} must be {required!r} for the direct decoder contract.")
+        if isinstance(self.action_dim, bool) or not isinstance(self.action_dim, int):
+            raise ValueError("action_dim must be an integer for the direct decoder contract.")
+        if self.action_dim not in (10, 20):
+            raise ValueError("action_dim must be 10 or 20 for the direct decoder contract.")
         if not isinstance(self.dropout, float):
             raise ValueError("dropout must be a float for the direct decoder contract.")
         if self.dropout != 0.1:
@@ -65,7 +68,7 @@ class DirectDecoderConfig:
             not isinstance(key, str) for key in self.tactile_keys
         ):
             raise ValueError("tactile_keys must be a tuple of strings for the direct decoder contract.")
-        if self.tactile_keys != TACTILE_KEYS:
+        if self.tactile_keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
             raise ValueError("tactile_keys must use canonical order for the direct decoder contract.")
 
     def to_primitive(self) -> dict[str, int | float | list[str]]:

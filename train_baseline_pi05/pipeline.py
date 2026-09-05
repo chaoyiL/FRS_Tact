@@ -84,12 +84,14 @@ def run_pipeline(config_path: str | Path, *, check: bool = False, max_samples: i
     _positive(max_steps, "max_steps")
     config = load_config(path)
     overrides = {"max_samples": max_samples, "max_steps": max_steps}
-    for _name, module, override in _STAGES:
+    for stage_index, (_name, module, override) in enumerate(_STAGES, start=1):
         command = [sys.executable, "-m", module, "--config", str(config.config_path)]
         value = overrides[override]
         if value is not None:
             command.extend(["--" + override.replace("_", "-"), str(value)])
+        print(f"[Pipeline {stage_index}/{len(_STAGES)}] Starting {_name}", flush=True)
         subprocess.run(command, check=True)
+        print(f"[Pipeline {stage_index}/{len(_STAGES)}] Finished {_name}", flush=True)
     _write_run_metadata(config, {
         "config": str(config.config_path),
         "max_samples": max_samples,

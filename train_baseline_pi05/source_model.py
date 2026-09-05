@@ -19,11 +19,34 @@ def fixed_noise(batch_size: int, *, seed: int, horizon: int, action_dim: int):
     return jnp.broadcast_to(one, (batch_size, horizon, action_dim))
 
 
-def sample_coarse_actions(model: Any, rng: Any, observation: Any, noise: Any, num_steps: int) -> np.ndarray:
+def make_frozen_sampler(model: Any) -> Callable[..., Any]:
+    """Build one reusable whole-policy JIT for the frozen cache producer."""
+    sampler = getattr(model, "sample_actions", None)
+    if not callable(sampler):
+        raise TypeError("Pi0.5 model must provide sample_actions")
+    import flax.nnx as nnx
+
+    if isinstance(model, nnx.Module):
+        from .runtime_path import activate_vendored_lerobot
+
+        activate_vendored_lerobot()
+        from lerobot.policies.pi05_jax.nnx_utils import module_jit
+
+        # Capture graph/state once. The native method creates its while-loop
+        # functions on every call, so invoking it eagerly repeatedly recompiles
+        # the loop and dispatches the large prefix network one operation at a time.
+        return module_jit(sampler, static_argnames=("num_steps",))
+    return sampler
+
+
+def sample_coarse_actions(
+    model: Any, rng: Any, observation: Any, noise: Any, num_steps: int,
+    *, sampler: Callable[..., Any] | None = None,
+) -> np.ndarray:
     """Run native Pi0.5 forward Euler sampling from supplied fixed noise."""
     if num_steps <= 0:
         raise ValueError("num_steps must be positive")
-    sampler = getattr(model, "sample_actions", None)
+    sampler = sampler if sampler is not None else getattr(model, "sample_actions", None)
     if not callable(sampler):
         raise TypeError("Pi0.5 model must provide sample_actions")
     # Native Pi0.5 accepts an RNG first; supplied noise makes that RNG inert for this call.
@@ -39,8 +62,8 @@ def validate_pi05_model(model: Any, *, action_horizon: int) -> int:
     if not bool(getattr(model, "pi05", True)):
         raise ValueError("source checkpoint is not a Pi0.5 model")
     width = int(getattr(model, "action_dim", 0))
-    if width < 20:
-        raise ValueError("source model action width must be at least 20")
+    if width < 10:
+        raise ValueError("source model action width must be at least 10")
     horizon = int(getattr(model, "action_horizon", action_horizon))
     if horizon != action_horizon:
         raise ValueError("source model horizon does not match cache horizon")

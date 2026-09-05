@@ -163,6 +163,13 @@ def test_writer_persists_progress_resumes_only_matching_manifest_and_finalizes(
             tmp_path,
             {**manifest, "source_variant": {"paligemma_variant": "gemma_2b", "action_expert_variant": "gemma_300m_lora"}},
         )
+    for key, changed in (
+        ("camera_map", {"right_wrist_0_rgb": "camera1"}),
+        ("rename_map", {"camera0": "camera1"}),
+        ("action_key", "alternate_actions"),
+    ):
+        with pytest.raises(ValueError, match="immutable"):
+            ActionCacheWriter.resume(tmp_path, {**manifest, key: changed})
 
     resumed = ActionCacheWriter.resume(tmp_path, manifest)
     resumed.write_batch(

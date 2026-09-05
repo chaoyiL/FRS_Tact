@@ -13,8 +13,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+from tqdm import tqdm
 
-from .config import TACTILE_KEYS
+from .config import RIGHT_TACTILE_KEYS, TACTILE_KEYS
 
 EMBEDDINGS_NAME = "embeddings.npy"
 MANIFEST_NAME = "manifest.json"
@@ -56,16 +57,20 @@ class TactileEmbeddingCache:
         self.cache_dir, self.metadata, self.embeddings = cache_dir, dict(metadata), embeddings
 
     @classmethod
-    def open(cls, path: str | Path, *, tactile_keys: Sequence[str] = TACTILE_KEYS, encoder_path: str | Path) -> "TactileEmbeddingCache":
+    def open(cls, path: str | Path, *, tactile_keys: Sequence[str] | None = None, encoder_path: str | Path) -> "TactileEmbeddingCache":
         cache_dir = Path(path)
         metadata = json.loads((cache_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
-        expected_keys = list(tactile_keys)
-        if metadata.get("status") != "complete" or metadata.get("tactile_keys") != expected_keys:
+        cached_keys = tuple(metadata.get("tactile_keys", ()))
+        if (
+            metadata.get("status") != "complete"
+            or cached_keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS)
+            or (tactile_keys is not None and cached_keys != tuple(tactile_keys))
+        ):
             raise ValueError("tactile cache manifest has an invalid status or key order")
         if metadata.get("preprocess_version") != PREPROCESS_VERSION or metadata.get("encoder_identity") != _identity(Path(encoder_path)):
             raise ValueError("tactile cache preprocessing or encoder identity does not match")
         embeddings = np.load(cache_dir / EMBEDDINGS_NAME, mmap_mode="r", allow_pickle=False)
-        shape = (int(metadata["total_frames"]), len(expected_keys), int(metadata["embedding_dim"]))
+        shape = (int(metadata["total_frames"]), len(cached_keys), int(metadata["embedding_dim"]))
         if embeddings.dtype != np.float32 or tuple(embeddings.shape) != shape or not np.isfinite(embeddings).all():
             raise ValueError("tactile embeddings have invalid dtype, shape, or values")
         return cls(cache_dir, metadata, embeddings)
@@ -80,15 +85,33 @@ class TactileEmbeddingCache:
 def _default_encoder(checkpoint: Path) -> Callable[[np.ndarray], np.ndarray]:
     from .tactile_encoder.encoder_checkpoint import load_tactile_encoder
     from .tactile_encoder.resnet import encode_resnet18
+    import jax
     import jax.numpy as jnp
 
     variables = load_tactile_encoder(checkpoint).params.get("tactile_resnet")
     if not isinstance(variables, dict):
         raise ValueError("encoder checkpoint must contain the shared ResNet18 subtree")
+
+    @jax.jit
+    def forward(variables, images):
+        # Compile the entire frozen network once per batch shape; weights remain
+        # arguments rather than multi-megabyte constants embedded in the graph.
+        return encode_resnet18(variables, images, train=False)[0]
+
     def encode(images: np.ndarray) -> np.ndarray:
-        result, _ = encode_resnet18(variables, jnp.asarray(images), train=False)
+        result = forward(variables, jnp.asarray(images))
         return np.asarray(result, dtype=np.float32)
     return encode
+
+
+def _raw_image_to_unit(image: Any) -> np.ndarray:
+    """Keep legacy float-image resize semantics without constructing a Torch tensor."""
+    from .tactile_encoder.preprocess import parse_image_to_unit
+
+    array = np.asarray(image)
+    if array.dtype == np.uint8:
+        array = array.astype(np.float32) / np.float32(255)
+    return parse_image_to_unit(array, image_size=224)
 
 
 def _required_tactile_frames(
@@ -154,21 +177,28 @@ def _manifest_contract(
 
 
 def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = None, *, max_samples: int | None = None) -> Path:
-    """Encode four current tactile frames into RMS-normalized float32 tokens."""
+    """Encode the selected current tactile frames into RMS-normalized float32 tokens."""
+    print("[Tactile cache] Loading dataset and checking cache...", flush=True)
     deps = dict(dependencies or {})
     tactile = getattr(config, "tactile", config)
     dataset_info = getattr(config, "dataset", config)
     cache_info = getattr(config, "cache", config)
     output, checkpoint = Path(cache_info.tactile_root), Path(tactile.encoder_checkpoint)
+    batch_size = int(getattr(cache_info, "tactile_batch_size", 32))
+    if batch_size <= 0:
+        raise ValueError("cache.tactile_batch_size must be positive")
     keys = tuple(getattr(getattr(config, "decoder", config), "tactile_keys", TACTILE_KEYS))
-    if keys != TACTILE_KEYS:
-        raise ValueError("tactile keys must use the canonical four-current-frame order")
+    if keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
+        raise ValueError("tactile keys must use canonical right-two or four-current-frame order")
     dataset = deps.get("dataset")
     if dataset is None:
         from .runtime_path import activate_vendored_lerobot
         activate_vendored_lerobot()
         from lerobot.datasets import LeRobotDataset
-        dataset = LeRobotDataset(dataset_info.repo_id, root=dataset_info.root, revision=getattr(dataset_info, "revision", None))
+        dataset = LeRobotDataset(
+            dataset_info.repo_id, root=dataset_info.root,
+            revision=getattr(dataset_info, "revision", None), visual_keys=list(keys),
+        )
     if max_samples is not None and max_samples <= 0:
         raise ValueError("max_samples must be positive when provided")
     selection = _selection_contract(dataset_info, max_samples)
@@ -209,24 +239,49 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
             if existing != contract:
                 raise ValueError("complete tactile cache does not match requested encoder, dataset, count, or selection contract")
             TactileEmbeddingCache.open(output, tactile_keys=keys, encoder_path=checkpoint)
+            print(f"[Tactile cache] Reusing complete cache: {count:,} frames at {output}", flush=True)
             return output
         if any(entry.name != WRITER_LOCK_NAME for entry in output.iterdir()):
             raise ValueError("tactile cache root contains files without a matching complete manifest")
         temporary = output / f".{EMBEDDINGS_NAME}.{uuid.uuid4().hex}.npy"
         published = manifest_published = False
+        print(f"[Tactile cache] Loading encoder: {checkpoint}", flush=True)
         encoder = deps.get("encoder") or _default_encoder(checkpoint)
         from .tactile_encoder.preprocess import parse_image_to_unit
-        embeddings = np.lib.format.open_memmap(temporary, mode="w+", dtype=np.float32, shape=(count, 4, dim))
-        for index in range(count):
-            sample = dataset[index]
-            images = np.stack([parse_image_to_unit(sample[key], image_size=224) for key in keys])
-            tokens = np.asarray(encoder(images), dtype=np.float32)
-            if tokens.shape != (4, dim) or not np.isfinite(tokens).all():
-                raise ValueError("shared ResNet18 encoder must return finite [4, 512] tokens")
-            rms = np.sqrt(np.mean(np.square(tokens), axis=-1, keepdims=True))
-            if np.any(rms == 0):
-                raise ValueError("tactile encoder produced a zero RMS token")
-            embeddings[index] = tokens / rms
+        # Embedded image datasets already contain PIL images in uint8. Avoid the
+        # costly PIL -> Torch float CHW -> NumPy -> uint8 roundtrip. Video-backed
+        # sensors retain LeRobot's timestamp-aware frame decoding path.
+        image_rows = None
+        if set(keys).issubset(getattr(getattr(dataset, "meta", None), "image_keys", ())):
+            image_rows = dataset.hf_dataset.select_columns(list(keys)).with_format(None)
+        embeddings = np.lib.format.open_memmap(temporary, mode="w+", dtype=np.float32, shape=(count, len(keys), dim))
+        print(f"[Tactile cache] Encoding {count:,} frames, batch size {batch_size}; the first batch includes JAX compilation.", flush=True)
+        with tqdm(total=count, desc="Tactile cache", unit="frame", mininterval=1.0, dynamic_ncols=True, disable=False) as progress:
+            for start in range(0, count, batch_size):
+                end = min(start + batch_size, count)
+                if image_rows is not None:
+                    columns = image_rows[start:end]
+                    images = np.stack([
+                        _raw_image_to_unit(columns[key][index])
+                        for index in range(end - start) for key in keys
+                    ])
+                else:
+                    samples = [dataset[index] for index in range(start, end)]
+                    images = np.stack([
+                        parse_image_to_unit(sample[key], image_size=224)
+                        for sample in samples for key in keys
+                    ])
+                tokens = np.asarray(encoder(images), dtype=np.float32)
+                expected_shape = ((end - start) * len(keys), dim)
+                if tokens.shape != expected_shape or not np.isfinite(tokens).all():
+                    raise ValueError(f"shared ResNet18 encoder must return finite {expected_shape} tokens")
+                tokens = tokens.reshape(end - start, len(keys), dim)
+                rms = np.sqrt(np.mean(np.square(tokens), axis=-1, keepdims=True))
+                if np.any(rms == 0):
+                    raise ValueError("tactile encoder produced a zero RMS token")
+                embeddings[start:end] = tokens / rms
+                progress.update(end - start)
+        print("[Tactile cache] Flushing embeddings and publishing cache...", flush=True)
         embeddings.flush()
         del embeddings
         with temporary.open("rb") as handle:
@@ -235,6 +290,7 @@ def prepare_tactile_cache(config: Any, dependencies: Mapping[str, Any] | None = 
         published = True
         _atomic_json(manifest_path, contract)
         manifest_published = True
+        print(f"[Tactile cache] Complete: {output}", flush=True)
     except BaseException:
         if "temporary" in locals():
             temporary.unlink(missing_ok=True)

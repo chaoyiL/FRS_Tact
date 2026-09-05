@@ -24,12 +24,12 @@ def test_default_deploy_config_accepts_legacy_checkpoint_pairs() -> None:
     assert config["model"]["artifact_verification"] == "legacy-compatible"
 
 
-def test_server_config_negotiates_low_latency_rdp_step_v2() -> None:
+def test_server_config_negotiates_timestamped_rdp_step_v3() -> None:
     config = deploy.load_config(ROOT / "configs" / "deploy_pick_tube_rdp.yaml")
 
     payload = deploy.build_server_config(config)
 
-    assert payload["execution_protocol"] == "rdp_step_v2"
+    assert payload["execution_protocol"] == "rdp_step_v3"
     assert payload["policy_type"] == "rdp"
     assert payload["observation_profile"] == "rdp_vitac_224"
     assert payload["task"] == 0

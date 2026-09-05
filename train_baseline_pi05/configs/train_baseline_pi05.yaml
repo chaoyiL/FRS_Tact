@@ -34,9 +34,11 @@ tactile:
   freeze_encoder: true
 
 cache:
+  tactile_batch_size: 32
   action_root: /workspace/baseline_pi05/action_cache
   tactile_root: /workspace/baseline_pi05/tactile_embedding_cache
-  action_batch_size: 64
+  # Small source batches fit the 16 GB RTX 5080; decoder training is separate.
+  action_batch_size: 4
 
 decoder:
   output: /workspace/baseline_pi05/decoder
@@ -60,7 +62,7 @@ decoder:
   seed: 0
   workers: 0
   pin_memory: false
-  device: cpu
+  device: cuda
   resume: false
 
 evaluation:

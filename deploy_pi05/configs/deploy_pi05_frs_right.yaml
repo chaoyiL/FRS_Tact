@@ -41,7 +41,7 @@ frs:
 
   # Uploaded arm9 epoch-10 baseline. The runtime guards below make low-Gate
   # execution exactly VLA and clamp all remaining arm residuals.
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_insert_01_right_two_face_arm9_epoch10
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_insert_01_right_two_face_learned_residual_v3
   # TODO: replace with the tactile encoder used to train that FRS checkpoint.
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
 

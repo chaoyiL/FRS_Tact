@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .deployment import TACTILE_KEYS
+from .deployment import RIGHT_TACTILE_KEYS, TACTILE_KEYS
 
 
 @dataclass(frozen=True)
@@ -23,13 +23,15 @@ class DirectDecoderConfig:
     tactile_keys: tuple[str, ...] = TACTILE_KEYS
 
     def validate(self) -> None:
-        for name, required in {"action_horizon": 50, "action_dim": 20, "tactile_dim": 512, "d_model": 128, "nhead": 4, "num_layers": 2, "dim_feedforward": 256}.items():
+        for name, required in {"action_horizon": 50, "tactile_dim": 512, "d_model": 128, "nhead": 4, "num_layers": 2, "dim_feedforward": 256}.items():
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value != required:
                 raise ValueError(f"{name} must be {required!r} for the direct decoder contract.")
+        if isinstance(self.action_dim, bool) or not isinstance(self.action_dim, int) or self.action_dim not in (10, 20):
+            raise ValueError("action_dim must be 10 or 20 for the direct decoder contract.")
         if not isinstance(self.dropout, float) or self.dropout != 0.1:
             raise ValueError("dropout must be 0.1 for the direct decoder contract.")
-        if not isinstance(self.tactile_keys, tuple) or any(not isinstance(key, str) for key in self.tactile_keys) or self.tactile_keys != TACTILE_KEYS:
+        if not isinstance(self.tactile_keys, tuple) or any(not isinstance(key, str) for key in self.tactile_keys) or self.tactile_keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
             raise ValueError("tactile_keys must use canonical order for the direct decoder contract.")
 
     def to_primitive(self) -> dict[str, int | float | list[str]]:

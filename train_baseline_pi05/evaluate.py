@@ -88,7 +88,8 @@ def evaluate_decoder(
     donor_lookup, donor_cache = _tactile_donor_lookup(loader) if shuffle_tactile else ({}, None)
     was_training = model.training
     model.eval()
-    totals = {name: 0.0 for name in ("decoder_smooth_l1", "coarse_smooth_l1", "decoder_mse", "coarse_mse", "delta_sq", "physical_abs", "physical_sq", "gripper_9", "gripper_19", "shuffled_decoder_mse")}
+    totals = {name: 0.0 for name in ("decoder_smooth_l1", "coarse_smooth_l1", "decoder_mse", "coarse_mse", "delta_sq", "physical_abs", "physical_sq", "shuffled_decoder_mse")}
+    gripper_totals: dict[int, float] = {}
     count = physical_count = gripper_count = 0
     try:
         device = next(model.parameters()).device
@@ -116,8 +117,10 @@ def evaluate_decoder(
         totals["physical_abs"] += float((physical_error.abs() * expanded).sum().item())
         totals["physical_sq"] += float((physical_error.square() * expanded).sum().item())
         gripper_valid = valid.sum().item()
-        totals["gripper_9"] += float((error[..., 9].abs() * valid).sum().item())
-        totals["gripper_19"] += float((error[..., 19].abs() * valid).sum().item())
+        for index in range(9, target.shape[-1], 10):
+            gripper_totals[index] = gripper_totals.get(index, 0.0) + float(
+                (error[..., index].abs() * valid).sum().item()
+            )
         count += elements; physical_count += elements; gripper_count += int(gripper_valid)
         if shuffle_tactile:
             try:
@@ -140,9 +143,8 @@ def evaluate_decoder(
         "delta_rms": (totals["delta_sq"] / count) ** 0.5,
         "physical_mae": totals["physical_abs"] / physical_count,
         "physical_rmse": (totals["physical_sq"] / physical_count) ** 0.5,
-        "normalized_gripper_mae_9": totals["gripper_9"] / gripper_count,
-        "normalized_gripper_mae_19": totals["gripper_19"] / gripper_count,
     }
+    result.update({f"normalized_gripper_mae_{index}": total / gripper_count for index, total in gripper_totals.items()})
     result["relative_mse_reduction"] = 0.0 if result["coarse_mse"] == 0.0 else (result["coarse_mse"] - result["decoder_mse"]) / result["coarse_mse"]
     if shuffle_tactile:
         result["shuffled_decoder_mse"] = totals["shuffled_decoder_mse"] / count
@@ -181,7 +183,11 @@ def main() -> None:
     output = args.output if args.output is not None else evaluation.output
     shuffle = evaluation.shuffle_tactile if args.shuffle_tactile is None else args.shuffle_tactile
     action = ActionCache.open(config.cache.action_root)
-    tactile = TactileEmbeddingCache.open(config.cache.tactile_root, encoder_path=config.tactile.encoder_checkpoint)
+    tactile = TactileEmbeddingCache.open(
+        config.cache.tactile_root,
+        tactile_keys=config.decoder.tactile_keys,
+        encoder_path=config.tactile.encoder_checkpoint,
+    )
     loader = make_loader(BaselineCacheDataset(action, tactile, split), batch_size=evaluation.batch_size, shuffle=False, seed=config.decoder.seed, workers=config.decoder.workers, pin_memory=config.decoder.pin_memory)
     model, _ = load_decoder_checkpoint(checkpoint, map_location=config.decoder.device)
     model.to(config.decoder.device)

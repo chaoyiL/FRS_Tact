@@ -39,25 +39,29 @@ def _caches(
     indices: tuple[int, ...] = (1, 4, 7, 9),
     episode_indices: tuple[int, ...] | None = None,
     tactile_keys=TACTILE_KEYS,
+    action_dim: int = 20,
 ):
     action_dir, tactile_dir, encoder = tmp_path / "action", tmp_path / "tactile", tmp_path / "encoder"
     dataset_root = tmp_path / "dataset"
     encoder.mkdir(); (encoder / "weights").write_bytes(b"frozen")
+    manifest = _manifest(dataset_root)
+    manifest["source_model_action_width"] = action_dim
+    manifest["decoder_action_width"] = action_dim
     writer = ActionCacheWriter.create(
         action_dir,
         sample_count=len(indices),
         horizon=50,
-        action_dim=20,
-        manifest=_manifest(dataset_root),
+        action_dim=action_dim,
+        manifest=manifest,
     )
     episodes = episode_indices or tuple(range(len(indices)))
     records = [SampleRecord(index, episodes[i], index, 0 if i < 2 else 1) for i, index in enumerate(indices)]
-    coarse = np.zeros((len(indices), 50, 20), dtype=np.float32)
-    expert = np.ones((len(indices), 50, 20), dtype=np.float32)
+    coarse = np.zeros((len(indices), 50, action_dim), dtype=np.float32)
+    expert = np.ones((len(indices), 50, action_dim), dtype=np.float32)
     writer.write_batch(0, coarse=coarse, expert=expert, valid=np.ones((len(indices), 50), dtype=np.bool_), records=records)
     writer.finalize()
     tactile_dir.mkdir()
-    embeddings = np.stack([np.full((4, 512), frame, dtype=np.float32) for frame in range(10)])
+    embeddings = np.stack([np.full((len(tactile_keys), 512), frame, dtype=np.float32) for frame in range(10)])
     np.save(tactile_dir / "embeddings.npy", embeddings)
     (tactile_dir / "manifest.json").write_text(json.dumps({
         "status": "complete", "total_frames": 10, "tactile_keys": list(tactile_keys),
@@ -69,7 +73,23 @@ def _caches(
             "revision": "one",
         },
     }), encoding="utf-8")
-    return ActionCache.open(action_dir), TactileEmbeddingCache.open(tactile_dir, encoder_path=encoder)
+    return ActionCache.open(action_dir), TactileEmbeddingCache.open(tactile_dir, tactile_keys=tactile_keys, encoder_path=encoder)
+
+
+def test_training_opens_two_sensor_cache_from_config(tmp_path: Path) -> None:
+    from train_baseline_pi05.train import _open_caches
+
+    right_keys = (TACTILE_KEYS[2], TACTILE_KEYS[3])
+    action, tactile = _caches(tmp_path, action_dim=10, tactile_keys=right_keys)
+    config = SimpleNamespace(
+        cache=SimpleNamespace(action_root=action.cache_dir, tactile_root=tactile.cache_dir),
+        tactile=SimpleNamespace(encoder_checkpoint=tmp_path / "encoder"),
+        decoder=SimpleNamespace(tactile_keys=right_keys),
+    )
+
+    _, opened_tactile = _open_caches(config)
+
+    assert opened_tactile.get_many([1]).shape == (1, 2, 512)
 
 
 def test_dataset_aligns_absolute_action_dataset_indices_to_tactile_memmap_and_split(tmp_path: Path):
@@ -181,6 +201,37 @@ def test_evaluation_uses_cross_episode_tactile_donors_across_batch_boundaries(tm
     assert model.tactile_frames[1::2] == [9, 7]
 
 
+@pytest.mark.parametrize("action_dim", (10, 20))
+def test_evaluation_reports_only_present_grippers_and_masks_their_errors(action_dim: int) -> None:
+    from train_baseline_pi05.evaluate import evaluate_decoder
+
+    target = torch.ones(1, 2, action_dim)
+    target[:, 1] = 1000.0
+    target[:, 0, 9] = 2.0
+    if action_dim == 20:
+        target[:, 0, 19] = 3.0
+    batch = {
+        "coarse": torch.zeros_like(target),
+        "target": target,
+        "tactile": torch.zeros(1, 4, 512),
+        "valid": torch.tensor([[True, False]]),
+    }
+
+    class Zero(torch.nn.Module):
+        def forward(self, coarse, tactile):
+            return torch.zeros_like(coarse)
+
+    metrics = evaluate_decoder(
+        Zero(), [batch], {"q01": np.zeros(action_dim), "q99": np.ones(action_dim)}
+    )
+
+    assert metrics["normalized_gripper_mae_9"] == pytest.approx(2.0)
+    if action_dim == 20:
+        assert metrics["normalized_gripper_mae_19"] == pytest.approx(3.0)
+    else:
+        assert "normalized_gripper_mae_19" not in metrics
+
+
 def test_evaluation_rejects_single_episode_shuffled_tactile_split(tmp_path: Path) -> None:
     from train_baseline_pi05.data import BaselineCacheDataset, make_loader
     from train_baseline_pi05.evaluate import evaluate_decoder
@@ -204,21 +255,27 @@ def test_evaluation_rejects_single_episode_shuffled_tactile_split(tmp_path: Path
     assert model.training is True
 
 
-def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("action_dim", (10, 20))
+@pytest.mark.parametrize("device", (
+    "cpu",
+    pytest.param("cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")),
+))
+def test_training_and_resume_only_update_decoder_and_preserve_source_inputs(tmp_path: Path, monkeypatch, action_dim: int, device: str):
     from train_baseline_pi05.train import train_decoder
 
-    action, tactile = _caches(tmp_path)
+    tactile_keys = (TACTILE_KEYS[2], TACTILE_KEYS[3]) if action_dim == 10 else TACTILE_KEYS
+    action, tactile = _caches(tmp_path, action_dim=action_dim, tactile_keys=tactile_keys)
     source = tmp_path / "source.bin"; source.write_bytes(b"source")
     encoder = tmp_path / "encoder.bin"; encoder.write_bytes(b"encoder")
     config = SimpleNamespace(
         cache=SimpleNamespace(action_root=action.cache_dir, tactile_root=tactile.cache_dir),
         source=SimpleNamespace(checkpoint=source, norm_stats_dir=tmp_path, norm_stats_asset_id="synthetic", seed=0, sample_steps=10, paligemma_variant="p", action_expert_variant="a", use_quantile_norm=True),
         tactile=SimpleNamespace(encoder_checkpoint=encoder),
-        decoder=SimpleNamespace(output=tmp_path / "output", batch_size=2, epochs=2, learning_rate=1e-3, weight_decay=0.0, seed=3, action_horizon=50, action_dim=20, tactile_dim=512, d_model=128, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1, tactile_keys=TACTILE_KEYS, workers=0, pin_memory=False, device="cpu", resume=False),
+        decoder=SimpleNamespace(output=tmp_path / "output", batch_size=2, epochs=2, learning_rate=1e-3, weight_decay=0.0, seed=3, action_horizon=50, action_dim=action_dim, tactile_dim=512, d_model=128, nhead=4, num_layers=2, dim_feedforward=256, dropout=0.1, tactile_keys=tactile_keys, workers=0, pin_memory=False, device=device, resume=False),
         dataset=SimpleNamespace(),
         action_cache=action,
         tactile_cache=tactile,
-        norm_stats={"q01": np.zeros(20), "q99": np.ones(20)},
+        norm_stats={"q01": np.zeros(action_dim), "q99": np.ones(action_dim)},
     )
     before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in (source, encoder, action.cache_dir / "coarse_actions.npy", tactile.cache_dir / "embeddings.npy")}
     import train_baseline_pi05.train as training
@@ -253,7 +310,7 @@ def test_training_config_exposes_loader_resume_and_evaluation_fields():
 
     assert config.decoder.workers == 0
     assert config.decoder.pin_memory is False
-    assert config.decoder.device == "cpu"
+    assert config.decoder.device == "cuda"
     assert config.decoder.resume is False
     assert config.evaluation.split == "test"
     assert config.evaluation.batch_size == config.decoder.batch_size
@@ -326,14 +383,14 @@ def test_evaluate_cli_opens_configured_caches_and_computes_current_metrics(monke
     config = SimpleNamespace(
         cache=SimpleNamespace(action_root=tmp_path / "action", tactile_root=tmp_path / "tactile"),
         tactile=SimpleNamespace(encoder_checkpoint=tmp_path / "encoder"),
-        decoder=SimpleNamespace(batch_size=3, device="cpu", seed=0, workers=0, pin_memory=False),
+        decoder=SimpleNamespace(batch_size=3, device="cpu", seed=0, workers=0, pin_memory=False, tactile_keys=(TACTILE_KEYS[2], TACTILE_KEYS[3])),
         source=SimpleNamespace(norm_stats_dir=tmp_path, norm_stats_asset_id="stats"),
         evaluation=SimpleNamespace(split="test", batch_size=2, shuffle_tactile=True, output=None),
     )
     observed = {}
     monkeypatch.setattr(evaluate, "load_config", lambda path: config, raising=False)
     monkeypatch.setattr(evaluate.ActionCache, "open", lambda path: "action")
-    monkeypatch.setattr(evaluate.TactileEmbeddingCache, "open", lambda *args, **kwargs: "tactile", raising=False)
+    monkeypatch.setattr(evaluate.TactileEmbeddingCache, "open", lambda *args, **kwargs: observed.setdefault("tactile_open", kwargs) and "tactile", raising=False)
     monkeypatch.setattr(evaluate, "BaselineCacheDataset", lambda action, tactile, split: observed.setdefault("split", split) or "dataset", raising=False)
     monkeypatch.setattr(evaluate, "make_loader", lambda dataset, **kwargs: observed.setdefault("loader", kwargs) or "loader", raising=False)
     monkeypatch.setattr(evaluate, "load_decoder_checkpoint", lambda path, **kwargs: (torch.nn.Identity(), {}), raising=False)
@@ -347,6 +404,7 @@ def test_evaluate_cli_opens_configured_caches_and_computes_current_metrics(monke
     assert observed["loader"]["batch_size"] == 2
     assert observed["shuffle"] is True
     assert observed["output"] == Path("metrics.json")
+    assert observed["tactile_open"]["tactile_keys"] == config.decoder.tactile_keys
 
 
 def test_training_modules_do_not_import_jax_flax_or_pi_runtime():

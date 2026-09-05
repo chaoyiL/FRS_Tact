@@ -11,11 +11,8 @@ from typing import Any
 
 import numpy as np
 
-from .deployment import TACTILE_KEYS
-
-
-_CHUNK_SHAPE = (1, 50, 20)
-_TOKEN_SHAPE = (1, 4, 512)
+from .deployment import RIGHT_TACTILE_KEYS, TACTILE_KEYS
+from .right_arm_adapter import expand_right_action, project_right_observation
 
 
 def _immutable(value: Any) -> np.ndarray:
@@ -86,6 +83,7 @@ class DirectDecoderRuntime:
         max_normalized_action_abs: float,
         max_normalized_delta_rms: float,
         device: str | None = None,
+        action_dim: int = 20,
     ) -> None:
         for name, value in (("max_normalized_action_abs", max_normalized_action_abs), ("max_normalized_delta_rms", max_normalized_delta_rms)):
             if not isinstance(value, (int, float)) or isinstance(value, bool) or not np.isfinite(value) or value <= 0:
@@ -96,9 +94,16 @@ class DirectDecoderRuntime:
         self.max_normalized_action_abs = float(max_normalized_action_abs)
         self.max_normalized_delta_rms = float(max_normalized_delta_rms)
         self.device = device
+        if isinstance(action_dim, bool) or action_dim not in (10, 20):
+            raise ValueError("action_dim must be 10 or 20")
+        self.action_dim = action_dim
+        self._chunk_shape = (1, 50, action_dim)
         self.tactile_keys = tuple(getattr(tactile_encoder, "tactile_keys", TACTILE_KEYS))
-        if self.tactile_keys != TACTILE_KEYS:
+        if self.tactile_keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
             raise ValueError("tactile encoder must use canonical tactile_keys")
+        key_map = getattr(tactile_encoder, "key_map", {})
+        self._observation_tactile_keys = tuple(key_map.get(key, key) for key in self.tactile_keys)
+        self._token_shape = (1, len(self.tactile_keys), 512)
         self._active_chunk_id: int | None = None
         self._coarse: np.ndarray | None = None
         self._cache: dict[int, _CachedRequest] = {}
@@ -131,13 +136,16 @@ class DirectDecoderRuntime:
         if isinstance(chunk_id, bool) or not isinstance(chunk_id, Integral):
             raise ValueError("chunk id must be an integer")
         prediction_started = perf_counter()
+        model_observation = project_right_observation(observation) if self.action_dim == 10 else observation
         coarse = _finite_shape(
-            self.policy.predict_action_chunk(observation, task, seed=seed, num_steps=num_steps),
-            _CHUNK_SHAPE,
+            self.policy.predict_action_chunk(model_observation, task, seed=seed, num_steps=num_steps),
+            self._chunk_shape,
             "Pi0.5 normalized action chunk",
         )
         prediction_finished = perf_counter()
-        physical = _finite_shape(self.policy.unnormalize_actions(np.array(coarse, copy=True)), _CHUNK_SHAPE, "Pi0.5 physical action chunk")
+        physical = _finite_shape(self.policy.unnormalize_actions(np.array(coarse, copy=True)), self._chunk_shape, "Pi0.5 physical action chunk")
+        if self.action_dim == 10:
+            physical = expand_right_action(physical[0], observation)[None, ...]
         self._active_chunk_id = int(chunk_id)
         self._coarse = _immutable(coarse)
         return DirectChunkReady(
@@ -159,11 +167,12 @@ class DirectDecoderRuntime:
         self._clear()
 
     def _payload_digest(self, observation: Mapping[str, Any]) -> bytes:
-        missing = [key for key in self.tactile_keys if key not in observation]
+        digest_keys = self._observation_tactile_keys + (("observation.state",) if self.action_dim == 10 else ())
+        missing = [key for key in digest_keys if key not in observation]
         if missing:
             raise ValueError(f"observation is missing tactile keys: {missing}")
         digest = sha256()
-        for key in self.tactile_keys:
+        for key in digest_keys:
             array = np.ascontiguousarray(np.asarray(observation[key]))
             for part in (key.encode(), array.dtype.str.encode(), repr(array.shape).encode(), array.tobytes(order="C")):
                 digest.update(len(part).to_bytes(8, "big"))
@@ -208,10 +217,10 @@ class DirectDecoderRuntime:
             raise ValueError("unique action indices must be strictly increasing")
         assert self._coarse is not None
         encode_started = perf_counter()
-        tactile = _finite_shape(self.tactile_encoder.encode(observation), _TOKEN_SHAPE, "tactile encoder tokens")
+        tactile = _finite_shape(self.tactile_encoder.encode(observation), self._token_shape, "tactile encoder tokens")
         encode_finished = perf_counter()
         decode_started = perf_counter()
-        decoded = _finite_shape(self._decode(np.array(self._coarse, copy=True), np.array(tactile, copy=True)), _CHUNK_SHAPE, "direct decoder output")
+        decoded = _finite_shape(self._decode(np.array(self._coarse, copy=True), np.array(tactile, copy=True)), self._chunk_shape, "direct decoder output")
         decode_finished = perf_counter()
         max_abs = float(np.max(np.abs(decoded)))
         if max_abs > self.max_normalized_action_abs:
@@ -221,7 +230,10 @@ class DirectDecoderRuntime:
             raise ValueError(f"direct decoder delta limit exceeded: {delta_rms:.4f}")
         decoded_copy = _immutable(decoded)
         selected_normalized = _immutable(decoded_copy[0, action_index])
-        selected_action = _immutable(_finite_shape(self.policy.unnormalize_actions(np.array(selected_normalized, copy=True)), (20,), "selected physical action"))
+        physical = _finite_shape(self.policy.unnormalize_actions(np.array(selected_normalized, copy=True)), (self.action_dim,), "selected physical action")
+        if self.action_dim == 10:
+            physical = expand_right_action(physical[None, :], observation)[0]
+        selected_action = _immutable(physical)
         result = DirectSteerResult(
             chunk_id=int(chunk_id), request_id=request_id, action_index=action_index,
             action_vla_normalized=self._coarse, decoded_normalized=decoded_copy,

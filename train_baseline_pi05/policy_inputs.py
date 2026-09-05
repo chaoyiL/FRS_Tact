@@ -107,8 +107,8 @@ class Pi05SampleProcessor:
         Args:
             camera_map: pi0.5 image key (subset of `base_0_rgb`/`left_wrist_0_rgb`/
                 `right_wrist_0_rgb`) -> dataset observation key, *after* `rename_map` is applied
-                (e.g. `{"base_0_rgb": "observation.images.camera1"}`). Keys from `IMAGE_KEYS` not
-                present in `camera_map` are zero-filled and masked off by `PickTubeInputs`.
+                (e.g. `{"base_0_rgb": "observation.images.camera1"}`). Only configured cameras
+                are encoded, matching the one/two-camera fine-tuning profiles.
             state_stats / action_stats: required, not loaded automatically -- see this module's
                 docstring and pi05_frs_plan.md for why (no norm stats exist for a brand-new
                 dataset in the pretrained pi05_base checkpoint's assets).
@@ -125,6 +125,8 @@ class Pi05SampleProcessor:
         unknown_cameras = set(camera_map) - set(IMAGE_KEYS)
         if unknown_cameras:
             raise ValueError(f"camera_map keys must be a subset of {IMAGE_KEYS}, got extra {sorted(unknown_cameras)}")
+        if not camera_map:
+            raise ValueError("camera_map must contain at least one camera")
 
         self.config = Pi0Config(
             pi05=True,
@@ -133,6 +135,7 @@ class Pi05SampleProcessor:
             max_token_len=max_token_len,
             paligemma_variant=paligemma_variant,
             action_expert_variant=action_expert_variant,
+            image_keys=tuple(key for key in IMAGE_KEYS if key in camera_map),
         )
 
         self.dataset_repo_id = dataset_repo_id
@@ -168,7 +171,7 @@ class Pi05SampleProcessor:
                         "prompt": "prompt",
                     }
                 ),
-                PickTubeInputs(model_type=self.config.model_type),
+                PickTubeInputs(model_type=self.config.model_type, image_keys=self.config.image_keys),
                 transforms.Normalize(norm_stats, use_quantiles=use_quantile_norm),
                 transforms.ResizeImages(*IMAGE_RESOLUTION),
                 transforms.TokenizePrompt(

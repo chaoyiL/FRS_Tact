@@ -14,11 +14,12 @@ import types
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
-        cache=SimpleNamespace(action_root=tmp_path / "actions", tactile_root=tmp_path / "tactile"),
+        cache=SimpleNamespace(action_root=tmp_path / "actions", tactile_root=tmp_path / "tactile", tactile_batch_size=1),
         source=SimpleNamespace(
             checkpoint=tmp_path / "source", norm_stats_dir=tmp_path / "stats", norm_stats_asset_id="demo",
             seed=0, sample_steps=3, action_horizon=50, model_action_dim=20,
@@ -87,6 +88,8 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
     config.source.action_expert_variant = "gemma_300m_lora"
     config.source.use_quantile_norm = True
     captured = {}
+    import torch
+    monkeypatch.setattr(torch, "set_num_threads", lambda count: captured.update(torch_threads=count))
 
     class Metadata:
         pass
@@ -106,7 +109,11 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
     activate_vendored_lerobot()
     import lerobot.datasets
     monkeypatch.setattr(lerobot.datasets, "LeRobotDatasetMetadata", lambda *args, **kwargs: Metadata())
-    monkeypatch.setattr(lerobot.datasets, "LeRobotDataset", lambda *args, **kwargs: Dataset())
+    def dataset_factory(*args, **kwargs):
+        assert captured.get("torch_threads") == 1
+        captured["dataset_kwargs"] = kwargs
+        return Dataset()
+    monkeypatch.setattr(lerobot.datasets, "LeRobotDataset", dataset_factory)
     monkeypatch.setitem(sys.modules, "lerobot.policies.pi05_jax", types.SimpleNamespace(
         load_norm_stats=lambda *args: {"state": "state", "actions": "actions"}
     ))
@@ -121,6 +128,7 @@ def test_default_dependencies_pass_source_variants_action_dim_and_camera_mapping
     assert captured["use_quantile_norm"] is True
     assert captured["rename_map"] == config.dataset.rename_map
     assert captured["camera_map"] == config.dataset.camera_map
+    assert captured["dataset_kwargs"]["visual_keys"] == ["observation.images.camera0"]
     assert dependencies["params"] is not None
 
 
@@ -213,7 +221,8 @@ def test_action_producer_writes_sliced_forward_actions_and_preserves_records(tmp
     assert manifest["decoder_action_width"] == 20
 
 
-def test_action_producer_batches_real_pi05_observation_pytrees(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_action_producer_batches_real_pi05_observation_pytrees(monkeypatch, tmp_path: Path, prefetch: bool) -> None:
     from train_baseline_pi05.action_cache import SampleRecord
     from train_baseline_pi05.prepare_action_cache import prepare_action_cache
     from train_baseline_pi05.runtime_path import activate_vendored_lerobot
@@ -294,6 +303,7 @@ def test_action_producer_batches_real_pi05_observation_pytrees(monkeypatch, tmp_
             return noise
 
     config = _config(tmp_path)
+    config.cache.action_prefetch = prefetch
     records = (SampleRecord(0, 0, 0, 0), SampleRecord(1, 0, 1, 0))
     prepare_action_cache(config, dependencies={
         "metadata": Metadata(), "dataset": Dataset(), "records": records,
@@ -319,9 +329,13 @@ def test_action_window_masks_terminal_zero_row_and_padding() -> None:
     np.testing.assert_array_equal(valid, [True, False, False])
 
 
-def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
+@pytest.mark.parametrize("prefetch", [False, True])
+def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path, prefetch: bool) -> None:
+    import threading
     from train_baseline_pi05.action_cache import ActionCache, ActionCacheWriter, SampleRecord
     from train_baseline_pi05.prepare_action_cache import prepare_action_cache
+
+    caller_thread = threading.get_ident()
 
     class Metadata:
         total_episodes = 1
@@ -334,6 +348,7 @@ def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
 
     class Processor:
         def prepare_sample(self, sample):
+            assert (threading.get_ident() != caller_thread) == prefetch
             return {"state": sample["observation.state"]}, np.zeros((50, 20), np.float32), "pick"
 
     class Source:
@@ -342,6 +357,7 @@ def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
             return np.broadcast_to(np.arange(32, dtype=np.float32), noise.shape)
 
     config = _config(tmp_path)
+    config.cache.action_prefetch = prefetch
     config.source.model_action_dim = 32
     records = (SampleRecord(0, 0, 0, 0), SampleRecord(1, 0, 1, 0))
     manifest = {
@@ -352,6 +368,7 @@ def test_action_producer_resumes_an_incomplete_cache(tmp_path: Path) -> None:
         "norm_stats": {"dir": str(config.source.norm_stats_dir), "asset_id": "demo", "use_quantile_norm": True},
         "sample_steps": 3, "noise_seed": 0, "source_model_action_width": 32,
         "decoder_action_width": 20, "action_space": "normalized_pi05",
+        "camera_map": {}, "rename_map": {}, "action_key": "actions",
     }
     with ActionCacheWriter.create(config.cache.action_root, sample_count=2, horizon=50, action_dim=20, manifest=manifest) as writer:
         writer.write_batch(0, coarse=np.zeros((1, 50, 20), np.float32), expert=np.zeros((1, 50, 20), np.float32), valid=np.concatenate([np.ones((1, 2), bool), np.zeros((1, 48), bool)], axis=1), records=records[:1])
@@ -507,3 +524,106 @@ time.sleep(2)
         prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda _images: (_ for _ in ()).throw(AssertionError("must not encode"))})
     assert holder.wait(timeout=5) == 0
     assert prepare_tactile_cache(config, dependencies={"dataset": Dataset(), "encoder": lambda _images: (_ for _ in ()).throw(AssertionError("must not encode"))}) == output
+
+
+def test_action_window_reuses_selected_column_and_maps_absolute_indices() -> None:
+    from datasets import Dataset as HFDataset
+    from train_baseline_pi05.action_cache import SampleRecord
+    from train_baseline_pi05.prepare_action_cache import _window
+
+    selected = HFDataset.from_dict({"actions": [[1.0], [2.0], [0.0]]})
+    dataset = SimpleNamespace(hf_dataset=object(), absolute_to_relative_idx={10: 0, 11: 1, 12: 2})
+    metadata = SimpleNamespace(episodes=[{"dataset_from_index": 10, "dataset_to_index": 13}])
+    for index, expected in ((10, [1, 2, 0, 0]), (11, [2, 0, 0, 0])):
+        actions, valid = _window(dataset, SampleRecord(index, 0, index - 10, 0), metadata,
+                                 "actions", 4, action_rows=selected)
+        np.testing.assert_array_equal(actions[:, 0], expected)
+        np.testing.assert_array_equal(valid, np.asarray(expected) != 0)
+
+
+def test_action_window_reads_only_raw_action_column_without_decoding_video() -> None:
+    from datasets import Dataset as HFDataset
+    from train_baseline_pi05.action_cache import SampleRecord
+    from train_baseline_pi05.prepare_action_cache import _window
+
+    class Dataset:
+        hf_dataset = HFDataset.from_dict({
+            "actions": [np.full(10, value, np.float32) for value in (1, 2, 0, 9)],
+            "unrelated": [10, 20, 30, 40],
+        })
+
+        def __getitem__(self, index):
+            raise AssertionError("action-only reads must not decode videos")
+
+    metadata = SimpleNamespace(episodes=[{"dataset_from_index": 0, "dataset_to_index": 3}])
+    actions, valid = _window(Dataset(), SampleRecord(1, 0, 1, 0), metadata, "actions", 4)
+    np.testing.assert_array_equal(actions[:, 0], [2, 0, 0, 0])
+    np.testing.assert_array_equal(valid, [True, False, False, False])
+
+
+@pytest.mark.parametrize("action_dim", [10, 20])
+@pytest.mark.parametrize("changed_field", ["camera_map", "rename_map", "action_key"])
+def test_action_cache_widths_and_preprocessing_contract(tmp_path, monkeypatch, action_dim, changed_field) -> None:
+    from datasets import Dataset as HFDataset
+    from train_baseline_pi05.action_cache import ActionCache
+    import train_baseline_pi05.prepare_action_cache as producer
+
+    config = _config(tmp_path)
+    config.decoder.action_dim = action_dim
+    config.source.model_action_dim = 32
+    config.dataset.camera_map = {"right_wrist_0_rgb": "camera1"}
+    config.dataset.rename_map = {"camera0": "camera1"}
+
+    class Dataset:
+        hf_dataset = HFDataset.from_dict({
+            "actions": [np.full(action_dim, value, np.float32) for value in (1, 2, 0)],
+        })
+        reads = 0
+
+        def __getitem__(self, index):
+            self.reads += 1
+            return {"actions": np.full(action_dim, 0 if index == 2 else index + 1, np.float32)}
+
+    class Processor:
+        def prepare_sample(self, sample):
+            return {"state": np.zeros(1)}, np.pad(sample["actions"], ((0, 0), (0, 32 - action_dim))), "task"
+
+    class Source:
+        action_dim = 32
+        def sample_actions(self, rng, observation, *, noise, num_steps):
+            return noise
+
+    monkeypatch.setattr(producer, "fixed_noise", lambda batch_size, **kw: np.zeros((batch_size, kw["horizon"], kw["action_dim"]), np.float32))
+    sampler_builds = []
+    sampler_calls = []
+    def sampler_factory(model):
+        sampler_builds.append(model)
+        def sample(rng, observation, *, noise, num_steps):
+            sampler_calls.append(num_steps)
+            return noise + 7
+        return sample
+    monkeypatch.setattr(producer, "make_frozen_sampler", sampler_factory, raising=False)
+    deps = {"metadata": SimpleNamespace(total_episodes=1, episodes=[{"dataset_from_index": 0, "dataset_to_index": 3}]),
+            "dataset": Dataset(), "processor": Processor(), "model": Source(), "batch_size": 1}
+    column_selections = []
+    original_select = deps["dataset"].hf_dataset.select_columns
+    def select_columns(columns):
+        column_selections.append(columns)
+        return original_select(columns)
+    monkeypatch.setattr(deps["dataset"].hf_dataset, "select_columns", select_columns)
+    output = producer.prepare_action_cache(config, deps)
+    assert column_selections == [["actions"]]  # One shared view for all batches.
+    assert deps["dataset"].reads == 2  # Decode only the two current anchor observations.
+    cache = ActionCache.open(output)
+    assert cache.coarse_actions.shape == (2, 50, action_dim)
+    assert cache.expert_actions.shape == (2, 50, action_dim)
+    assert cache.expert_actions[0, 0, -1] == 1
+    assert np.all(cache.coarse_actions == 7)
+    assert sampler_builds == [deps["model"]]
+    assert sampler_calls == [config.source.sample_steps] * 2
+    producer.prepare_action_cache(config, deps)
+    assert sampler_builds == [deps["model"]]
+    assert column_selections == [["actions"]]
+    setattr(config.dataset, changed_field, "alternate_actions" if changed_field == "action_key" else {"new": "mapping"})
+    with pytest.raises(ValueError, match="producer contract"):
+        producer.prepare_action_cache(config, deps)

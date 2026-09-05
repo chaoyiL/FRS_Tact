@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import functools
 import ipaddress
+import math
+from numbers import Real
 import time
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -180,15 +182,54 @@ class RobotBridgeClient:
         observation = message["obs"]
         if not isinstance(observation, dict):
             raise RuntimeError(f"Observation must be a dictionary, got {type(observation)}")
+        timestamp = observation.get("observation.timestamp")
+        camera_times = observation.get("observation.camera_timestamps")
+        if (
+            isinstance(timestamp, (bool, np.bool_))
+            or not isinstance(timestamp, Real)
+            or not math.isfinite(timestamp)
+        ):
+            raise RuntimeError("rdp_step_v3 requires a finite observation.timestamp")
+        camera_times = np.asarray(camera_times)
+        if (
+            camera_times.shape != (2,)
+            or camera_times.dtype.kind not in "fiu"
+            or not np.isfinite(camera_times).all()
+        ):
+            raise RuntimeError("rdp_step_v3 requires two finite camera timestamps")
+        previous = getattr(self, "_last_observation_timestamp", None)
+        previous_cameras = getattr(self, "_last_camera_timestamps", None)
+        if previous is not None and (
+            timestamp <= previous or np.any(camera_times <= previous_cameras)
+        ):
+            raise RuntimeError("Observation timestamps must advance for both cameras")
+        self._last_observation_timestamp = float(timestamp)
+        self._last_camera_timestamps = camera_times.astype(np.float64, copy=True)
         return int(message["obs_seq"]), observation
 
     def send_action(self, action: np.ndarray, obs_seq: int) -> None:
         self._send({"type": "action", "obs_seq": int(obs_seq), "action": action})
 
-    def receive_action_ack(self, obs_seq: int, timeout: float) -> None:
+    def receive_action_ack(self, obs_seq: int, timeout: float) -> dict[str, Any]:
         message = self._receive(timeout=timeout)
         if message.get("type") != "action_ack" or message.get("obs_seq") != int(obs_seq):
             raise RuntimeError(f"Expected action_ack for observation {obs_seq}, got {message}")
+        if message.get("status") != "scheduled":
+            raise RuntimeError(
+                f"RDP action {obs_seq} was not scheduled: {message.get('reason') or message}. "
+                "Both endpoints must use rdp_step_v3."
+            )
+        count = message.get("scheduled_count")
+        if type(count) is not int or count != 1:
+            raise RuntimeError(f"RDP action {obs_seq}: invalid scheduled_count {count!r}")
+        for key in ("target_timestamp", "reference_timestamp"):
+            value = message.get(key)
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real) or not math.isfinite(value):
+                raise RuntimeError(f"RDP action {obs_seq}: invalid {key}")
+        if message.get("reference_source") not in {"latest_measured", "accepted_target"}:
+            raise RuntimeError(f"RDP action {obs_seq}: missing action reference source")
+        # This receipt confirms scheduling only; it is never an arrival ACK.
+        return message
 
     def close(self) -> None:
         self._websocket.close()

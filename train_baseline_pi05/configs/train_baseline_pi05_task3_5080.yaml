@@ -1,0 +1,63 @@
+# Local RTX 5080 config; convert data/insert_01 to this v3.0 dataset first.
+cache:
+  tactile_batch_size: 32
+  action_batch_size: 16
+  action_prefetch: true
+  action_root: /home/typhon/FRS_Tact/outputs/baseline_pi05/task3/action_cache
+  tactile_root: /home/typhon/FRS_Tact/outputs/baseline_pi05/task3_right_two_face/tactile_embedding_cache
+dataset:
+  action_key: action
+  camera_map:
+    right_wrist_0_rgb: observation.images.camera1
+  frame_stride: 5
+  rename_map: {}
+  repo_id: KaiyueChen/insert_01
+  revision: null
+  root: /home/typhon/FRS_Tact/data/lerobot_v30/KaiyueChen/insert_01
+  split_seed: 42
+  test_fraction: 0.1
+  train_fraction: 0.8
+  validation_fraction: 0.1
+decoder:
+  action_dim: 10
+  action_horizon: 50
+  batch_size: 256
+  d_model: 128
+  device: cuda
+  dim_feedforward: 256
+  dropout: 0.1
+  epochs: 50
+  learning_rate: 0.0003
+  nhead: 4
+  num_layers: 2
+  output: /home/typhon/FRS_Tact/outputs/baseline_pi05/task3_right_two_face/decoder
+  pin_memory: false
+  resume: false
+  seed: 0
+  tactile_dim: 512
+  tactile_keys:
+  - observation.images.tactile_left_1
+  - observation.images.tactile_right_1
+  weight_decay: 0.0001
+  workers: 0
+evaluation:
+  batch_size: 256
+  output: null
+  shuffle_tactile: true
+  split: test
+source:
+  action_expert_variant: gemma_300m_lora
+  action_horizon: 50
+  allow_download: false
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+  model_action_dim: 10
+  norm_stats_asset_id: insert_0102_train90
+  norm_stats_dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  paligemma_variant: gemma_2b_lora
+  sample_steps: 10
+  seed: 0
+  use_quantile_norm: true
+tactile:
+  embedding_dim: 512
+  encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
+  freeze_encoder: true

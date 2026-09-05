@@ -7,7 +7,7 @@ import sys
 import pytest
 import yaml
 
-from train_baseline_pi05.config import load_config
+from train_baseline_pi05.config import DecoderTrainConfig, load_config
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -30,7 +30,7 @@ def test_default_yaml_locks_direct_decoder_contract():
         "right_wrist_0_rgb": "observation.images.camera2",
     }
     assert config.dataset.frame_stride == 5
-    assert config.cache.action_batch_size == 64
+    assert config.cache.action_batch_size == 4
     assert config.decoder.num_layers == 2
     assert config.decoder.d_model == 128
     assert config.decoder.tactile_keys == (
@@ -39,6 +39,59 @@ def test_default_yaml_locks_direct_decoder_contract():
         "observation.images.tactile_left_1",
         "observation.images.tactile_right_1",
     )
+
+
+def test_decoder_defaults_to_cuda(tmp_path: Path):
+    assert DecoderTrainConfig(output=tmp_path).device == "cuda"
+    assert DecoderTrainConfig.from_mapping({"output": str(tmp_path)}).device == "cuda"
+
+
+def test_action_prefetch_is_opt_in_and_requires_boolean(tmp_path: Path):
+    from train_baseline_pi05.config import CacheConfig
+
+    raw = {"action_root": str(tmp_path / "actions"), "tactile_root": str(tmp_path / "tactile")}
+    assert CacheConfig.from_mapping(raw).action_prefetch is False
+    assert CacheConfig.from_mapping({**raw, "action_prefetch": True}).action_prefetch is True
+    with pytest.raises(ValueError, match="boolean"):
+        CacheConfig.from_mapping({**raw, "action_prefetch": "false"})
+
+
+@pytest.mark.parametrize("action_dim", [10, 20])
+@pytest.mark.parametrize("right_only", [True, False])
+def test_load_config_accepts_supported_action_and_tactile_contracts(tmp_path: Path, action_dim: int, right_only: bool):
+    raw = yaml.safe_load((ROOT / "train_baseline_pi05/configs/train_baseline_pi05.yaml").read_text())
+    raw["source"]["model_action_dim"] = action_dim
+    raw["decoder"]["action_dim"] = action_dim
+    if right_only:
+        raw["decoder"]["tactile_keys"] = [
+            "observation.images.tactile_left_1", "observation.images.tactile_right_1",
+        ]
+    path = tmp_path / "supported.yaml"
+    path.write_text(yaml.safe_dump(raw))
+
+    config = load_config(path)
+
+    assert config.decoder.action_dim == action_dim
+    assert len(config.decoder.tactile_keys) == (2 if right_only else 4)
+
+
+def test_config_rejects_old_cross_arm_tactile_pair(tmp_path):
+    with pytest.raises(ValueError, match="tactile_keys"):
+        DecoderTrainConfig.from_mapping({
+            "output": str(tmp_path),
+            "tactile_keys": ["observation.images.tactile_right_0", "observation.images.tactile_right_1"],
+        })
+
+
+@pytest.mark.parametrize("name", ["task3", "task3_5080", "task4"])
+def test_right_arm_profiles_use_camera1_faces_and_fresh_outputs(name):
+    config = load_config(ROOT / f"train_baseline_pi05/configs/train_baseline_pi05_{name}.yaml")
+    assert config.decoder.tactile_keys == ("observation.images.tactile_left_1", "observation.images.tactile_right_1")
+    task = name.split("_")[0]
+    assert config.cache.action_root.parent.name == task
+    assert config.cache.tactile_root.parent.name == f"{task}_right_two_face"
+    assert config.decoder.output.parent.name == f"{task}_right_two_face"
+    assert config.decoder.resume is False
 
 
 def test_config_import_does_not_import_heavy_runtimes():

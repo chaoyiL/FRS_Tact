@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from train_baseline_pi05.config import DecoderTrainConfig, TACTILE_KEYS
+from train_baseline_pi05.config import DecoderTrainConfig, RIGHT_TACTILE_KEYS, TACTILE_KEYS
 from train_baseline_pi05.model import (
     DirectDecoderConfig,
     DirectTactileActionDecoder,
@@ -137,6 +137,44 @@ def test_best_checkpoint_round_trips_with_weights_only_and_strict_state(tmp_path
     assert metadata["global_step"] == 12
     for key, value in model.state_dict().items():
         assert torch.equal(value.cpu(), loaded.state_dict()[key].cpu())
+
+
+def test_single_arm_right_tactile_checkpoint_preserves_predictions(tmp_path: Path):
+    keys = ("observation.images.tactile_left_1", "observation.images.tactile_right_1")
+    config = DirectDecoderConfig(action_dim=10, tactile_keys=keys)
+    model = DirectTactileActionDecoder(config).eval()
+    coarse, tactile = torch.randn(2, 50, 10), torch.randn(2, 2, 512)
+    with torch.no_grad():
+        expected = model(coarse, tactile)
+    path = save_best_checkpoint(
+        tmp_path, model, config, epoch=0, global_step=0,
+        metrics={"validation_loss": 1.0}, source_contract=_source_contract(),
+    )
+
+    loaded, metadata = load_decoder_checkpoint(path)
+    loaded.eval()
+    with torch.no_grad():
+        actual = loaded(coarse, tactile)
+
+    assert actual.shape == (2, 50, 10)
+    assert loaded.config.tactile_keys == keys
+    assert metadata["decoder_config"]["action_dim"] == 10
+    torch.testing.assert_close(actual, expected)
+
+
+def test_checkpoint_loader_rejects_old_cross_arm_sensor_contract(tmp_path):
+    config = DirectDecoderConfig(action_dim=10, tactile_keys=RIGHT_TACTILE_KEYS)
+    path = save_best_checkpoint(
+        tmp_path, DirectTactileActionDecoder(config), config, epoch=0, global_step=0,
+        metrics={"validation_loss": 1.0}, source_contract=_source_contract(),
+    )
+    raw = torch.load(path, weights_only=True)
+    raw["decoder_config"]["tactile_keys"] = [
+        "observation.images.tactile_right_0", "observation.images.tactile_right_1",
+    ]
+    torch.save(raw, path)
+    with pytest.raises(ValueError, match="tactile_keys"):
+        load_decoder_checkpoint(path)
 
 
 def test_best_checkpoint_canonicalizes_nested_source_contract_containers(tmp_path: Path):

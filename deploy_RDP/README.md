@@ -4,6 +4,10 @@
 `DEPLOY_PICK_TUBE_RDP.md`。策略端接收两路视觉、四路触觉 RGB 和 20D state，在线
 生成 PCA30 触觉特征，并以 `[1,20]` 单步相对动作发送给机器人服务器。
 
+当前使用 `rdp_step_v3`，需要同时更新服务器。观测携带真实采集时间；策略按采集时间推进
+动作索引，服务器以已成功入队的目标承接下一步增量。ACK明确区分调度与拒绝，不代表到达。
+0902单右臂请使用 `scripts/start_pick_tube_rdp_right.sh`，通用launcher默认是双臂配置。
+
 部署端保留完整 `reactive_diffusion_policy`，因为原生 checkpoint loader 会构造训练
 workspace；但部署入口不会创建 dataset 或优化器。AT/LDP、PCA、normalizer 和数据
 identity 会在策略构造前进行配对校验。

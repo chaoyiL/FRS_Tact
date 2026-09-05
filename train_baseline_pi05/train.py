@@ -107,8 +107,9 @@ def _source_contract(config: Any, action: ActionCache, tactile: Any) -> dict[str
 def _open_caches(config: Any) -> tuple[ActionCache, Any]:
     action = getattr(config, "action_cache", None) or ActionCache.open(_field(config, "cache.action_root"))
     tactile = getattr(config, "tactile_cache", None) or TactileEmbeddingCache.open(
-        _field(config, "cache.tactile_root"), encoder_path=_field(config, "tactile.encoder_checkpoint")
-
+        _field(config, "cache.tactile_root"),
+        tactile_keys=_field(config, "decoder.tactile_keys"),
+        encoder_path=_field(config, "tactile.encoder_checkpoint"),
     )
     return action, tactile
 
@@ -132,7 +133,9 @@ def train_decoder(config: Any, *, max_steps: int | None = None) -> Path:
     if resume:
         if not last_path.exists():
             raise FileNotFoundError(f"resume checkpoint is missing: {last_path}")
-        restored, payload = load_decoder_checkpoint(last_path, map_location=device)
+        # RNG state belongs on the CPU; optimizer loading moves its state to
+        # the devices of the parameters already attached to this optimizer.
+        restored, payload = load_decoder_checkpoint(last_path, map_location="cpu")
         if payload["source_contract"] != contract:
             raise ValueError("resume source contract does not match frozen inputs")
         model.load_state_dict(restored.state_dict()); optimizer.load_state_dict(payload["optimizer_state"])

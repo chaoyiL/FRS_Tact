@@ -49,7 +49,7 @@ TACTILE_KEYS = (
 STATE_KEY = "observation.state"
 IMAGE_SIZE = 224
 STATE_DIM = 20
-RDP_EXECUTION_PROTOCOL = "rdp_step_v2"
+RDP_EXECUTION_PROTOCOL = "rdp_step_v3"
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -476,6 +476,7 @@ class PickTubeRDPRuntime:
         dataset_obs_temporal_downsample_ratio: int,
         n_obs_steps: int,
         profile: StateActionProfile = DUAL_ARM_20X20,
+        control_frequency: float = 30.0,
     ) -> None:
         if slow_update_interval < 1:
             raise ValueError("slow_update_interval must be positive")
@@ -489,6 +490,9 @@ class PickTubeRDPRuntime:
         self.temporal_downsample_ratio = dataset_obs_temporal_downsample_ratio
         self.n_obs_steps = n_obs_steps
         self.profile = profile
+        if not math.isfinite(control_frequency) or control_frequency <= 0:
+            raise ValueError("control_frequency must be finite and positive")
+        self.control_frequency = float(control_frequency)
         self.reset()
 
     def reset(self) -> None:
@@ -496,6 +500,15 @@ class PickTubeRDPRuntime:
         self.latent_action: torch.Tensor | None = None
         self.tactile_history: list[torch.Tensor] = []
         self.observation_history: list[dict[str, torch.Tensor]] = []
+        self.observation_timestamps: list[float] = []
+        self.plan_timestamp: float | None = None
+        self.last_decoder_tick = -1
+
+    def _history_at_times(self, timestamps: np.ndarray) -> list[dict[str, torch.Tensor]]:
+        """Nearest recorded frames on the training time grid; no synthetic images."""
+        available = np.asarray(self.observation_timestamps, dtype=np.float64)
+        indices = np.abs(available[:, None] - timestamps[None, :]).argmin(axis=0)
+        return [self.observation_history[int(index)] for index in indices]
 
     def _prepare_observation(
         self, observation: dict[str, Any]
@@ -545,6 +558,9 @@ class PickTubeRDPRuntime:
 
     def _padded_observation_history(self) -> list[dict[str, torch.Tensor]]:
         raw_steps = self.n_obs_steps * self.temporal_downsample_ratio
+        if self.observation_timestamps:
+            times = self.observation_timestamps[-1] + np.arange(1 - raw_steps, 1) / self.control_frequency
+            return self._history_at_times(times)
         history = self.observation_history[-raw_steps:]
         if not history:
             raise RuntimeError("Observation history is empty")
@@ -570,13 +586,42 @@ class PickTubeRDPRuntime:
 
     @torch.inference_mode()
     def predict(self, observation: dict[str, Any]) -> tuple[np.ndarray, bool]:
+        timestamp = observation.get("observation.timestamp")
+        if timestamp is not None:
+            if isinstance(timestamp, (bool, np.bool_)) or not isinstance(timestamp, Real) or not math.isfinite(timestamp):
+                raise ValueError("observation.timestamp must be finite")
+            timestamp = float(timestamp)
+            if self.observation_timestamps:
+                gap = timestamp - self.observation_timestamps[-1]
+                if gap <= 0:
+                    raise ValueError("observation.timestamp must strictly increase")
+                if gap > self.slow_update_interval / self.control_frequency:
+                    # A discontinuity invalidates the old plan and touch context.
+                    self.reset()
+        elif self.observation_timestamps:
+            raise ValueError("observation.timestamp disappeared during a timed rollout")
         current_obs, tactile_embedding = self._prepare_observation(observation)
         self.observation_history.append(current_obs)
         raw_steps = self.n_obs_steps * self.temporal_downsample_ratio
-        if len(self.observation_history) > raw_steps:
+        if timestamp is not None:
+            self.observation_timestamps.append(timestamp)
+            retained = raw_steps + self.slow_update_interval + 1
+            self.observation_history = self.observation_history[-retained:]
+            self.observation_timestamps = self.observation_timestamps[-retained:]
+        elif len(self.observation_history) > raw_steps:
             self.observation_history = self.observation_history[-raw_steps:]
 
-        slow_update = self.latent_action is None or self.step % self.slow_update_interval == 0
+        tick = 0
+        if timestamp is not None:
+            if self.plan_timestamp is not None:
+                tick = int(math.floor((timestamp - self.plan_timestamp) * self.control_frequency + 0.5))
+            slow_update = (
+                self.latent_action is None or tick >= self.slow_update_interval
+                or tick <= self.last_decoder_tick
+            )
+        else:
+            # Offline callers without capture metadata retain their sampled-frame API.
+            slow_update = self.latent_action is None or self.step % self.slow_update_interval == 0
         if slow_update:
             obs_dict = self._slow_policy_observation()
             result = self.policy.predict_action(
@@ -585,14 +630,22 @@ class PickTubeRDPRuntime:
                 return_latent_action=True,
             )
             self.latent_action = result["action"][:, 0].detach()
+            if timestamp is not None:
+                self.plan_timestamp = timestamp
+                tick = 0
             # Match the official runner: start decoding with the complete raw
             # observation window, then extend it once per control step.
             self.tactile_history = [
                 frame["tactile_embedding"]
                 for frame in self._padded_observation_history()
             ]
-        else:
+        elif timestamp is None:
             self.tactile_history.append(tactile_embedding)
+
+        if timestamp is not None:
+            times = self.plan_timestamp + np.arange(1 - raw_steps, tick + 1) / self.control_frequency
+            self.tactile_history = [frame["tactile_embedding"] for frame in self._history_at_times(times)]
+            self.last_decoder_tick = tick
 
         extended_obs = {"tactile_embedding": torch.cat(self.tactile_history, dim=1)}
         result = self.policy.predict_from_latent_action(
@@ -640,7 +693,7 @@ def validate_unqualified_runtime_mode(
 
 
 def build_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Build the fixed one-step RDP v2 wire contract."""
+    """Build the timestamped one-step RDP v3 wire contract."""
     control = config["control"]
     return {
         "policy_type": "rdp",
@@ -718,6 +771,7 @@ def run(
         ),
         n_obs_steps=int(checkpoint_cfg.n_obs_steps),
         profile=profile,
+        control_frequency=float(control.get("control_frequency", 30.0)),
     )
 
     bridge = RobotBridgeClient(
@@ -758,18 +812,23 @@ def run(
                 torch.cuda.synchronize(device)
             inference_ms = (time.perf_counter() - started) * 1000.0
             bridge.send_action(action, obs_seq)
-            bridge.receive_action_ack(obs_seq, timeout=ack_timeout)
+            receipt = bridge.receive_action_ack(obs_seq, timeout=ack_timeout)
             iteration += 1
             now = time.monotonic()
             if now - last_status >= status_interval:
                 print(
                     f"[rdp] iter={iteration} obs_seq={obs_seq} "
-                    f"slow={slow_update} inference_ms={inference_ms:.1f}"
+                    f"slow={slow_update} inference_ms={inference_ms:.1f} "
+                    f"obs_time={observation['observation.timestamp']:.6f} "
+                    f"decoder_tick={rdp.last_decoder_tick} "
+                    f"ack={receipt['status']} reference={receipt['reference_source']} "
+                    f"target_time={receipt['target_timestamp']:.6f}"
                 )
                 last_status = now
     except KeyboardInterrupt:
         print("[rdp] Interrupted")
     finally:
+        rdp.reset()
         try:
             bridge.send_state("stop")
         finally:

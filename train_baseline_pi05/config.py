@@ -16,6 +16,11 @@ TACTILE_KEYS = (
     "observation.images.tactile_left_1",
     "observation.images.tactile_right_1",
 )
+RIGHT_TACTILE_KEYS = (
+    # The suffix identifies the arm/camera; left/right identifies a jaw face.
+    "observation.images.tactile_left_1",
+    "observation.images.tactile_right_1",
+)
 
 
 def _mapping(value: object, name: str) -> Mapping[str, Any]:
@@ -87,7 +92,7 @@ def _tactile_keys(value: object, name: str) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)) or any(not isinstance(key, str) for key in value):
         raise ValueError(f"{name} must be a sequence of strings.")
     keys = tuple(value)
-    if keys != TACTILE_KEYS:
+    if keys not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
         raise ValueError(f"{name} must contain the approved tactile keys in canonical order.")
     return keys
 
@@ -192,6 +197,8 @@ class CacheConfig:
     action_root: Path
     tactile_root: Path
     action_batch_size: int = 64
+    tactile_batch_size: int = 32
+    action_prefetch: bool = False
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "CacheConfig":
@@ -199,6 +206,8 @@ class CacheConfig:
             action_root=_path(_required(raw, "action_root", "cache"), "cache.action_root"),
             tactile_root=_path(_required(raw, "tactile_root", "cache"), "cache.tactile_root"),
             action_batch_size=_positive_integer(raw.get("action_batch_size", 64), "cache.action_batch_size"),
+            tactile_batch_size=_positive_integer(raw.get("tactile_batch_size", 32), "cache.tactile_batch_size"),
+            action_prefetch=_boolean(raw.get("action_prefetch", False), "cache.action_prefetch"),
         )
 
 
@@ -221,7 +230,7 @@ class DecoderTrainConfig:
     seed: int = 0
     workers: int = 0
     pin_memory: bool = False
-    device: str = "cpu"
+    device: str = "cuda"
     resume: bool = False
 
     @classmethod
@@ -248,7 +257,7 @@ class DecoderTrainConfig:
             seed=_integer(raw.get("seed", 0), "decoder.seed"),
             workers=_nonnegative_integer(raw.get("workers", 0), "decoder.workers"),
             pin_memory=_boolean(raw.get("pin_memory", False), "decoder.pin_memory"),
-            device=_string(raw.get("device", "cpu"), "decoder.device"),
+            device=_string(raw.get("device", "cuda"), "decoder.device"),
             resume=_boolean(raw.get("resume", False), "decoder.resume"),
         )
 
@@ -303,7 +312,6 @@ class BaselineTrainConfig:
             raise ValueError("source.action_horizon must be 50 for the direct decoder contract.")
         decoder_contract = {
             "action_horizon": 50,
-            "action_dim": 20,
             "tactile_dim": 512,
             "d_model": 128,
             "nhead": 4,
@@ -314,6 +322,9 @@ class BaselineTrainConfig:
         for field, expected in decoder_contract.items():
             if getattr(self.decoder, field) != expected:
                 raise ValueError(f"decoder.{field} must be {expected} for the direct decoder contract.")
+        if _integer(self.decoder.action_dim, "decoder.action_dim") not in (10, 20):
+            raise ValueError("decoder.action_dim must be 10 or 20 for the direct decoder contract.")
+        _tactile_keys(self.decoder.tactile_keys, "decoder.tactile_keys")
         if self.source.model_action_dim < self.decoder.action_dim:
             raise ValueError("source.model_action_dim must be at least decoder.action_dim.")
         if self.source.seed != 0:

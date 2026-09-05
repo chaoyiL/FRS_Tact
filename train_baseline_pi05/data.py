@@ -11,7 +11,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from train_baseline_pi05.action_cache import SPLIT_IDS
-from train_baseline_pi05.config import TACTILE_KEYS
+from train_baseline_pi05.config import RIGHT_TACTILE_KEYS, TACTILE_KEYS
 
 
 class BaselineCacheDataset(Dataset[dict[str, torch.Tensor]]):
@@ -25,7 +25,7 @@ class BaselineCacheDataset(Dataset[dict[str, torch.Tensor]]):
         tactile_manifest = getattr(tactile_cache, "metadata", None)
         if not isinstance(action_manifest, Mapping) or not isinstance(tactile_manifest, Mapping):
             raise ValueError("action and tactile cache manifests are required")
-        if tuple(tactile_manifest.get("tactile_keys", ())) != TACTILE_KEYS:
+        if tuple(tactile_manifest.get("tactile_keys", ())) not in (TACTILE_KEYS, RIGHT_TACTILE_KEYS):
             raise ValueError("tactile cache key order does not match the decoder contract")
         action_identity = action_manifest.get("dataset_identity")
         tactile_identity = tactile_manifest.get("dataset_identity")

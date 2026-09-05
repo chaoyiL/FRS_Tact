@@ -1,0 +1,81 @@
+# Bimanual template: set the matching Pi0.5, norm stats and trained decoder paths.
+source:
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
+  seed: 0
+  sample_steps: 10
+  action_horizon: 50
+  action_dim: 20
+  state_dim: 20
+  model_action_dim: 20
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera0
+    right_wrist_0_rgb: observation.images.camera1
+norm_stats:
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets
+  asset_id: two_tubes_0102
+  use_quantile_norm: true
+tactile_encoder:
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
+  embedding_dim: 512
+  tactile_keys: &id001
+  - observation.images.tactile_left_0
+  - observation.images.tactile_right_0
+  - observation.images.tactile_left_1
+  - observation.images.tactile_right_1
+  key_map:
+    observation.images.tactile_left_0: observation.images.tactile_left_0
+    observation.images.tactile_right_0: observation.images.tactile_right_0
+    observation.images.tactile_left_1: observation.images.tactile_left_1
+    observation.images.tactile_right_1: observation.images.tactile_right_1
+direct_decoder:
+  checkpoint: /workspace/baseline_pi05/decoder/best.pt
+  device: cuda
+  action_horizon: 50
+  action_dim: 20
+  tactile_dim: 512
+  d_model: 128
+  nhead: 4
+  num_layers: 2
+  dim_feedforward: 256
+  dropout: 0.1
+  tactile_keys: *id001
+connection:
+  address: 127.0.0.1
+  port: 26421
+  retry_interval_s: 1.0
+  ping_interval_s: 20.0
+  ping_timeout_s: 20.0
+  observation_timeout_s: 30.0
+  action_ack_timeout_s: 30.0
+  token: null
+  token_env: VB_ROBOT_TOKEN
+  require_token: true
+observation:
+  data_type: vitac
+  language_prompt: Firstly, use the left hand to pick up the blue tube, and then use
+    the right hand to pick up the green tube. Next, use the left hand to place the
+    blue tube back firstly, and then use the right hand to place the green tube back.
+  single_arm_mode: false
+  no_state_obs_mode: false
+control:
+  control_frequency: 10.0
+  controller_frequency: 80.0
+  action_horizon: 50
+  steps_per_inference: 50
+  max_normalized_action_abs: 8.0
+  max_normalized_delta_rms: 4.0
+runtime:
+  auto_start: false
+  warmup_runs: 1
+  max_iterations: 0
+logging:
+  save_observations: true
+  output_dir: outputs/pi05_direct_observations
+  save_every: 1
+  queue_size: 32
+server:
+  task: 0
+  dispatch_lead_time_s: 0.01
+  gripper_hysteresis_enabled: false

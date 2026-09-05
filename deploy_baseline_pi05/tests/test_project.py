@@ -30,7 +30,7 @@ def _production_sources() -> list[Path]:
     return sorted(
         path
         for path in DEPLOY_ROOT.rglob("*.py")
-        if "tests" not in path.parts and "__pycache__" not in path.parts
+        if not {"tests", "__pycache__", ".venv"}.intersection(path.parts)
     )
 
 

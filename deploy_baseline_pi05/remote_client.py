@@ -247,9 +247,9 @@ def _make_runtime(config: DeploymentConfig) -> Any:
     from .tactile_encoder import FrozenTactileEncoder
 
     policy = Pi05VisualPolicy(config)
-    encoder = FrozenTactileEncoder(config.tactile_encoder.checkpoint, tactile_keys=config.tactile_encoder.tactile_keys)
+    encoder = FrozenTactileEncoder(config.tactile_encoder.checkpoint, tactile_keys=config.tactile_encoder.tactile_keys, key_map=config.tactile_encoder.key_map)
     decoder = load_decoder(config.direct_decoder.checkpoint, device=config.direct_decoder.device, expected_source=expected_source_contract(config))
-    return DirectDecoderRuntime(policy=policy, tactile_encoder=encoder, decoder=decoder, max_normalized_action_abs=config.control.max_normalized_action_abs, max_normalized_delta_rms=config.control.max_normalized_delta_rms, device=config.direct_decoder.device)
+    return DirectDecoderRuntime(policy=policy, tactile_encoder=encoder, decoder=decoder, action_dim=config.source.action_dim, max_normalized_action_abs=config.control.max_normalized_action_abs, max_normalized_delta_rms=config.control.max_normalized_delta_rms, device=config.direct_decoder.device)
 
 
 def _warmup_observation() -> dict[str, np.ndarray]:

@@ -155,6 +155,9 @@ def _manifest_immutable(manifest: Mapping[str, Any], sample_count: int, horizon:
         "source_model_action_width": manifest.get("source_model_action_width"),
         "decoder_action_width": manifest.get("decoder_action_width"),
         "action_space": manifest.get("action_space"),
+        "camera_map": manifest.get("camera_map"),
+        "rename_map": manifest.get("rename_map"),
+        "action_key": manifest.get("action_key"),
     }
 
 
