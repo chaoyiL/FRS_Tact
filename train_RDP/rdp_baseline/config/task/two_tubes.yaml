@@ -1,0 +1,4 @@
+defaults:
+- dual_arm
+- _self_
+name: two_tubes

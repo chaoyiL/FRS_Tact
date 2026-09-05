@@ -1,0 +1,31 @@
+name: single_right
+arms: right
+action_contract: single_right_chunk_relative10d_v1
+dataset_path: ${repo_root}/data/rdp_baseline/${task.name}/replay_buffer.zarr
+tactile_cache_path: ${repo_root}/data/rdp_baseline/${task.name}/raw_tactile_manifest.json
+tactile_pca_path: ${repo_root}/data/rdp_baseline/${task.name}/tactile_pca.npz
+at_shape_meta: &at_shape_meta
+  action:
+    shape: [10]
+  obs: &lowdim_obs
+    right_robot_tcp_pose:
+      shape: [9]
+      type: low_dim
+    right_robot_gripper_width:
+      shape: [1]
+      type: low_dim
+    tactile_embedding:
+      shape: [15]
+      type: low_dim
+  extended_obs:
+    tactile_embedding:
+      shape: [15]
+      type: low_dim
+ldp_shape_meta:
+  <<: *at_shape_meta
+  obs:
+    <<: *lowdim_obs
+    camera2:
+      shape: [3, 224, 224]
+      type: rgb
+shape_meta: ${shape_meta}

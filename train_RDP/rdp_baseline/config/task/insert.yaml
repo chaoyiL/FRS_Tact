@@ -1,0 +1,7 @@
+defaults:
+- single_right
+- _self_
+name: insert
+dataset_path: ${repo_root}/data/rdp_insert01_encoder0824/insert01_pca30_single_right_rdp_zarr/replay_buffer.zarr
+tactile_cache_path: ${repo_root}/data/rdp_insert01_encoder0824/tactile_cache/KaiyueChen/insert_01/embeddings.npy
+tactile_pca_path: ${repo_root}/checkpoints/model/rdp_0902/insert/pca/tactile_pca_insert_01_02_encoder0824_2x15.npz

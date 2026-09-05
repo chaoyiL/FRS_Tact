@@ -1,0 +1,46 @@
+defaults:
+- task: insert
+- _self_
+action_contract: ${task.action_contract}
+at:
+  horizon: 32
+  n_obs_steps: 2
+  dataset_obs_temporal_downsample_ratio: 2
+  policy:
+    horizon: ${horizon}
+    n_latent_dims: 4
+    mlp_layer_num: 1
+    use_conv_encoder: true
+    conv_latent_dims: 32
+    conv_layer_num: 1
+    use_rnn_decoder: true
+    rnn_latent_dims: 32
+    rnn_layer_num: 1
+    kl_multiplier: 1e-6
+    n_embed: 16
+    use_vq: false
+    vqvae_groups: 4
+    eval: false
+    act_scale: 1
+repo_root: ${oc.env:RDP_BASELINE_REPO_ROOT,/home/typhon/FRS_Tact}
+dataset_path: ${task.dataset_path}
+tactile_cache_path: ${task.tactile_cache_path}
+tactile_pca_path: ${task.tactile_pca_path}
+task:
+  dataset:
+    _target_: rdp_baseline.dataset.ChunkRelativeDataset
+    arms: ${task.arms}
+    dataset_path: ${dataset_path}
+    tactile_cache_path: ${tactile_cache_path}
+    tactile_pca_path: ${tactile_pca_path}
+    shape_meta: ${shape_meta}
+    horizon: ${horizon}
+    n_obs_steps: ${dataset_obs_steps}
+    obs_temporal_downsample_ratio: ${dataset_obs_temporal_downsample_ratio}
+    n_latency_steps: ${n_latency_steps}
+    pad_before: ${eval:'${dataset_obs_steps}-1'}
+    pad_after: ${eval:'${n_action_steps}-1'}
+    val_ratio: 0.1
+    seed: ${training.seed}
+    max_train_episodes: null
+    episode_limit: null

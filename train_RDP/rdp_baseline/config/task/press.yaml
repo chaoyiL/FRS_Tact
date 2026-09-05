@@ -1,0 +1,4 @@
+defaults:
+- single_right
+- _self_
+name: press

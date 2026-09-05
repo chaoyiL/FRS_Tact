@@ -1,0 +1,40 @@
+name: dual_arm
+arms: both
+action_contract: dual_arm_chunk_relative20d_v1
+dataset_path: ${repo_root}/data/rdp_baseline/${task.name}/replay_buffer.zarr
+tactile_cache_path: ${repo_root}/data/rdp_baseline/${task.name}/raw_tactile_manifest.json
+tactile_pca_path: ${repo_root}/data/rdp_baseline/${task.name}/tactile_pca.npz
+at_shape_meta: &at_shape_meta
+  action:
+    shape: [20]
+  obs: &lowdim_obs
+    left_robot_tcp_pose:
+      shape: [9]
+      type: low_dim
+    left_robot_gripper_width:
+      shape: [1]
+      type: low_dim
+    right_robot_tcp_pose:
+      shape: [9]
+      type: low_dim
+    right_robot_gripper_width:
+      shape: [1]
+      type: low_dim
+    tactile_embedding:
+      shape: [30]
+      type: low_dim
+  extended_obs:
+    tactile_embedding:
+      shape: [30]
+      type: low_dim
+ldp_shape_meta:
+  <<: *at_shape_meta
+  obs:
+    <<: *lowdim_obs
+    camera1:
+      shape: [3, 224, 224]
+      type: rgb
+    camera2:
+      shape: [3, 224, 224]
+      type: rgb
+shape_meta: ${shape_meta}

@@ -1,0 +1,162 @@
+defaults:
+- common
+- _self_
+name: train_latent_diffusion_unet_image
+_target_: rdp_baseline.workspace_ldp.TrainDiffusionUnetImageWorkspace
+task_name: ${task.name}
+shape_meta: ${task.ldp_shape_meta}
+exp_name: default
+horizon: ${at.horizon}
+n_obs_steps: ${at.n_obs_steps}
+n_latency_steps: 0
+obs_temporal_downsample_ratio: 2
+dataset_obs_steps: ${eval:'${at.n_obs_steps}*${at.dataset_obs_temporal_downsample_ratio}'}
+dataset_obs_temporal_downsample_ratio: ${at.dataset_obs_temporal_downsample_ratio}
+n_action_steps: ${eval:'${horizon}-${dataset_obs_steps}+1'}
+past_action_visible: false
+keypoint_visible_rate: 1.0
+at_load_dir: null
+use_latent_action_before_vq: false
+obs_as_global_cond: true
+policy:
+  _target_: rdp_baseline.policy.LatentDiffusionUnetImagePolicy
+  shape_meta: ${shape_meta}
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: 100
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: true
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: epsilon
+  obs_encoder:
+    _target_: rdp_baseline.vision.MultiImageObsEncoder
+    shape_meta: ${shape_meta}
+    rgb_model:
+      _target_: reactive_diffusion_policy.model.vision.model_getter.get_resnet
+      name: resnet18
+      weights: null
+    resize_shape:
+    - 224
+    - 224
+    random_transforms:
+    - type: RandomCrop
+      ratio: 0.9
+    use_group_norm: true
+    share_rgb_model: false
+    imagenet_norm: true
+  use_latent_action_before_vq: ${use_latent_action_before_vq}
+  at:
+    _target_: rdp_baseline.model.VAE
+    shape_meta: ${shape_meta}
+    horizon: ${at.policy.horizon}
+    n_latent_dims: ${at.policy.n_latent_dims}
+    mlp_layer_num: ${at.policy.mlp_layer_num}
+    use_conv_encoder: ${at.policy.use_conv_encoder}
+    conv_latent_dims: ${at.policy.conv_latent_dims}
+    conv_layer_num: ${at.policy.conv_layer_num}
+    use_rnn_decoder: ${at.policy.use_rnn_decoder}
+    rnn_latent_dims: ${at.policy.rnn_latent_dims}
+    rnn_layer_num: ${at.policy.rnn_layer_num}
+    use_vq: ${at.policy.use_vq}
+    n_embed: ${at.policy.n_embed}
+    vqvae_groups: ${at.policy.vqvae_groups}
+    eval: true
+    load_dir: ${at_load_dir}
+    act_scale: ${at.policy.act_scale}
+    device: ${training.device}
+  horizon: ${horizon}
+  n_action_steps: ${eval:'${n_action_steps}+${n_latency_steps}'}
+  n_obs_steps: ${n_obs_steps}
+  num_inference_steps: 100
+  obs_as_global_cond: ${obs_as_global_cond}
+  diffusion_step_embed_dim: 128
+  down_dims:
+  - 512
+  - 1024
+  - 2048
+  kernel_size: 5
+  n_groups: 8
+  cond_predict_scale: true
+ema:
+  _target_: reactive_diffusion_policy.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: true
+  pin_memory: true
+  persistent_workers: ${eval:'${dataloader.num_workers} > 0'}
+val_dataloader:
+  batch_size: 64
+  num_workers: 4
+  shuffle: false
+  pin_memory: true
+  persistent_workers: ${eval:'${val_dataloader.num_workers} > 0'}
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 0.0001
+  betas:
+  - 0.95
+  - 0.999
+  eps: 1.0e-08
+  weight_decay: 1.0e-06
+  encoder_weight_decay: 1.0e-06
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: false
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  num_epochs: 401
+  gradient_accumulate_every: 1
+  use_ema: true
+  freeze_encoder: false
+  rollout_every: 50
+  checkpoint_every: 10
+  val_every: 1
+  sample_every: 10
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+  layer_decay: 1.0
+  encoder_lr_coefficient: 0.1
+  mixed_precision: 'no'
+logging:
+  project: rdp_baseline_ldp
+  resume: false
+  mode: offline
+  name: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+  tags:
+  - ${name}
+  - ${task_name}
+  - ${exp_name}
+  id: null
+  group: null
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt
+  save_last_ckpt: true
+  save_last_snapshot: false
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+hydra:
+  job:
+    override_dirname: ${name}
+    chdir: false
+  run:
+    dir: ${repo_root}/train_RDP/data/outputs/rdp_baseline/${now:%Y%m%d_%H%M%S}/ldp
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}
