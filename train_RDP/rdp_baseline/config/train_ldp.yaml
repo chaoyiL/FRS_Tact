@@ -115,7 +115,7 @@ training:
   resume: false
   lr_scheduler: cosine
   lr_warmup_steps: 500
-  num_epochs: 401
+  num_epochs: 40
   gradient_accumulate_every: 1
   use_ema: true
   freeze_encoder: false

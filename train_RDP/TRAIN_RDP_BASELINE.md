@@ -13,7 +13,7 @@ bash train_RDP/scripts/train_rdp_baseline.sh all
 
 依次训练 AT 和 LDP；LDP 加载这次 AT 的 `checkpoints/latest.ckpt`。默认解释器为 `train_RDP/.venv/bin/python`，日志使用 W&B offline 模式，无需登录。默认 FP32；若希望 LDP 使用 BF16，加 `MIXED_PRECISION=bf16`。AT 保持原版 FP32 训练。
 
-原版默认 AT 601 epoch、LDP 401 epoch，batch size 均为 64。这些是还原用的默认值，并非针对当前数据量确定的最优训练时长。可以通过 `AT_EPOCHS`、`LDP_EPOCHS`、`AT_BATCH`、`LDP_BATCH` 调整，例如：
+按当前训练安排，默认 AT 60 epoch、LDP 40 epoch，batch size 均为 64；训练目标与模型结构沿用原版。可以通过 `AT_EPOCHS`、`LDP_EPOCHS`、`AT_BATCH`、`LDP_BATCH` 调整，例如：
 
 ```bash
 RUN_ID=insert01_original_rdp_20e AT_EPOCHS=20 LDP_EPOCHS=20 \

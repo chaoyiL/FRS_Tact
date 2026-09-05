@@ -71,7 +71,7 @@ def commands(stage, task, gpu, environ, run_id):
                    TACTILE_PCA_PATH=str(pca), OUTPUT_ROOT=str(work / 'outputs' / task), RUN_ID=run_id,
                    NUM_WORKERS=workers, DEVICE='cuda:0', MIXED_PRECISION=environ.get('MIXED_PRECISION', 'bf16'),
                    AT_BATCH=environ.get('AT_BATCH', '64'), LDP_BATCH=environ.get('LDP_BATCH', '64'),
-                   AT_EPOCHS=environ.get('AT_EPOCHS', '601'), LDP_EPOCHS=environ.get('LDP_EPOCHS', '401'),
+                   AT_EPOCHS=environ.get('AT_EPOCHS', '60'), LDP_EPOCHS=environ.get('LDP_EPOCHS', '40'),
                    WANDB_MODE=environ.get('WANDB_MODE', 'offline'),
                    AT_CKPT=str(work / 'outputs' / task / run_id / 'at/checkpoints/latest.ckpt'))
         for training_stage in (('at', 'ldp') if stage in ('all', 'train') else (stage,)):
@@ -159,8 +159,8 @@ def main():
     print(f'RDP baseline run: {run_id}', flush=True)
     for gpu, selected in lanes:
         print(f'GPU {gpu}: {" -> ".join(selected)}', flush=True)
-    print(f'AT: epochs={env.get("AT_EPOCHS", "601")} batch={env.get("AT_BATCH", "64")} FP32; '
-          f'LDP: epochs={env.get("LDP_EPOCHS", "401")} batch={env.get("LDP_BATCH", "64")} '
+    print(f'AT: epochs={env.get("AT_EPOCHS", "60")} batch={env.get("AT_BATCH", "64")} FP32; '
+          f'LDP: epochs={env.get("LDP_EPOCHS", "40")} batch={env.get("LDP_BATCH", "64")} '
           f'precision={env.get("MIXED_PRECISION", "bf16")}; workers={env.get("NUM_WORKERS", "32")}', flush=True)
     if env.get('DRY_RUN') == '1':
         for gpu, selected in lanes:

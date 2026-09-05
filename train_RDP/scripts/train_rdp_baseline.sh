@@ -11,7 +11,7 @@ case "$stage" in
     cat <<'HELP'
 Usage: bash train_RDP/scripts/train_rdp_baseline.sh {at|ldp|all} [Hydra overrides...]
 Environment: RUN_ID, OUTPUT_ROOT, PYTHON_BIN, DATASET_PATH, TACTILE_CACHE_PATH,
-TACTILE_PCA_PATH, AT_CKPT, AT_EPOCHS=601, LDP_EPOCHS=401, AT_BATCH=64,
+TACTILE_PCA_PATH, AT_CKPT, AT_EPOCHS=60, LDP_EPOCHS=40, AT_BATCH=64,
 LDP_BATCH=64, NUM_WORKERS=4, DEVICE=cuda:0, MIXED_PRECISION=no (LDP),
 WANDB_MODE=offline, DRY_RUN=1 (print commands only).
 For a separate LDP invocation, set AT_CKPT to the baseline AT's latest.ckpt.
@@ -38,14 +38,14 @@ run() {
 }
 if [[ "$stage" == at || "$stage" == all ]]; then
   run "$PYTHON_BIN" "$RDP_DIR/train_baseline.py" --config-name=train_at \
-    "hydra.run.dir=$AT_DIR" "training.num_epochs=${AT_EPOCHS:-601}" \
+    "hydra.run.dir=$AT_DIR" "training.num_epochs=${AT_EPOCHS:-60}" \
     "dataloader.batch_size=${AT_BATCH:-64}" "val_dataloader.batch_size=${AT_BATCH:-64}" \
     "${common[@]}" "$@"
 fi
 if [[ "$stage" == ldp || "$stage" == all ]]; then
   run "$PYTHON_BIN" "$RDP_DIR/train_baseline.py" --config-name=train_ldp \
     "hydra.run.dir=$LDP_DIR" "at_load_dir=$AT_CKPT" \
-    "training.mixed_precision=${MIXED_PRECISION:-no}" "training.num_epochs=${LDP_EPOCHS:-401}" \
+    "training.mixed_precision=${MIXED_PRECISION:-no}" "training.num_epochs=${LDP_EPOCHS:-40}" \
     "dataloader.batch_size=${LDP_BATCH:-64}" "val_dataloader.batch_size=${LDP_BATCH:-64}" \
     "${common[@]}" "$@"
 fi

@@ -35,7 +35,7 @@ nohup env GPU_IDS=0,1 NUM_WORKERS=32 RUN_ID=original_rdp_v1 \
   > /DATA/ljl/substage/rdp_original/logs/original_rdp_v1.log 2>&1 &
 ```
 
-默认 AT 601 epoch、LDP 401 epoch、两者每卡 batch=64，采用恢复的原版默认值。若要延用此前服务器的 20/10 epoch 训练时长，可在 `env` 后加 `AT_EPOCHS=20 LDP_EPOCHS=10`。AT 用 FP32；LDP 默认 BF16，可设置 `MIXED_PRECISION=no`。
+默认 AT 60 epoch、LDP 40 epoch、两者每卡 batch=64。训练轮数按当前安排设置，训练目标与模型结构沿用原版；可在 `env` 后用 `AT_EPOCHS`、`LDP_EPOCHS` 覆盖。AT 用 FP32；LDP 默认 BF16，可设置 `MIXED_PRECISION=no`。
 
 日志：
 
