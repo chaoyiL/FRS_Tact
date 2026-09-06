@@ -22,6 +22,11 @@ def test_baseline_configs_select_original_methods_without_experimental_overrides
     assert ldp.policy.noise_scheduler.prediction_type=='epsilon'
     assert ldp.policy.num_inference_steps==100
     assert list(ldp.policy.obs_encoder.random_transforms)==[{'type':'RandomCrop','ratio':.9}]
+    assert dict(ldp.task.dataset.rgb_color_jitter) == {
+        'probability': .8, 'brightness': .2, 'contrast': .2,
+        'saturation': .1, 'hue': 0.0,
+    }
+    assert 'rgb_color_jitter' not in at.task.dataset
     for cfg in [at,ldp]:
         assert cfg.action_contract=='single_right_chunk_relative10d_v1'
         assert cfg.task.dataset._target_=='rdp_baseline.dataset.ChunkRelativeDataset'

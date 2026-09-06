@@ -17,6 +17,16 @@ past_action_visible: false
 keypoint_visible_rate: 1.0
 at_load_dir: null
 use_latent_action_before_vq: false
+task:
+  dataset:
+    # Training RGB only; validation disables this in get_validation_dataset.
+    # One set of factors per camera/window, shared by both observation frames.
+    rgb_color_jitter:
+      probability: 0.8
+      brightness: 0.2
+      contrast: 0.2
+      saturation: 0.1
+      hue: 0.0
 obs_as_global_cond: true
 policy:
   _target_: rdp_baseline.policy.LatentDiffusionUnetImagePolicy

@@ -4,6 +4,10 @@
 
 ## 启动
 
+2026-09-06 起，LDP 默认增加适度光照增强：每个训练样本/相机有 80% 概率应用亮度 ±20%、对比度 ±20%、饱和度 ±10%，不改变色相。同一窗口的两帧共享增强参数；增强在 RGB 数据加载时进行，随后仍使用原有随机裁剪。验证集关闭光照增强，部署不使用该数据变换。AT、触觉编码/PCA、状态与动作标签不变，已有匹配的 AT/PCA 可直接用于重新训练 LDP。
+
+配置位于 `rdp_baseline/config/train_ldp.yaml` 的 `task.dataset.rgb_color_jitter`。仅训练 LDP 时，可附加 `task.dataset.rgb_color_jitter=null` 关闭，或用 `task.dataset.rgb_color_jitter.brightness=0.1` 调整强度。已存在的 checkpoint 不会因修改配置自动获得增强效果；使用新的 RUN_ID 训练 LDP 并与原模型对照。
+
 在 `/home/typhon/FRS_Tact` 执行：
 
 ```bash

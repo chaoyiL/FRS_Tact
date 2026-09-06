@@ -58,6 +58,36 @@ class BaselineDatasetTest(unittest.TestCase):
         args.update(kwargs)
         return cls(**args)
 
+    def test_lighting_is_temporally_consistent_and_only_changes_training_rgb(self):
+        ds = self.dataset(rgb_color_jitter=dict(probability=1.0, brightness=.2,
+                                                contrast=.2, saturation=.1))
+        # Repeat the same non-gray image in both observation frames.
+        picture = np.array([[[80, 120, 160]]], dtype=np.uint8)
+        ds._read_rgb = lambda frames, key: np.repeat(picture[None], len(frames), axis=0)
+        torch.manual_seed(42)
+        sample = ds[1]
+        rgb = sample['obs']['camera2']
+        torch.testing.assert_close(rgb[0], rgb[1])
+        self.assertFalse(torch.equal(rgb[0, :, 0, 0], torch.tensor([80,120,160])/255))
+        self.assertTrue(bool(((rgb >= 0) & (rgb <= 1)).all()))
+        original = self.dataset()[1]
+        for key in ('right_robot_tcp_pose', 'right_robot_gripper_width', 'tactile_embedding'):
+            torch.testing.assert_close(sample['obs'][key], original['obs'][key])
+        torch.testing.assert_close(sample['action'], original['action'])
+        torch.testing.assert_close(sample['extended_obs']['tactile_embedding'],
+                                   original['extended_obs']['tactile_embedding'])
+
+    def test_validation_disables_lighting_without_disabling_training(self):
+        ds = self.dataset(val_ratio=.5, rgb_color_jitter=dict(probability=1., brightness=.2))
+        val = ds.get_validation_dataset()
+        self.assertIsNotNone(ds.rgb_color_jitter)
+        self.assertIsNone(val.rgb_color_jitter)
+        sample = val[0]
+        frames = val._frame_indices([0])[0, val.obs_indices]
+        expected = torch.from_numpy(np.moveaxis(val._read_rgb(frames), -1, 1).astype(np.float32)/255)
+        torch.testing.assert_close(sample['obs']['camera2'], expected)
+        torch.testing.assert_close(val[0]['obs']['camera2'], expected)
+
     def test_chunk_uses_last_observation_base_and_keeps_micro_motion(self):
         ds = self.dataset()
         sample = ds[1]  # Unpadded window frames 0,1,2,3; base is frame 1.
