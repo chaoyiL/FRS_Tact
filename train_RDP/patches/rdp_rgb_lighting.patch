@@ -1,0 +1,68 @@
+diff --git a/train_RDP/rdp_baseline/config/train_ldp.yaml b/train_RDP/rdp_baseline/config/train_ldp.yaml
+index 4cfee3f..22f4dcf 100644
+--- a/train_RDP/rdp_baseline/config/train_ldp.yaml
++++ b/train_RDP/rdp_baseline/config/train_ldp.yaml
+@@ -17,6 +17,16 @@ past_action_visible: false
+ keypoint_visible_rate: 1.0
+ at_load_dir: null
+ use_latent_action_before_vq: false
++task:
++  dataset:
++    # Training RGB only; validation disables this in get_validation_dataset.
++    # One set of factors per camera/window, shared by both observation frames.
++    rgb_color_jitter:
++      probability: 0.8
++      brightness: 0.2
++      contrast: 0.2
++      saturation: 0.1
++      hue: 0.0
+ obs_as_global_cond: true
+ policy:
+   _target_: rdp_baseline.policy.LatentDiffusionUnetImagePolicy
+diff --git a/train_RDP/rdp_baseline/dataset.py b/train_RDP/rdp_baseline/dataset.py
+index fd1825c..fd1aa92 100644
+--- a/train_RDP/rdp_baseline/dataset.py
++++ b/train_RDP/rdp_baseline/dataset.py
+@@ -103,7 +103,7 @@ class ChunkRelativeDataset(BaseImageDataset):
+                  horizon=32, n_obs_steps=4, obs_temporal_downsample_ratio=2,
+                  n_latency_steps=0, pad_before=3, pad_after=28, val_ratio=.1,
+                  seed=42, max_train_episodes=None, episode_limit=None, shape_meta=None,
+-                 arms='right'):
++                 arms='right', rgb_color_jitter=None):
+         if arms not in ('right', 'both'):
+             raise ValueError('arms must be right or both')
+         self.arms = ('left', 'right') if arms == 'both' else ('right',)
+@@ -176,6 +176,14 @@ class ChunkRelativeDataset(BaseImageDataset):
+         cameras = ('camera1', 'camera2') if arms == 'both' else ('camera2',)
+         self.rgb_keys = tuple(key for key in cameras if shape_meta is None or key in shape_meta.get('obs', {}))
+         self.include_rgb = bool(self.rgb_keys)
++        self.rgb_color_jitter = None
++        if rgb_color_jitter is not None and self.include_rgb:
++            from torchvision.transforms import ColorJitter, RandomApply
++            options = dict(rgb_color_jitter)
++            probability = float(options.pop('probability', .8))
++            if not 0 <= probability <= 1:
++                raise ValueError('RGB lighting probability must be between 0 and 1')
++            self.rgb_color_jitter = RandomApply([ColorJitter(**options)], p=probability)
+         self.val_mask = np.zeros(len(ends), dtype=bool)
+         rng = np.random.default_rng(seed)
+         if val_ratio > 0:
+@@ -200,6 +208,7 @@ class ChunkRelativeDataset(BaseImageDataset):
+     def get_validation_dataset(self):
+         result = copy.copy(self)
+         result.indices = self._make_indices(self.val_mask)
++        result.rgb_color_jitter = None
+         return result
+ 
+     def __len__(self):
+@@ -238,6 +247,10 @@ class ChunkRelativeDataset(BaseImageDataset):
+             for key in self.rgb_keys:
+                 rgb = self._read_rgb(frames, key)
+                 sample['obs'][key] = torch.from_numpy(np.moveaxis(rgb, -1, 1).astype(np.float32) / 255)
++                if self.rgb_color_jitter is not None:
++                    # One call on [T,C,H,W] shares lighting parameters across
++                    # the observation history; only RGB is augmented.
++                    sample['obs'][key] = self.rgb_color_jitter(sample['obs'][key])
+         return sample
+ 
+     def get_normalizer(self, batch_size=1024, **kwargs):

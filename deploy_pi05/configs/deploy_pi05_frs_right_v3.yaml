@@ -2,7 +2,7 @@
 # This file is intentionally separate from deploy_pi05_frs_right.yaml, which
 # remains the objective-v2 flow-decoder deployment.
 
-checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task4_0830_6k
 seed: 0
 num_steps: 10
 task: 0
@@ -20,8 +20,8 @@ model:
   empty_cameras: []
 
 norm_stats:
-  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
-  asset_id: insert_0102_train90
+  dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task4_0830_6k/assets
+  asset_id: press_0102
   use_quantile_norm: true
 
 frs:
@@ -30,7 +30,7 @@ frs:
   # Must be an objective-v3 learned_residual_gated checkpoint. The runtime
   # fails closed if its architecture, arm9/gripper contract, thresholds, or
   # residual bound do not match the checkpoint metadata and decoder config.
-  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_insert_01_right_two_face_learned_residual_v3
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_frs_right_press_v3_best
   tactile_encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
 
   tactile_keys:
@@ -74,7 +74,8 @@ connection:
 
 observation:
   data_type: vitac
-  language_prompt: Firstly, use the hand to pick up the tube and then insert it back.
+  language_prompt: Use the hand to press the button of the bread machine.
+  #Firstly, use the hand to pick up the tube and then insert it back.
   single_arm_mode: true
   controlled_arm: right
   no_state_obs_mode: false

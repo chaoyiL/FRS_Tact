@@ -170,10 +170,14 @@ class RobotBridgeClient:
         return message
 
     def send_config(self, config: dict[str, Any]) -> None:
+        self._execution_protocol = config.get('execution_protocol', 'rdp_step_v3')
+        self._execution_started = False
+        self._expected_execution = None
         self._send({"type": "config", "config": config})
 
     def send_state(self, state: str) -> None:
         self._send({"type": "state", "state": state})
+        self._execution_started = state == 'start'
 
     def receive_observation(self, timeout: float | None = None) -> tuple[int, dict[str, Any]]:
         message = self._receive(timeout=timeout)
@@ -205,19 +209,33 @@ class RobotBridgeClient:
             raise RuntimeError("Observation timestamps must advance for both cameras")
         self._last_observation_timestamp = float(timestamp)
         self._last_camera_timestamps = camera_times.astype(np.float64, copy=True)
+        if getattr(self, '_execution_protocol', None) == 'rdp_observation_deadline_v1':
+            deadline = observation.get('observation.action_target_timestamp')
+            if deadline is not None or getattr(self, '_execution_started', False):
+                if (isinstance(deadline, (bool, np.bool_)) or not isinstance(deadline, Real)
+                        or not math.isfinite(deadline) or deadline <= timestamp):
+                    raise RuntimeError('RDP execution requires a finite future observation.action_target_timestamp')
+                self._expected_execution = (int(message['obs_seq']), float(deadline))
         return int(message["obs_seq"]), observation
 
     def send_action(self, action: np.ndarray, obs_seq: int) -> None:
         self._send({"type": "action", "obs_seq": int(obs_seq), "action": action})
 
     def receive_action_ack(self, obs_seq: int, timeout: float) -> dict[str, Any]:
+        self.last_action_receipt = None
         message = self._receive(timeout=timeout)
         if message.get("type") != "action_ack" or message.get("obs_seq") != int(obs_seq):
             raise RuntimeError(f"Expected action_ack for observation {obs_seq}, got {message}")
+        self.last_action_receipt = message
         if message.get("status") != "scheduled":
+            if (getattr(self, '_execution_protocol', None) == 'rdp_observation_deadline_v1'
+                    and message.get('status') == 'rejected'
+                    and message.get('reason') == 'rdp_execution_deadline_missed'
+                    and type(message.get('scheduled_count')) is int
+                    and message['scheduled_count'] == 0 and message.get('target_timestamp') is None):
+                return message
             raise RuntimeError(
-                f"RDP action {obs_seq} was not scheduled: {message.get('reason') or message}. "
-                "Both endpoints must use rdp_step_v3."
+                f"RDP action {obs_seq} was not scheduled: {message.get('reason') or message}"
             )
         count = message.get("scheduled_count")
         if type(count) is not int or count != 1:
@@ -226,8 +244,14 @@ class RobotBridgeClient:
             value = message.get(key)
             if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real) or not math.isfinite(value):
                 raise RuntimeError(f"RDP action {obs_seq}: invalid {key}")
-        if message.get("reference_source") not in {"latest_measured", "accepted_target"}:
-            raise RuntimeError(f"RDP action {obs_seq}: missing action reference source")
+        protocol = getattr(self, '_execution_protocol', None)
+        allowed = ({'observation'} if protocol in {'rdp_observation_step_v1', 'rdp_observation_deadline_v1'}
+                   else {'latest_measured', 'accepted_target'})
+        if message.get("reference_source") not in allowed:
+            raise RuntimeError(f"RDP action {obs_seq}: incompatible action reference source")
+        if protocol == 'rdp_observation_deadline_v1':
+            if getattr(self, '_expected_execution', None) != (int(obs_seq), float(message['target_timestamp'])):
+                raise RuntimeError(f'RDP action {obs_seq}: server changed the predicted execution time')
         # This receipt confirms scheduling only; it is never an arrival ACK.
         return message
 

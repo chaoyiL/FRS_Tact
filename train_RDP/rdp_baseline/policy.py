@@ -207,8 +207,6 @@ class LatentDiffusionUnetImagePolicy(DiffusionUnetImagePolicy):
                 extend_obs_pad_after_n = self.original_horizon - extended_obs_last_step
             else:
                 extend_obs_pad_after_n = None
-            print(f"extended_obs_last_step: {extended_obs_last_step}")
-            print(f"extend_obs_pad_after_n: {extend_obs_pad_after_n}")
             temporal_cond = self.at.get_temporal_cond(extended_obs_dict, extended_obs_last_step, extend_obs_pad_after_n=extend_obs_pad_after_n)
             temporal_cond = temporal_cond.to(self.device)
             nsample = self.at.get_action_from_latent_with_temporal_cond(latent_action, temporal_cond)

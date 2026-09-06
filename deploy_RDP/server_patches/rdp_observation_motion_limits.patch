@@ -1,0 +1,278 @@
+--- a/deploy_scripts/vbvla_safety.py
++++ b/deploy_scripts/vbvla_safety.py
+@@ -297,6 +297,49 @@
+     )
+ 
+ 
++def _validate_rotation_6d_geometry(rotation_6d):
++    """Check the nondegenerate 6D representation without imposing a pose delta."""
++    first = rotation_6d[..., :3]
++    second = rotation_6d[..., 3:]
++    epsilon = 1e-6
++
++    first_norm = np.linalg.norm(first, axis=-1, keepdims=True)
++    if np.any(first_norm <= epsilon):
++        raise UnsafeActionError("action contains a near-zero 6D rotation vector")
++    first_unit = first / first_norm
++
++    second_norm = np.linalg.norm(second, axis=-1, keepdims=True)
++    if np.any(second_norm <= epsilon):
++        raise UnsafeActionError("action contains a near-zero 6D rotation vector")
++    second_unit = second / second_norm
++    second_orthogonal = (
++        second_unit - np.sum(first_unit * second_unit, axis=-1, keepdims=True) * first_unit
++    )
++    orthogonal_norm = np.linalg.norm(second_orthogonal, axis=-1, keepdims=True)
++    if np.any(orthogonal_norm <= epsilon):
++        raise UnsafeActionError("action contains collinear 6D rotation vectors")
++    second_unit = second_orthogonal / orthogonal_norm
++    third_unit = np.cross(first_unit, second_unit)
++
++    rotation_matrices = np.stack((first_unit, second_unit, third_unit), axis=-1)
++    return (rotation_matrices, first_norm, second_norm, first_unit,
++            second_unit, orthogonal_norm)
++
++
++def validate_action_chunk_structure_and_rotation(
++    action, action_horizon, n_robots, min_gripper, max_gripper,
++) -> np.ndarray:
++    """Validate wire representation; motion bounds require its actual reference."""
++    action_array = validate_action_chunk_structure(
++        action, action_horizon=action_horizon, n_robots=n_robots,
++        min_gripper=min_gripper, max_gripper=max_gripper,
++    )
++    per_robot = action_array.astype(np.float64, copy=False).reshape(
++        action_horizon, n_robots, 10)
++    _validate_rotation_6d_geometry(per_robot[..., 3:9])
++    return action_array
++
++
+ def _validate_action_chunk_semantics(
+     action_array: np.ndarray,
+     *,
+@@ -313,29 +356,8 @@
+         raise UnsafeActionError("action translation delta exceeds the configured limit")
+ 
+     rotation_6d = per_robot[..., 3:9]
+-    first = rotation_6d[..., :3]
+-    second = rotation_6d[..., 3:]
+-    epsilon = 1e-6
+-
+-    first_norm = np.linalg.norm(first, axis=-1, keepdims=True)
+-    if np.any(first_norm <= epsilon):
+-        raise UnsafeActionError("action contains a near-zero 6D rotation vector")
+-    first_unit = first / first_norm
+-
+-    second_norm = np.linalg.norm(second, axis=-1, keepdims=True)
+-    if np.any(second_norm <= epsilon):
+-        raise UnsafeActionError("action contains a near-zero 6D rotation vector")
+-    second_unit = second / second_norm
+-    second_orthogonal = (
+-        second_unit - np.sum(first_unit * second_unit, axis=-1, keepdims=True) * first_unit
+-    )
+-    orthogonal_norm = np.linalg.norm(second_orthogonal, axis=-1, keepdims=True)
+-    if np.any(orthogonal_norm <= epsilon):
+-        raise UnsafeActionError("action contains collinear 6D rotation vectors")
+-    second_unit = second_orthogonal / orthogonal_norm
+-    third_unit = np.cross(first_unit, second_unit)
+-
+-    rotation_matrices = np.stack((first_unit, second_unit, third_unit), axis=-1)
++    (rotation_matrices, first_norm, second_norm, first_unit,
++     second_unit, orthogonal_norm) = _validate_rotation_6d_geometry(rotation_6d)
+     traces = np.trace(rotation_matrices, axis1=-2, axis2=-1)
+     rotation_angles = np.arccos(np.clip((traces - 1.0) / 2.0, -1.0, 1.0))
+     if np.any(rotation_angles > max_rot_delta):
+--- a/deploy_scripts/bimanual_rdp_online.py
++++ b/deploy_scripts/bimanual_rdp_online.py
+@@ -41,6 +41,7 @@
+     FreshActions,
+     UnsafeActionError,
+     validate_action_chunk,
++    validate_action_chunk_structure_and_rotation,
+     validate_safety_limits,
+     wait_for_action_or_stop,
+     wait_for_start,
+@@ -193,15 +194,29 @@
+             f"shape {expected_action_shape} for {RDP_N_ROBOTS} robots; "
+             "action_horizon must be a positive integer"
+         )
+-    validated = validate_action_chunk(
+-        raw_action,
+-        action_horizon=action_horizon,
+-        n_robots=RDP_N_ROBOTS,
+-        max_pos_delta=max_pos_delta,
+-        max_rot_delta=max_rot_delta,
+-        min_gripper=min_gripper,
+-        max_gripper=max_gripper,
+-    )
++    observation_relative = issued_reference_obs is not None
++    if observation_relative:
++        if not schedule_from_receive:
++            raise UnsafeActionError("observation-relative actions require receive scheduling")
++        if action_reference is None:
++            raise UnsafeActionError("observation-relative actions require a fresh tracking reference")
++        # Wire deltas include motion since capture. Bound the reconstructed target
++        # against fresh feedback below, using the configured limits directly.
++        validate_safety_limits(max_pos_delta, max_rot_delta, min_gripper, max_gripper)
++        validated = validate_action_chunk_structure_and_rotation(
++            raw_action, action_horizon=action_horizon, n_robots=RDP_N_ROBOTS,
++            min_gripper=min_gripper, max_gripper=max_gripper,
++        )
++    else:
++        validated = validate_action_chunk(
++            raw_action,
++            action_horizon=action_horizon,
++            n_robots=RDP_N_ROBOTS,
++            max_pos_delta=max_pos_delta,
++            max_rot_delta=max_rot_delta,
++            min_gripper=min_gripper,
++            max_gripper=max_gripper,
++        )
+ 
+     if issued_target_timestamp is not None:
+         if (isinstance(issued_target_timestamp, (bool, np.bool_))
+@@ -245,7 +260,12 @@
+         converted = np.asarray(converter(selected_raw, conversion_obs, action_pose_repr))
+         if converted.shape != (selected_count, RDP_N_ROBOTS * 7) or not np.isfinite(converted).all():
+             raise UnsafeActionError("converted action has invalid shape or non-finite values")
+-        if action_reference is not None:
++        if observation_relative:
++            from deploy_scripts.rdp_action_reference import RDPActionReference
++            RDPActionReference(
++                max_pos_delta=max_pos_delta, max_rot_delta=max_rot_delta,
++            ).validate(converted, measured_obs)
++        elif action_reference is not None:
+             action_reference.validate(converted, measured_obs)
+         schedule_now = float(now())
+         if not np.isfinite(schedule_now):
+--- a/tests/test_rdp_observation_step_v1.py
++++ b/tests/test_rdp_observation_step_v1.py
+@@ -72,6 +72,7 @@
+     clock=[200.];env=Env(clock)
+     options=kwargs(env,clock)
+     options['issued_reference_obs']=snapshot_action_reference(pose_obs(199.9,0.))
++    options['action_reference']=RDPActionReference(max_pos_delta=.03,max_rot_delta=.5)
+     with pytest.raises(ValueError,match='match observation timestamp'):
+         online.execute_action_chunk(action(),**options)
+     assert not env.calls
+--- a/tests/test_rdp_observation_deadline_v1.py
++++ b/tests/test_rdp_observation_deadline_v1.py
+@@ -4,6 +4,7 @@
+ import pytest
+ from deploy_scripts import bimanual_rdp_online as online
+ from deploy_scripts import rdp_step_protocol as protocol
++from deploy_scripts.rdp_action_reference import RDPActionReference
+ from client.robot_client import _LOW_LATENCY_EXECUTION_PROTOCOLS
+ from test_rdp_step_v3 import Env, Client, action, kwargs
+ from test_rdp_observation_step_v1 import pose_obs
+@@ -14,6 +15,7 @@
+     env = Env(clock)
+     env.get_action_reference_obs = lambda: pose_obs(clock[0], 0.)
+     kw = kwargs(env, clock)
++    kw["action_reference"] = RDPActionReference(max_pos_delta=.03, max_rot_delta=.5)
+     kw.update(issued_reference_obs=protocol.snapshot_action_reference(pose_obs(199.8, 0.)),
+               issued_target_timestamp=200.08)
+     return env, kw
+--- /dev/null
++++ b/tests/test_rdp_observation_motion_limits.py
+@@ -0,0 +1,100 @@
++"""Motion limits use fresh feedback, regardless of observation capture age."""
++import numpy as np
++import pytest
++from scipy.spatial.transform import Rotation
++from deploy_scripts import bimanual_rdp_online as online
++from deploy_scripts.rdp_action_reference import RDPActionReference
++from real_world.real_inference_util import get_real_umi_action
++from test_rdp_step_v3 import Client, Env, kwargs, action
++
++
++def pose(t, x=0., angle=0.):
++    out = {'timestamp': np.array([t])}
++    for i in range(2):
++        out[f'robot{i}_eef_pos'] = np.array([[x, 0., 0.]])
++        out[f'robot{i}_eef_rot_axis_angle'] = np.array([[0., 0., angle]])
++    return out
++
++
++def execute(wire, *, x=0., angle=0., deadline=False, reference=True, issued=True, schedule=True):
++    clock = [200.]
++    env = Env(clock)
++    env.get_action_reference_obs = lambda: pose(200., x, angle)
++    options = kwargs(env, clock)
++    options.update(converter=get_real_umi_action, schedule_from_receive=schedule)
++    if reference:
++        # Deliberately broader object: server configuration must remain authoritative.
++        options['action_reference'] = RDPActionReference(max_pos_delta=.5, max_rot_delta=2.)
++    if issued:
++        options['issued_reference_obs'] = pose(199.8)
++    if deadline:
++        options['issued_target_timestamp'] = 200.05
++    client = Client()
++    online.execute_rdp_action_chunk_and_publish_ack(client, 7, wire, **options)
++    return env, client.acks[0]
++
++
++@pytest.mark.parametrize('deadline', [False, True])
++def test_motion_since_capture_does_not_count_as_remaining_translation(deadline):
++    wire = action(); wire[0, [0, 10]] = .04
++    env, ack = execute(wire, x=.03, deadline=deadline)
++    assert ack['status'] == 'scheduled'
++    assert len(env.calls) == 1
++    np.testing.assert_allclose(env.calls[0]['actions'][0, [0, 7]], .04)
++
++
++@pytest.mark.parametrize('deadline', [False, True])
++def test_rotation_since_capture_does_not_count_as_remaining_rotation(deadline):
++    wire = action()
++    rot = Rotation.from_rotvec([0., 0., .6]).as_matrix()[:, :2].T.reshape(6)
++    wire[0, 3:9] = rot; wire[0, 13:19] = rot
++    env, ack = execute(wire, angle=.5, deadline=deadline)
++    assert ack['status'] == 'scheduled'
++    assert len(env.calls) == 1
++
++
++@pytest.mark.parametrize('kind', ['translation', 'rotation'])
++def test_configured_fresh_tracking_limit_cannot_be_bypassed_by_reference_object(kind):
++    wire = action()
++    if kind == 'translation':
++        wire[0, 0] = .04
++    else:
++        wire[0, 3:9] = Rotation.from_rotvec([0., 0., .6]).as_matrix()[:, :2].T.reshape(6)
++    env, ack = execute(wire)
++    assert ack['status'] == 'rejected'
++    assert 'tracking error' in ack['reason']
++    assert not env.calls
++
++
++@pytest.mark.parametrize('kind', ['zero', 'collinear', 'nan', 'gripper'])
++def test_observation_wire_still_rejects_invalid_structure(kind):
++    wire = action()
++    if kind == 'zero': wire[0, 3:6] = 0.
++    elif kind == 'collinear': wire[0, 6:9] = wire[0, 3:6]
++    elif kind == 'nan': wire[0, 0] = np.nan
++    else: wire[0, 9] = .2
++    env, ack = execute(wire)
++    assert ack['status'] == 'rejected'
++    assert not env.calls
++
++
++def test_observation_mode_requires_tracking_reference():
++    env, ack = execute(action(), reference=False)
++    assert ack['status'] == 'rejected'
++    assert 'tracking reference' in ack['reason']
++    assert not env.calls
++
++
++def test_observation_mode_requires_receive_scheduling():
++    env, ack = execute(action(), schedule=False)
++    assert ack['status'] == 'rejected'
++    assert 'receive' in ack['reason']
++    assert not env.calls
++
++
++def test_legacy_still_checks_raw_translation():
++    wire = action(); wire[0, 0] = .04
++    env, ack = execute(wire, x=.03, issued=False)
++    assert ack['status'] == 'rejected'
++    assert 'translation delta' in ack['reason']
++    assert not env.calls

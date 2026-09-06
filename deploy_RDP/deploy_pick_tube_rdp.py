@@ -7,6 +7,7 @@ import argparse
 import copy
 import math
 import os
+import sys
 import time
 import warnings
 from collections.abc import Mapping, Sequence
@@ -412,6 +413,14 @@ def load_policy(
     cfg = copy.deepcopy(_checkpoint_cfg(payload, "LDP", ldp_checkpoint))
     at_cfg = _checkpoint_cfg(at_payload, "AT", at_checkpoint)
     OmegaConf.set_struct(cfg, False)
+    from baseline_loading import is_baseline_config, load_baseline_policy
+    if is_baseline_config(cfg):
+        return load_baseline_policy(
+            payload, at_payload, cfg, at_cfg, device=device,
+            num_inference_steps=num_inference_steps,
+            pca_output_dim=tactile_embedding_dim, profile=profile,
+            slow_update_interval=slow_update_interval,
+        )
     validate_tactile_dimensions(
         tactile_embedding_dim,
         cfg,
@@ -503,6 +512,10 @@ class PickTubeRDPRuntime:
         self.observation_timestamps: list[float] = []
         self.plan_timestamp: float | None = None
         self.last_decoder_tick = -1
+
+    def _action_for_execution(self, action, observation):
+        """Legacy policies already predict wire-relative per-step increments."""
+        return action
 
     def _history_at_times(self, timestamps: np.ndarray) -> list[dict[str, torch.Tensor]]:
         """Nearest recorded frames on the training time grid; no synthetic images."""
@@ -660,6 +673,7 @@ class PickTubeRDPRuntime:
                 f"Expected finite {self.profile.action_dim}D action, got {action.shape}"
             )
         self.step += 1
+        action = self._action_for_execution(action, observation)
         return action[None].astype(np.float32, copy=False), slow_update
 
 
@@ -692,8 +706,8 @@ def validate_unqualified_runtime_mode(
         )
 
 
-def build_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
-    """Build the timestamped one-step RDP v3 wire contract."""
+def build_server_config(config: Mapping[str, Any], *, baseline: bool = False, deadline: bool = False) -> dict[str, Any]:
+    """Build the timestamped one-step contract for the selected action basis."""
     control = config["control"]
     return {
         "policy_type": "rdp",
@@ -707,8 +721,23 @@ def build_server_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "no_state_obs_mode": False,
         "steps_per_inference": 1,
         "action_horizon": 1,
-        "execution_protocol": RDP_EXECUTION_PROTOCOL,
+        "execution_protocol": ("rdp_observation_deadline_v1" if baseline and deadline
+                               else "rdp_observation_step_v1" if baseline else RDP_EXECUTION_PROTOCOL),
     }
+
+
+def resolve_planning_config(control: Mapping[str, Any], *, baseline: bool) -> tuple[str, float]:
+    mode = control.get("planning_mode", "asynchronous" if baseline else "synchronous")
+    if mode not in {"synchronous", "asynchronous"}:
+        raise ValueError("control.planning_mode must be synchronous or asynchronous")
+    if mode == "asynchronous" and not baseline:
+        raise ValueError("Asynchronous planning currently requires a baseline checkpoint")
+    frequency = control.get("ldp_inference_frequency", 6.0)
+    control_frequency = float(control.get("control_frequency", 30.0))
+    if (isinstance(frequency, bool) or not isinstance(frequency, Real)
+            or not math.isfinite(frequency) or not 0 < frequency <= control_frequency):
+        raise ValueError("control.ldp_inference_frequency must be positive and no greater than control_frequency")
+    return mode, float(frequency)
 
 
 def run(
@@ -760,7 +789,26 @@ def run(
         allow_unqualified_checkpoint=allow_unqualified_checkpoint,
     )
     tactile_encoder = load_tactile_resnet18(encoder_dir, device=device)
-    rdp = PickTubeRDPRuntime(
+    from baseline_loading import is_baseline_config
+    baseline = is_baseline_config(checkpoint_cfg)
+    planning_mode, planning_frequency = resolve_planning_config(control, baseline=baseline)
+    runtime_class = PickTubeRDPRuntime
+    runtime_options = {}
+    if baseline:
+        from baseline_runtime import BaselineRDPRuntime
+        runtime_class = BaselineRDPRuntime
+        if planning_mode == "asynchronous":
+            from async_baseline_runtime import AsyncBaselineRDPRuntime
+            runtime_class = AsyncBaselineRDPRuntime
+            runtime_options["inference_fps"] = planning_frequency
+        execution_protocol = build_server_config(config, baseline=True,
+            deadline=planning_mode == 'asynchronous')['execution_protocol']
+        print('[rdp] Baseline runtime: fixed chunk base, observation-relative wire actions; '
+              f'requires server {execution_protocol}')
+        print(f'[rdp] Planning mode={planning_mode}; LDP request frequency={planning_frequency:g}Hz; '
+              f'plan update interval={slow_update_interval} control ticks; '
+              'AT uses fresh tactile input each execution step')
+    rdp = runtime_class(
         policy,
         tactile_encoder,
         device,
@@ -772,21 +820,33 @@ def run(
         n_obs_steps=int(checkpoint_cfg.n_obs_steps),
         profile=profile,
         control_frequency=float(control.get("control_frequency", 30.0)),
+        **runtime_options,
     )
-
-    bridge = RobotBridgeClient(
-        address=str(connection["address"]),
-        port=int(connection.get("port", 26421)),
-        token=_token(connection),
-        add_port=connection.get("add_port"),
-        retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
-    )
-    bridge.send_config(build_server_config(config))
 
     ack_timeout = float(connection.get("action_ack_timeout_s", 3.0))
     status_interval = float(runtime_config.get("status_interval_s", 2.0))
     max_iterations = int(runtime_config.get("max_iterations", 0))
+    bridge = None
+    execution_trace = None
     try:
+        if planning_mode == 'asynchronous':
+            from execution_trace import ExecutionTrace
+            trace_dir = resolve_path(str(runtime_config.get('trace_dir', Path(__file__).parent / 'logs')))
+            execution_trace = ExecutionTrace(trace_dir, {
+                'ldp_checkpoint': str(ldp_checkpoint), 'at_checkpoint': str(at_checkpoint),
+                'pca_path': str(tactile_pca_path), 'control': dict(control),
+                'execution_protocol': 'rdp_observation_deadline_v1',
+            })
+            print(f'[rdp] Execution trace: {execution_trace.path}')
+        bridge = RobotBridgeClient(
+            address=str(connection["address"]),
+            port=int(connection.get("port", 26421)),
+            token=_token(connection),
+            add_port=connection.get("add_port"),
+            retry_interval_s=float(connection.get("retry_interval_s", 1.0)),
+        )
+        bridge.send_config(build_server_config(config, baseline=baseline,
+            deadline=planning_mode == 'asynchronous'))
         print("[rdp] Waiting for robot warmup observation")
         _, warmup_observation = bridge.receive_observation()
         for index in range(int(runtime_config.get("warmup_runs", 2))):
@@ -794,7 +854,7 @@ def run(
             started = time.perf_counter()
             rdp.predict(warmup_observation)
             if device.type == "cuda":
-                torch.cuda.synchronize(device)
+                torch.cuda.current_stream(device).synchronize()
             print(f"[rdp] Warmup {index + 1}: {(time.perf_counter() - started) * 1000:.1f}ms")
         rdp.reset()
         if not auto_start:
@@ -809,30 +869,77 @@ def run(
             policy_action, slow_update = rdp.predict(observation)
             action = wire_action_for_profile(policy_action, observation, profile)
             if device.type == "cuda":
-                torch.cuda.synchronize(device)
+                torch.cuda.current_stream(device).synchronize()
             inference_ms = (time.perf_counter() - started) * 1000.0
             bridge.send_action(action, obs_seq)
-            receipt = bridge.receive_action_ack(obs_seq, timeout=ack_timeout)
+            receipt = None
+            try:
+                receipt = bridge.receive_action_ack(obs_seq, timeout=ack_timeout)
+            finally:
+                ack_error = sys.exc_info()[1]
+                if execution_trace is not None:
+                    try:
+                        history = getattr(rdp, 'observation_history', [])
+                        tactile = history[-1]['tactile_embedding'].detach().float().cpu().tolist() if history else None
+                        recorded_receipt = receipt or getattr(bridge, 'last_action_receipt', None)
+                        if recorded_receipt is not None and recorded_receipt.get('obs_seq') != obs_seq:
+                            recorded_receipt = None
+                        execution_trace.write({
+                            'type': 'action', 'obs_seq': obs_seq,
+                            'capture_timestamp': observation['observation.timestamp'],
+                            'observation_state': np.asarray(observation.get(STATE_KEY, [])).tolist(),
+                            'tactile_embedding': tactile,
+                            'wire_action': action.tolist(), 'receipt': recorded_receipt,
+                            'ack_error': str(ack_error) if ack_error is not None else None,
+                            'runtime': getattr(rdp, 'last_diagnostics', {}),
+                        })
+                    except Exception as trace_error:
+                        if ack_error is None:
+                            raise
+                        ack_error.add_note(f'Failed to record rejected action: {trace_error!r}')
             iteration += 1
+            if receipt['status'] == 'rejected':
+                print(f"[rdp] obs_seq={obs_seq} missed execution deadline; action not scheduled, requesting fresh observation")
+                continue
             now = time.monotonic()
             if now - last_status >= status_interval:
+                planner_detail = (
+                    f" planner={rdp.planner_status} adopted_ldp_ms={rdp.last_planning_ms:.1f}"
+                    f" capture_tick={rdp.last_diagnostics['capture_tick']}"
+                    f" lookahead_ticks={rdp.last_diagnostics['lookahead_ticks']}"
+                    if planning_mode == "asynchronous" else ""
+                )
                 print(
                     f"[rdp] iter={iteration} obs_seq={obs_seq} "
-                    f"slow={slow_update} inference_ms={inference_ms:.1f} "
+                    f"plan_updated={slow_update} execution_inference_ms={inference_ms:.1f} "
                     f"obs_time={observation['observation.timestamp']:.6f} "
                     f"decoder_tick={rdp.last_decoder_tick} "
                     f"ack={receipt['status']} reference={receipt['reference_source']} "
-                    f"target_time={receipt['target_timestamp']:.6f}"
+                    f"target_time={receipt['target_timestamp']:.6f}{planner_detail}"
                 )
                 last_status = now
     except KeyboardInterrupt:
         print("[rdp] Interrupted")
     finally:
-        rdp.reset()
-        try:
-            bridge.send_state("stop")
-        finally:
-            bridge.close()
+        original_error = sys.exc_info()[1]
+        cleanup_error = None
+        cleanups = []
+        if bridge is not None:
+            cleanups.extend((lambda: bridge.send_state("stop"), bridge.close))
+        cleanups.append(getattr(rdp, "close", rdp.reset))
+        if execution_trace is not None:
+            cleanups.append(execution_trace.close)
+        for cleanup in cleanups:
+            try:
+                cleanup()
+            except BaseException as error:
+                primary = original_error or cleanup_error
+                if primary is not None:
+                    primary.add_note(f"RDP shutdown also failed: {error!r}")
+                else:
+                    cleanup_error = error
+        if original_error is None and cleanup_error is not None:
+            raise cleanup_error
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

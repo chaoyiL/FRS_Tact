@@ -1,0 +1,298 @@
+--- a/client/robot_client.py
++++ b/client/robot_client.py
+@@ -63,7 +63,7 @@
+ _MAX_FRS_OUTBOUND_BATCH = 16
+ _FRS_RECV_POLL_S = 0.005
+ _LOW_LATENCY_EXECUTION_PROTOCOLS = frozenset(
+-    {"frs_steering_v1", "rdp_step_v2", "rdp_step_v3"}
++    {"frs_steering_v1", "rdp_step_v2", "rdp_step_v3", "rdp_observation_step_v1"}
+ )
+ 
+ 
+@@ -880,7 +880,7 @@
+             outcome = validate_action_outcome(status=status, scheduled_count=scheduled_count,
+                                              target_timestamp=target_timestamp, reason=reason)
+             if reference_source is not None or reference_timestamp is not None:
+-                if reference_source not in {"latest_measured", "accepted_target"}:
++                if reference_source not in {"latest_measured", "accepted_target", "observation"}:
+                     raise ValueError("invalid RDP action reference_source")
+                 if isinstance(reference_timestamp, bool) or not isinstance(reference_timestamp, (int, float)) or not np.isfinite(reference_timestamp):
+                     raise ValueError("invalid RDP action reference_timestamp")
+--- a/deploy_scripts/bimanual_rdp_online.py
++++ b/deploy_scripts/bimanual_rdp_online.py
+@@ -21,7 +21,7 @@
+ # The legacy Plotly shutdown plot is disabled; live traces use headless Matplotlib.
+ # import plotly.graph_objects as go
+ 
+-from deploy_scripts.rdp_step_protocol import RDPObservationGate, add_capture_metadata
++from deploy_scripts.rdp_step_protocol import RDPObservationGate, add_capture_metadata, snapshot_action_reference
+ from client.robot_client import RobotClient
+ from configs.rdp_server_config import RDP_SERVER_CONFIG
+ from utils.precise_sleep import precise_wait
+@@ -162,6 +162,7 @@
+     max_reference_age_s: float = 0.1,
+     max_observation_age_s: float = 0.5,
+     action_reference=None,
++    issued_reference_obs=None,
+ ) -> ActionChunkResult:
+     """Validate the full chunk, then convert only capped fresh actions."""
+     try:
+@@ -217,8 +218,16 @@
+                 or not np.isfinite(max_reference_age_s) or max_reference_age_s <= 0
+                 or reference_age > max_reference_age_s):
+             raise UnsafeActionError("action reference age is stale or invalid")
++        measured_reference_time = reference_time
+         reference_source = "latest_measured"
+-        if action_reference is not None:
++        if issued_reference_obs is not None:
++            conversion_obs = issued_reference_obs
++            issued_times = np.asarray(conversion_obs["timestamp"], dtype=np.float64)
++            if issued_times.shape != (1,) or not np.isfinite(issued_times).all() or float(issued_times[0]) != observation_time:
++                raise UnsafeActionError("issued action reference must match observation timestamp")
++            reference_time = float(issued_times[0])
++            reference_source = "observation"
++        elif action_reference is not None:
+             conversion_obs = action_reference.reference_obs(measured_obs)
+             reference_source = action_reference.source
+         execution_limit = _validate_max_executed_actions(max_executed_actions)
+@@ -237,7 +246,7 @@
+                 or not np.isfinite(observation_age) or observation_age < 0
+                 or observation_age > max_observation_age_s):
+             raise UnsafeActionError("RDP observation age is stale or invalid")
+-        if schedule_now - reference_time > max_reference_age_s:
++        if schedule_now - measured_reference_time > max_reference_age_s:
+             raise UnsafeActionError("action reference age became stale during conversion")
+         if not np.isfinite(command_lead_s) or command_lead_s <= 0:
+             raise UnsafeActionError("command lead time must be finite and positive")
+@@ -381,7 +390,8 @@
+             reason = result.controller_records[0].get("skip_reason") or "controller_rejected"
+     if reference is not None:
+         if scheduled:
+-            reference.commit(result.fresh.absolute)
++            if kwargs.get("issued_reference_obs") is None:
++                reference.commit(result.fresh.absolute)
+         else:
+             reference.reset()
+     client.publish_action_ack(
+@@ -481,6 +491,10 @@
+     }
+     policy_family = SERVER_CONFIG.policy_family
+     for field, expected in expected_fields.items():
++        if field == "execution_protocol" and expected == "rdp_step_v3":
++            if config[field] not in {"rdp_step_v3", "rdp_observation_step_v1"}:
++                raise ValueError(f"RDP requires execution_protocol=rdp_step_v3 or rdp_observation_step_v1, got {config[field]!r}")
++            continue
+         if expected is not None and config[field] != expected:
+             raise ValueError(
+                 f"{policy_family} requires {field}={expected!r}, "
+@@ -1411,7 +1425,7 @@
+             ),
+             connection_generation=connection_generation,
+             config_validator=validate_rdp_config,
+-            step_protocol=SERVER_CONFIG.expected_execution_protocol,
++            step_protocol=config_dict["execution_protocol"],
+         )
+     except BaseException as exc:
+         client_cleanup.close_preserving_error(exc)
+@@ -1708,6 +1722,10 @@
+                         finish_rdp_cycle(t_cycle_actual_start, loop_length_set)
+                         continue
+                     last_fresh_observation_at = time.monotonic()
++                    if config_dict["execution_protocol"] == "rdp_observation_step_v1":
++                        # Freeze the exact poses used to build the outgoing state.
++                        # Later camera/controller updates cannot change this basis.
++                        obs = {**obs, **snapshot_action_reference(obs)}
+                     try:
+                         prediction_reference_waypoint = reference_waypoint_from_obs(
+                             obs,
+@@ -1738,6 +1756,11 @@
+                         no_state_obs_mode=no_state_obs_mode
+                     )
+                     add_capture_metadata(obs_dict, obs)
++                    issued_reference_obs = (
++                        snapshot_action_reference(obs)
++                        if config_dict["execution_protocol"] == "rdp_observation_step_v1"
++                        else None
++                    )
+                     obs_seq = client.publish_obs(obs_dict)
+ 
+                     time3 = round(time.time(), 2)
+@@ -1789,6 +1812,7 @@
+                             max_reference_age_s=SERVER_CONFIG.max_reference_age_s,
+                             max_observation_age_s=SERVER_CONFIG.max_observation_age_s,
+                             action_reference=action_reference,
++                            issued_reference_obs=issued_reference_obs,
+                         )
+ 
+                     result = dispatch_action_chunk()
+--- a/deploy_scripts/frs_protocol.py
++++ b/deploy_scripts/frs_protocol.py
+@@ -16,7 +16,7 @@
+ 
+ @dataclass(frozen=True)
+ class NegotiatedExecution:
+-    protocol: Literal["legacy_chunk", "frs_steering_v1", "rdp_step_v2", "rdp_step_v3"]
++    protocol: Literal["legacy_chunk", "frs_steering_v1", "rdp_step_v2", "rdp_step_v3", "rdp_observation_step_v1"]
+     connection_generation: int
+     execution_mode: Literal["rtc", "block"]
+     action_horizon: int
+--- a/deploy_scripts/rdp_step_protocol.py
++++ b/deploy_scripts/rdp_step_protocol.py
+@@ -54,3 +54,11 @@
+         if target_timestamp is not None and (isinstance(target_timestamp,bool) or not isinstance(target_timestamp,(int,float)) or not math.isfinite(target_timestamp)):
+             raise ValueError('rejected ACK target_timestamp must be finite or null')
+     return dict(status=status,scheduled_count=scheduled_count,target_timestamp=target_timestamp,reason=reason)
++
++
++def snapshot_action_reference(observation):
++    """Own the pose associated with an issued observation, independent of buffers."""
++    keys = ["timestamp"]
++    for robot_idx in range(2):
++        keys.extend(f"robot{robot_idx}_{suffix}" for suffix in ("eef_pos", "eef_rot_axis_angle"))
++    return {key: np.asarray(observation[key])[-1:].copy() for key in keys}
+--- a/deploy_scripts/vbvla_dry_run.py
++++ b/deploy_scripts/vbvla_dry_run.py
+@@ -76,7 +76,7 @@
+                 f"policy connection generation {connection_generation} is no longer active"
+             )
+ 
+-    is_rdp_v3 = config.get("execution_protocol") == "rdp_step_v3"
++    is_rdp_v3 = config.get("execution_protocol") in {"rdp_step_v3", "rdp_observation_step_v1"}
+     synthetic_capture_time = time.time()
+ 
+     def publish_observation() -> int:
+--- a/tests/test_rdp_observation_step_v1.py
++++ b/tests/test_rdp_observation_step_v1.py
+@@ -0,0 +1,102 @@
++"""CPU-only observation-reference baseline execution and negotiation."""
++import threading
++import numpy as np
++import pytest
++from scipy.spatial.transform import Rotation
++from client.robot_client import RobotClient, _LOW_LATENCY_EXECUTION_PROTOCOLS
++from deploy_scripts import bimanual_rdp_online as online
++from deploy_scripts.rdp_action_reference import RDPActionReference
++from deploy_scripts.rdp_step_protocol import snapshot_action_reference
++from real_world.real_inference_util import get_real_umi_action
++from test_rdp_step_v3 import Client, Env, kwargs, action
++from test_rdp_runtime_contract import valid_config
++
++
++def pose_obs(t, x):
++    obs = {'timestamp': np.array([t])}
++    for i in range(2):
++        obs[f'robot{i}_eef_pos'] = np.array([[x, 0., 0.]])
++        obs[f'robot{i}_eef_rot_axis_angle'] = np.array([[0., 0., .3]])
++    return obs
++
++
++@pytest.mark.parametrize('has_accepted', [False, True])
++def test_issued_pose_not_measured_or_accepted_is_conversion_reference(has_accepted):
++    clock = [200.]
++    env = Env(clock)
++    env.get_action_reference_obs = lambda: pose_obs(200., .012)
++    reference = RDPActionReference(max_pos_delta=.03, max_rot_delta=.5)
++    if has_accepted:
++        accepted = np.zeros((1, 14)); accepted[0, [0, 7]] = .022
++        accepted[0, [5, 12]] = .3
++        reference.commit(accepted)
++    issued = pose_obs(199.8, .005)
++    snapshot = snapshot_action_reference(issued)
++    # Camera/shared-memory buffers may change while the client predicts.
++    issued['robot0_eef_pos'][:] = .5
++    issued['robot1_eef_pos'][:] = .5
++    issued['timestamp'][:] = 999.
++    wire = action(); wire[0, [0, 10]] = .003
++    options = kwargs(env, clock)
++    options.update(converter=get_real_umi_action, action_reference=reference,
++                   issued_reference_obs=snapshot)
++    client = Client()
++    result = online.execute_rdp_action_chunk_and_publish_ack(client, 7, wire, **options)
++    expected = np.array([.005, 0., 0.]) + Rotation.from_rotvec([0.,0.,.3]).apply([.003,0.,0.])
++    np.testing.assert_allclose(result.fresh.absolute[0, :3], expected, atol=1e-8)
++    np.testing.assert_allclose(result.fresh.absolute[0, 7:10], expected, atol=1e-8)
++    assert client.acks[0]['reference_source'] == 'observation'
++    assert client.acks[0]['reference_timestamp'] == 199.8
++    assert client.acks[0]['target_timestamp'] == pytest.approx(200.05)
++    assert client.acks[0]['status'] == 'scheduled'
++    assert reference.source == ('accepted_target' if has_accepted else 'latest_measured')
++    if has_accepted:
++        np.testing.assert_array_equal(reference._accepted, accepted)
++
++
++def test_observation_mode_still_validates_tracking_against_fresh_measured():
++    clock=[200.]; env=Env(clock)
++    env.get_action_reference_obs=lambda:pose_obs(200., .8)
++    options=kwargs(env,clock)
++    options.update(converter=get_real_umi_action,
++                   action_reference=RDPActionReference(max_pos_delta=.03,max_rot_delta=.5),
++                   issued_reference_obs=snapshot_action_reference(pose_obs(199.8,0.)))
++    client=Client()
++    online.execute_rdp_action_chunk_and_publish_ack(client,7,action(),**options)
++    assert client.acks[0]['status']=='rejected'
++    assert 'tracking error' in client.acks[0]['reason']
++    assert not env.calls
++
++
++def test_rejects_reference_not_matching_issued_observation_timestamp():
++    clock=[200.];env=Env(clock)
++    options=kwargs(env,clock)
++    options['issued_reference_obs']=snapshot_action_reference(pose_obs(199.9,0.))
++    with pytest.raises(ValueError,match='match observation timestamp'):
++        online.execute_action_chunk(action(),**options)
++    assert not env.calls
++
++
++@pytest.mark.parametrize('protocol',['rdp_step_v3','rdp_observation_step_v1'])
++def test_negotiates_only_supported_rdp_protocols(protocol):
++    config=online.validate_rdp_config(valid_config(execution_protocol=protocol))
++    negotiated=online.validate_execution_config(config,execution_mode='rtc',
++        available_observation_keys=online.available_rdp_observation_keys('vitac',camera_count=2),
++        connection_generation=1,config_validator=online.validate_rdp_config,
++        step_protocol=config['execution_protocol'])
++    assert negotiated.protocol==protocol
++    assert protocol in _LOW_LATENCY_EXECUTION_PROTOCOLS
++
++
++def test_unknown_protocol_is_rejected():
++    with pytest.raises(ValueError,match='execution_protocol'):
++        online.validate_rdp_config(valid_config(execution_protocol='unknown'))
++
++
++def test_bridge_publishes_observation_reference_ack():
++    client=RobotClient.__new__(RobotClient)
++    client._condition=threading.Condition();client._stop_requested=False
++    client._consumed_action_generations={1:10};client._active_connection_generations={10};client._consumed_action_traces={}
++    client.publish_action_ack(1,status='scheduled',scheduled_count=1,target_timestamp=200.05,
++                              reason=None,reference_source='observation',reference_timestamp=199.8)
++    assert client._latest_action_ack['reference_source']=='observation'
+--- a/tests/test_rdp_step_v3.py
++++ b/tests/test_rdp_step_v3.py
+@@ -114,7 +114,8 @@
+     assert result['observation.camera_timestamps']==[9.99,10.002]
+ 
+ 
+-def test_v3_dry_run_never_claims_a_robot_action_was_scheduled(monkeypatch):
++@pytest.mark.parametrize("protocol", ["rdp_step_v3", "rdp_observation_step_v1"])
++def test_v3_dry_run_never_claims_a_robot_action_was_scheduled(monkeypatch, protocol):
+     from deploy_scripts import vbvla_dry_run as dry
+     class DryClient(Client):
+         def __init__(self):super().__init__();self.observations=[]
+@@ -123,7 +124,7 @@
+     monkeypatch.setattr(dry,'wait_for_start',lambda *a,**kw:None)
+     monkeypatch.setattr(dry,'wait_for_stop',lambda *a,**kw:None)
+     monkeypatch.setattr(dry,'wait_for_action_or_stop',lambda *a,**kw:action())
+-    config={'language_prompt':'x','single_arm_mode':False,'data_type':'vitac','execution_protocol':'rdp_step_v3'}
++    config={'language_prompt':'x','single_arm_mode':False,'data_type':'vitac','execution_protocol':protocol}
+     dry.run_dry_run(client,config,iterations=3,action_timeout_s=1.,limits={'max_pos_delta':.03,'max_rot_delta':.5,'min_gripper':0.,'max_gripper':.1},action_horizon=1,publish_action_ack=True)
+     assert client.acks==[dict(obs_seq=2,status='rejected',scheduled_count=0,target_timestamp=None,reason='dry_run_no_hardware')]
+     assert client.observations[1]['observation.timestamp']>client.observations[0]['observation.timestamp']
+@@ -211,7 +212,7 @@
+         def publish_obs(self,obs):return 1
+         def publish_action_ack(self,*a,**kw):events.append('rejected_ack');super().publish_action_ack(*a,**kw)
+     def wait_for_client(*a,**kw):events.append('wait_for_client')
+-    ns=dict(vars(online));ns.update(env=LoopEnv(),client=LoopClient(),action_reference=RDPActionReference(max_pos_delta=.03,max_rot_delta=.5),observation_gate=online.RDPObservationGate(),time=SimpleNamespace(time=lambda:200.,monotonic=lambda:100.),steps_per_inference=1,dt=1/30,action_timeout_s=3.,last_fresh_observation_at=100.,cam_path=['left','right'],obs_saver=None,iter_idx=0,episode_start_pose=[],data_type='vitac',language_prompt='x',no_state_obs_mode=False,action_horizon=1,max_action_pos_delta=.03,max_action_rot_delta=.5,exec_mode='rtc',action_pose_repr='relative',get_real_umi_obs_dict=lambda **kw:{},wait_for_action_or_stop=lambda *a,**kw:action(),wait_for_stop=wait_for_client,client_cleanup=SimpleNamespace(close=lambda:events.append('transport_closed')),action_debug_logger=None,debug_info={},width_slope=1.,width_offset=0.,quest_2_ee_left=None,quest_2_ee_right=None)
++    ns=dict(vars(online));ns.update(config_dict={"execution_protocol":"rdp_step_v3"},env=LoopEnv(),client=LoopClient(),action_reference=RDPActionReference(max_pos_delta=.03,max_rot_delta=.5),observation_gate=online.RDPObservationGate(),time=SimpleNamespace(time=lambda:200.,monotonic=lambda:100.),steps_per_inference=1,dt=1/30,action_timeout_s=3.,last_fresh_observation_at=100.,cam_path=['left','right'],obs_saver=None,iter_idx=0,episode_start_pose=[],data_type='vitac',language_prompt='x',no_state_obs_mode=False,action_horizon=1,max_action_pos_delta=.03,max_action_rot_delta=.5,exec_mode='rtc',action_pose_repr='relative',get_real_umi_obs_dict=lambda **kw:{},wait_for_action_or_stop=lambda *a,**kw:action(),wait_for_stop=wait_for_client,client_cleanup=SimpleNamespace(close=lambda:events.append('transport_closed')),action_debug_logger=None,debug_info={},width_slope=1.,width_offset=0.,quest_2_ee_left=None,quest_2_ee_right=None)
+     code=ast.fix_missing_locations(ast.Module(body=[ast.Try(body=[loop],handlers=[],orelse=[],finalbody=[cleanup])],type_ignores=[]))
+     exec(compile(code,online.__file__,'exec'),ns)
+     assert ns['client'].acks[0]['status']=='rejected'

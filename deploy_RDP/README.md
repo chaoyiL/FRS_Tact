@@ -1,5 +1,9 @@
 # deploy_RDP
 
+0906 原始 RDP baseline 使用自动适配入口，支持右臂 15D 触觉与固定 chunk 基底动作。
+需要配套更新并重启机器人服务器，详见 [baseline 部署说明](DEPLOY_RDP_BASELINE.md)。
+下文的 `rdp_step_v3`、旧产物配对规则适用于此前的模型。
+
 独立的 Pick Tube RDP 部署子项目，使用新源代码自带的 VB3 WebSocket bridge，详见
 `DEPLOY_PICK_TUBE_RDP.md`。策略端接收两路视觉、四路触觉 RGB 和 20D state，在线
 生成 PCA30 触觉特征，并以 `[1,20]` 单步相对动作发送给机器人服务器。

@@ -1,10 +1,10 @@
 task: insert the object with the right hand
 
 model:
-  ldp_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_insert01_0905/insert/ldp/latest.ckpt
-  at_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_insert01_0905/insert/at/latest.ckpt
+  ldp_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_0906/insert/ldp/latest.ckpt
+  at_checkpoint: /home/typhon/FRS_Tact/checkpoints/model/rdp_0906/insert/at/latest.ckpt
   tactile_encoder_dir: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
-  tactile_pca_path: /home/typhon/FRS_Tact/checkpoints/model/rdp_insert01_0905/insert/pca/tactile_pca_insert01_encoder0824_2x15.npz
+  tactile_pca_path: /home/typhon/FRS_Tact/checkpoints/model/rdp_0906/insert/pca/tactile_pca.npz
   state_action_profile: single-right-arm-7x10
   artifact_verification: strict
   device: cuda:0
@@ -22,6 +22,9 @@ connection:
 control:
   control_frequency: 30.0
   controller_frequency: 80.0
+  # Baseline defaults to asynchronous planning; use planning_mode: synchronous for comparison.
+  ldp_inference_frequency: 6.0
+  # Adopt a ready plan every 16 control ticks; AT continues on every observation.
   slow_update_interval: 16
 
 runtime:
