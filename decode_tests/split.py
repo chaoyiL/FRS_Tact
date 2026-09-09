@@ -114,11 +114,15 @@ def write_split_json(
     records_sha256: str,
 ) -> None:
     payload: dict[str, Any] = {
+        "mode": "episode",
         "seed": split.seed,
         "ratios": [TRAIN_RATIO, VAL_RATIO, TEST_RATIO],
         "train_episodes": list(split.train_episodes),
         "val_episodes": list(split.val_episodes),
         "test_episodes": list(split.test_episodes),
+        "train_indices": [int(index) for index in split.train_indices],
+        "val_indices": [int(index) for index in split.val_indices],
+        "test_indices": [int(index) for index in split.test_indices],
         "train_sample_count": int(split.train_indices.shape[0]),
         "val_sample_count": int(split.val_indices.shape[0]),
         "test_sample_count": int(split.test_indices.shape[0]),

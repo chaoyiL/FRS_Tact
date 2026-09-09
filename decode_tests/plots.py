@@ -1,4 +1,4 @@
-"""Training curves and GT-vs-decoded sample plots for decode_tests."""
+"""Training curves and VLA-target-vs-decoded sample plots for decode_tests."""
 
 from __future__ import annotations
 
@@ -20,9 +20,6 @@ HISTORY_FIELDS = (
     "val_mse_target",
     "val_rmse_target",
     "val_mae_target",
-    "val_mse_gt",
-    "val_rmse_gt",
-    "val_mae_gt",
 )
 
 _DIM_COLORS = ("#4C72B0", "#55A868", "#C44E52")
@@ -167,30 +164,30 @@ def select_high_mid_low_positions(sample_mse: np.ndarray) -> list[tuple[str, int
     return selected
 
 
-def plot_gt_vs_pred_samples(
+def plot_target_vs_pred_samples(
     path: pathlib.Path,
     *,
     cache_indices: np.ndarray,
-    sample_mse_gt: np.ndarray,
-    gt_actions: np.ndarray,
+    sample_mse_target: np.ndarray,
+    target_actions: np.ndarray,
     predictions: np.ndarray,
     episode_indices: np.ndarray,
     dataset_indices: np.ndarray,
 ) -> pathlib.Path:
-    """Plot GT vs decoded actions for high / mid / low vs-GT MSE samples."""
-    if gt_actions.shape != predictions.shape:
+    """Plot VLA target vs decoded actions for high/mid/low target-MSE samples."""
+    if target_actions.shape != predictions.shape:
         raise ValueError(
-            f"gt/pred shape mismatch: {gt_actions.shape} vs {predictions.shape}"
+            f"target/pred shape mismatch: {target_actions.shape} vs {predictions.shape}"
         )
-    if gt_actions.ndim != 3:
-        raise ValueError(f"Expected actions [N, T, A], got {gt_actions.shape}")
+    if target_actions.ndim != 3:
+        raise ValueError(f"Expected actions [N, T, A], got {target_actions.shape}")
 
-    picks = select_high_mid_low_positions(sample_mse_gt)
+    picks = select_high_mid_low_positions(sample_mse_target)
     if not picks:
-        raise ValueError("No samples available to plot GT vs predicted actions.")
+        raise ValueError("No samples available to plot VLA target vs decoded actions.")
 
-    action_horizon = gt_actions.shape[1]
-    action_dim = gt_actions.shape[2]
+    action_horizon = target_actions.shape[1]
+    action_dim = target_actions.shape[2]
     dims_to_plot = min(3, action_dim)
     timesteps = np.arange(action_horizon)
 
@@ -208,11 +205,11 @@ def plot_gt_vs_pred_samples(
             color = _DIM_COLORS[dim % len(_DIM_COLORS)]
             axis.plot(
                 timesteps,
-                gt_actions[position, :, dim],
+                target_actions[position, :, dim],
                 linestyle="-",
                 linewidth=1.8,
                 color=color,
-                label=f"GT dim {dim}",
+                label=f"VLA target dim {dim}",
             )
             axis.plot(
                 timesteps,
@@ -228,13 +225,14 @@ def plot_gt_vs_pred_samples(
             f"{label} MSE  cache={cache_index} "
             f"episode={int(episode_indices[cache_index])} "
             f"dataset={int(dataset_indices[cache_index])} "
-            f"mse_gt={float(sample_mse_gt[position]):.4f}"
+            f"mse_target={float(sample_mse_target[position]):.4f}"
         )
         axis.legend(loc="upper right", fontsize=8, ncol=2)
         axis.grid(True, alpha=0.25)
 
     fig.suptitle(
-        f"Ground truth vs decoded actions (high / mid / low vs-GT MSE, first {dims_to_plot} dims)",
+        "VLA predicted target vs decoded actions "
+        f"(high / mid / low target MSE, first {dims_to_plot} dims)",
         fontsize=13,
     )
     return _atomic_savefig(fig, path)

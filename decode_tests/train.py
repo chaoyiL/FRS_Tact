@@ -21,7 +21,7 @@ import numpy as np
 from flax import nnx
 
 from decode_tests.plots import HISTORY_FIELDS
-from decode_tests.plots import plot_gt_vs_pred_samples
+from decode_tests.plots import plot_target_vs_pred_samples
 from decode_tests.plots import plot_training_curves
 from decode_tests.split import EpisodeSplit
 from decode_tests.split import build_episode_split
@@ -36,6 +36,7 @@ from utils.model import SelfAttentionFlowDecoder
 from utils.model import decode_actions
 from utils.model import flow_matching_loss_per_sample
 from utils.model import make_optimizer
+from utils.model import resolve_peak_learning_rate
 from utils.model import train_step
 
 
@@ -45,13 +46,9 @@ class SplitEval:
     mse_target: float
     rmse_target: float
     mae_target: float
-    mse_gt: float
-    rmse_gt: float
-    mae_gt: float
     cache_indices: np.ndarray
     sample_flow_loss: np.ndarray
     sample_mse_target: np.ndarray
-    sample_mse_gt: np.ndarray
     predictions: np.ndarray | None
 
 
@@ -62,7 +59,7 @@ def iter_index_batches(
     batch_size: int,
     shuffle: bool,
     seed: int,
-) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+) -> Iterator[tuple[np.ndarray, np.ndarray, np.ndarray]]:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}.")
     order = np.asarray(indices, dtype=np.int64)
@@ -74,7 +71,6 @@ def iter_index_batches(
             batch_indices,
             np.asarray(pairs.arrays["x_base"][batch_indices], dtype=np.float32),
             np.asarray(pairs.arrays["target"][batch_indices], dtype=np.float32),
-            np.asarray(pairs.arrays["gt_action"][batch_indices], dtype=np.float32),
         )
 
 
@@ -95,32 +91,24 @@ def evaluate_indices(
     flow_losses: list[np.ndarray] = []
     mse_targets: list[np.ndarray] = []
     mae_targets: list[np.ndarray] = []
-    mse_gts: list[np.ndarray] = []
-    mae_gts: list[np.ndarray] = []
     predictions: list[np.ndarray] = []
 
-    for batch_indices, x_base_np, target_np, gt_np in iter_index_batches(
+    for batch_indices, x_base_np, target_np in iter_index_batches(
         pairs, indices, batch_size=batch_size, shuffle=False, seed=0
     ):
         x_base = jnp.asarray(x_base_np)
         target = jnp.asarray(target_np)
-        gt_action = jnp.asarray(gt_np)
         t = jnp.full((len(batch_indices),), 0.5, dtype=jnp.float32)
         flow_loss = flow_matching_loss_per_sample(model, x_base, target, t)
         prediction = decode_actions(model, x_base, num_steps=num_steps, solver=solver)
         diff_target = prediction - target
-        diff_gt = prediction - gt_action
         mse_target = jnp.mean(jnp.square(diff_target), axis=(1, 2))
         mae_target = jnp.mean(jnp.abs(diff_target), axis=(1, 2))
-        mse_gt = jnp.mean(jnp.square(diff_gt), axis=(1, 2))
-        mae_gt = jnp.mean(jnp.abs(diff_gt), axis=(1, 2))
 
         cache_indices.append(batch_indices)
         flow_losses.append(np.asarray(jax.device_get(flow_loss)))
         mse_targets.append(np.asarray(jax.device_get(mse_target)))
         mae_targets.append(np.asarray(jax.device_get(mae_target)))
-        mse_gts.append(np.asarray(jax.device_get(mse_gt)))
-        mae_gts.append(np.asarray(jax.device_get(mae_gt)))
         if keep_predictions:
             predictions.append(np.asarray(jax.device_get(prediction), dtype=np.float32))
 
@@ -128,20 +116,14 @@ def evaluate_indices(
     all_flow = np.concatenate(flow_losses)
     all_mse_target = np.concatenate(mse_targets)
     all_mae_target = np.concatenate(mae_targets)
-    all_mse_gt = np.concatenate(mse_gts)
-    all_mae_gt = np.concatenate(mae_gts)
     return SplitEval(
         flow_loss=float(np.mean(all_flow)),
         mse_target=float(np.mean(all_mse_target)),
         rmse_target=float(np.sqrt(np.mean(all_mse_target))),
         mae_target=float(np.mean(all_mae_target)),
-        mse_gt=float(np.mean(all_mse_gt)),
-        rmse_gt=float(np.sqrt(np.mean(all_mse_gt))),
-        mae_gt=float(np.mean(all_mae_gt)),
         cache_indices=all_indices,
         sample_flow_loss=all_flow,
         sample_mse_target=all_mse_target,
-        sample_mse_gt=all_mse_gt,
         predictions=np.concatenate(predictions) if keep_predictions else None,
     )
 
@@ -166,6 +148,7 @@ def train_decoder(
     num_heads: int,
     mlp_ratio: int,
     learning_rate: float,
+    lr_reference_dim: int | None,
     weight_decay: float,
     grad_clip_norm: float | None,
     warmup_epochs: int,
@@ -230,9 +213,14 @@ def train_decoder(
     steps_per_epoch = max(1, math.ceil(len(split.train_indices) / batch_size))
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch
     total_steps = epochs * steps_per_epoch
+    peak_learning_rate = resolve_peak_learning_rate(
+        learning_rate,
+        model_dim=model_dim,
+        lr_reference_dim=lr_reference_dim,
+    )
     optimizer = make_optimizer(
         model,
-        learning_rate=learning_rate,
+        learning_rate=peak_learning_rate,
         weight_decay=weight_decay,
         grad_clip_norm=grad_clip_norm,
         warmup_steps=warmup_steps,
@@ -247,8 +235,16 @@ def train_decoder(
         flush=True,
     )
     schedule_name = "warmup+cosine" if cosine_decay else "warmup+constant"
+    if lr_reference_dim is not None:
+        print(
+            f"learning_rate={learning_rate:g} scaled by sqrt({lr_reference_dim}/{model_dim}) "
+            f"-> peak={peak_learning_rate:g}",
+            flush=True,
+        )
+    else:
+        print(f"learning_rate peak={peak_learning_rate:g}", flush=True)
     print(
-        f"optim=adamw lr={learning_rate:g} wd={weight_decay:g} "
+        f"optim=adamw peak_lr={peak_learning_rate:g} wd={weight_decay:g} "
         f"clip={grad_clip_norm} schedule={schedule_name} "
         f"warmup_epochs={warmup_epochs} steps_per_epoch={steps_per_epoch} "
         f"eval_every={eval_every} solver={solver} decode_steps={validation_steps}",
@@ -265,6 +261,17 @@ def train_decoder(
         "solver": solver,
         "validation_steps": validation_steps,
         "eval_every": eval_every,
+        "split_mode": "episode",
+        "base_learning_rate": learning_rate,
+        "peak_learning_rate": peak_learning_rate,
+        "lr_reference_dim": lr_reference_dim,
+        "weight_decay": weight_decay,
+        "grad_clip_norm": grad_clip_norm,
+        "warmup_epochs": warmup_epochs,
+        "min_learning_rate_ratio": min_learning_rate_ratio,
+        "lr_schedule": "cosine" if cosine_decay else "constant",
+        "batch_size": batch_size,
+        "epochs": epochs,
         **counts,
     }
 
@@ -286,7 +293,7 @@ def train_decoder(
         for epoch in range(1, epochs + 1):
             losses: list[float] = []
             weights: list[int] = []
-            for batch_number, (_, x_base_np, target_np, _) in enumerate(
+            for batch_number, (_, x_base_np, target_np) in enumerate(
                 iter_index_batches(
                     pairs,
                     split.train_indices,
@@ -330,9 +337,6 @@ def train_decoder(
                     "val_mse_target": validation.mse_target,
                     "val_rmse_target": validation.rmse_target,
                     "val_mae_target": validation.mae_target,
-                    "val_mse_gt": validation.mse_gt,
-                    "val_rmse_gt": validation.rmse_gt,
-                    "val_mae_gt": validation.mae_gt,
                 }
                 writer.writerow(_blank_history_row(epoch, **metrics))
                 history_file.flush()
@@ -356,8 +360,7 @@ def train_decoder(
                 print(
                     f"epoch={epoch}/{epochs} train_flow_loss={train_loss:.8f} "
                     f"val_flow_loss={validation.flow_loss:.8f} "
-                    f"val_mse_target={validation.mse_target:.8f} "
-                    f"val_mse_gt={validation.mse_gt:.8f}",
+                    f"val_mse_target={validation.mse_target:.8f}",
                     flush=True,
                 )
             else:
@@ -396,9 +399,6 @@ def _summarize_eval(prefix: str, result: SplitEval) -> dict[str, float]:
         f"{prefix}_mse_target": result.mse_target,
         f"{prefix}_rmse_target": result.rmse_target,
         f"{prefix}_mae_target": result.mae_target,
-        f"{prefix}_mse_gt": result.mse_gt,
-        f"{prefix}_rmse_gt": result.rmse_gt,
-        f"{prefix}_mae_gt": result.mae_gt,
     }
 
 
@@ -434,13 +434,15 @@ def _write_final_reports(
     if validation.predictions is None:
         raise RuntimeError("Validation predictions missing after final eval.")
 
-    gt_actions = np.asarray(pairs.arrays["gt_action"][validation.cache_indices], dtype=np.float32)
-    sample_path = output_dir / "val_gt_vs_pred_samples.png"
-    plot_gt_vs_pred_samples(
+    target_actions = np.asarray(
+        pairs.arrays["target"][validation.cache_indices], dtype=np.float32
+    )
+    sample_path = output_dir / "val_target_vs_pred_samples.png"
+    plot_target_vs_pred_samples(
         sample_path,
         cache_indices=validation.cache_indices,
-        sample_mse_gt=validation.sample_mse_gt,
-        gt_actions=gt_actions,
+        sample_mse_target=validation.sample_mse_target,
+        target_actions=target_actions,
         predictions=validation.predictions,
         episode_indices=np.asarray(pairs.arrays["episode_index"]),
         dataset_indices=np.asarray(pairs.arrays["dataset_index"]),
@@ -454,13 +456,12 @@ def _write_final_reports(
     }
     atomic_write_json(output_dir / "final_metrics.json", final_metrics)
     print(
-        f"val_mse_gt={validation.mse_gt:.8f} "
-        f"val_rmse_gt={validation.rmse_gt:.8f} "
-        f"val_mae_gt={validation.mae_gt:.8f}",
+        f"val_mse_target={validation.mse_target:.8f} "
+        f"val_rmse_target={validation.rmse_target:.8f} "
+        f"val_mae_target={validation.mae_target:.8f}",
         flush=True,
     )
     print(
-        f"test_mse_gt={test.mse_gt:.8f} "
         f"test_mse_target={test.mse_target:.8f} "
         f"best_val_mse_target={best_mse_target:.8f}",
         flush=True,
@@ -478,18 +479,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--cache-dir", type=pathlib.Path, required=True)
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
-    parser.add_argument("--model-dim", type=int, default=128)
-    parser.add_argument("--depth", type=int, default=4)
+    parser.add_argument("--model-dim", type=int, default=256)
+    parser.add_argument("--depth", type=int, default=6)
     parser.add_argument("--num-heads", type=int, default=4)
     parser.add_argument("--mlp-ratio", type=int, default=4)
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--warmup-epochs", type=int, default=10)
+    parser.add_argument(
+        "--lr-reference-dim",
+        type=int,
+        default=256,
+        help=(
+            "Scale peak LR by sqrt(reference_dim / model_dim); "
+            "set <= 0 to disable (default: 256)."
+        ),
+    )
     parser.add_argument("--min-lr-ratio", type=float, default=0.1)
     parser.add_argument("--lr-schedule", choices=("cosine", "constant"), default="cosine")
-    parser.add_argument("--batch-size", type=int, default=64)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=128)
+    parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--validation-steps", type=int, default=10)
     parser.add_argument(
         "--eval-every",
@@ -513,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         num_heads=args.num_heads,
         mlp_ratio=args.mlp_ratio,
         learning_rate=args.learning_rate,
+        lr_reference_dim=args.lr_reference_dim if args.lr_reference_dim > 0 else None,
         weight_decay=args.weight_decay,
         grad_clip_norm=args.grad_clip_norm if args.grad_clip_norm > 0 else None,
         warmup_epochs=args.warmup_epochs,

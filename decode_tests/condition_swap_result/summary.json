@@ -1,0 +1,245 @@
+{
+  "configuration": {
+    "cache_dir": "/home/rvsa/codehub/FRS_Tact/cache/tactile_test_05",
+    "decoder_checkpoint": "/home/rvsa/codehub/FRS_Tact/decode_tests/result/best",
+    "decoder_solver": "fireflow",
+    "decoder_steps": 10,
+    "jacobian_linearization_point": "z_ii = E(a_i, o_i)",
+    "source_reverse_solver": "slerpflow",
+    "source_reverse_steps": 20,
+    "split_json": "/home/rvsa/codehub/FRS_Tact/decode_tests/result/split.json"
+  },
+  "experiment": {
+    "action_source": "VLA target",
+    "anchor_cache_indices": [
+      7903,
+      1638,
+      263,
+      3923,
+      2778,
+      2544,
+      961,
+      5639
+    ],
+    "condition_cache_indices": [
+      [
+        7903,
+        2401,
+        5401,
+        1882,
+        5742,
+        5220
+      ],
+      [
+        1638,
+        6318,
+        3029,
+        7236,
+        3612,
+        8040
+      ],
+      [
+        263,
+        6298,
+        2525,
+        2386,
+        3196,
+        7281
+      ],
+      [
+        3923,
+        1941,
+        5859,
+        2542,
+        7902,
+        3967
+      ],
+      [
+        2778,
+        5429,
+        2277,
+        3931,
+        254,
+        1640
+      ],
+      [
+        2544,
+        7265,
+        7239,
+        982,
+        3215,
+        5208
+      ],
+      [
+        961,
+        5205,
+        5415,
+        2264,
+        3040,
+        5734
+      ],
+      [
+        5639,
+        3282,
+        5204,
+        8582,
+        960,
+        8827
+      ]
+    ],
+    "equations": {
+      "R_ij": "||a_hat_ij - a_i||_2^2",
+      "decoding": "a_hat_ij = D(z_ij)",
+      "delta_z_ijk": "||z_ij - z_ik||_2",
+      "encoding": "z_ij = E(a_i, o_j)",
+      "r_null": "||J_D(z_ii) (z_ij - z_ii)||_2 / ||z_ij - z_ii||_2"
+    },
+    "num_actions": 8,
+    "num_conditions_per_action": 6,
+    "seed": 0,
+    "split": "test"
+  },
+  "jacobian_null_space": {
+    "finite_difference_gain": {
+      "count": 40,
+      "max": 4.9796133732785925,
+      "mean": 1.7478267873752493,
+      "median": 1.5863780297109185,
+      "min": 0.7710198599760606,
+      "p90": 2.8396412405828277,
+      "std": 0.9004539827870683
+    },
+    "fraction_at_or_below_threshold": 0.0,
+    "interpretation": "Small r_null means the local decoder Jacobian is insensitive to the observation-induced latent direction. The finite-difference gain and linearization error should also be checked because JVP is local.",
+    "linearization_relative_error": {
+      "count": 40,
+      "max": 2.11602783203125,
+      "mean": 0.7881356004625559,
+      "median": 0.709400862455368,
+      "min": 0.20939497649669647,
+      "p90": 1.2558485269546509,
+      "std": 0.4087405026472305
+    },
+    "null_ratio_epsilon": 0.1,
+    "r_null": {
+      "count": 40,
+      "max": 5.808906798318356,
+      "mean": 2.648791724914634,
+      "median": 2.4994520124262305,
+      "min": 1.189970748265941,
+      "p90": 3.851783734089241,
+      "std": 0.9401255948299383
+    }
+  },
+  "metrics": {
+    "delta_z_all_condition_pairs_l2": {
+      "count": 120,
+      "max": 40.92280197143555,
+      "mean": 14.292475900053978,
+      "median": 12.476205825805664,
+      "min": 1.9597378969192505,
+      "p90": 25.13581981658936,
+      "std": 9.075533871102019
+    },
+    "delta_z_all_condition_pairs_rms": {
+      "count": 120,
+      "max": 1.2940926879317645,
+      "mean": 0.4519677752262865,
+      "median": 0.3945322623647491,
+      "min": 0.06197235629228381,
+      "p90": 0.7948644371472843,
+      "std": 0.2869935834267209
+    },
+    "delta_z_original_to_swapped_l2": {
+      "count": 40,
+      "max": 40.58316421508789,
+      "mean": 15.401293304562568,
+      "median": 15.82863998413086,
+      "min": 1.9597378969192505,
+      "p90": 26.019382286071778,
+      "std": 9.535034882138149
+    },
+    "delta_z_original_to_swapped_rms": {
+      "count": 40,
+      "max": 1.2833523704394136,
+      "mean": 0.4870316548844045,
+      "median": 0.5005455509108306,
+      "min": 0.06197235629228381,
+      "p90": 0.8228051098543573,
+      "std": 0.30152427505296286
+    },
+    "original_condition_R_squared_l2": {
+      "count": 8,
+      "max": 65.46097925979508,
+      "mean": 22.591676394059345,
+      "median": 18.016557627095718,
+      "min": 5.993694909557172,
+      "p90": 42.410987048160884,
+      "std": 17.960452827888236
+    },
+    "original_condition_reconstruction_mse": {
+      "count": 8,
+      "max": 0.06546097925979508,
+      "mean": 0.022591676394059342,
+      "median": 0.018016557627095718,
+      "min": 0.0059936949095571726,
+      "p90": 0.04241098704816088,
+      "std": 0.017960452827888235
+    },
+    "reconstruction_degradation_mse": 0.4420228986679673,
+    "swapped_condition_R_squared_l2": {
+      "count": 40,
+      "max": 1571.4888486049626,
+      "mean": 464.6145750620266,
+      "median": 360.0350574722007,
+      "min": 43.16215467721271,
+      "p90": 854.9019883043868,
+      "std": 332.9966278920779
+    },
+    "swapped_condition_reconstruction_mse": {
+      "count": 40,
+      "max": 1.5714888486049627,
+      "mean": 0.46461457506202664,
+      "median": 0.3600350574722007,
+      "min": 0.04316215467721271,
+      "p90": 0.8549019883043869,
+      "std": 0.33299662789207796
+    }
+  },
+  "outcome": {
+    "interpretation": "Delta z is non-zero and reconstruction degrades; changing the condition damages the action code.",
+    "label": "action_code_damaged",
+    "latent_rms_epsilon": 0.001,
+    "note": "The automatic label is threshold-based. Use the CSVs and scatter plot to inspect per-action heterogeneity before drawing a final conclusion.",
+    "reconstruction_degradation_epsilon": 0.01
+  },
+  "outputs": {
+    "arrays": "/home/rvsa/codehub/FRS_Tact/decode_tests/condition_swap_result/condition_swap_arrays.npz",
+    "jacobian_null_space_plot": "/home/rvsa/codehub/FRS_Tact/decode_tests/condition_swap_result/jacobian_null_space.png",
+    "latent_pairwise_csv": "/home/rvsa/codehub/FRS_Tact/decode_tests/condition_swap_result/latent_pairwise.csv",
+    "plot": "/home/rvsa/codehub/FRS_Tact/decode_tests/condition_swap_result/condition_swap.png",
+    "reconstruction_csv": "/home/rvsa/codehub/FRS_Tact/decode_tests/condition_swap_result/reconstruction_by_condition.csv"
+  },
+  "sanity_check": {
+    "available": true,
+    "description": "Recomputed E(a_i, o_i) should match the cache x_base used during decoder training.",
+    "original_z_vs_cached_x_base_l2": {
+      "count": 8,
+      "max": 0.09670884907245636,
+      "mean": 0.05508220521733165,
+      "median": 0.05076584964990616,
+      "min": 0.04159463196992874,
+      "p90": 0.07127196639776229,
+      "std": 0.016696832988688015
+    },
+    "original_z_vs_cached_x_base_rms": {
+      "count": 8,
+      "max": 0.003058202471061306,
+      "mean": 0.0017418522642852474,
+      "median": 0.0016053570860659152,
+      "min": 0.001315337730051353,
+      "p90": 0.0022538174834863998,
+      "std": 0.0005280002686734469
+    }
+  }
+}
