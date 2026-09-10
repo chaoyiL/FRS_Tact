@@ -1,0 +1,22 @@
+# GT -> inferred base x0* -> reconstructed data 的 FireFlow 回环比较。
+# 运行：
+#   uv run python -m modalities_eval.reverse_forward_logp_compare \
+#     --config configs/reverse_forward_logp_compare.yaml
+
+data:
+  checkpoint_dir: /home/rvsa/codehub/FRS_Tact/checkpoints/tactile_test_L32_4k
+  dataset_repo_id: chaoyi/tactile_test_05
+  dataset_root: null
+  dataset_revision: null
+  action_key: null
+  rename_map: null
+  allow_download: false
+  episode_index: 100
+  frame: 0
+
+experiment:
+  steps: [10, 20, 50, 100, 200]
+  # 两个方向的相同物理时间区间复用同一 Rademacher probe。
+  hutchinson_samples: 1
+  hutchinson_seed: 0
+  output_dir: eval_outputs/loglike/reverse_forward_compare
