@@ -1,0 +1,59 @@
+cache:
+  action_batch_size: 16
+  action_prefetch: true
+  action_root: /home/typhon/FRS_Tact/outputs/baseline_state/task3/action_cache_structured_noise_v1
+dataset:
+  action_key: action
+  camera_map:
+    right_wrist_0_rgb: observation.images.camera1
+  frame_stride: 5
+  rename_map: {}
+  repo_id: KaiyueChen/insert_01
+  revision: null
+  root: /home/typhon/FRS_Tact/data/lerobot_v30/KaiyueChen/insert_01
+  split_seed: 42
+  test_fraction: 0.1
+  train_fraction: 0.8
+  validation_fraction: 0.1
+decoder:
+  action_dim: 10
+  action_horizon: 50
+  batch_size: 128
+  d_model: 256
+  device: cuda
+  dim_feedforward: 1024
+  dropout: 0.0
+  epochs: 50
+  learning_rate: 0.0003
+  nhead: 4
+  num_layers: 6
+  output: /home/typhon/FRS_Tact/outputs/baseline_state/task3_right_two_face/decoder_state_v1
+  pin_memory: false
+  resume: false
+  seed: 0
+  weight_decay: 0.0001
+  workers: 0
+  state_dim: 7
+  decode_steps: 10
+  decode_solver: fireflow
+  state_dropout_rate: 0.1
+  grad_clip_norm: 1.0
+  aux_decode_weight: 4.0
+evaluation:
+  batch_size: 128
+  output: null
+  split: test
+source:
+  action_expert_variant: gemma_300m_lora
+  action_horizon: 50
+  allow_download: false
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+  model_action_dim: 10
+  norm_stats_asset_id: insert_0102_train90
+  norm_stats_dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_task3_0830_1w/assets
+  paligemma_variant: gemma_2b_lora
+  sample_steps: 10
+  seed: 0
+  use_quantile_norm: true
+  reverse_steps: 50
+  reverse_solver: slerpflow
