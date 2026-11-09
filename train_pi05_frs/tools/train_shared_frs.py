@@ -8,6 +8,7 @@ import math
 import os
 import subprocess
 import sys
+import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
@@ -229,34 +230,46 @@ def _execute(config, prepared, args):
             directory.mkdir(parents=True, exist_ok=True)
             path = directory / f"{source['name']}.yaml"
             path.write_text(yaml.safe_dump(native, sort_keys=False))
-            for module, extra in (
-                ("prepare_frs_pi05_cache", ["--checkpoint-smoke"]),
-                ("precompute_tactile_embeddings", []),
-                ("prepare_frs_pi05_cache", []),
-            ):
-                print(f"task={source['name']} stage={module} {extra}", flush=True)
-                command = [
-                    sys.executable,
-                    "-m",
-                    f"train_pi05_frs.tools.{module}",
-                    "--config",
-                    str(path),
-                    *extra,
-                ]
-                with subprocess.Popen(
-                    command,
-                    cwd=TRAIN_ROOT,
-                    env=os.environ.copy(),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    errors="replace",
-                ) as process:
-                    for line in process.stdout:
-                        sys.stdout.write(line)
-                    status = process.wait()
-                    if status:
-                        raise subprocess.CalledProcessError(status, command)
+            arrow_root = (
+                Path(os.environ.get("FRS_ARROW_TMPDIR") or str(Path(config["workspace"]) / "arrow_tmp"))
+                .expanduser()
+                .resolve()
+            )
+            arrow_root.mkdir(parents=True, exist_ok=True)
+            # HF materializes embedded images into another on-disk Arrow dataset.
+            # Share that copy across this task's subprocesses, then release it after
+            # they exit. FRS training reads the persistent NumPy caches, not Arrow.
+            with tempfile.TemporaryDirectory(prefix=f"{source['name']}_", dir=arrow_root) as arrow_cache:
+                child_environment = {**os.environ, "HF_DATASETS_CACHE": arrow_cache}
+                print(f"task={source['name']} temporary Arrow cache: {arrow_cache}", flush=True)
+                for module, extra in (
+                    ("prepare_frs_pi05_cache", ["--checkpoint-smoke"]),
+                    ("precompute_tactile_embeddings", []),
+                    ("prepare_frs_pi05_cache", []),
+                ):
+                    print(f"task={source['name']} stage={module} {extra}", flush=True)
+                    command = [
+                        sys.executable,
+                        "-m",
+                        f"train_pi05_frs.tools.{module}",
+                        "--config",
+                        str(path),
+                        *extra,
+                    ]
+                    with subprocess.Popen(
+                        command,
+                        cwd=TRAIN_ROOT,
+                        env=child_environment,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        errors="replace",
+                    ) as process:
+                        for line in process.stdout:
+                            sys.stdout.write(line)
+                        status = process.wait()
+                        if status:
+                            raise subprocess.CalledProcessError(status, command)
     if args.prepare_task:
         print(
             f"Prepared frozen caches for {args.prepare_task}; shared training still uses ALL configured tasks."

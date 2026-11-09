@@ -45,6 +45,7 @@ if [[ "${FRS_FOREGROUND:-0}" != "1" && -z "${TMUX:-}" ]] && command -v tmux >/de
         exit 1
     fi
     printf -v INNER '%q ' env FRS_FOREGROUND=1 "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}" \
+        "FRS_ARROW_TMPDIR=${FRS_ARROW_TMPDIR:-}" \
         bash "${SCRIPT_DIR}/start_frs_pi05_shared_train.sh" "$@"
     tmux new-session -d -s "${SESSION}" -c "${TRAIN_ROOT}" "${INNER}"
     echo "共享 FRS 已启动：tmux attach -t ${SESSION}"

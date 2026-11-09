@@ -113,6 +113,7 @@ native_configs/     # 为各个原始 Pi0.5 自动生成的独立缓存配置
 logs/               # 每次启动的 pipeline_*.log，包含各缓存阶段和训练输出
 action_cache/       # 四个 VLA 各自产生的 x_base / predicted / GT / state
 tactile_embeddings/ # 冻结 encoder 的逐帧 embedding
+arrow_tmp/          # 当前任务的临时 HF Arrow 副本；任务结束/报错后自动清理
 runs/shared_frs/    # 唯一一套共享 FRS checkpoint 和验证结果
 ```
 
@@ -145,6 +146,24 @@ CUDA_VISIBLE_DEVICES=0 bash train_pi05_frs/scripts/start_frs_pi05_shared_train.s
 
 正常流程按 source 顺序执行：各自 Pi0.5 checkpoint smoke → 冻结触觉 embedding → 各自 Pi0.5 action cache；
 四份缓存完成后，创建一个共享 FRS 并联合优化。每个 Pi0.5 在单独子进程中生成缓存，进程结束即释放显存。
+
+HF Datasets 读取带有内嵌图片的 Parquet 时会额外生成 Arrow 副本。共享启动器为每个任务创建
+独立临时目录，同一任务的触觉和 action 预计算共用该目录，子进程结束后自动释放。
+这些临时文件不参与缓存来源校验；删除它们不会删除已完成的 action cache 或触觉 embedding。
+因此重新运行正常启动命令会复用已完成的缓存，不需要 `--resume`，也不要提前用 `--train-only`。
+
+若之前在全局 `HF_DATASETS_CACHE` 下生成过较大的副本，确认没有其他数据处理进程使用它后，
+可清理其中的 `parquet/` 目录（包含失败的 `.incomplete` 文件）。保留 v3 数据、模型、
+`action_cache/`、`tactile_embeddings/` 和 `runs/`。
+如 workspace 配额不足，也可将可重建的临时 Arrow 副本放到另一个有足够空间的挂载点：
+
+```bash
+FRS_ARROW_TMPDIR=/tmp/frs_arrow_tmp CUDA_VISIBLE_DEVICES=0 \
+  bash train_pi05_frs/scripts/start_frs_pi05_shared_train.sh
+```
+
+此处 `/tmp` 是容器临时盘，先用 `df -h /tmp` 确认容量。训练数据、模型和持久化缓存仍在 workspace。
+异常退出或强制终止后可能残留临时目录；只有确认对应进程已结束时再清理该任务的残留目录。
 
 如果先准备 insert 的缓存，可执行：
 

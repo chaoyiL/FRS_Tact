@@ -62,7 +62,8 @@ def test_shared_pipeline_prepares_four_sources_then_trains_once(tmp_path, monkey
 
     config = load_shared_config(DEFAULT_CONFIG)
     config["workspace"] = str(tmp_path / "work")
-    stages, trained = [], []
+    stages, trained, arrow_paths = [], [], []
+    monkeypatch.setenv("FRS_ARROW_TMPDIR", str(tmp_path / "scratch"))
     monkeypatch.setattr(pipeline, "load_shared_config", lambda _: config)
     monkeypatch.setattr(pipeline, "preflight_environment", lambda: None)
     monkeypatch.setattr(
@@ -74,6 +75,11 @@ def test_shared_pipeline_prepares_four_sources_then_trains_once(tmp_path, monkey
         def __init__(self, command, **kwargs):
             self.stdout = io.StringIO("synthetic stage output\n")
             stages.append((Path(command[4]).stem, command[2], command[5:]))
+            arrow = Path(kwargs["env"]["HF_DATASETS_CACHE"])
+            assert arrow.parent == tmp_path / "scratch"
+            assert arrow.is_dir()
+            (arrow / "generated.arrow").write_bytes(b"temporary dataset")
+            arrow_paths.append(arrow)
 
         def __enter__(self):
             return self
@@ -91,6 +97,10 @@ def test_shared_pipeline_prepares_four_sources_then_trains_once(tmp_path, monkey
     ]
     assert all(stages[index][2] == ["--checkpoint-smoke"] for index in (0, 3, 6, 9))
     assert len(trained) == 1 and [s["name"] for s in trained[0]] == ["insert", "press", "bread", "pick"]
+    assert len(set(arrow_paths)) == 4
+    for start in range(0, 12, 3):
+        assert arrow_paths[start] == arrow_paths[start + 1] == arrow_paths[start + 2]
+    assert all(not path.exists() for path in arrow_paths)
     log = next((tmp_path / "work/logs").glob("pipeline_*.log")).read_text()
     assert log.count("synthetic stage output") == 12
 
@@ -104,7 +114,11 @@ def test_shared_pipeline_stops_before_training_after_failed_native_stage(
 
     config = load_shared_config(DEFAULT_CONFIG)
     config["workspace"] = str(tmp_path / "work")
-    count = []
+    count, arrow_paths = [], []
+    monkeypatch.delenv("FRS_ARROW_TMPDIR", raising=False)
+    persistent = tmp_path / "work/action_cache/previous_task/keep.npy"
+    persistent.parent.mkdir(parents=True)
+    persistent.write_bytes(b"completed action cache")
     monkeypatch.setattr(pipeline, "load_shared_config", lambda _: config)
     monkeypatch.setattr(pipeline, "preflight_environment", lambda: None)
     monkeypatch.setattr(
@@ -120,6 +134,9 @@ def test_shared_pipeline_stops_before_training_after_failed_native_stage(
         def __init__(self, command, **kwargs):
             self.stdout = io.StringIO("synthetic stage output\n")
             count.append(command)
+            arrow = Path(kwargs["env"]["HF_DATASETS_CACHE"])
+            (arrow / "partial.arrow.incomplete").write_bytes(b"partial dataset")
+            arrow_paths.append(arrow)
 
         def __enter__(self):
             return self
@@ -134,6 +151,8 @@ def test_shared_pipeline_stops_before_training_after_failed_native_stage(
     with pytest.raises(subprocess.CalledProcessError):
         pipeline.main([])
     assert len(count) == failure_stage
+    assert all(not path.exists() for path in arrow_paths)
+    assert persistent.read_bytes() == b"completed action cache"
     log = next((tmp_path / "work/logs").glob("pipeline_*.log")).read_text()
     assert "CalledProcessError" in log
 
