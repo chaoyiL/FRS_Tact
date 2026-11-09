@@ -13,6 +13,7 @@ import numpy as np
 import yaml
 
 from train_pi05_frs.tools.train_shared_frs import DEFAULT_CONFIG, load_shared_config
+from utils.hf_download import retry_hf_call
 
 
 def normalize_v21_subset(entry: dict, raw_root: Path, destination: Path) -> None:
@@ -84,7 +85,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--max-workers", type=int, default=4)
+    parser.add_argument("--max-workers", type=int, default=1)
     args = parser.parse_args(argv)
     config = load_shared_config(args.config.resolve())
     work = Path(config["workspace"])
@@ -144,12 +145,14 @@ def main(argv=None):
             raise FileExistsError(
                 f"Existing dataset is not this generated subset: {destination}; use a new root"
             )
-        snapshot_download(
+        retry_hf_call(
+            snapshot_download,
             entry["repo_id"],
             repo_type="dataset",
             revision=entry["revision"],
             local_dir=root,
             allow_patterns=["meta/episodes_stats.jsonl"],
+            max_workers=args.max_workers,
         )
         destination.parent.mkdir(parents=True, exist_ok=True)
         # Temporary conversion copies are owned by this run and are removed on completion/failure.

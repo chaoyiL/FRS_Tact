@@ -30,6 +30,16 @@ source ./env_path
 export HF_HUB_ENABLE_HF_TRANSFER=0
 ```
 
+首次批量下载前，在这套环境中登录 Hugging Face，按提示粘贴 Read token：
+
+```bash
+"$DATA_TOOL_PYTHON" -c 'from huggingface_hub import login; login()'
+```
+
+登录信息保存在 `HF_HOME` 指定的 workspace 目录，后续下载自动使用。
+如果服务器设置了 `HF_HUB_DISABLE_IMPLICIT_TOKEN=1`，先执行
+`export HF_HUB_DISABLE_IMPLICIT_TOKEN=0`，确保下载会发送已登录 token。
+
 这会创建 `/workspace/venvs/pi05_frs_train` 和独立的数据工具环境
 `/workspace/venvs/lerobot_data_tools`。安装脚本会检查 GPU；系统 NVIDIA 驱动和可用的 CUDA/cuDNN
 仍由服务器镜像提供。这里使用 Pi0.5 FRS 固定的 Python 3.12、JAX 0.5.3、Flax 0.10.2。
@@ -82,6 +92,12 @@ bash scripts/download_frs_shared_ckpts.sh
 bash scripts/download_frs_shared_data.sh --dry-run
 bash scripts/download_frs_shared_data.sh
 ```
+
+数据下载默认 `--max-workers 1`，并在启动 Python 前默认设置 `HF_HUB_DISABLE_XET=1`，
+避免逐 episode 的 Xet read-token 请求。需要启用 Xet 时可显式设置该变量为 `0`。
+遇到 HTTP 429 时按 `Retry-After` 和递增等待时间重试，最多尝试 6 次；每次只补齐尚未完成的
+episode，保留原始采样清单和固定 commit。若仍被限流，先登录并等待限流窗口恢复，再重复执行
+数据下载；无需删除已有文件，也无需重新下载已完成的 VLA 权重。
 
 下载器只获取各任务随机选中的 335 条 v2.1 episode Parquet，保留 state、action、RGB、触觉全部列，
 再通过仓库现有转换器生成完整 v3 子集。生成的 v3 episode ID 从 0 连续编号；原始 ID 对照表

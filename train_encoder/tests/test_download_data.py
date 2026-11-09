@@ -218,3 +218,37 @@ def test_shell_help_and_syntax():
     subprocess.run(["bash", "-n", str(script)], check=True)
     result = subprocess.run(["bash", str(script), "--help"], check=True, capture_output=True, text=True)
     assert "300 条训练 + 35 条" in result.stdout
+
+
+def test_rate_limit_after_partial_download_retries_only_missing_episodes(tmp_path, hub, monkeypatch):
+    import huggingface_hub
+    import requests
+    from huggingface_hub.errors import HfHubHTTPError
+
+    from utils import hf_download
+
+    tasks, calls = hub
+    snapshot = huggingface_hub.snapshot_download
+    episode_attempts, sleeps = [], []
+
+    def interrupted_snapshot(repo_id, **kwargs):
+        paths = kwargs["allow_patterns"]
+        if paths[0].startswith("data/"):
+            episode_attempts.append(list(paths))
+            if len(episode_attempts) == 1:
+                snapshot(repo_id, **{**kwargs, "allow_patterns": paths[:1]})
+                response = requests.Response()
+                response.status_code = 429
+                response.headers["Retry-After"] = "120"
+                raise HfHubHTTPError("Xet token rate limit", response=response)
+        return snapshot(repo_id, **kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", interrupted_snapshot)
+    monkeypatch.setattr(hf_download.time, "sleep", sleeps.append)
+    entry = prepare(tasks[:1], tmp_path / "subset")[0]
+    assert sleeps == [120]
+    assert len(episode_attempts[0]) == 5
+    assert episode_attempts[1] == episode_attempts[0][1:]
+    assert len(entry["train_episode_ids"]) == 3
+    assert len(entry["val_episode_ids"]) == 2
+    assert len([paths for _, paths in calls if paths[0].startswith("data/")]) == 2

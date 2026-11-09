@@ -10,6 +10,7 @@ import yaml
 
 from train_encoder.utils.tasks import normalize_tasks, sample_task_episodes
 from utils.cache import atomic_write_json
+from utils.hf_download import retry_hf_call
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_FORMAT = "tactile-encoder-v21-subset-v1"
@@ -145,8 +146,9 @@ def download_task(
                 f"Existing selection differs from configuration: {plan_path}. Use a new --output-dir."
             )
     else:
-        remote = HfApi().dataset_info(repo_id, revision=revision, files_metadata=True)
-        snapshot_download(
+        remote = retry_hf_call(HfApi().dataset_info, repo_id, revision=revision, files_metadata=True)
+        retry_hf_call(
+            snapshot_download,
             repo_id,
             repo_type="dataset",
             revision=remote.sha,
@@ -182,20 +184,26 @@ def download_task(
         flush=True,
     )
     if not dry_run:
-        missing = [
-            row["path"]
-            for row in plan["episodes"]
-            if not (root / row["path"]).is_file() or (root / row["path"]).stat().st_size != row["size_bytes"]
-        ]
-        if missing:
-            snapshot_download(
-                repo_id,
-                repo_type="dataset",
-                revision=plan["revision"],
-                local_dir=root,
-                allow_patterns=missing,
-                max_workers=max_workers,
-            )
+        def fetch_missing():
+            # Recompute after a partial transfer so retries avoid even metadata requests
+            # for episodes that finished downloading during the previous attempt.
+            missing = [
+                row["path"]
+                for row in plan["episodes"]
+                if not (root / row["path"]).is_file()
+                or (root / row["path"]).stat().st_size != row["size_bytes"]
+            ]
+            if missing:
+                snapshot_download(
+                    repo_id,
+                    repo_type="dataset",
+                    revision=plan["revision"],
+                    local_dir=root,
+                    allow_patterns=missing,
+                    max_workers=max_workers,
+                )
+
+        retry_hf_call(fetch_missing)
         for row in plan["episodes"]:
             validate_local_episode(root / row["path"], row, keys)
     return {**plan, "root": root.relative_to(output_dir).as_posix()}

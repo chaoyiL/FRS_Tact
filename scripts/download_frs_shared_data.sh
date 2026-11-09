@@ -8,6 +8,7 @@ if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
 按共享 FRS 配置下载四任务各 300 训练 + 35 验证所需的 335 条 episode。
 仅下载选中的 v2.1 Parquet，然后保留全部模态转换为可用于 Pi0.5 的完整 v3 子集。
 默认保存到 /workspace/frs_shared_four_tasks/datasets/{raw,v30}。
+默认单文件并发、禁用 Xet；遇到 429 等待重试，重复运行可续传。
 需要先运行 bash scripts/setup_env.sh --pi05_frs_train。
 EOF
     exit 0
@@ -33,6 +34,9 @@ case "${HF_HUB_ENABLE_HF_TRANSFER:-0}" in
         fi
         ;;
 esac
+# Avoid a separate Xet read-token request for every episode by default.
+# Set HF_HUB_DISABLE_XET=0 explicitly to opt back into the Xet backend.
+export HF_HUB_DISABLE_XET="${HF_HUB_DISABLE_XET:-1}"
 # Conversion uses the root data-tools LeRobot; never the private FRS reader package.
 export PYTHONPATH="${REPO_ROOT}"
 cd "${REPO_ROOT}"

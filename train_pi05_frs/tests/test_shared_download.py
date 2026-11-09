@@ -154,3 +154,27 @@ def test_download_launchers_configure_transfer_before_hub_import(
     )
     assert result.stdout.strip() == str(expected)
     assert ("已切换为普通" in result.stderr) == (enabled == "1" and not available)
+
+
+@pytest.mark.parametrize("requested,expected", [(None, True), ("0", False)])
+def test_data_launcher_disables_xet_by_default_and_honors_explicit_override(tmp_path, requested, expected):
+    root = Path(__file__).resolve().parents[2]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    launcher = scripts / "download_frs_shared_data.sh"
+    launcher.write_text((root / "scripts/download_frs_shared_data.sh").read_text())
+    python = tmp_path / "data-python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        f"exec {shlex.quote(sys.executable)} -c "
+        "'from huggingface_hub import constants; print(constants.HF_HUB_DISABLE_XET)'\n"
+    )
+    python.chmod(0o755)
+    environment = {**os.environ, "DATA_TOOL_PYTHON": str(python), "HF_HUB_ENABLE_HF_TRANSFER": "0"}
+    environment.pop("HF_HUB_DISABLE_XET", None)
+    if requested is not None:
+        environment["HF_HUB_DISABLE_XET"] = requested
+    result = subprocess.run(
+        ["bash", str(launcher)], env=environment, capture_output=True, text=True, check=True, timeout=10
+    )
+    assert result.stdout.strip() == str(expected)
