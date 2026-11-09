@@ -1,0 +1,74 @@
+dataset:
+  repo_id: KaiyueChen/two_tubes_03
+  root: /workspace/lerobot_v30/KaiyueChen/two_tubes_03
+  revision: null
+  action_key: actions
+  rename_map:
+    observation.images.camera0: observation.images.camera1
+    observation.images.camera1: observation.images.camera2
+  camera_map:
+    left_wrist_0_rgb: observation.images.camera1
+    right_wrist_0_rgb: observation.images.camera2
+  frame_stride: 5
+  train_fraction: 0.8
+  validation_fraction: 0.1
+  test_fraction: 0.1
+  split_seed: 42
+source:
+  checkpoint: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint
+  norm_stats_dir: /home/typhon/FRS_Tact/checkpoints/model/pi05_bi_two_tubes_0102_step16000/checkpoint/assets
+  norm_stats_asset_id: two_tubes_0102
+  seed: 0
+  sample_steps: 10
+  action_horizon: 50
+  model_action_dim: 20
+  paligemma_variant: gemma_2b_lora
+  action_expert_variant: gemma_300m_lora
+  use_quantile_norm: true
+  allow_download: false
+tactile:
+  encoder_checkpoint: /home/typhon/FRS_Tact/checkpoints/encoder/encoder_ckpt_0824
+  embedding_dim: 512
+  freeze_encoder: true
+cache:
+  tactile_batch_size: 32
+  action_root: /workspace/baseline_pi05/action_cache_flow_v2
+  tactile_root: /workspace/baseline_pi05/tactile_embedding_cache_flow_v2
+  action_batch_size: 4
+decoder:
+  output: /workspace/baseline_pi05/decoder_flow_v2
+  action_horizon: 50
+  action_dim: 20
+  tactile_dim: 512
+  d_model: 256
+  nhead: 4
+  num_layers: 6
+  dim_feedforward: 1024
+  dropout: 0.0
+  tactile_keys:
+  - observation.images.tactile_left_0
+  - observation.images.tactile_right_0
+  - observation.images.tactile_left_1
+  - observation.images.tactile_right_1
+  batch_size: 256
+  epochs: 50
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  seed: 0
+  workers: 0
+  pin_memory: false
+  device: cuda
+  resume: false
+  state_dim: 20
+  tactile_window: 10
+  history_stride: 3
+  gru_hidden_dim: 256
+  decode_steps: 10
+  decode_solver: fireflow
+  state_dropout_rate: 0.1
+  grad_clip_norm: 1.0
+evaluation:
+  split: test
+  batch_size: 256
+  shuffle_tactile: true
+  output: null
