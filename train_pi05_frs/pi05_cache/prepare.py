@@ -307,6 +307,8 @@ def prepare_cache(
     drop_tail_action_chunks: int = 1,
     flush_every: int = 8,
     loaded_model: Pi0 | None = None,
+    num_train_episodes: int | None = None,
+    num_val_episodes: int | None = None,
 ) -> pathlib.Path:
     if min(model_sample_steps, reverse_steps, batch_size, load_workers) <= 0:
         raise ValueError(
@@ -360,6 +362,8 @@ def prepare_cache(
         max_samples=max_samples,
         action_horizon=action_horizon,
         drop_tail_action_chunks=drop_tail_action_chunks,
+        num_train_episodes=num_train_episodes,
+        num_val_episodes=num_val_episodes,
     )
     checkpoint_is_local = _is_local_path(checkpoint_dir)
     configuration = {
@@ -394,6 +398,8 @@ def prepare_cache(
         "drop_tail_action_chunks": drop_tail_action_chunks,
     }
     digest = records_digest(records)
+    if num_train_episodes is not None or num_val_episodes is not None:
+        configuration.update(num_train_episodes=num_train_episodes, num_val_episodes=num_val_episodes)
     action_dim = model.action_dim
     # Store the dataset's real normalized state width, not the zero padding added for pi0.5.
     state_dim = int(np.asarray(model.state_stats.mean).shape[-1])

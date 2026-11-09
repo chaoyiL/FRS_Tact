@@ -133,6 +133,8 @@ def build_records(
     max_samples: int | None,
     action_horizon: int,
     drop_tail_action_chunks: int = 1,
+    num_train_episodes: int | None = None,
+    num_val_episodes: int | None = None,
 ) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
     """Select an episode-disjoint train/val sample set from any LeRobot-metadata-like object.
 
@@ -147,11 +149,25 @@ def build_records(
     if episode_count < 2:
         raise ValueError("At least two episodes are required for an episode-disjoint train/validation split.")
     episodes = list(range(episode_count))
-    if max_episodes is not None:
+    exact_budget = num_train_episodes is not None or num_val_episodes is not None
+    if exact_budget:
+        if any(type(n) is not int or n <= 0 for n in (num_train_episodes, num_val_episodes)):
+            raise ValueError("num_train_episodes and num_val_episodes must both be positive integers")
+        if max_episodes is not None or max_samples is not None:
+            raise ValueError("Exact episode budgets cannot be combined with max_episodes/max_samples")
+        count = num_train_episodes + num_val_episodes
+        if len(episodes) < count:
+            raise ValueError(f"Need {count} episodes, only {len(episodes)} available")
+        chosen = np.random.default_rng(split_seed).permutation(episodes)[:count]
+        val_episodes = tuple(sorted(int(e) for e in chosen[:num_val_episodes]))
+        train_episodes = tuple(sorted(int(e) for e in chosen[num_val_episodes:]))
+        episodes = sorted((*train_episodes, *val_episodes))
+    elif max_episodes is not None:
         if max_episodes < 2:
             raise ValueError("max_episodes must be at least 2 for an episode-disjoint split.")
         episodes = episodes[:max_episodes]
-    train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
+    if not exact_budget:
+        train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
     val_set = set(val_episodes)
 
     records: list[SampleRecord] = []
@@ -171,6 +187,8 @@ def build_records(
             "Try lowering --drop-tail-action-chunks or using longer episodes."
         )
     present = {record.episode_index for record in records}
+    if exact_budget and present != set(episodes):
+        raise ValueError("Selected episodes are too short after tail trimming; exact episode budget cannot be met")
     train_episodes = tuple(episode for episode in train_episodes if episode in present)
     val_episodes = tuple(episode for episode in val_episodes if episode in present)
     if not train_episodes or not val_episodes:

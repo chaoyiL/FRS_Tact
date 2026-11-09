@@ -61,6 +61,7 @@ class DecoderConfig:
     decoder_input_version: int = DECODER_INPUT_VERSION
     output_mode: str = "flow"
     residual_bound: float = 0.5
+    tactile_token_identity: bool = False
 
     def __post_init__(self) -> None:
         if min(
@@ -185,12 +186,13 @@ class ConditionedTransformerBlock(nnx.Module):
         self.fc1 = nnx.Linear(dim, hidden_dim, rngs=rngs)
         self.fc2 = nnx.Linear(hidden_dim, dim, rngs=rngs)
 
-    def __call__(self, x: Array, tactile_tokens: Array) -> Array:
+    def __call__(self, x: Array, tactile_tokens: Array, condition_mask: Array | None = None) -> Array:
         self_normalized = self.norm_self(x)
         x = x + self.self_attention(self_normalized, deterministic=True)
         q = self.norm_cross_q(x)
         kv = self.norm_cross_kv(tactile_tokens)
-        x = x + self.cross_attention(q, kv, kv, deterministic=True)
+        attention_mask = None if condition_mask is None else condition_mask[:, None, None, :].astype(bool)
+        x = x + self.cross_attention(q, kv, kv, mask=attention_mask, deterministic=True)
         mlp_normalized = self.norm_mlp(x)
         return x + self.fc2(nnx.gelu(self.fc1(mlp_normalized)))
 
@@ -208,6 +210,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
             rngs=rngs,
         )
         self.tactile_proj = nnx.Linear(config.gru_hidden_dim, config.model_dim, rngs=rngs)
+        if config.tactile_token_identity:
+            self.tactile_identity = nnx.Param(0.02 * jax.random.normal(rngs.params(), (config.num_tactile_tokens, config.model_dim)))
         if config.state_conditioning:
             self.state_norm = nnx.LayerNorm(config.state_dim, rngs=rngs)
             self.state_fc1 = nnx.Linear(config.state_dim, config.model_dim, rngs=rngs)
@@ -262,6 +266,8 @@ class TactileConditionedFlowDecoder(nnx.Module):
         state_keep_mask: Array | None = None,
     ) -> Array:
         tactile = self.tactile_proj(self.encode_tactile_tokens(tactile_seq))
+        if self.config.tactile_token_identity:
+            tactile = tactile + self.tactile_identity[...][None, :, :]
         if not self.config.state_conditioning:
             return tactile
         if state is None:
@@ -298,6 +304,7 @@ class TactileConditionedFlowDecoder(nnx.Module):
         x_t: Array,
         t: Array,
         condition: Array,
+        condition_mask: Array | None = None,
     ) -> Array:
         """Predict velocity while reusing already encoded tactile/state tokens."""
         if x_t.ndim != 3:
@@ -306,7 +313,7 @@ class TactileConditionedFlowDecoder(nnx.Module):
         x = x + sequence_position_embedding(x.shape[1], self.config.model_dim)[None, :, :]
         x = x + self.time_mlp(t)[:, None, :]
         for block in self.blocks:
-            x = block(x, condition)
+            x = block(x, condition) if condition_mask is None else block(x, condition, condition_mask)
         return self.action_out(self.out_norm(x))
 
     def predict_residual_gate(

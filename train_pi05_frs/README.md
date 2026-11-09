@@ -6,6 +6,13 @@ training. On `/workspace`, it uses `/workspace/venvs/pi05_frs_train` for trainin
 `/workspace/venvs/lerobot_data_tools` for LeRobot dataset download/conversion. Both are
 separate from the pure-vision Pi0.5 training and deployment environments.
 
+Outside `/workspace`, the package-local training environment is `train_pi05_frs/.venv`.
+
+For **four task-specific frozen Pi0.5 models and one shared 20D tactile repair network**,
+use [the shared four-task guide](SHARED_FOUR_TASKS.md) and
+`scripts/start_frs_pi05_shared_train.sh`. The existing single-task launchers keep their
+original objectives and native interfaces.
+
 ## Set up and run
 
 Run commands from the repository root. The launcher selects only the package-local interpreter,

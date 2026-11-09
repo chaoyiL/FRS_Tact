@@ -1942,6 +1942,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> None:
+    import sys
+
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    if any(value == "--shared-config" or value.startswith("--shared-config=") for value in argv_list):
+        shared = argparse.ArgumentParser(add_help=False)
+        shared.add_argument("--shared-config", type=pathlib.Path, required=True)
+        selected, remaining = shared.parse_known_args(argv_list)
+        from train_pi05_frs.tools.train_shared_frs import main as train_shared_main
+
+        train_shared_main(["--config", str(selected.shared_config), *remaining])
+        return
     args = build_parser().parse_args(argv)
     train_decoder(
         cache_dir=args.cache_dir,

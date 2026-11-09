@@ -21,9 +21,16 @@ sys.path.insert(0, _private_src_text)
 
 try:
     from .cache import CachedPairs, MultiCachedPairs
-    from .prepare import prepare_cache
 except Exception:
     sys.path[:] = _previous_sys_path
     raise
 
 __all__ = ["CachedPairs", "MultiCachedPairs", "prepare_cache"]
+
+
+def __getattr__(name):
+    if name == "prepare_cache":
+        from .prepare import prepare_cache
+
+        return prepare_cache
+    raise AttributeError(name)

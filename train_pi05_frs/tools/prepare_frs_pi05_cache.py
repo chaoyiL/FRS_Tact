@@ -143,6 +143,8 @@ def prepare_from_config(config: Mapping[str, Any]) -> list[Path]:
             drop_tail_action_chunks=int(cache_config.get("drop_tail_action_chunks", 1)),
             flush_every=int(cache_config.get("flush_every", 8)),
             loaded_model=shared_model,
+            num_train_episodes=cache_config.get("num_train_episodes"),
+            num_val_episodes=cache_config.get("num_val_episodes"),
         )
         outputs.append(output)
     return outputs

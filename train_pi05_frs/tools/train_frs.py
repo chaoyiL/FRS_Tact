@@ -56,6 +56,8 @@ ROOT_KEYS = {
 }
 DATASET_KEYS = {"repo_id", "root", "revision", "action_key", "rename_map"}
 ACTION_CACHE_KEYS = {
+    "num_train_episodes",
+    "num_val_episodes",
     "root",
     "model_sample_steps",
     "reverse_steps",
@@ -1052,6 +1054,13 @@ def validate_config(config: Mapping[str, Any], *, check_paths: bool) -> Mapping[
         if action_cache.get(key) is not None:
             _integer(action_cache, key, prefix="action_cache.", default=1)
     reverse_solver = _nonempty_string(action_cache.get("reverse_solver", "fireflow"), "action_cache.reverse_solver")
+    if action_cache.get("num_train_episodes") is not None or action_cache.get("num_val_episodes") is not None:
+        for key in ("num_train_episodes", "num_val_episodes"):
+            if action_cache.get(key) is None:
+                raise ValueError("Both num_train_episodes and num_val_episodes are required")
+            _integer(action_cache, key, prefix="action_cache.", default=1)
+        if action_cache.get("max_episodes") is not None or action_cache.get("max_samples") is not None:
+            raise ValueError("Exact episode budgets cannot be combined with max_episodes/max_samples")
     if reverse_solver not in ("euler", "fireflow", "slerpflow"):
         raise ValueError("config.action_cache.reverse_solver is invalid")
     val_fraction = _number(action_cache, "val_fraction", prefix="action_cache.", default=0.1)
