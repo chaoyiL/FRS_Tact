@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -114,3 +118,39 @@ def test_download_dry_run_never_writes_targets(tmp_path, monkeypatch, capsys, fa
     download.main(["--dry-run"])
     assert "Total:" in capsys.readouterr().out
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("script", ["download_frs_shared_ckpts.sh", "download_frs_shared_data.sh"])
+@pytest.mark.parametrize(
+    "enabled,available,expected", [("1", False, False), ("1", True, True), ("0", False, False)]
+)
+def test_download_launchers_configure_transfer_before_hub_import(
+    tmp_path, script, enabled, available, expected
+):
+    root = Path(__file__).resolve().parents[2]
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    launcher = scripts / script
+    launcher.write_text((root / "scripts" / script).read_text())
+    # Simulate an image/env_path enabling the optional backend for another venv.
+    (tmp_path / "env_path").write_text(f"export HF_HUB_ENABLE_HF_TRANSFER={enabled}\n")
+    python = tmp_path / "data-python"
+    python.write_text(
+        "#!/usr/bin/env bash\n"
+        'if [[ "$1" == "-c" ]]; then\n'
+        f"  exit {0 if available else 1}\n"
+        "fi\n"
+        f"exec {shlex.quote(sys.executable)} -c "
+        "'from huggingface_hub import constants; print(constants.HF_HUB_ENABLE_HF_TRANSFER)'\n"
+    )
+    python.chmod(0o755)
+    result = subprocess.run(
+        ["bash", str(launcher)],
+        env={**os.environ, "DATA_TOOL_PYTHON": str(python), "HF_HUB_ENABLE_HF_TRANSFER": "1"},
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    assert result.stdout.strip() == str(expected)
+    assert ("已切换为普通" in result.stderr) == (enabled == "1" and not available)

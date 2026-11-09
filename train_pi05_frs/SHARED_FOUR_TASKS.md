@@ -26,6 +26,8 @@ export UV_PYTHON_INSTALL_DIR=/workspace/uv-python
 
 bash scripts/setup_env.sh --pi05_frs_train
 source ./env_path
+# 某些服务器镜像默认启用 hf_transfer，但专用环境没有安装该可选包。
+export HF_HUB_ENABLE_HF_TRANSFER=0
 ```
 
 这会创建 `/workspace/venvs/pi05_frs_train` 和独立的数据工具环境
@@ -71,6 +73,8 @@ bash scripts/download_frs_shared_ckpts.sh
 `train_state/`，四份合计约 23.6 GiB。下载后检查文件大小和统计量维度，重复运行可续传。
 下载目录带有 `.frs_pi05_source.json` 来源记录；若目录已有其他来源的内容，需在配置中指定
 新的空目录。这里用专用下载入口；`scripts/download_ckpt.sh` 无参数时仍是 SmolVLA 流程。
+两个共享 FRS 下载脚本会在 `hf_transfer` 不可用时自动禁用该可选加速后端。
+若之前下载因该错误中断，直接重复运行即可，无需删除已有文件。
 
 先下载数据。`--dry-run` 只读取 metadata、显示选中的文件数量和体积：
 
@@ -109,6 +113,15 @@ CUDA_VISIBLE_DEVICES=0 \
   bash train_pi05_frs/scripts/start_frs_pi05_shared_train.sh
 
 tmux attach -t frs_pi05_shared_train
+```
+
+每一步成功后再执行下一步；下载未完成时不要启动训练。也可以用以下命令让流程在失败处停止：
+
+```bash
+bash scripts/download_frs_shared_ckpts.sh &&
+bash scripts/download_frs_shared_data.sh &&
+bash train_pi05_frs/scripts/start_frs_pi05_shared_train.sh --check &&
+CUDA_VISIBLE_DEVICES=0 bash train_pi05_frs/scripts/start_frs_pi05_shared_train.sh
 ```
 
 `--check` 不导入 JAX、不初始化 GPU、不创建输出目录；只检查配置、checkpoint、数据、统计量和运行环境。

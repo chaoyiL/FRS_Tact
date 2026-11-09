@@ -24,6 +24,16 @@ else
 fi
 DATA_PYTHON="${PYTHON_OVERRIDE:-${DATA_TOOL_PYTHON:-${DEFAULT_PYTHON}}}"
 [[ -x "${DATA_PYTHON}" ]] || { echo '请先运行 bash scripts/setup_env.sh --pi05_frs_train' >&2; exit 1; }
+# Server images may enable this optional backend for a different Python environment.
+# Disable it before huggingface_hub reads its environment at import time.
+case "${HF_HUB_ENABLE_HF_TRANSFER:-0}" in
+    1|[Oo][Nn]|[Yy][Ee][Ss]|[Tt][Rr][Uu][Ee])
+        if ! "${DATA_PYTHON}" -c 'import hf_transfer' >/dev/null 2>&1; then
+            export HF_HUB_ENABLE_HF_TRANSFER=0
+            echo '当前数据工具环境没有可用的 hf_transfer，已切换为普通 Hugging Face 下载。' >&2
+        fi
+        ;;
+esac
 export PYTHONPATH="${REPO_ROOT}"
 cd "${REPO_ROOT}"
 exec "${DATA_PYTHON}" -m train_pi05_frs.tools.download_shared_checkpoints "$@"
