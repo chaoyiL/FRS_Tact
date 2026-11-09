@@ -8,7 +8,7 @@
 resources:
   # 两个 baseline 中 act_inter 使用的冻结触觉编码器，按现有实验使用 0824 版本。
   # 填 Hugging Face 模型仓库或完整 checkpoint 压缩包的 URL。
-  tactile_encoder_url: ""
+  tactile_encoder_url: "KaiyueChen/encoder_ckpt_0824"
 
   # Pi0.5 预处理需要的公共资源，默认地址来自仓库 tokenizer 实现。
   paligemma_tokenizer_url: "gs://big_vision/paligemma_tokenizer.model"
