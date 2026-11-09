@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import pathlib
 from collections.abc import Sequence
 from typing import Any
@@ -10,22 +11,20 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from utils.cache import atomic_write_json
 from train_encoder.utils.checkpoint import load_checkpoint
-from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
-from train_encoder.utils.clip_backend import ClipBackend
-from train_encoder.utils.data import DataKeys
-from train_encoder.utils.data import batches
-from train_encoder.utils.data import build_future_records
-from train_encoder.utils.data import future_records_digest
-from train_encoder.utils.data import resolve_data_keys
+from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE, ClipBackend
+from train_encoder.utils.data import (
+    DataKeys,
+    batches,
+    build_future_records,
+    future_records_digest,
+    resolve_data_keys,
+)
 from train_encoder.utils.image_dataset import create_image_dataset
 from train_encoder.utils.masking import resolve_eval_rgb_mask
-from train_encoder.utils.metrics import pooled_retrieval_metrics_by_side
-from train_encoder.utils.metrics import retrieval_metrics_by_side
-from train_encoder.utils.model import TactileClipConfig
-from train_encoder.utils.model import forward_embeddings
-from train_encoder.utils.model import tactile_clip_config_from_dict
+from train_encoder.utils.metrics import pooled_retrieval_metrics_by_side, retrieval_metrics_by_side
+from train_encoder.utils.model import TactileClipConfig, forward_embeddings, tactile_clip_config_from_dict
+from utils.cache import atomic_write_json
 
 
 def _tree_to_jax(batch: dict[str, np.ndarray]) -> dict[str, jax.Array]:
@@ -238,9 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset-repo-id",
         action="append",
-        required=True,
         dest="dataset_repo_ids",
-        help="LeRobot dataset repo id (repeatable).",
+        help="LeRobot dataset repo id (repeatable; defaults to checkpoint metadata).",
     )
     parser.add_argument(
         "--config-name",
@@ -248,6 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional run label (defaults to repo id).",
     )
     parser.add_argument("--output-dir", type=pathlib.Path, required=True)
+    parser.add_argument("--dataset-manifest", type=pathlib.Path, default=None,
+                        help="Override the checkpoint local subset manifest path after relocating data.")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--split-seed", type=int, default=None)
     parser.add_argument("--val-fraction", type=float, default=None)
@@ -301,6 +301,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     params, metadata = load_checkpoint(args.checkpoint_dir)
     extra = metadata.get("extra_metadata") or {}
+    repo_ids = args.dataset_repo_ids or extra.get("dataset_repo_id")
+    if not repo_ids:
+        raise ValueError("Checkpoint has no dataset repo ids; pass --dataset-repo-id.")
+    manifest = args.dataset_manifest or extra.get("dataset_manifest")
+    if manifest is not None and extra.get("dataset_manifest_sha256") is not None:
+        actual = hashlib.sha256(pathlib.Path(manifest).read_bytes()).hexdigest()
+        if actual != extra["dataset_manifest_sha256"]:
+            raise ValueError("Local subset manifest differs from the checkpoint.")
     split_seed = int(extra.get("split_seed", 0) if args.split_seed is None else args.split_seed)
     val_fraction = float(
         extra.get("val_fraction", 0.1) if args.val_fraction is None else args.val_fraction
@@ -316,9 +324,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     backend = ClipBackend.from_pretrained(metadata["clip_model_id"])
     dataset_info = create_image_dataset(
-        args.dataset_repo_ids,
+        repo_ids,
         image_size=CLIP_IMAGE_SIZE,
         config_name=args.config_name if args.config_name is not None else extra.get("config_name"),
+        dataset_manifest=manifest,
     )
     dataset = dataset_info.dataset
     record_set = build_future_records(
@@ -327,6 +336,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         val_fraction=val_fraction,
         split_seed=split_seed,
         frame_stride=frame_stride,
+        tasks=extra.get("tasks"),
     )
     expected_records_digest = extra.get("records_sha256")
     actual_records_digest = future_records_digest(record_set.records)

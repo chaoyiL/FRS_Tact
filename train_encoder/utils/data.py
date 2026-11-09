@@ -8,12 +8,14 @@ from typing import Any, Literal
 
 import numpy as np
 
-from utils.cache import SampleRecord
-from utils.cache import split_episodes
-from train_encoder.utils.image_dataset import ImageDatasetInfo
-from train_encoder.utils.image_dataset import create_image_dataset
-from train_encoder.utils.image_dataset import episode_count
-from train_encoder.utils.image_dataset import indices_for_episode
+from train_encoder.utils.image_dataset import (
+    ImageDatasetInfo,
+    create_image_dataset,
+    episode_count,
+    indices_for_episode,
+)
+from train_encoder.utils.tasks import select_task_episodes
+from utils.cache import SampleRecord, split_episodes
 
 # Per-wrist pairing: left wrist camera + tactile_*_0; right wrist camera + tactile_*_1.
 DEFAULT_LEFT_TACTILE_IMAGE_KEYS = ("tactile_left_0", "tactile_right_0")
@@ -83,6 +85,7 @@ class FutureRecord:
     future_dataset_index: int
     episode_index: int
     split: Literal["train", "val"]
+    side_ids: tuple[int, ...] = (0, 1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -90,6 +93,7 @@ class FutureRecordSet:
     records: tuple[FutureRecord, ...]
     train_episodes: tuple[int, ...]
     val_episodes: tuple[int, ...]
+    task_selections: tuple[dict[str, Any], ...] = ()
 
     def split_records(self, split: Literal["train", "val"]) -> tuple[FutureRecord, ...]:
         return tuple(record for record in self.records if record.split == split)
@@ -104,6 +108,9 @@ def future_records_digest(records: Sequence[FutureRecord]) -> str:
             f"{record.dataset_index}:{record.future_dataset_index}:"
             f"{record.episode_index}:{record.split}\n".encode()
         )
+        # Preserve the digest of legacy, two-wrist checkpoints.
+        if record.side_ids != (0, 1):
+            digest.update(f"sides:{record.side_ids}\n".encode())
     return digest.hexdigest()
 
 
@@ -283,7 +290,7 @@ def load_record_pairs(
             tactile_history=tactile_history,
             history_stride=history_stride,
         )
-        for side_i, side in enumerate(keys.sides)
+        for side_i, side in enumerate(keys.sides) if side_i in record.side_ids
     ]
 
 
@@ -293,12 +300,16 @@ def _build_base_records(
     val_fraction: float,
     split_seed: int,
     frame_stride: int,
+    episode_split: tuple[tuple[int, ...], tuple[int, ...]] | None = None,
 ) -> tuple[list[SampleRecord], tuple[int, ...], tuple[int, ...]]:
     if frame_stride <= 0:
         raise ValueError(f"frame_stride must be positive, got {frame_stride}.")
-    total_episodes = episode_count(dataset)
-    episodes = list(range(total_episodes))
-    train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
+    if episode_split is None:
+        episodes = list(range(episode_count(dataset)))
+        train_episodes, val_episodes = split_episodes(episodes, val_fraction=val_fraction, seed=split_seed)
+    else:
+        train_episodes, val_episodes = episode_split
+        episodes = sorted((*train_episodes, *val_episodes))
     val_set = set(val_episodes)
 
     records: list[SampleRecord] = []
@@ -318,15 +329,23 @@ def build_future_records(
     val_fraction: float = 0.1,
     split_seed: int = 0,
     frame_stride: int = 1,
+    tasks: Sequence[dict[str, Any]] | None = None,
 ) -> FutureRecordSet:
     if future_offset <= 0:
         raise ValueError(f"future_offset must be positive, got {future_offset}.")
 
+    episode_split = None
+    side_ids: dict[int, tuple[int, ...]] = {}
+    selections = []
+    if tasks is not None:
+        train_episodes, val_episodes, side_ids, selections = select_task_episodes(dataset, tasks, seed=split_seed)
+        episode_split = (train_episodes, val_episodes)
     base_records, train_episodes, val_episodes = _build_base_records(
         dataset,
         val_fraction=val_fraction,
         split_seed=split_seed,
         frame_stride=frame_stride,
+        episode_split=episode_split,
     )
     episode_indices = {
         episode: tuple(int(index) for index in indices_for_episode(dataset, episode))
@@ -351,16 +370,21 @@ def build_future_records(
                 future_dataset_index=future_index,
                 episode_index=int(record.episode_index),
                 split=record.split,
+                side_ids=side_ids.get(record.episode_index, (0, 1)),
             )
         )
     if not any(record.split == "train" for record in future_records):
         raise ValueError("Dataset selection produced no training samples.")
     if not any(record.split == "val" for record in future_records):
         raise ValueError("Dataset selection produced no validation samples.")
+    represented = {record.episode_index for record in future_records}
+    if tasks is not None and represented != {*train_episodes, *val_episodes}:
+        raise ValueError("Selected episodes too short for future_offset; cannot meet the requested episode budgets.")
     return FutureRecordSet(
         records=tuple(future_records),
         train_episodes=train_episodes,
         val_episodes=val_episodes,
+        task_selections=tuple(selections),
     )
 
 
@@ -410,7 +434,7 @@ def batches(
         raise ValueError(f"batch_size must be positive, got {batch_size}.")
     if batch_size % 2 != 0:
         raise ValueError(
-            f"batch_size must be even for equal left/right sampling, got {batch_size}."
+            f"batch_size must be even, got {batch_size}."
         )
     if len(keys.sides) != 2:
         raise ValueError(f"Expected exactly 2 wrist sides, got {len(keys.sides)}.")
@@ -422,16 +446,13 @@ def batches(
         raise ValueError(f"tactile_history must be non-negative, got {tactile_history}.")
     if history_stride <= 0:
         raise ValueError(f"history_stride must be positive, got {history_stride}.")
-    # Expand each temporal record into one contrastive sample per wrist side.
-    # Order is always (r, left), (r, right) interleaved so every even-sized batch
-    # contains equal left/right counts. Shuffle permutes records, not free samples.
-    num_sides = len(keys.sides)
+    # Expand only active wrists. Legacy two-wrist records remain interleaved.
     record_order = np.arange(len(records))
     if shuffle:
         record_order = np.random.default_rng(seed).permutation(record_order)
     sample_index: list[tuple[int, int]] = []
     for record_i in record_order.tolist():
-        for side_i in range(num_sides):
+        for side_i in records[record_i].side_ids:
             sample_index.append((int(record_i), side_i))
     order = np.arange(len(sample_index))
 
@@ -463,6 +484,7 @@ def batches(
             loader=mp_loader,
             tactile_history=tactile_history,
             history_stride=history_stride,
+            dataset_manifest=getattr(dataset, "dataset_manifest", None),
         )
         return
 

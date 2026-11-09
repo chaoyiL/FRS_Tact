@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import pathlib
 from collections.abc import Sequence
 from typing import Any
@@ -13,29 +14,29 @@ import optax
 import yaml
 
 from train_encoder.evaluate_retrieval import evaluate_records
-from train_encoder.utils.checkpoint import CHECKPOINT_NAME
-from train_encoder.utils.checkpoint import load_checkpoint
-from train_encoder.utils.checkpoint import load_train_state
-from train_encoder.utils.checkpoint import save_checkpoint
-from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE
-from train_encoder.utils.clip_backend import DEFAULT_CLIP_MODEL_ID
-from train_encoder.utils.clip_backend import ClipBackend
-from train_encoder.utils.data import batches
-from train_encoder.utils.data import batch_uint8_to_float32
-from train_encoder.utils.data import build_future_records
-from train_encoder.utils.data import future_records_digest
-from train_encoder.utils.data import history_dataset_indices
-from train_encoder.utils.data import resolve_data_keys
-from train_encoder.utils.image_dataset import create_image_dataset
-from train_encoder.utils.model import TactileClipConfig
+from train_encoder.utils.checkpoint import CHECKPOINT_NAME, load_checkpoint, load_train_state, save_checkpoint
+from train_encoder.utils.clip_backend import CLIP_IMAGE_SIZE, DEFAULT_CLIP_MODEL_ID, ClipBackend
+from train_encoder.utils.data import (
+    batch_uint8_to_float32,
+    batches,
+    build_future_records,
+    future_records_digest,
+    history_dataset_indices,
+    resolve_data_keys,
+)
+from train_encoder.utils.image_dataset import create_image_dataset, normalize_repo_ids
 from train_encoder.utils.masking import resolve_eval_rgb_mask
-from train_encoder.utils.model import init_memory_bank
-from train_encoder.utils.model import init_trainable_params
-from train_encoder.utils.model import make_learning_rate_schedule
-from train_encoder.utils.model import make_train_step
+from train_encoder.utils.model import (
+    TactileClipConfig,
+    init_memory_bank,
+    init_trainable_params,
+    make_learning_rate_schedule,
+    make_train_step,
+)
 from train_encoder.utils.prefetch import prefetch_iterator
+from train_encoder.utils.tasks import normalize_tasks, task_repo_ids
 from train_encoder.utils.visualize import plot_training_history
-
+from utils.cache import atomic_write_json
 
 DEFAULT_CONFIG = pathlib.Path(__file__).resolve().parent / "configs" / "train.yaml"
 
@@ -203,12 +204,14 @@ def train(
     tactile_history: int,
     write_plots: bool = True,
     config_name: str | None = None,
+    tasks: Sequence[dict[str, Any]] | None = None,
+    dataset_manifest: pathlib.Path | None = None,
 ) -> None:
     if epochs <= 0 or batch_size <= 0:
         raise ValueError("epochs and batch_size must be positive.")
     if batch_size % 2 != 0:
         raise ValueError(
-            f"batch_size must be even for equal left/right sampling, got {batch_size}."
+            f"batch_size must be even, got {batch_size}."
         )
     if warmup_epochs < 0:
         raise ValueError("warmup_epochs must be non-negative.")
@@ -281,12 +284,18 @@ def train(
             print(f"already finished: last epoch {resume_metadata['epoch']} >= --epochs {epochs}")
             return
 
+    if tasks is not None:
+        tasks = normalize_tasks(tasks)
+        if list(normalize_repo_ids(dataset_repo_ids)) != task_repo_ids(tasks):
+            raise ValueError("dataset_repo_ids must match the task repo ids in task order.")
     dataset_info = create_image_dataset(
         dataset_repo_ids,
         image_size=CLIP_IMAGE_SIZE,
         cache_size=image_cache_size,
         config_name=config_name,
+        dataset_manifest=dataset_manifest,
     )
+    manifest_sha256 = None if dataset_manifest is None else hashlib.sha256(dataset_manifest.read_bytes()).hexdigest()
     dataset = dataset_info.dataset
     effective_loader = "thread" if preload_images else loader
     print(
@@ -303,7 +312,20 @@ def train(
         val_fraction=val_fraction,
         split_seed=split_seed,
         frame_stride=frame_stride,
+        tasks=tasks,
     )
+    if resume_dir is not None:
+        previous = resume_metadata.get("extra_metadata") or {}
+        if previous.get("dataset_manifest_sha256") != manifest_sha256:
+            raise ValueError("Local subset manifest differs from the resume checkpoint.")
+        if previous.get("tasks") != tasks or previous.get("dataset_repo_id") != _repo_id_for_metadata(dataset_info.repo_id):
+            raise ValueError("Resume task/dataset configuration differs from the checkpoint; use a new output_dir.")
+        if previous.get("records_sha256") not in (None, future_records_digest(record_set.records)):
+            raise ValueError("Resume episode selection differs from the checkpoint; restore its split settings.")
+    for selection in record_set.task_selections:
+        print(f"task={selection['name']} sides={selection['sides']} "
+              f"train_episodes={len(selection['train_episodes'])} "
+              f"val_episodes={len(selection['val_episodes'])}", flush=True)
     if preload_images:
         # Only decode frames touched by training/val pairs (stride + future/history).
         needed_indices = {
@@ -347,7 +369,7 @@ def train(
     else:
         params = init_trainable_params(jax.random.key(seed), model_config)
 
-    train_sample_count = len(train_records) * len(keys.sides)
+    train_sample_count = sum(len(record.side_ids) for record in train_records)
     steps_per_epoch = max(1, (train_sample_count + batch_size - 1) // batch_size)
     total_steps = epochs * steps_per_epoch
     warmup_steps = min(warmup_epochs, epochs) * steps_per_epoch
@@ -412,6 +434,10 @@ def train(
     data_metadata = {
         "config_name": dataset_info.config_name,
         "dataset_repo_id": _repo_id_for_metadata(dataset_info.repo_id),
+        "tasks": tasks,
+        "task_selections": list(record_set.task_selections),
+        "dataset_manifest": None if dataset_manifest is None else str(dataset_manifest.resolve()),
+        "dataset_manifest_sha256": manifest_sha256,
         "sides": [
             {
                 "name": side.name,
@@ -447,9 +473,10 @@ def train(
         "train_record_count": len(train_records),
         "val_record_count": len(val_records),
         "train_sample_count": train_sample_count,
-        "val_sample_count": len(val_records) * len(keys.sides),
+        "val_sample_count": sum(len(record.side_ids) for record in val_records),
         "records_sha256": records_sha256,
     }
+    atomic_write_json(output_dir / "data_selection.json", data_metadata)
     # Fresh runs must not inherit best/ metrics from a different dataset split.
     if resume_dir is None and best_recall_at_1 >= 0.0:
         best_dir = output_dir / "best"
@@ -484,6 +511,7 @@ def train(
             pair_threads=pair_threads,
             tactile_history=tactile_history,
             history_stride=frame_stride,
+            dataset_manifest=None if dataset_manifest is None else str(dataset_manifest.resolve()),
         )
         mp_loader.start()
     stop_track_recall1 = -1.0
@@ -796,6 +824,7 @@ def _yaml_argparse_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
     defaults: dict[str, Any] = {}
     direct_keys = (
         "config_name",
+        "tasks",
         "clip_model_id",
         "masked_rgb_key",
         "future_offset",
@@ -841,6 +870,9 @@ def _yaml_argparse_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
 
     if "output_dir" in cfg and cfg["output_dir"] is not None:
         defaults["output_dir"] = pathlib.Path(cfg["output_dir"])
+    if cfg.get("dataset_manifest"):
+        path = pathlib.Path(cfg["dataset_manifest"])
+        defaults["dataset_manifest"] = path if path.is_absolute() else DEFAULT_CONFIG.parents[2] / path
     if "resume_from" in cfg:
         value = cfg["resume_from"]
         defaults["resume_from"] = None if value in (None, "") else pathlib.Path(value)
@@ -883,6 +915,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional run label stored in checkpoint metadata (defaults to repo id).",
     )
     parser.add_argument("--output-dir", type=pathlib.Path, default=None)
+    parser.add_argument("--dataset-manifest", type=pathlib.Path, default=None,
+                        help="Local episode subset manifest produced by scripts/download_encoder_data.sh.")
     parser.add_argument("--clip-model-id", default=DEFAULT_CLIP_MODEL_ID)
     parser.add_argument(
         "--masked-rgb-key",
@@ -1085,6 +1119,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.set_defaults(**_yaml_argparse_defaults(cfg))
     args = parser.parse_args(argv_list)
 
+    args.tasks = cfg.get("tasks")
+    if args.tasks is not None:
+        args.tasks = normalize_tasks(args.tasks)
+        if args.dataset_repo_ids:
+            # An explicit legacy CLI override must not silently inherit YAML budgets.
+            args.tasks = None
+            args.dataset_manifest = None
+            print("--dataset-repo-id overrides YAML tasks: using legacy all-episode, two-wrist sampling.")
+        else:
+            args.dataset_repo_ids = task_repo_ids(args.tasks)
     if not args.dataset_repo_ids:
         args.dataset_repo_ids = _dataset_repo_ids_from_cfg(cfg)
     if not args.dataset_repo_ids:
@@ -1145,6 +1189,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         tactile_history=args.tactile_history,
         write_plots=bool(args.write_plots),
         config_name=args.config_name,
+        tasks=args.tasks,
+        dataset_manifest=args.dataset_manifest,
     )
 
 

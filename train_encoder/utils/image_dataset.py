@@ -7,11 +7,14 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import io
+import json
 import sys
 import threading
 import types
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import cv2
@@ -295,6 +298,11 @@ class ImageOnlyLeRobotDataset:
         except ModuleNotFoundError as exc:
             raise RuntimeError("lerobot is required for tactile CLIP image loading.") from exc
 
+        self._initialize(repo_id, lerobot_dataset.LeRobotDataset(repo_id, return_uint8=True),
+                         image_size=image_size, cache_size=cache_size)
+
+    def _initialize(self, repo_id: str, dataset: Any, *, image_size: int, cache_size: int) -> None:
+
         self.repo_id = repo_id
         self.image_size = int(image_size)
         self._cache_size = max(0, int(cache_size))
@@ -304,14 +312,16 @@ class ImageOnlyLeRobotDataset:
         self._cache_order: list[int] = []
         self._cache_lock = threading.RLock()
         # return_uint8 keeps decoded video frames in uint8 for our LRU cache.
-        self._dataset = lerobot_dataset.LeRobotDataset(repo_id, return_uint8=True)
+        self._dataset = dataset
         self._video_keys = set(self._dataset.meta.video_keys)
         self._image_keys = set(self._dataset.meta.image_keys)
-        missing = [key for key in RAW_IMAGE_KEYS if key not in self._video_keys and key not in self._image_keys]
-        if missing:
+        available_keys = self._video_keys | self._image_keys
+        wrist_groups = ((RAW_CAMERA0_KEY, *RAW_TACTILE_KEYS[:2]),
+                        (RAW_CAMERA1_KEY, *RAW_TACTILE_KEYS[2:]))
+        if not any(set(group) <= available_keys for group in wrist_groups):
             available = sorted(self._video_keys | self._image_keys)
             raise KeyError(
-                f"Dataset {repo_id!r} is missing required image keys {missing}. "
+                f"Dataset {repo_id!r} needs at least one complete RGB + two tactile wrist group. "
                 f"Available camera keys: {available}"
             )
         # Scalar columns only — never pull state/actions through select_columns.
@@ -346,6 +356,9 @@ class ImageOnlyLeRobotDataset:
 
     def __len__(self) -> int:
         return len(self._dataset)
+
+    def episodes_by_repo(self) -> dict[str, tuple[int, ...]]:
+        return {self.repo_id: tuple(range(self._episode_offset, self._episode_offset + self.num_episodes))}
 
     def indices_for_episode(self, episode_index: int) -> tuple[int, ...]:
         local_episode = int(episode_index) - self._episode_offset
@@ -413,7 +426,14 @@ class ImageOnlyLeRobotDataset:
             )
         for raw_key in raw_keys:
             canonical = CANONICAL_FROM_RAW[raw_key]
-            output[canonical] = parse_image_to_uint8(frames[raw_key], image_size=self.image_size)
+            value = frames[raw_key]
+            if isinstance(value, dict):
+                from PIL import Image
+
+                source = io.BytesIO(value["bytes"]) if value.get("bytes") is not None else self._dataset.root / value["path"]
+                with Image.open(source) as image:
+                    value = np.asarray(image.convert("RGB"))
+            output[canonical] = parse_image_to_uint8(value, image_size=self.image_size)
         return output
 
     def get_images(
@@ -436,6 +456,9 @@ class ImageOnlyLeRobotDataset:
         unknown = [key for key in canonical_keys if key not in RAW_FROM_CANONICAL]
         if unknown:
             raise KeyError(f"Unknown image keys {unknown}. Expected one of {sorted(RAW_FROM_CANONICAL)}.")
+        missing = set(canonical_keys) - set(self._canonical_image_keys)
+        if missing:
+            raise KeyError(f"Dataset {self.repo_id!r} lacks requested wrist images: {sorted(missing)}.")
 
         local_index = int(index) - self._frame_offset
         if local_index < 0 or local_index >= len(self._dataset):
@@ -546,7 +569,7 @@ class ImageOnlyLeRobotDataset:
         print(f"preloaded {self.repo_id}: {total} frames in RAM", flush=True)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        return self.get_images(index, tuple(CANONICAL_FROM_RAW.values()))
+        return self.get_images(index, self._canonical_image_keys)
 
 
 class CombinedImageDataset:
@@ -568,6 +591,12 @@ class CombinedImageDataset:
             episode_offset += dataset.num_episodes
         self._total_frames = frame_offset
         self._total_episodes = episode_offset
+        self.prepared_splits = {}
+        for dataset in self._datasets:
+            for name, split in getattr(dataset, "prepared_splits", {}).items():
+                self.prepared_splits[name] = {**split,
+                    "train": [dataset._episode_offset + e for e in split["train"]],
+                    "val": [dataset._episode_offset + e for e in split["val"]]}
 
     @property
     def num_episodes(self) -> int:
@@ -576,6 +605,10 @@ class CombinedImageDataset:
     @property
     def repo_ids(self) -> tuple[str, ...]:
         return tuple(dataset.repo_id for dataset in self._datasets)
+
+    def episodes_by_repo(self) -> dict[str, tuple[int, ...]]:
+        return {repo: episodes for dataset in self._datasets
+                for repo, episodes in dataset.episodes_by_repo().items()}
 
     def __len__(self) -> int:
         return self._total_frames
@@ -634,25 +667,88 @@ class ImageDatasetInfo:
     dataset: ImageOnlyLeRobotDataset | CombinedImageDataset
 
 
+class _PreparedBacking:
+    def __init__(self, hf_dataset, meta, lengths, root):
+        self.hf_dataset = hf_dataset
+        self.meta = meta
+        self.root = root
+        ends = np.cumsum(lengths)
+        self.episode_data_index = {"from": np.r_[0, ends[:-1]], "to": ends}
+
+    def __len__(self):
+        return len(self.hf_dataset)
+
+
+def _prepared_image_dataset(entry: dict, manifest_dir: Path, *, image_size: int, cache_size: int):
+    from datasets import Dataset, Image
+
+    from train_encoder.download_data import required_image_keys
+
+    root = (manifest_dir / entry["root"]).resolve()
+    episodes = entry["episodes"]
+    ids = [row["episode_index"] for row in episodes]
+    train, val = entry["train_episode_ids"], entry["val_episode_ids"]
+    if (not episodes or len(set(ids)) != len(ids) or set(train) & set(val)
+            or len(set(train)) != len(train) or len(set(val)) != len(val)
+            or set(train) | set(val) != set(ids)):
+        raise ValueError(f"Invalid episode partition in manifest for {entry['repo_id']}")
+    keys = required_image_keys(entry["sides"])
+    paths = []
+    for row in episodes:
+        path = root / row["path"]
+        if not path.is_file() or path.stat().st_size != row["size_bytes"]:
+            raise FileNotFoundError(f"Local episode missing/incomplete: {path}; run scripts/download_encoder_data.sh")
+        paths.append(str(path))
+    # Arrow caches memory-map selected image columns; never load state/actions or fetch the Hub.
+    hf = Dataset.from_parquet(paths, columns=["episode_index", "timestamp", *keys],
+                              cache_dir=str(manifest_dir / ".arrow_cache"))
+    lengths = [row["length"] for row in episodes]
+    expected_ids = np.repeat(ids, lengths)
+    if len(hf) != sum(lengths) or not np.array_equal(np.asarray(hf["episode_index"]), expected_ids):
+        raise ValueError(f"Local episode order/length mismatch: {entry['repo_id']}")
+    hf = hf.remove_columns("episode_index").add_column("episode_index", np.repeat(np.arange(len(ids)), lengths))
+    for key in keys:
+        hf = hf.cast_column(key, Image(decode=False))
+    backing = _PreparedBacking(hf, SimpleNamespace(video_keys=[], image_keys=keys, total_episodes=len(ids)), lengths, root)
+    dataset = ImageOnlyLeRobotDataset.__new__(ImageOnlyLeRobotDataset)
+    dataset._initialize(entry["repo_id"], backing, image_size=image_size, cache_size=cache_size)
+    local_ids = {raw: local for local, raw in enumerate(ids)}
+    dataset.prepared_splits = {entry["name"]: {"repo_ids": [entry["repo_id"]], "sides": entry["sides"],
+        "seed": entry["split_seed"], "train": [local_ids[e] for e in train], "val": [local_ids[e] for e in val]}}
+    return dataset
+
+
 def create_image_dataset(
     repo_ids: str | Sequence[str],
     *,
     image_size: int = 224,
     cache_size: int = DEFAULT_IMAGE_CACHE_SIZE,
     config_name: str | None = None,
+    dataset_manifest: str | Path | None = None,
 ) -> ImageDatasetInfo:
     """Build an image-only dataset from one or more LeRobot repo ids."""
 
     resolved = normalize_repo_ids(repo_ids)
-    datasets = [
-        ImageOnlyLeRobotDataset(repo_id, image_size=image_size, cache_size=cache_size)
-        for repo_id in resolved
-    ]
+    if dataset_manifest is not None:
+        manifest_path = Path(dataset_manifest).resolve()
+        if not manifest_path.is_file():
+            raise FileNotFoundError(f"Subset manifest not found: {manifest_path}; run bash scripts/download_encoder_data.sh")
+        manifest = json.loads(manifest_path.read_text())
+        if manifest.get("format") != "tactile-encoder-v21-subset-v1":
+            raise ValueError(f"Unsupported subset manifest: {manifest_path}")
+        entries = {entry["repo_id"]: entry for entry in manifest["tasks"]}
+        if len(entries) != len(manifest["tasks"]) or set(entries) != set(resolved):
+            raise ValueError("Dataset repo ids differ from the local subset manifest.")
+        datasets = [_prepared_image_dataset(entries[repo], manifest_path.parent,
+                    image_size=image_size, cache_size=cache_size) for repo in resolved]
+    else:
+        datasets = [ImageOnlyLeRobotDataset(repo_id, image_size=image_size, cache_size=cache_size) for repo_id in resolved]
     if len(datasets) == 1:
         dataset: ImageOnlyLeRobotDataset | CombinedImageDataset = datasets[0]
         repo_id: str | tuple[str, ...] = resolved[0]
     else:
         dataset = CombinedImageDataset(datasets)
         repo_id = resolved
+    dataset.dataset_manifest = None if dataset_manifest is None else str(Path(dataset_manifest).resolve())
     label = config_name or ("+".join(resolved) if len(resolved) > 1 else resolved[0])
     return ImageDatasetInfo(config_name=label, repo_id=repo_id, dataset=dataset)

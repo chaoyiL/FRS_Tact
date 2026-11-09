@@ -18,8 +18,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from train_encoder.utils.data import DataKeys
-    from train_encoder.utils.data import FutureRecord
+    from train_encoder.utils.data import DataKeys, FutureRecord
 
 # Sentinel: stop workers.
 _STOP = None
@@ -33,8 +32,7 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
     try:
-        from train_encoder.utils.data import load_pair
-        from train_encoder.utils.data import stack_pairs
+        from train_encoder.utils.data import load_pair, stack_pairs
         from train_encoder.utils.image_dataset import create_image_dataset
 
         repo_ids = init["repo_ids"]
@@ -49,6 +47,7 @@ def _worker_loop(task_q: Any, result_q: Any, init: dict[str, Any]) -> None:
             repo_ids,
             image_size=image_size,
             cache_size=cache_size,
+            dataset_manifest=init.get("dataset_manifest"),
         ).dataset
     except Exception as exc:  # noqa: BLE001 — surface init failure to parent
         result_q.put(("__init__", None, f"worker init failed: {exc}\n{traceback.format_exc()}"))
@@ -102,6 +101,7 @@ class MpBatchLoader:
         pair_threads: int = 8,
         tactile_history: int = 0,
         history_stride: int = 5,
+        dataset_manifest: str | None = None,
     ):
         import multiprocessing as mp
 
@@ -128,6 +128,7 @@ class MpBatchLoader:
             "records": tuple(records),
             "tactile_history": int(tactile_history),
             "history_stride": int(history_stride),
+            "dataset_manifest": dataset_manifest,
         }
         self._workers = [
             self._ctx.Process(
@@ -240,6 +241,7 @@ def iter_mp_batches(
     loader: MpBatchLoader | None = None,
     tactile_history: int = 0,
     history_stride: int = 5,
+    dataset_manifest: str | None = None,
 ) -> Iterator[dict[str, np.ndarray]]:
     """Yield stacked batches using a spawn process pool.
 
@@ -261,6 +263,7 @@ def iter_mp_batches(
             pair_threads=pair_threads,
             tactile_history=tactile_history,
             history_stride=history_stride,
+            dataset_manifest=dataset_manifest,
         )
         loader.start()
     try:
