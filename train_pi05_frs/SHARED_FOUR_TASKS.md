@@ -1,5 +1,8 @@
 # 四个冻结 Pi0.5，共享一个触觉 FRS
 
+新开单张 RTX 4090 实例时，按 [4090 完整启动步骤](START_4090.md) 操作；该流程使用
+独立的小 batch 配置，并将 Arrow 临时副本放到容器临时盘。
+
 本流程只更新一个 FRS 的 GRU、Transformer 和触觉位置标识参数。四个任务各自已有的
 Pi0.5 checkpoint，以及已有的触觉 ResNet encoder，均保持冻结。
 

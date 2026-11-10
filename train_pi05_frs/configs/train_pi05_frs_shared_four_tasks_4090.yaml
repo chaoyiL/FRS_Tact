@@ -1,0 +1,101 @@
+# Initial small-batch profile for a single 24 GB RTX 4090; verify peak VRAM on the server.
+# Use --config /workspace/FRS_Tact/train_pi05_frs/configs/train_pi05_frs_shared_four_tasks_4090.yaml
+# Shares frozen assets and compatible caches; starts a new shared FRS output.
+workspace: /workspace/frs_shared_four_tasks
+output: /workspace/frs_shared_four_tasks/runs/shared_frs_4090
+# Frozen encoder: https://huggingface.co/KaiyueChen/encoder_ckpt_0824
+tactile_encoder_repo: KaiyueChen/encoder_ckpt_0824
+tactile_encoder_revision: 1a432a8b9c1a38f75cb40c58a4924a401486d832
+tactile_encoder: /workspace/FRS_Tact/checkpoints/encoder_ckpt_0824
+seed: 42
+num_train_episodes: 300
+num_val_episodes: 35
+action_horizon: 50
+
+# Keep each frozen VLA's native interface and its own normalization statistics.
+# Download these pinned revisions with scripts/download_frs_shared_ckpts.sh.
+sources:
+  - name: insert
+    repo_id: KaiyueChen/insert_01
+    dataset_root: /workspace/frs_shared_four_tasks/datasets/v30/KaiyueChen/insert_01
+    checkpoint_repo: KaiyueChen/pi05_task3_0830_1w
+    checkpoint_revision: bd63237ad2923700b8f50b79fbb5afcab3945d66
+    checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task3_0830_1w
+    norm_stats_asset_id: insert_0102_train90
+    native_action_dim: 10
+    active_wrists: [right]
+  - name: press
+    repo_id: KaiyueChen/press_01
+    dataset_root: /workspace/frs_shared_four_tasks/datasets/v30/KaiyueChen/press_01
+    checkpoint_repo: KaiyueChen/pi05_task4_0830_6k
+    checkpoint_revision: d69071bee996ee600866b5406527f4a72c6cefd9
+    checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task4_0830_6k
+    norm_stats_asset_id: press_0102
+    native_action_dim: 10
+    active_wrists: [right]
+  - name: bread
+    repo_id: KaiyueChen/bread_03
+    dataset_root: /workspace/frs_shared_four_tasks/datasets/v30/KaiyueChen/bread_03
+    checkpoint_repo: KaiyueChen/pi05_task2_0902_12k
+    checkpoint_revision: d9c44f5f66c75f75fd66712151249fb22c62924c
+    checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task2_0902_12k
+    norm_stats_asset_id: bread_01020304
+    native_action_dim: 20
+    active_wrists: [left, right]
+  - name: pick
+    repo_id: KaiyueChen/pick_01
+    dataset_root: /workspace/frs_shared_four_tasks/datasets/v30/KaiyueChen/pick_01
+    checkpoint_repo: KaiyueChen/pi05_task1_0902_8k
+    checkpoint_revision: 1362eceb5fe3cf00af5c6460bb2c35badf0a76cf
+    checkpoint: /workspace/FRS_Tact/checkpoints/model/pi05_task1_0902_8k
+    norm_stats_asset_id: pick_0102
+    native_action_dim: 20
+    active_wrists: [left, right]
+
+cache:
+  batch_size: 4
+  load_workers: 4
+  model_sample_steps: 10
+  reverse_steps: 50
+  reverse_solver: slerpflow
+  frame_stride: 5
+  drop_tail_action_chunks: 1
+  tactile_batch_size: 32
+
+training:
+  # Existing per-wrist composite-endpoint FM + safety/rank/repair, with idle-wrist masks.
+  loss_mode: bimanual_gated
+  # FRS is tactile-conditioned; each native Pi0.5 still uses its original 7D/20D state.
+  # We do not mix incompatible normalized state vectors into the shared decoder.
+  tactile_window: 10
+  history_stride: 3
+  model_dim: 256
+  depth: 6
+  num_heads: 4
+  mlp_ratio: 4
+  balance_tasks: true
+  batch_size: 32
+  epochs: 50
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-4
+  grad_clip_norm: 1.0
+  warmup_epochs: 2
+  min_lr_ratio: 0.1
+  gate_tau: 0.65
+  gate_temperature: 0.15
+  low_gate_threshold: 0.3
+  high_gate_threshold: 0.7
+  aux_decode_weight: 4.0
+  aux_decode_steps: 10
+  decode_solver: fireflow
+  low_gate_safety_weight: 0.5
+  low_gate_safety_margin: 0.03
+  rank_weight: 4.0
+  rank_margin: 0.0
+  repair_weight: 2.0
+  repair_margin: 0.0
+  best_max_low_gate_unsafe_frac: 0.1
+  best_min_high_gate_gain: 0.0
+  best_min_high_gate_rank_satisfied_frac: 0.8
+  validation_steps: 10
+  eval_every: 5

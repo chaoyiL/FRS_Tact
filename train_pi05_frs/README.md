@@ -13,6 +13,10 @@ use [the shared four-task guide](SHARED_FOUR_TASKS.md) and
 `scripts/start_frs_pi05_shared_train.sh`. The existing single-task launchers keep their
 original objectives and native interfaces.
 
+For a fresh single-RTX-4090 instance, use [the complete 4090 startup steps](START_4090.md)
+and `configs/train_pi05_frs_shared_four_tasks_4090.yaml` (cache batch 4, tactile batch 32,
+FRS batch 32). The profile shares frozen assets/caches and writes a new `shared_frs_4090` run.
+
 ## Set up and run
 
 Run commands from the repository root. The launcher selects only the package-local interpreter,
