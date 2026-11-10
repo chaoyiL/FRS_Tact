@@ -27,6 +27,49 @@ def consistency_error_file(error: OSError, expected_sizes: dict[str, int]) -> st
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _broken_file_error(error: OSError, filename: str, size: int) -> bool:
+    response = getattr(error, "response", None)
+    # A broken partial may fail at HTTP Range handling before any size check.
+    return (response is not None and response.status_code == 416) or (
+        consistency_error_file(error, {filename: size}) is not None
+    )
+
+
+def download_hf_file(
+    repo_id: str, filename: str, *, repo_type: str, revision: str, local_dir: Path, expected_size: int
+) -> None:
+    """Resume one known file; restart it if its partial download is invalid."""
+    from huggingface_hub import hf_hub_download
+
+    path = local_dir / filename
+    if path.is_file() and path.stat().st_size == expected_size:
+        return
+    if not path.is_file():
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                revision=revision,
+                local_dir=local_dir,
+                force_download=False,
+            )
+        except OSError as error:
+            if not _broken_file_error(error, filename, expected_size):
+                raise
+        else:
+            if path.is_file() and path.stat().st_size == expected_size:
+                return
+    force_download_hf_file(
+        repo_id,
+        filename,
+        repo_type=repo_type,
+        revision=revision,
+        local_dir=local_dir,
+        expected_size=expected_size,
+    )
+
+
 def force_download_hf_file(
     repo_id: str, filename: str, *, repo_type: str, revision: str, local_dir: Path, expected_size: int
 ) -> None:
@@ -45,7 +88,7 @@ def force_download_hf_file(
                 force_download=True,
             )
         except OSError as error:
-            if attempt == 2 or consistency_error_file(error, {filename: expected_size}) is None:
+            if attempt == 2 or not _broken_file_error(error, filename, expected_size):
                 raise
             continue
         path = local_dir / filename

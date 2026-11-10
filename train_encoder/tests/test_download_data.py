@@ -94,8 +94,15 @@ def hub(tmp_path, monkeypatch):
             shutil.copyfile(source / repo_id / relative, destination)
         return str(local_dir)
 
+    def download_file(repo_id, filename, *, repo_type, revision, local_dir, **kwargs):
+        snapshot(
+            repo_id, repo_type=repo_type, revision=revision, local_dir=local_dir, allow_patterns=[filename]
+        )
+        return str(Path(local_dir) / filename)
+
     monkeypatch.setattr("huggingface_hub.HfApi", Api)
     monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot)
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download_file)
     return tasks, calls
 
 
@@ -118,8 +125,8 @@ def test_exact_download_partition_resume_and_local_loading(tmp_path, hub, monkey
         assert len(entry["val_episode_ids"]) == 2
         assert not set(entry["train_episode_ids"]) & set(entry["val_episode_ids"])
     episode_calls = [paths for _, paths in calls if paths[0].startswith("data/")]
-    assert len(episode_calls) == 4
-    assert all(len(paths) == 5 for paths in episode_calls)
+    assert len(episode_calls) == 20
+    assert all(len(paths) == 1 for paths in episode_calls)
     before = len(calls)
     assert entries == prepare(tasks, output)
     assert len(calls) == before  # Fully downloaded data works offline.
@@ -149,7 +156,7 @@ def test_exact_download_partition_resume_and_local_loading(tmp_path, hub, monkey
             records.split_records("train"),
             resolve_data_keys(),
             batch_size=8,
-                image_size=4,
+            image_size=4,
             shuffle=True,
             seed=2,
             num_workers=2,
@@ -164,7 +171,7 @@ def test_exact_download_partition_resume_and_local_loading(tmp_path, hub, monkey
             records.split_records("train"),
             resolve_data_keys(),
             batch_size=8,
-                image_size=4,
+            image_size=4,
             shuffle=True,
             seed=2,
             num_workers=2,
@@ -228,35 +235,42 @@ def test_rate_limit_after_partial_download_retries_only_missing_episodes(tmp_pat
     from utils import hf_download
 
     tasks, calls = hub
-    snapshot = huggingface_hub.snapshot_download
+    output = tmp_path / "subset"
+    selected = prepare(tasks[:1], output, dry_run=True)[0]
+    bad = selected["episodes"][1]["path"]
+    download_file = huggingface_hub.hf_hub_download
     episode_attempts, sleeps = [], []
 
-    def interrupted_snapshot(repo_id, **kwargs):
-        paths = kwargs["allow_patterns"]
-        if paths[0].startswith("data/"):
-            episode_attempts.append(list(paths))
-            if len(episode_attempts) == 1:
-                snapshot(repo_id, **{**kwargs, "allow_patterns": paths[:1]})
-                response = requests.Response()
-                response.status_code = 429
-                response.headers["Retry-After"] = "120"
-                raise HfHubHTTPError("Xet token rate limit", response=response)
-        return snapshot(repo_id, **kwargs)
+    def interrupted_download(**kwargs):
+        filename = kwargs["filename"]
+        first_failure = filename == bad and bad not in episode_attempts
+        episode_attempts.append(filename)
+        if first_failure:
+            response = requests.Response()
+            response.status_code = 429
+            response.headers["Retry-After"] = "120"
+            raise HfHubHTTPError("Xet token rate limit", response=response)
+        return download_file(**kwargs)
 
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", interrupted_snapshot)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", interrupted_download)
     monkeypatch.setattr(hf_download.time, "sleep", sleeps.append)
-    entry = prepare(tasks[:1], tmp_path / "subset")[0]
+    entry = prepare(tasks[:1], output)[0]
     assert sleeps == [120]
-    assert len(episode_attempts[0]) == 5
-    assert episode_attempts[1] == episode_attempts[0][1:]
+    assert episode_attempts.count(bad) == 2
+    assert all(episode_attempts.count(row["path"]) == 1 for row in entry["episodes"] if row["path"] != bad)
     assert len(entry["train_episode_ids"]) == 3
     assert len(entry["val_episode_ids"]) == 2
-    assert len([paths for _, paths in calls if paths[0].startswith("data/")]) == 2
+    assert len([paths for _, paths in calls if paths[0].startswith("data/")]) == 5
 
 
 @pytest.mark.parametrize("existing_bad_file", [False, True])
-def test_size_mismatch_repairs_one_episode_and_preserves_completed_files(tmp_path, hub, monkeypatch, existing_bad_file):
+@pytest.mark.parametrize("failure", ["size", "range"])
+def test_size_mismatch_repairs_one_episode_and_preserves_completed_files(
+    tmp_path, hub, monkeypatch, existing_bad_file, failure
+):
     import huggingface_hub
+    import requests
+    from huggingface_hub.errors import HfHubHTTPError
 
     tasks, calls = hub
     output = tmp_path / "subset"
@@ -264,33 +278,45 @@ def test_size_mismatch_repairs_one_episode_and_preserves_completed_files(tmp_pat
     root = output / entry["root"]
     first, bad, *remaining = entry["episodes"]
     snapshot = huggingface_hub.snapshot_download
-    snapshot(entry["repo_id"], repo_type="dataset", revision=entry["revision"], local_dir=root, allow_patterns=[first["path"]])
+    download_file = huggingface_hub.hf_hub_download
+    snapshot(
+        entry["repo_id"],
+        repo_type="dataset",
+        revision=entry["revision"],
+        local_dir=root,
+        allow_patterns=[first["path"]],
+    )
     preserved = (root / first["path"]).stat().st_mtime_ns
     if existing_bad_file:
         destination = root / bad["path"]
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(b"bad")
-    snapshots, forced = [], []
+    normal, forced = [], []
 
-    def snapshot_with_broken_partial(repo_id, **kwargs):
-        snapshots.append(list(kwargs["allow_patterns"]))
-        if bad["path"] in kwargs["allow_patterns"]:
-            raise OSError(f"Consistency check failed: file should be of size {bad['size_bytes']} but has size {bad['size_bytes'] + 20} ({Path(bad['path']).name}).")
-        return snapshot(repo_id, **kwargs)
-
-    def force_download(**kwargs):
-        forced.append(kwargs)
+    def download_with_broken_partial(**kwargs):
         assert kwargs["repo_id"] == entry["repo_id"]
         assert kwargs["revision"] == entry["revision"]
-        assert kwargs["filename"] == bad["path"]
-        assert kwargs["force_download"] is True
-        return snapshot(kwargs["repo_id"], repo_type=kwargs["repo_type"], revision=kwargs["revision"], local_dir=kwargs["local_dir"], allow_patterns=[kwargs["filename"]])
+        if kwargs["force_download"]:
+            forced.append(kwargs)
+            assert kwargs["filename"] == bad["path"]
+        else:
+            normal.append(kwargs["filename"])
+            if kwargs["filename"] == bad["path"]:
+                if failure == "range":
+                    response = requests.Response()
+                    response.status_code = 416
+                    # Real CDN URLs can be opaque: repair must not parse a filename from them.
+                    response.url = "https://cdn.example.test/opaque-object"
+                    raise HfHubHTTPError("Range Not Satisfiable", response=response)
+                raise OSError(
+                    f"Consistency check failed: file should be of size {bad['size_bytes']} but has size {bad['size_bytes'] + 20} ({Path(bad['path']).name})."
+                )
+        return download_file(**kwargs)
 
-    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_with_broken_partial)
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download", force_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download_with_broken_partial)
     resumed = prepare(tasks[:1], output)[0]
     assert resumed == entry
     assert len(forced) == 1
-    assert snapshots[-1] == [row["path"] for row in remaining]
-    assert all(first["path"] not in names for names in snapshots)
+    assert {row["path"] for row in remaining} <= set(normal)
+    assert first["path"] not in normal
     assert (root / first["path"]).stat().st_mtime_ns == preserved

@@ -7,10 +7,11 @@ import json
 from pathlib import Path, PurePosixPath
 
 import yaml
+from tqdm.contrib.concurrent import thread_map
 
 from train_encoder.utils.tasks import normalize_tasks, sample_task_episodes
 from utils.cache import atomic_write_json
-from utils.hf_download import consistency_error_file, force_download_hf_file, retry_hf_call
+from utils.hf_download import download_hf_file, retry_hf_call
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_FORMAT = "tactile-encoder-v21-subset-v1"
@@ -188,43 +189,29 @@ def download_task(
         def fetch_missing():
             # Recompute after a partial transfer so retries avoid even metadata requests
             # for episodes that finished downloading during the previous attempt.
-            expected_sizes = {row["path"]: row["size_bytes"] for row in plan["episodes"]}
+            missing = [
+                row
+                for row in plan["episodes"]
+                if not (root / row["path"]).is_file()
+                or (root / row["path"]).stat().st_size != row["size_bytes"]
+            ]
 
-            def repair(filename):
-                force_download_hf_file(
+            def fetch_one(row):
+                # Keep the exact filename in scope even when the server returns 416
+                # with only an opaque signed CDN URL, not a size-check message.
+                download_hf_file(
                     repo_id,
-                    filename,
+                    row["path"],
                     repo_type="dataset",
                     revision=plan["revision"],
                     local_dir=root,
-                    expected_size=expected_sizes[filename],
+                    expected_size=row["size_bytes"],
                 )
 
-            # A completed but truncated file can otherwise be reused by Hub metadata.
-            for filename, size in expected_sizes.items():
-                path = root / filename
-                if path.is_file() and path.stat().st_size != size:
-                    repair(filename)
-            while True:
-                missing = [filename for filename in expected_sizes if not (root / filename).is_file()]
-                if not missing:
-                    return
-                try:
-                    snapshot_download(
-                        repo_id,
-                        repo_type="dataset",
-                        revision=plan["revision"],
-                        local_dir=root,
-                        allow_patterns=missing,
-                        max_workers=max_workers,
-                    )
-                except OSError as error:
-                    filename = consistency_error_file(error, {name: expected_sizes[name] for name in missing})
-                    if filename is None:
-                        raise
-                    repair(filename)
-                else:
-                    return
+            if missing:
+                thread_map(
+                    fetch_one, missing, max_workers=max_workers, desc=f"Downloading {repo_id}", unit="file"
+                )
 
         retry_hf_call(fetch_missing)
         for row in plan["episodes"]:

@@ -148,18 +148,19 @@ def test_forced_repair_retries_only_bad_file_and_keeps_revision(tmp_path, monkey
     assert (tmp_path / "good.parquet").read_bytes() == b"keep"
 
 
-@pytest.mark.parametrize("consistency,expected_calls", [(True, 3), (False, 1)])
+@pytest.mark.parametrize("failure,expected_calls", [("consistency", 3), ("range", 3), ("quota", 1)])
 def test_forced_repair_is_bounded_and_does_not_retry_disk_quota(
-    tmp_path, monkeypatch, consistency, expected_calls
+    tmp_path, monkeypatch, failure, expected_calls
 ):
     import huggingface_hub
 
     calls = []
-    error = (
-        OSError("Consistency check failed: file should be of size 4 but has size 8 (bad.parquet).")
-        if consistency
-        else OSError(122, "Disk quota exceeded")
-    )
+    if failure == "consistency":
+        error = OSError("Consistency check failed: file should be of size 4 but has size 8 (bad.parquet).")
+    elif failure == "range":
+        error = http_error(416)
+    else:
+        error = OSError(122, "Disk quota exceeded")
 
     def download(**kwargs):
         calls.append(kwargs)
@@ -177,3 +178,50 @@ def test_forced_repair_is_bounded_and_does_not_retry_disk_quota(
         )
     assert caught.value is error
     assert len(calls) == expected_calls
+
+
+def test_range_failure_restarts_known_file_without_parsing_signed_url(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    flags = []
+    error = http_error(416)
+    error.response.url = "https://cdn.example.test/opaque-signed-object"
+
+    def download(**kwargs):
+        flags.append(kwargs["force_download"])
+        assert kwargs["filename"] == "bad.parquet"
+        assert kwargs["revision"] == "pinned"
+        if not kwargs["force_download"]:
+            raise error
+        (tmp_path / kwargs["filename"]).write_bytes(b"good")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    hf_download.download_hf_file(
+        "org/data", "bad.parquet", repo_type="dataset", revision="pinned", local_dir=tmp_path, expected_size=4
+    )
+    assert flags == [False, True]
+
+
+@pytest.mark.parametrize("status", [403, 404, 429])
+def test_single_file_download_propagates_other_http_errors_without_forcing(tmp_path, monkeypatch, status):
+    import huggingface_hub
+
+    flags = []
+    error = http_error(status)
+
+    def download(**kwargs):
+        flags.append(kwargs["force_download"])
+        raise error
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    with pytest.raises(HfHubHTTPError) as caught:
+        hf_download.download_hf_file(
+            "org/data",
+            "bad.parquet",
+            repo_type="dataset",
+            revision="pinned",
+            local_dir=tmp_path,
+            expected_size=4,
+        )
+    assert caught.value is error
+    assert flags == [False]
