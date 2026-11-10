@@ -133,3 +133,6 @@ tmux attach -t frs_pi05_shared_4090
 
 若没有 tmux，启动器会在当前终端前台执行；先安装 tmux 再启动可避免 SSH 断开影响长任务。
 GPU 显存不足时先停止当前进程，再降低对应 batch 后重新启动，勿同时启动第二份任务。
+
+训练和验证完成后，按 [上传共享 best 到 HF](SHARED_FOUR_TASKS.md#上传共享-best-到-hugging-face)
+使用专用上传入口。先执行 `--dry-run` 本地校验；真正上传时需要有写入权限的 HF token。

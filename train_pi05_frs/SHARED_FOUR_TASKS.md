@@ -236,3 +236,37 @@ Pi0.5 反向积分得到的 `x_base` 和冻结 encoder 的触觉历史 embedding
 
 现有部署端不能仅替换 checkpoint 路径就把这份共享 20D 模型当作旧 10D 模型加载；
 本次提供训练、离线验证和模型级适配，实机部署入口接线需要单独完成。
+
+## 上传共享 best 到 Hugging Face
+
+使用专用入口 `scripts/upload_frs_pi05_shared_ckpt.sh`。它默认读取 4090 配置的 `best`，
+解析符号链接并固定到该次不可变快照；先校验所有文件的大小、SHA256 和参数清单，
+再把这一版快照作为普通文件上传到 model 仓库根目录。上传不需要 GPU 或训练图片。
+
+先登录有目标仓库写入权限的 HF token（之前用于下载的 Read token 不够）：
+
+```bash
+cd /workspace/FRS_Tact
+source ./env_path
+"$DATA_TOOL_PYTHON" -c 'from huggingface_hub import login; login()'
+```
+
+下面的仓库名是示例，执行时替换为你选择的目标仓库。先做本地校验，再上传：
+
+```bash
+bash scripts/upload_frs_pi05_shared_ckpt.sh \
+  KaiyueChen/pi05_frs_shared_four_tasks_best --dry-run
+
+bash scripts/upload_frs_pi05_shared_ckpt.sh \
+  KaiyueChen/pi05_frs_shared_four_tasks_best
+```
+
+默认新建 public 仓库，增加 `--private` 可创建 private 仓库；已有仓库的可见性保持原样。
+使用其他训练配置时传 `--config /absolute/path/config.yaml`，或直接传
+`--checkpoint /absolute/path/to/best`。`--dry-run` 不访问 HF。
+
+上传包括 `checkpoint.json`、`params.npz`，以及清单要求的 `opt_state.npz` 和
+`opt_state.treedef.pkl`。保留完整文件清单，下载后才能通过当前 v3 loader 的校验；
+不要只上传 `best` 链接或单独的 `params.npz`。metadata 已包含结构、best epoch、验证指标、
+episode 划分和 encoder 来源。四个冻结 VLA、encoder、大数据及历史 checkpoint 不会被上传。
+这份共享 20D checkpoint 的部署仍需对应适配入口。
