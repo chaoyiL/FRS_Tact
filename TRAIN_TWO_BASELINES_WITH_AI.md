@@ -1,8 +1,8 @@
-把下面资源链接填好，然后将本文件交给有当前仓库终端访问权限的 AI，发送：
+把下面资源链接、Hugging Face 主页链接和 token 填好，然后将本文件交给有当前仓库终端访问权限的 AI，发送：
 
-> 请读取并执行 `TRAIN_TWO_BASELINES_WITH_AI.md`。自动准备所有资源、生成配置、依次完整训练两个 baseline，并完成离线评估。请直接执行，持续处理可修复的问题，最终交付权重、配置、日志和评估结果。
+> 请读取并执行 `TRAIN_TWO_BASELINES_WITH_AI.md`。自动准备资源、生成配置、依次训练两个 baseline，每个训练完成后立即上传 checkpoint 到指定 Hugging Face 主页下，两个都上传成功后关闭当前 RunPod。发现训练失败或提前终止时，立即上传本次运行中已保存的最佳可用 checkpoint，然后关闭当前 RunPod；上传失败也关闭。请直接执行并交付上传链接和运行记录。
 
-用户只需编辑下面的 URL 清单。其余路径、单臂／双臂配置、动作字段、缓存和训练调度由 AI 根据本仓库及资源元信息确定。前提是链接能提供完整且相互匹配的数据和模型资产，执行机器有可用 GPU、磁盘与资源访问权限。
+用户只需编辑下面的资源清单和两个上传字段。其余路径、单臂／双臂配置、动作字段、缓存和训练调度由 AI 根据本仓库及资源元信息确定。执行机器为 RunPod Pod，需要可用 GPU、持久存储、资源访问权限及当前 Pod 的停止权限。本指南完成条件为训练、上传和停机，无需训练后的独立离线评估。
 
 ```yaml
 resources:
@@ -24,9 +24,19 @@ resources:
       # 如果 checkpoint 未包含模型档位、相机映射、归一化方式等来源信息，
       # 可补充原 Pi0.5 训练配置的文件 URL；已包含时保持 null。
       pi05_training_config_url: null
+
+publishing:
+  # 填个人或组织主页，例如 https://huggingface.co/KaiyueChen。
+  # AI 会在该主页对应的 namespace 下为两个 baseline 分别创建模型仓库。
+  huggingface_home_url: ""
+  # 填有该 namespace 模型仓库写入权限的 Hugging Face token。
+  # 也可以保持空字符串，由执行环境的 HF_TOKEN 提供。
+  huggingface_token: ""
 ```
 
-URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链接，或可下载的资源压缩包链接。例如数据集仓库 URL 的形式是 `https://huggingface.co/datasets/OWNER/DATASET`，模型仓库是 `https://huggingface.co/OWNER/MODEL`。链接包含 revision 时必须尊重该 revision。不要在本文件填写访问 token；使用执行环境已有的凭据。
+资源 URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链接，或可下载的资源压缩包链接。例如数据集仓库 URL 的形式是 `https://huggingface.co/datasets/OWNER/DATASET`，模型仓库是 `https://huggingface.co/OWNER/MODEL`。链接包含 revision 时必须尊重该 revision。
+
+Hugging Face token 仅用于认证，读取后通过进程内参数或受限环境变量传给上传工具；日志、最终训练配置、报告和上传包均须排除 token。本文件填写真实 token 后的副本也须排除 Git 提交和 Hugging Face 上传。RunPod 使用容器环境提供的 `RUNPOD_POD_ID` 和 `RUNPOD_API_KEY`，后者与 Hugging Face token 是不同凭据；AI 启动训练前须确认这两项及对应停止权限可用。
 
 以下内容是给执行 AI 的完整任务要求。
 
@@ -41,13 +51,13 @@ URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链�
 
    两者都需要视觉、state、专家动作和冻结 Pi0.5；act_inter 额外需要触觉数据与编码器。视觉仍用于 state baseline 的上游 VLA。专家动作是训练监督目标。
 
-   先读取两个目录的 README、配置解析、pipeline 和实际启动脚本。使用当前仓库实现。用户授权本机依赖安装、上述资源下载／转换、生成运行配置和必要的下载／调度辅助文件、训练与离线评估。遵守执行平台的权限规则。
+   先读取两个目录的 README、配置解析、pipeline 和实际启动脚本。使用当前仓库实现。用户授权本机依赖安装、资源下载／转换、生成运行配置和下载／调度辅助文件、训练、上传到填写的 Hugging Face namespace，以及完成或失败后的当前 RunPod Stop。执行这些已授权步骤无需再要求用户确认；遵守执行平台的权限规则。
 
-   检查必填 URL 是否为空；norm stats 和源模型配置优先从 checkpoint 解析，有补充链接时使用补充资源并校验一致性。只有确实缺少无法推断的来源信息、凭据或硬件条件时才报告具体阻塞；不要为路径命名、常规安装或正常启动再次要求确认。
+   检查必填 URL、上传主页和 token，解析目标 namespace，用 `HfApi.whoami()` 验证身份，再通过目标仓库的授权检查或创建操作确认写入权限。norm stats 和源模型配置优先从 checkpoint 解析，有补充链接时使用补充资源并校验一致性。先核对当前 Pod ID 和停机认证，并建立第 7 条要求的收尾监督器，再启动准备／训练流程。缺少无法推断的输入或停机权限时明确报告，避免启动无法按要求收尾的训练；已进入运行流程后的失败按第 8～10 条收尾。
 
 2. **建立固定的本地运行目录和状态记录。**
 
-   从本文件位置确定仓库根目录，不依赖某台机器上的 `/workspace` 或 `/home/typhon`。在仓库根目录建立 `.baseline_runs/<run_id>/`，包含：
+   从本文件位置确定仓库根目录，不依赖某台机器上的 `/home/typhon`。将运行目录放在当前 Pod 已挂载的持久卷中，默认 `/workspace/baseline_runs/<run_id>/`；先确认该挂载实际可持久保存。仓库位于持久卷时也可使用仓库的 `.baseline_runs/<run_id>/`。运行目录包含：
 
    ```text
    resource_manifest.json       原 URL、解析后的 revision、下载位置和身份校验信息
@@ -60,8 +70,10 @@ URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链�
    outputs/<experiment>/act_inter/
    outputs/<experiment>/state/
    logs/
-   metrics/
+   upload_staging/             只包含待上传模型产物的暂存包
+   upload_manifest.json        两个目标 repo、选择的 checkpoint、哈希和上传状态
    run_all.sh                  可重复执行的完整流程入口
+   finalize.py                 失败保全、上传和最终停止 Pod 的幂等收尾器
    training_report.md
    ```
 
@@ -125,17 +137,26 @@ URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链�
 
    明确写入 `dataset.root/repo_id/action_key/camera_map/rename_map`、源模型和 norm 资产、`cache.*_root`、`decoder.output`、动作与 state 维度。state 的 YAML 使用自己的 schema。初次训练 `decoder.resume: false`；只有相同实验存在兼容 `last.pt` 时才设置为 true。
 
-   默认保持各模板 batch size；显存不足时可降低 cache、训练和评估 batch size，记录调整。不要通过截断正式样本、减少 epochs、修改 loss 或跳过反向积分来宣称完成训练。
+   在正式运行前根据 GPU 检查决定 batch size，记录相对模板的调整。正式运行中出现 OOM、非有限 loss 或其他训练失败时立即进入上传／停机收尾，不重新启动训练。不要通过截断正式样本、减少 epochs、修改 loss 或跳过反向积分来宣称完成训练。保留训练过程中用于选择 `best.pt` 的原有验证。
 
 7. **预检后直接执行全流程，缓存由总入口生成。**
 
-   用生成配置的绝对路径依次执行对应命令；以下变量由运行脚本设置：
+   用生成配置的绝对路径执行预检；以下变量由运行脚本设置：
 
    ```bash
    bash train_baseline_act_inter/scripts/start_train.sh --config "$ACT_CONFIG" --check
    bash train_baseline_state/scripts/start_train.sh --config "$STATE_CONFIG" --check
+   ```
 
+   先运行 act_inter：
+
+   ```bash
    bash train_baseline_act_inter/scripts/start_train.sh --config "$ACT_CONFIG"
+   ```
+
+   它正常完成且第 8 条上传验证成功后，再运行 state 并立即上传：
+
+   ```bash
    bash train_baseline_state/scripts/start_train.sh --config "$STATE_CONFIG"
    ```
 
@@ -143,30 +164,69 @@ URL 可使用 Hugging Face 仓库页、指定 revision 的仓库页／文件链�
 
    act_inter 总入口自动运行触觉特征缓存、VLA／GT／state 动作缓存、修正网络训练。state 总入口自动运行 VLA／反向积分／GT／state 缓存、修正网络训练。缓存格式不同，不能直接互换，也不能将 TacFRS 缓存直接当作 baseline 缓存。
 
-   可修复下载、依赖、字段和路径问题后重试；保留诊断与日志。若要先冒烟，使用独立缓存和输出目录，保证采样覆盖训练与验证 episode；不要盲目使用很小的 `--max-samples`，它可能只截取到一个 split。正式运行移除样本／步数上限。
+   准备阶段可修复下载、依赖、字段和路径问题；一旦正式总入口出现非零退出、提前终止、OOM、NaN 或子进程消失，立即停止后续训练任务，按第 9 条保全上传并关闭 Pod。若要先冒烟，使用独立缓存和输出目录，保证采样覆盖训练与验证 episode；不要盲目使用很小的 `--max-samples`，它可能只截取到一个 split。正式运行移除样本／步数上限。
 
-   将流程写入本次运行目录的 `run_all.sh`，然后自动执行；逐阶段保存日志和真实退出码，脚本失败必须向上传递。持续监督长任务，按执行环境支持的方式保留会话、进程与日志，记录进度和恢复方式。启动进程本身不代表训练完成。
+   将流程写入运行目录的 `run_all.sh`，然后自动执行。使用独立父监督器运行训练子进程，逐阶段保存日志、真实退出码和预期 epoch／step，识别提前返回 0 的未完成训练。监督器与训练子进程分开管理进程组，捕获 `SIGINT`／`SIGTERM`，接到信号时停止训练并限时等待退出，避免读取正在写入的文件。
 
-8. **完成训练后执行离线评估。**
+   成功路径、异常、信号和上传失败路径必须汇入同一个幂等收尾器。用 `try/finally` 或等效机制保证“尝试保全上传”之后始终调用停机；单纯依靠 `set -e` 会跳过错误后的上传／停止命令，不能作为完整监督方案。上传子进程也必须有总超时，退出码或超时均不能跳过 Stop。持续监督长任务，保留会话、进程与日志。
 
-   两个训练进程都需正常结束，产生能被对应加载器读取的 `best.pt` 和 `last.pt`，checkpoint 记录的 epoch 达到配置目标。随后分别使用同一运行配置和缓存评估 `best.pt`：
+8. **训练完成后立即上传 checkpoint。**
+
+   正常完成要求训练进程退出码为 0、`last.pt` 记录的 epoch 达到配置目标，且 `best.pt`／`last.pt` 可由对应加载器读取；`best.pt` 的选中 epoch 可以早于最后一轮。完成后直接打包上传，省去训练后的独立离线诊断／评估。
+
+   从 `huggingface_home_url` 解析个人或组织 namespace；上传地址限定在这个 namespace 下。每个 experiment 为两个 baseline 创建独立模型仓库，例如 `<namespace>/<experiment>-baseline-act-inter-<run_id>` 和 `<namespace>/<experiment>-baseline-state-<run_id>`。名称自动生成并写入 `upload_manifest.json`，相同运行可以续传，其他运行使用独立名称。新建仓库默认 private，已有仓库沿用其可见性。
+
+   采用当前安装版本支持的 `huggingface_hub.HfApi`：显式传入 token，`create_repo(repo_id=目标仓库, repo_type="model", private=True, exist_ok=True)` 创建目标，`upload_folder()` 上传独立暂存包。只打包已验证的 `best.pt`、可用的 `last.pt`、最终训练 YAML、所用 norm stats、源模型／编码器来源信息，以及不含凭据的训练状态、日志和 README。不要将整个工作目录或本任务文档作为上传包。官方接口见 [Hugging Face 上传指南](https://huggingface.co/docs/huggingface_hub/guides/upload)。
+
+   上传必须等待远端 commit 完成，记录 repo URL、commit SHA 和各 checkpoint 的 SHA-256。使用该 commit 的远端文件信息或回读结果核对大小与哈希，不能仅凭文件上传进度达到 100% 判定成功。每个目标的上传和回读校验合计限时 5 分钟，包含工具内部重试；由父监督器实施总超时。确定上传失败或超时后立即进入停机流程，禁止无限重传或继续训练下一个 baseline。
+
+9. **训练失败／终止时，上传本次最佳可用 checkpoint 后关闭。**
+
+   一旦发现正式训练失败或提前终止，停止后续任务，收集当前 run 的已有产物。先选择本次运行最新保存且有效的 `best.pt`；有多个有效的 best 备份时，使用训练期间记录的验证指标 `decoder_smooth_l1` 选择最优，指标相同取 step 较新的。不要把其他 run、测试／冒烟运行或来源不兼容的文件混入。
+
+   “可用”至少要求：文件写入已完成，使用本 baseline 的 `load_decoder_checkpoint(..., map_location="cpu")` 安全加载、结构及 `source_contract` 匹配，模型参数和已有选择指标有限。仅做加载与完整性检查，不重新跑离线诊断，也不为了挑 checkpoint 再训练。
+
+   如果没有有效 best，但有有效 `last.pt`，将其作为回退结果，注明 `last_fallback`、原始 epoch／step 和失败原因。部署加载器要求精简的 best schema：用对应 checkpoint 模块的 `save_best_checkpoint()` 从已加载模型及原始 payload 导出便携副本，保留原来的 metrics 和 source contract；不要仅把含优化器等续训字段的 `last.pt` 改名。可同时保留原始 `last.pt` 供恢复。
+
+   尝试上传已有的最佳可用产物与失败记录；此前已经验证上传成功的结果不必重复上传。尚未启动的另一个 baseline 标为 `not_started`。如果失败发生在首次有效保存前，记录 `no_valid_checkpoint`，尽力上传不含凭据的失败记录，仍执行停机。上传失败或超时记录 `upload_failed` 后同样关闭 Pod，不等待用户回复、不启动下一轮训练。
+
+10. **最后始终执行当前 RunPod 的 Stop。**
+
+   正常路径在两个 checkpoint 都验证上传成功后关闭；多个 experiment 时，所有计划结果上传成功后关闭。失败路径在第 9 条的限时保全上传结束后关闭，上传失败也关闭。终态顺序为：保存本地报告和上传状态、刷新文件到持久卷、记录 `stop_requested`、调用 RunPod Stop。最终报告写明完成／失败、权重 epoch／step、已成功的远端链接和 commit，以及未上传产物的持久卷路径。不得把失败收尾标为训练成功。
+
+   关闭目标只使用已核对的当前 `RUNPOD_POD_ID`。优先使用已配置认证的当前 CLI；先按 `runpodctl --help` 核对版本，当前官方命令是：
 
    ```bash
-   train_baseline_act_inter/.venv/bin/python -m train_baseline_act_inter.evaluate \
-     --config "$ACT_CONFIG" --checkpoint "$ACT_OUTPUT/best.pt" \
-     --split test --output "$ACT_METRICS_JSON"
-
-   train_baseline_state/.venv/bin/python -m train_baseline_state.evaluate \
-     --config "$STATE_CONFIG" --checkpoint "$STATE_OUTPUT/best.pt" \
-     --split test --output "$STATE_METRICS_JSON"
+   runpodctl pod stop "$RUNPOD_POD_ID"
    ```
 
-   检查指标有限、test split 非空，报告原 VLA／修正网络误差、relative MSE reduction 和 delta RMS。训练与评估结果按实际数值报告；修正器未优于 VLA 时也保留结果。
+   CLI 不可用时，用 RunPod REST Stop API；下面示例从环境读取 RunPod 凭据，不使用 Hugging Face token：
 
-9. **交付可核查的结果。**
+   ```bash
+   python - <<'PY'
+   import os
+   import re
+   import urllib.request
 
-   在 `training_report.md` 汇总每个 experiment 的原始 URL／revision、实际资源路径、最终配置、环境和 GPU、样本与 split 数量、缓存路径、训练 epochs／steps、batch 调整、best／last 权重、日志、评估指标及复跑命令。
+   pod_id = os.environ["RUNPOD_POD_ID"]
+   api_key = os.environ["RUNPOD_API_KEY"]
+   if not re.fullmatch(r"[A-Za-z0-9_-]+", pod_id) or not api_key:
+       raise RuntimeError("Missing or invalid current RunPod identity / credential")
+   request = urllib.request.Request(
+       f"https://rest.runpod.io/v1/pods/{pod_id}/stop",
+       data=b"",
+       headers={"Authorization": f"Bearer {api_key}"},
+       method="POST",
+   )
+   with urllib.request.urlopen(request, timeout=20) as response:
+       if response.status != 200:
+           raise RuntimeError(f"RunPod Stop returned HTTP {response.status}")
+       print(f"RunPod Stop accepted for {pod_id}", flush=True)
+   PY
+   ```
 
-   只有全部 experiment 的两个 baseline 均完成正式训练和评估，才将总状态标为 completed。若仍在运行或被外部条件阻塞，如实标为 running／blocked，给出当前阶段、具体原因、日志和可继续执行的命令。
+   Stop 失败时，在父监督器仍存活的情况下最多重试 3 次，单次请求限时 20 秒，并尝试上述另一种可用方式。只能依据 API／CLI 的实际结果记录接受或失败；停机可能立即断开当前会话，不能因断线就伪称已核实 stopped。若控制面确实不可访问或认证不可用，保存失败原因与 Pod ID，明确报告仍需停止，不能谎报已关闭。
 
-   默认交付本机训练产物；额外的 Git 推送、权重上传和机器人部署由用户另行指定。
+   本指南中的关闭采用 **Stop**，释放 GPU 并保留持久卷；容器临时盘会清除，保留的存储仍可能计费。Pod ID／API key 环境变量、CLI 和 REST 方法依据 [RunPod 环境变量](https://docs.runpod.io/pods/templates/environment-variables)、[管理 Pod](https://docs.runpod.io/pods/manage-pods) 和 [REST Stop API](https://docs.runpod.io/api-reference/pods/POST/pods/podId/stop)。
+
+   上述监督器处理训练子进程失败及可捕获信号。整个 Pod 被强制回收、主机断电，或监督器本身被 `SIGKILL` 时，容器内程序无法继续上传／停机；需要保证覆盖这些情形时，应在 Pod 外部署监督器。不要把本地 `finally` 当成对这类中断的保证。
