@@ -1,11 +1,57 @@
-"""Retry Hugging Face rate limits, including failures while acquiring Xet tokens."""
+"""Retry Hub rate limits and repair individual downloads with size mismatches."""
 
 from __future__ import annotations
 
 import math
+import re
 import sys
 import time
 from email.utils import parsedate_to_datetime
+from pathlib import Path, PurePosixPath
+
+
+def consistency_error_file(error: OSError, expected_sizes: dict[str, int]) -> str | None:
+    """Resolve a Hub size error only to one explicitly selected, pinned file."""
+    match = re.match(
+        r"Consistency check failed: file should be of size (\d+) but has size \d+ \(([^\n)]+)\)",
+        str(error),
+    )
+    if match is None:
+        return None
+    expected, reported = int(match[1]), match[2]
+    candidates = [
+        name
+        for name, size in expected_sizes.items()
+        if size == expected and reported in (name, PurePosixPath(name).name)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def force_download_hf_file(
+    repo_id: str, filename: str, *, repo_type: str, revision: str, local_dir: Path, expected_size: int
+) -> None:
+    """Discard only this file's broken partial download, with three bounded attempts."""
+    from huggingface_hub import hf_hub_download
+
+    for attempt in range(3):
+        print(f"Redownloading {repo_id}/{filename} from byte 0 (attempt {attempt + 1}/3)", flush=True)
+        try:
+            hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+                repo_type=repo_type,
+                revision=revision,
+                local_dir=local_dir,
+                force_download=True,
+            )
+        except OSError as error:
+            if attempt == 2 or consistency_error_file(error, {filename: expected_size}) is None:
+                raise
+            continue
+        path = local_dir / filename
+        if not path.is_file() or path.stat().st_size != expected_size:
+            raise OSError(f"Forced download still has the wrong size: {path}")
+        return
 
 
 def retry_after_seconds(value: str | None) -> float:

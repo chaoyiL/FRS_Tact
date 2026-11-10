@@ -102,6 +102,11 @@ bash scripts/download_frs_shared_data.sh
 episode，保留原始采样清单和固定 commit。若仍被限流，先登录并等待限流窗口恢复，再重复执行
 数据下载；无需删除已有文件，也无需重新下载已完成的 VLA 权重。
 
+若下载过程中出现 `Consistency check failed`（大小不匹配），下载器会根据已固定的
+selection 清单定位出错 episode，仅对该文件使用 `force_download=True` 从头重下，最多尝试
+3 次。其他已完成文件保留；本地已有但大小异常的 Parquet 也会单独修复。磁盘配额错误仍会
+立即报错，不会当成网络问题反复重试。
+
 下载器只获取各任务随机选中的 335 条 v2.1 episode Parquet，保留 state、action、RGB、触觉全部列，
 再通过仓库现有转换器生成完整 v3 子集。生成的 v3 episode ID 从 0 连续编号；原始 ID 对照表
 保存在每个数据集根目录的 `frs_subset_source.json`。后续 FRS 缓存按完整 episode 分成 300/35，

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import requests
@@ -88,3 +89,91 @@ def test_import_preserves_callers_ability_to_configure_hub_environment():
         timeout=10,
     )
     assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        (
+            "Consistency check failed: file should be of size 20 but has size 30 (episode.parquet).",
+            "data/episode.parquet",
+        ),
+        (
+            "Consistency check failed: file should be of size 20 but has size 30 (data/episode.parquet).",
+            "data/episode.parquet",
+        ),
+        ("Consistency check failed: file should be of size 99 but has size 30 (episode.parquet).", None),
+        ("Consistency check failed: file should be of size 20 but has size 30 (other.parquet).", None),
+        ("[Errno 122] Disk quota exceeded", None),
+    ],
+)
+def test_consistency_error_resolves_only_selected_file(message, expected):
+    assert hf_download.consistency_error_file(OSError(message), {"data/episode.parquet": 20}) == expected
+
+
+def test_ambiguous_consistency_error_does_not_choose_a_file():
+    error = OSError("Consistency check failed: file should be of size 20 but has size 30 (episode.parquet).")
+    assert (
+        hf_download.consistency_error_file(error, {"a/episode.parquet": 20, "b/episode.parquet": 20}) is None
+    )
+
+
+def test_forced_repair_retries_only_bad_file_and_keeps_revision(tmp_path, monkeypatch):
+    import huggingface_hub
+
+    calls = []
+    (tmp_path / "good.parquet").write_bytes(b"keep")
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        assert kwargs["force_download"] is True
+        assert kwargs["filename"] == "data/bad.parquet"
+        assert kwargs["revision"] == "pinned"
+        if len(calls) < 3:
+            raise OSError("Consistency check failed: file should be of size 4 but has size 8 (bad.parquet).")
+        path = Path(kwargs["local_dir"]) / kwargs["filename"]
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"good")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    hf_download.force_download_hf_file(
+        "org/data",
+        "data/bad.parquet",
+        repo_type="dataset",
+        revision="pinned",
+        local_dir=tmp_path,
+        expected_size=4,
+    )
+    assert len(calls) == 3
+    assert (tmp_path / "good.parquet").read_bytes() == b"keep"
+
+
+@pytest.mark.parametrize("consistency,expected_calls", [(True, 3), (False, 1)])
+def test_forced_repair_is_bounded_and_does_not_retry_disk_quota(
+    tmp_path, monkeypatch, consistency, expected_calls
+):
+    import huggingface_hub
+
+    calls = []
+    error = (
+        OSError("Consistency check failed: file should be of size 4 but has size 8 (bad.parquet).")
+        if consistency
+        else OSError(122, "Disk quota exceeded")
+    )
+
+    def download(**kwargs):
+        calls.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    with pytest.raises(OSError) as caught:
+        hf_download.force_download_hf_file(
+            "org/data",
+            "bad.parquet",
+            repo_type="dataset",
+            revision="pinned",
+            local_dir=tmp_path,
+            expected_size=4,
+        )
+    assert caught.value is error
+    assert len(calls) == expected_calls

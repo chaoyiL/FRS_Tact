@@ -81,6 +81,9 @@ bash scripts/download_frs_shared_data.sh --config "$FRS_4090_CONFIG" --max-worke
 `/workspace/frs_shared_four_tasks/datasets/v30/KaiyueChen/`，四任务为
 insert、press、bread、pick。
 
+遇到大小校验失败时，最新下载器会单独强制重下出错 episode。修复后重跑同一命令即可，
+保留已有 `selection.json` 和其他完成的文件，无需重新采样或删除整个数据目录。
+
 ## 5. 检查输入，释放原始数据占用
 
 ```bash

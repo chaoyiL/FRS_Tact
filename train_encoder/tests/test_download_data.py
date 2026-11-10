@@ -252,3 +252,45 @@ def test_rate_limit_after_partial_download_retries_only_missing_episodes(tmp_pat
     assert len(entry["train_episode_ids"]) == 3
     assert len(entry["val_episode_ids"]) == 2
     assert len([paths for _, paths in calls if paths[0].startswith("data/")]) == 2
+
+
+@pytest.mark.parametrize("existing_bad_file", [False, True])
+def test_size_mismatch_repairs_one_episode_and_preserves_completed_files(tmp_path, hub, monkeypatch, existing_bad_file):
+    import huggingface_hub
+
+    tasks, calls = hub
+    output = tmp_path / "subset"
+    entry = prepare(tasks[:1], output, dry_run=True)[0]
+    root = output / entry["root"]
+    first, bad, *remaining = entry["episodes"]
+    snapshot = huggingface_hub.snapshot_download
+    snapshot(entry["repo_id"], repo_type="dataset", revision=entry["revision"], local_dir=root, allow_patterns=[first["path"]])
+    preserved = (root / first["path"]).stat().st_mtime_ns
+    if existing_bad_file:
+        destination = root / bad["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"bad")
+    snapshots, forced = [], []
+
+    def snapshot_with_broken_partial(repo_id, **kwargs):
+        snapshots.append(list(kwargs["allow_patterns"]))
+        if bad["path"] in kwargs["allow_patterns"]:
+            raise OSError(f"Consistency check failed: file should be of size {bad['size_bytes']} but has size {bad['size_bytes'] + 20} ({Path(bad['path']).name}).")
+        return snapshot(repo_id, **kwargs)
+
+    def force_download(**kwargs):
+        forced.append(kwargs)
+        assert kwargs["repo_id"] == entry["repo_id"]
+        assert kwargs["revision"] == entry["revision"]
+        assert kwargs["filename"] == bad["path"]
+        assert kwargs["force_download"] is True
+        return snapshot(kwargs["repo_id"], repo_type=kwargs["repo_type"], revision=kwargs["revision"], local_dir=kwargs["local_dir"], allow_patterns=[kwargs["filename"]])
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_with_broken_partial)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", force_download)
+    resumed = prepare(tasks[:1], output)[0]
+    assert resumed == entry
+    assert len(forced) == 1
+    assert snapshots[-1] == [row["path"] for row in remaining]
+    assert all(first["path"] not in names for names in snapshots)
+    assert (root / first["path"]).stat().st_mtime_ns == preserved
